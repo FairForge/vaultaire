@@ -108,7 +108,7 @@ func TestDNSCache_ARefreshedAnswerIsUsedAfterTheTTL(t *testing.T) {
 	r.set("s3.lyve.example", "10.0.0.1")
 	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	d := &fakeDial{}
-	dial := newTestDNS(r, clock).dialer(d.dial)
+	dial := newTestDNS(r, clock).dialer(d.dial, 0)
 
 	dialOnce(t, dial, "s3.lyve.example:443")
 	r.set("s3.lyve.example", "10.0.0.9") // the vendor moved the name
@@ -132,7 +132,7 @@ func TestDNSCache_DialsRotateOverTheAnswer(t *testing.T) {
 	r := &fakeResolver{answers: map[string][]string{}}
 	r.set("s3.wasabi.example", "10.0.0.1", "10.0.0.2", "10.0.0.3")
 	d := &fakeDial{}
-	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial)
+	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial, 0)
 
 	seen := map[string]int{}
 	for i := 0; i < 6; i++ {
@@ -147,7 +147,7 @@ func TestDNSCache_ADialThatFailsTriesTheNextAddress(t *testing.T) {
 	r := &fakeResolver{answers: map[string][]string{}}
 	r.set("s3.lyve.example", "10.0.0.1", "10.0.0.2")
 	d := &fakeDial{down: map[string]bool{"10.0.0.1:443": true}}
-	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial)
+	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial, 0)
 
 	for i := 0; i < 3; i++ {
 		c, err := dial(context.Background(), "tcp", "s3.lyve.example:443")
@@ -166,7 +166,7 @@ func TestDNSCache_AResolverOutageKeepsTheStaleAnswer(t *testing.T) {
 	r.set("s3.lyve.example", "10.0.0.1")
 	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	d := &fakeDial{}
-	dial := newTestDNS(r, clock).dialer(d.dial)
+	dial := newTestDNS(r, clock).dialer(d.dial, 0)
 	dialOnce(t, dial, "s3.lyve.example:443")
 	errs0 := promtest.ToFloat64(driverDNSRefreshes.WithLabelValues("s3.lyve.example", "error"))
 
@@ -189,7 +189,7 @@ func TestDNSCache_OneLookupForManyDialsAtOnce(t *testing.T) {
 	r := &fakeResolver{answers: map[string][]string{}, block: make(chan struct{})}
 	r.set("s3.idrive.example", "10.0.0.1", "10.0.0.2")
 	d := &fakeDial{}
-	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial)
+	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial, 0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -247,7 +247,7 @@ func TestDNSCache_ADialWhoseContextEndsDuringTheLookupReturnsAtItsDeadline(t *te
 	r := &fakeResolver{answers: map[string][]string{}, block: make(chan struct{})}
 	r.set("s3.lyve.example", "10.0.0.1")
 	d := &fakeDial{}
-	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial)
+	dial := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)}).dialer(d.dial, 0)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -275,7 +275,7 @@ func TestDNSCache_ADialAfterTheTTLTakesTheStaleAnswerWhileTheRefreshRuns(t *test
 	r.set("s3.lyve.example", "10.0.0.1")
 	clock := &fakeClock{t: time.Unix(1_800_000_000, 0)}
 	d := &fakeDial{}
-	dial := newTestDNS(r, clock).dialer(d.dial)
+	dial := newTestDNS(r, clock).dialer(d.dial, 0)
 	dialOnce(t, dial, "s3.lyve.example:443")
 
 	r.block = make(chan struct{}) // the refresh after the TTL hangs
@@ -301,7 +301,7 @@ func TestDNSCache_TheLookupItselfIsBounded(t *testing.T) {
 	}
 	c := &dnsDialCache{lookup: hung, ttl: 5 * time.Minute, now: time.Now, lookupTimeout: 50 * time.Millisecond}
 	d := &fakeDial{}
-	dial := c.dialer(d.dial)
+	dial := c.dialer(d.dial, 0)
 
 	start := time.Now()
 	c1, err := dial(context.Background(), "tcp", "s3.lyve.example:443")
@@ -315,4 +315,109 @@ func TestDNSCache_TheLookupItselfIsBounded(t *testing.T) {
 func TestDNSCache_TheDefaultLookupBoundIsFiveSeconds(t *testing.T) {
 	assert.Equal(t, 5*time.Second, (&dnsDialCache{}).lookupBound())
 	assert.Equal(t, 5*time.Second, sharedDNS.lookupBound(), "the shared cache: a hung resolver costs a dial at most this, once per host per TTL")
+}
+
+// Prompt 10 Part 0.4: the dial's address loop had no budget of its own —
+// net.Dialer.Timeout (10 s) applied to EACH address, so a host answering
+// four addresses whose SYNs are all lost held one dial 40 s before the
+// header bound even started (and the 2 s hedge dials through the same
+// loop). The loop now has one budget, the dialer's Timeout, across every
+// address, shared out as net.Dialer shares its own between the addresses of
+// one name: each attempt gets the time left divided by the addresses left
+// (never under a floor), so a blackholed first address cannot spend the
+// whole budget and leave the good one unasked.
+
+// blackholeDial is net.Dialer with a Timeout against addresses whose SYNs
+// are lost: a "down" address answers nothing until the attempt's own
+// timeout or its context ends; any other address connects at once.
+type blackholeDial struct {
+	timeout time.Duration
+	mu      sync.Mutex
+	dialed  []string
+	down    map[string]bool
+}
+
+func (d *blackholeDial) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	d.dialed = append(d.dialed, addr)
+	lost := d.down[addr]
+	d.mu.Unlock()
+	if lost {
+		t := time.NewTimer(d.timeout)
+		defer t.Stop()
+		select {
+		case <-t.C:
+			return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("i/o timeout")}
+		case <-ctx.Done():
+			return nil, &net.OpError{Op: "dial", Net: network, Err: ctx.Err()}
+		}
+	}
+	c1, c2 := net.Pipe()
+	_ = c2.Close()
+	return c1, nil
+}
+
+func TestDNSCache_TheAddressLoopHasOneBudget(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	r.set("s3.wasabi.example", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4")
+	const budget = 400 * time.Millisecond // the dialer's Timeout, scaled down from 10 s
+	d := &blackholeDial{timeout: budget, down: map[string]bool{
+		"10.0.0.1:443": true, "10.0.0.2:443": true, "10.0.0.3:443": true,
+	}}
+	c := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)})
+	c.dialAttemptMin = 10 * time.Millisecond // net.Dialer's 2 s floor, scaled down
+	dial := c.dialer(d.dial, budget)
+
+	start := time.Now()
+	conn, err := dial(context.Background(), "tcp", "s3.wasabi.example:443")
+	elapsed := time.Since(start)
+
+	require.NoError(t, err, "the fourth address answers: three lost SYNs must not spend the budget before it is asked")
+	_ = conn.Close()
+	assert.Equal(t, []string{"10.0.0.1:443", "10.0.0.2:443", "10.0.0.3:443", "10.0.0.4:443"}, d.dialed)
+	assert.Less(t, elapsed, budget+150*time.Millisecond, "one budget across the addresses, not the dialer's Timeout per address (%v)", elapsed)
+}
+
+func TestDNSCache_EveryAddressLostIsOneBudgetNotOnePerAddress(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	r.set("s3.wasabi.example", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4")
+	const budget = 300 * time.Millisecond
+	d := &blackholeDial{timeout: budget, down: map[string]bool{
+		"10.0.0.1:443": true, "10.0.0.2:443": true, "10.0.0.3:443": true, "10.0.0.4:443": true,
+	}}
+	c := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)})
+	c.dialAttemptMin = 10 * time.Millisecond
+	dial := c.dialer(d.dial, budget)
+
+	start := time.Now()
+	_, err := dial(context.Background(), "tcp", "s3.wasabi.example:443")
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.Less(t, elapsed, budget+150*time.Millisecond, "four lost addresses cost the budget once (%v), never 4 × the dialer's Timeout", elapsed)
+}
+
+func TestDNSCache_TheCallersDeadlineEndsTheLoop(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	r.set("s3.wasabi.example", "10.0.0.1", "10.0.0.2", "10.0.0.3")
+	d := &blackholeDial{timeout: 5 * time.Second, down: map[string]bool{
+		"10.0.0.1:443": true, "10.0.0.2:443": true, "10.0.0.3:443": true,
+	}}
+	c := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)})
+	dial := c.dialer(d.dial, 10*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := dial(ctx, "tcp", "s3.wasabi.example:443")
+
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "the caller's deadline is shorter than the budget: it ends the loop")
+}
+
+func TestDNSCache_TheDefaultAttemptFloorIsTwoSeconds(t *testing.T) {
+	assert.Equal(t, 2*time.Second, (&dnsDialCache{}).attemptMin(), "net.Dialer's own floor per address")
 }

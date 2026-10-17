@@ -132,7 +132,7 @@ func WithHTTP1Only() TransportOption {
 // cachedDialContext dials through the drivers' shared DNS cache
 // (dns_cache.go): an answer kept DRIVER_DNS_TTL, the dials rotated over it.
 func cachedDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return sharedDNS.dialer(dialer.DialContext)
+	return sharedDNS.dialer(dialer.DialContext, dialer.Timeout)
 }
 
 // TunedHTTPClient returns an HTTP client with connection pooling, DNS caching,

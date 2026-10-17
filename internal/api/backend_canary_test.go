@@ -99,6 +99,9 @@ func TestObjectCanary_ObjectCallsForbidden_HealthZeroAtTheSecondProbe(t *testing
 	require.NoError(t, d.HealthCheck(context.Background()), "HeadBucket alone stays green — the 2026-10-11 shape")
 	s := probeServer()
 	s.healthChecker.RegisterBackend("idrive")
+	// The 2026-10-11 shape: a key that worked, then lost its object calls. A
+	// backend with no success yet is unhealthy at its first failure (RP9-9).
+	s.healthChecker.UpdateHealth("idrive", true, 0, nil)
 	check := backendCheck{name: "idrive", probe: withObjectCanary(d.HealthCheck, d, "box-1")}
 
 	s.probeBackendOnce(context.Background(), check)

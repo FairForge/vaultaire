@@ -39,8 +39,11 @@ import (
 //     100 ms dial wait a whole hung lookup);
 //   - the dials rotate over the answer's addresses (round-robin per host);
 //   - a dial that fails on one address tries the next within the same call,
-//     until one connects, every address has been tried, or the caller's
-//     context ends.
+//     until one connects, every address has been tried, or the loop's ONE
+//     budget ends — the dialer's Timeout (10 s) across every address, each
+//     attempt given the time left over the addresses left, and the caller's
+//     context when it is shorter (Prompt 10 Part 0.4: the Timeout applied
+//     per address, 4 lost SYNs = 40 s).
 //
 // vaultaire_driver_dns_refreshes_total{host,outcome} counts the lookups
 // (ok | error).
@@ -97,8 +100,11 @@ type dnsDialCache struct {
 	mu            sync.Mutex
 	ttl           time.Duration
 	lookupTimeout time.Duration // 0 = dnsLookupTimeout
-	entries       map[string]*dnsEntry
-	flight        singleflight.Group
+	// dialAttemptMin is the least time one address of the loop is given
+	// (0 = dialAttemptMinDefault).
+	dialAttemptMin time.Duration
+	entries        map[string]*dnsEntry
+	flight         singleflight.Group
 }
 
 // lookupBound is how long one lookup may take.
@@ -107,6 +113,17 @@ func (c *dnsDialCache) lookupBound() time.Duration {
 		return c.lookupTimeout
 	}
 	return dnsLookupTimeout
+}
+
+// dialAttemptMinDefault is the least one address of the dial loop is given
+// (net.Dialer's own floor between the addresses of a name).
+const dialAttemptMinDefault = 2 * time.Second
+
+func (c *dnsDialCache) attemptMin() time.Duration {
+	if c.dialAttemptMin > 0 {
+		return c.dialAttemptMin
+	}
+	return dialAttemptMinDefault
 }
 
 var sharedDNS = &dnsDialCache{lookup: net.DefaultResolver.LookupHost, ttl: driverDNSTTLDefault, now: time.Now}
@@ -161,9 +178,20 @@ func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
 }
 
 // dialer dials addr through the cache: the next address of the answer in
-// turn, and on failure the ones after it.
-func (c *dnsDialCache) dialer(dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// turn, and on failure the ones after it. budget (the dialer's Timeout; 0 =
+// none) bounds the whole loop, not each address: net.Dialer applies its
+// Timeout per call, and the loop used to call it once per address — four
+// addresses whose SYNs are lost held one dial 4 × 10 s before the header
+// bound even started (Prompt 10 Part 0.4). Each attempt gets the time left
+// shared out over the addresses left (attemptContext), so a blackholed first
+// address cannot spend the budget before the good one is asked.
+func (c *dnsDialCache) dialer(dial func(ctx context.Context, network, addr string) (net.Conn, error), budget time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if budget > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, budget)
+			defer cancel()
+		}
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || net.ParseIP(host) != nil {
 			return dial(ctx, network, addr)
@@ -176,7 +204,9 @@ func (c *dnsDialCache) dialer(dial func(ctx context.Context, network, addr strin
 		start := int(e.next.Add(1)-1) % n
 		var errs []error
 		for i := 0; i < n; i++ {
-			conn, derr := dial(ctx, network, net.JoinHostPort(e.addrs[(start+i)%n], port))
+			actx, acancel := c.attemptContext(ctx, n-i)
+			conn, derr := dial(actx, network, net.JoinHostPort(e.addrs[(start+i)%n], port))
+			acancel() // a connected conn outlives its dial's context
 			if derr == nil {
 				return conn, nil
 			}
@@ -187,4 +217,21 @@ func (c *dnsDialCache) dialer(dial func(ctx context.Context, network, addr strin
 		}
 		return nil, fmt.Errorf("dial %s (%d address(es) tried): %w", host, len(errs), errors.Join(errs...))
 	}
+}
+
+// attemptContext is one address's share of the loop's deadline, the rule
+// net.Dialer uses between the addresses of one name: the time left divided
+// by the addresses left, never under attemptMin (2 s, about two SYN
+// retransmits) unless less than that is left. No deadline = ctx as is.
+func (c *dnsDialCache) attemptContext(ctx context.Context, addrsLeft int) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || addrsLeft <= 1 {
+		return ctx, func() {}
+	}
+	left := time.Until(deadline)
+	share := left / time.Duration(addrsLeft)
+	if floor := c.attemptMin(); share < floor {
+		share = min(floor, left)
+	}
+	return context.WithTimeout(ctx, share)
 }

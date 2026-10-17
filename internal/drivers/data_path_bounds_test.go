@@ -139,6 +139,8 @@ var boundSites = map[string]string{
 	// context.WithTimeout
 	"WithTimeout put_deadline.go:attempt":            "the per-size PUT deadline (s3PutDeadline)",
 	"WithTimeout dns_cache.go:entry":                 "one DNS lookup of the drivers' cache, 5 s (dnsLookupTimeout); a dial waits on it only within its own context",
+	"WithTimeout dns_cache.go:dialer":                "the dial's address loop: ONE budget, the dialer's Timeout (10 s), across every address",
+	"WithTimeout dns_cache.go:attemptContext":        "one address's share of the loop's budget: the time left over the addresses left, ≥ 2 s",
 	"WithTimeout onedrive.go:NewOneDriveFleetDriver": "boot only: the fleet's first token and drive ids, 30 s",
 	"WithTimeout quotaless.go:HealthCheck":           "the quotaless probe, 10 s",
 	"WithTimeout tenant_walk.go:s3WalkPrefix":        "a job (the erasure sweep): one listing page, 60 s over a 15 s transport bound",

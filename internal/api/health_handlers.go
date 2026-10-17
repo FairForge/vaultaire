@@ -40,6 +40,9 @@ type BackendHealthState struct {
 	// ConsecutiveFailures counts failed probes since the last success:
 	// Healthy turns false at probeFailuresToUnhealthy (WP-R6-3).
 	ConsecutiveFailures int
+	// LastSuccess is the last successful probe; zero = none yet, and then
+	// the first failure is enough (RP9-9).
+	LastSuccess time.Time
 }
 
 // probeFailuresToUnhealthy is how many probes in a row must fail before a
@@ -50,6 +53,11 @@ type BackendHealthState struct {
 // minute on 2026-10-17, and 199 single failures in 2.7 days each read as
 // an outage. Two in a row is ≥ 30 s of silence across two probes. Every
 // failure is still counted and its error kept (LastError).
+//
+// The two-in-a-row rule is for a backend that has answered at least once: one
+// that never has (LastSuccess zero) is unhealthy at its first failure (RP9-9,
+// Prompt 10 Part 0.3). RegisterBackend seeds Healthy, so after every slot
+// switch /health said "healthy" for ~30 s with eleven dead iDrive drivers.
 const probeFailuresToUnhealthy = 2
 
 // NewBackendHealthChecker creates a health checker
@@ -88,11 +96,13 @@ func (b *BackendHealthChecker) UpdateHealth(id string, healthy bool, latency tim
 	state.LastCheck = time.Now()
 	if healthy {
 		state.ConsecutiveFailures = 0
+		state.LastSuccess = state.LastCheck
 	} else {
 		state.Failures++
 		state.ConsecutiveFailures++
 	}
-	healthy = state.ConsecutiveFailures < probeFailuresToUnhealthy
+	healthy = state.ConsecutiveFailures < probeFailuresToUnhealthy &&
+		(state.ConsecutiveFailures == 0 || !state.LastSuccess.IsZero())
 	state.Healthy = healthy
 	if err != nil {
 		state.LastError = err.Error()
