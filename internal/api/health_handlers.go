@@ -169,6 +169,18 @@ func (b *BackendHealthChecker) failingBackends() []string {
 	return out
 }
 
+// backendHealthy is one backend's probe verdict; probed is false when no
+// probe state exists for it (never registered, never probed).
+func (b *BackendHealthChecker) backendHealthy(id string) (healthy, probed bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	st, ok := b.backends[id]
+	if !ok {
+		return false, false
+	}
+	return st.Healthy, true
+}
+
 // GetBackendStates returns all backend states
 func (b *BackendHealthChecker) GetBackendStates() map[string]*BackendHealthState {
 	b.mu.RLock()

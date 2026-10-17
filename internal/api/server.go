@@ -87,6 +87,9 @@ type Server struct {
 	jsonAPIIdempotency *idempotencyMiddleware
 	promHandler        http.Handler
 	healthChecker      *BackendHealthChecker
+	// regionBreakers reads the breaker states the region gate consults
+	// (nil = the engine's GetFailoverStatus); tests set it.
+	regionBreakers     func() map[string]string
 	certMonitor        *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
 	securityTxt        string             // rendered once at boot (security_txt.go)
 	sessionStore       dashauth.SessionStore
@@ -846,28 +849,31 @@ func (s *Server) setupRoutes() {
 		storageMode = config.DetectStorageMode(os.Getenv)
 	}
 	dashboard.RegisterRoutes(s.router, dashboard.Deps{
-		DB:            s.db,
-		Auth:          s.auth,
-		MFA:           s.mfaService,
-		MFAPending:    s.mfaPendingStore,
-		Sessions:      s.sessionStore,
-		Logger:        s.logger,
-		DataPath:      dataPath,
-		CreateBucket:  s.dashboardBucketCreator(),
-		Stripe:        s.stripe,
-		Google:        s.googleOAuth,
-		GitHub:        s.githubOAuth,
-		StorageMode:   storageMode,
-		Email:         s.emailSender,
-		BaseURL:       s.baseURL,
-		Hosts:         s.hosts,
-		Engine:        s.engine,
-		HealthChecker: &healthCheckerAdapter{s.healthChecker},
-		Flags:         s.flags,
-		Quotas:        houseQuotas(s.quotaManager),
-		Account:       s.accountSvc,
-		Exports:       dashboardExports(s.accountExports),
-		Egress:        s.egress,
+		DB:           s.db,
+		Auth:         s.auth,
+		MFA:          s.mfaService,
+		MFAPending:   s.mfaPendingStore,
+		Sessions:     s.sessionStore,
+		Logger:       s.logger,
+		DataPath:     dataPath,
+		CreateBucket: s.dashboardBucketCreator(),
+		// The region gate (Prompt 10 Part A): the picker shows a region
+		// whose driver is down by its probe or breaker as unavailable.
+		RegionAvailable: s.regionAvailableNow,
+		Stripe:          s.stripe,
+		Google:          s.googleOAuth,
+		GitHub:          s.githubOAuth,
+		StorageMode:     storageMode,
+		Email:           s.emailSender,
+		BaseURL:         s.baseURL,
+		Hosts:           s.hosts,
+		Engine:          s.engine,
+		HealthChecker:   &healthCheckerAdapter{s.healthChecker},
+		Flags:           s.flags,
+		Quotas:          houseQuotas(s.quotaManager),
+		Account:         s.accountSvc,
+		Exports:         dashboardExports(s.accountExports),
+		Egress:          s.egress,
 		// JWT_SECRET is the one secret every deployment must set and it
 		// survives restarts: the CSRF key is derived from it under its own
 		// label, never the secret itself (WP-R12-5).

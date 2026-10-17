@@ -16,8 +16,8 @@ Helper functions are in `context.go`: `formatBytes` (human-readable sizes), `rel
 ## Bucket Browser (`buckets.go`)
 
 Three handlers:
-- `HandleBuckets(tmpl, db, dataPath, logger)` — lists buckets from `buckets` table LEFT JOIN `object_head_cache` (includes empty buckets with count=0)
-- `HandleCreateBucket(tmpl, db, dataPath, logger)` — validates S3-compatible name and region (`drivers.IsValidRegion`; default `drivers.IDriveDefaultRegion` = `IDRIVE_REGION`, else `us-central-1`; a region whose key pair is not configured is refused by `IDriveRegionAvailable` — WP-R7-1), creates directory at `{dataPath}/{name}`, persists to `buckets` table with region
+- `HandleBuckets(tmpl, db, dataPath, regionUp, logger)` — lists buckets from `buckets` table LEFT JOIN `object_head_cache` (includes empty buckets with count=0). The region picker (`withRegionPicker`): a region with no driver is disabled "(not enabled)"; a registered region `regionUp` refuses (`Deps.RegionAvailable` = the API layer's region gate: unhealthy by the probe or breaker open — Prompt 10 Part A) is disabled "(temporarily unavailable)"; nil `regionUp` = registration only
+- `HandleCreateBucket(tmpl, db, create, regionUp, logger)` — validates S3-compatible name and region (`drivers.IsValidRegion`; default `drivers.IDriveDefaultRegion` = `IDRIVE_REGION`, else `us-central-1`; a region whose key pair is not configured is refused by `IDriveRegionAvailable` — WP-R7-1; one whose driver is down answers `BucketCreateRegionDown`, "temporarily unavailable" — Prompt 10 Part A), creates directory at `{dataPath}/{name}`, persists to `buckets` table with region
 - `HandleBucketObjects(tmpl, db, logger)` — lists objects in a bucket with prefix-based "folder" navigation (uses chi URL param `{name}`). Queries bucket visibility and tenant slug; for public-read buckets with a slug, sets `CDNBaseURL` and populates `ObjectRow.CDNURL` and `ObjectRow.PreviewType` fields for inline media previews and CDN copy buttons.
 
 `previewTypeFromContentType(ct)` maps content types to preview categories: `image/*` → "image", `video/*` → "video", `audio/*` → "audio", `text/*`/json/xml/js → "text", everything else → "".

@@ -13,6 +13,9 @@ const (
 	// ErrTypeGone: the resource existed and is gone for good (an expired
 	// export, WP-R10-3b).
 	ErrTypeGone = "gone_error"
+	// ErrTypeUnavailable: the request is valid but cannot be served now; it
+	// carries Retry-After (a region whose storage is down, Prompt 10 Part A).
+	ErrTypeUnavailable = "unavailable_error"
 )
 
 var managementErrorStatus = map[string]int{
@@ -24,6 +27,7 @@ var managementErrorStatus = map[string]int{
 	ErrTypeRateLimit:      http.StatusTooManyRequests,
 	ErrTypeAPI:            http.StatusInternalServerError,
 	ErrTypeGone:           http.StatusGone,
+	ErrTypeUnavailable:    http.StatusServiceUnavailable,
 }
 
 type managementError struct {

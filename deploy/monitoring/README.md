@@ -209,6 +209,15 @@ makes `/health` `degraded`. On 2026-10-17 most of Wasabi's 199
 `backend health check failed` lines in 2.7 days were single failures
 (`docs/reviews/WP-P9.md` has the count).
 
+**A region that cannot take a write is never offered (Prompt 10 Part A).**
+`vaultaire_region_create_refused_total{region,reason}` counts bucket
+creations refused for their region on S3, the management API and the
+dashboard: `unknown` (`region="other"`), `not_enabled` (no driver here) and
+`down` (enabled, but its `idrive-<region>` driver is unhealthy by the probe
+or its breaker is open: 503 + `Retry-After`). No rule: the region driver's
+own probe rule (`BackendProbeFailing`) already pages, and a refusal is the
+gate doing its job.
+
 The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
 live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.
 `vaultaire_errors_total` counts 5xx responses since 2026-09-22 (it was a

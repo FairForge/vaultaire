@@ -32,29 +32,33 @@ const sessionTTL = 24 * time.Hour
 
 // Deps groups the dependencies the dashboard routes need.
 type Deps struct {
-	DB            *sql.DB
-	Auth          *auth.AuthService
-	MFA           *auth.MFAService            // TOTP secret generation / validation.
-	MFAPending    *MFAPendingStore            // Short-lived store for 2FA login challenges.
-	MFAEnrol      *handlers.MFAEnrolmentStore // Pending TOTP enrolments (WP-R12-8); nil = one is created here.
-	Sessions      dashauth.SessionStore
-	Logger        *zap.Logger
-	DataPath      string                   // Local storage root (bucket list sizes in dev).
-	CreateBucket  handlers.BucketCreator   // The API layer's bucket registry (nil = creation refused).
-	Stripe        *billing.StripeService   // Nil when STRIPE_SECRET_KEY is not set.
-	Google        *oauth2.Config           // Nil when GOOGLE_CLIENT_ID is not set.
-	GitHub        *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
-	StorageMode   string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive", "wasabi"
-	Email         email.Sender             // Email sender (LogSender if unconfigured).
-	BaseURL       string                   // Base URL for email links and OAuth (VAULTAIRE_BASE_URL).
-	Hosts         hosts.Hosts              // The one host source (WP-DOMAIN-1); zero = hosts.Get().
-	Engine        *engine.CoreEngine       // Nil-safe; used by admin backends page.
-	HealthChecker handlers.HealthChecker   // Nil-safe; backend health state provider.
-	Flags         *flags.Service           // Nil-safe; admin feature-flags page (1.13).
-	Quotas        billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
-	Account       *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
-	Exports       handlers.ExportService   // The one GDPR export service (WP-R10-3b); nil = the settings page says export is unavailable.
-	Egress        usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
+	DB           *sql.DB
+	Auth         *auth.AuthService
+	MFA          *auth.MFAService            // TOTP secret generation / validation.
+	MFAPending   *MFAPendingStore            // Short-lived store for 2FA login challenges.
+	MFAEnrol     *handlers.MFAEnrolmentStore // Pending TOTP enrolments (WP-R12-8); nil = one is created here.
+	Sessions     dashauth.SessionStore
+	Logger       *zap.Logger
+	DataPath     string                 // Local storage root (bucket list sizes in dev).
+	CreateBucket handlers.BucketCreator // The API layer's bucket registry (nil = creation refused).
+	// RegionAvailable is the API layer's region gate (Prompt 10 Part A:
+	// registered AND healthy by the probe AND its breaker not open); nil =
+	// registration only (tests, a dev box without probes).
+	RegionAvailable handlers.RegionAvailable
+	Stripe          *billing.StripeService   // Nil when STRIPE_SECRET_KEY is not set.
+	Google          *oauth2.Config           // Nil when GOOGLE_CLIENT_ID is not set.
+	GitHub          *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
+	StorageMode     string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive", "wasabi"
+	Email           email.Sender             // Email sender (LogSender if unconfigured).
+	BaseURL         string                   // Base URL for email links and OAuth (VAULTAIRE_BASE_URL).
+	Hosts           hosts.Hosts              // The one host source (WP-DOMAIN-1); zero = hosts.Get().
+	Engine          *engine.CoreEngine       // Nil-safe; used by admin backends page.
+	HealthChecker   handlers.HealthChecker   // Nil-safe; backend health state provider.
+	Flags           *flags.Service           // Nil-safe; admin feature-flags page (1.13).
+	Quotas          billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
+	Account         *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
+	Exports         handlers.ExportService   // The one GDPR export service (WP-R10-3b); nil = the settings page says export is unavailable.
+	Egress          usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
 	// CSRFKey keys the session-bound CSRF token (WP-R12-5): CSRFKeyFromSecret
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
 	// key for this process — forms opened before a restart then fail once.
@@ -224,8 +228,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(bucketSettingsTmpl.ParseFS(Templates,
 			"templates/customer/bucket_settings.html",
 		))
-		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.Logger))
-		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.Logger))
+		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.RegionAvailable, deps.Logger))
+		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.RegionAvailable, deps.Logger))
 		// A system bucket (tenant.ExportsBucket, WP-R10-3b) has no page: 404
 		// before any handler, as the S3 API answers NoSuchBucket.
 		dr.With(noSystemBucket).Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
