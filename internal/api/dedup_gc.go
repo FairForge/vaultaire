@@ -3,11 +3,17 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -41,6 +47,11 @@ type DedupGCResult struct {
 	// but still at a legacy one (written before WP-R8-7): their rows are
 	// kept — the chunk move works from them — and they stay candidates.
 	LegacyPending int `json:"legacy_pending,omitempty"`
+	// NotSwept counts, per backend, the candidates whose backend could not
+	// be asked this run (a failure, an open breaker, no driver): they stay
+	// candidates. Recorded in job_runs.result, exported as
+	// vaultaire_dedup_gc_unswept_chunks{backend} (RP8-1).
+	NotSwept map[string]int `json:"not_swept,omitempty"`
 }
 
 // NewDedupGCRunner builds the GC runner. gci must be the SAME instance the PUT
@@ -80,9 +91,9 @@ func (g *DedupGCRunner) spec() jobSpec {
 			res, err := g.RunOnce(ctx)
 			g.logger.Info("dedup gc run", zap.Int("reconciled", res.Reconciled), zap.Int("deleted", res.Deleted),
 				zap.Int64("bytes_reclaimed", res.BytesReclaimed), zap.Int("failed", res.Failed), zap.Error(err))
-			rep := jobReport{Rows: int64(res.Deleted)}
+			rep := jobReport{Rows: int64(res.Deleted), Result: res}
 			if res.Failed > 0 {
-				rep.Note = fmt.Sprintf("%d chunk(s) not swept (see the log); they stay candidates", res.Failed)
+				rep.Note = fmt.Sprintf("%d chunk(s) not swept%s (see the log); they stay candidates", res.Failed, notSweptNote(res.NotSwept))
 			}
 			if res.LegacyPending > 0 {
 				if rep.Note != "" {
@@ -105,9 +116,10 @@ func (g *DedupGCRunner) RunOnce(ctx context.Context) (DedupGCResult, error) {
 	}
 	result.Reconciled = reconciled
 
-	deleted, failed, pending, reclaimed, err := g.sweep(ctx)
+	deleted, failed, pending, reclaimed, notSwept, err := g.sweep(ctx)
 	result.Deleted = deleted
 	result.Failed = failed
+	result.NotSwept = notSwept
 	result.LegacyPending = pending
 	result.BytesReclaimed = reclaimed
 	if err != nil {
@@ -152,7 +164,17 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 
 // sweep deletes chunks that have been ref_count=0 and marked_for_deletion past
 // the grace period. Uses conditional DELETE to avoid racing with concurrent re-refs.
-func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int, reclaimed int64, err error) {
+//
+// A backend that cannot be asked (RP8-1) is one Warn for the run, never one
+// Error per chunk: on prod the dead iDrive key made ~100 Error lines a night
+// (306 from 2026-10-14 to 10-17), each a "not swept" the job's note already
+// counted. A backend whose breaker is open — or that no driver is registered
+// under — is skipped before its first call (engine.CanAsk); a backend whose
+// calls fail is asked for each candidate (the breaker opens on its own) and
+// its failures are counted. Both end in ONE Warn per backend after the loop:
+// the count, the error class and the first error. The counts per backend are
+// the run's notSwept (job_runs.result).
+func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int, reclaimed int64, notSwept map[string]int, err error) {
 	graceSecs := int(g.GracePeriod.Seconds())
 	rows, err := g.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, backend_id, storage_key, size_bytes
@@ -162,7 +184,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int
 		  AND marked_at < NOW() - make_interval(secs => $1)
 	`, graceSecs)
 	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("sweep query: %w", err)
+		return 0, 0, 0, 0, nil, fmt.Errorf("sweep query: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -177,23 +199,39 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int
 	for rows.Next() {
 		var c candidate
 		if err := rows.Scan(&c.scope, &c.hash, &c.backendID, &c.key, &c.size); err != nil {
-			return 0, 0, 0, 0, fmt.Errorf("scan candidate: %w", err)
+			return 0, 0, 0, 0, nil, fmt.Errorf("scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("iterate candidates: %w", err)
+		return 0, 0, 0, 0, nil, fmt.Errorf("iterate candidates: %w", err)
 	}
 
+	unswept := map[string]*unsweptBackend{}
+	defer func() { g.reportUnswept(unswept) }()
+	skipped := map[string]bool{} // backend -> asked CanAsk this run, and it refused
+	asked := map[string]bool{}
 	for _, c := range candidates {
 		if ctx.Err() != nil {
 			// Run deadline or shutdown: what is left stays a candidate.
-			return deleted, failed, pending, reclaimed, ctx.Err()
+			return deleted, failed, pending, reclaimed, unsweptCounts(unswept), ctx.Err()
+		}
+		if !asked[c.backendID] {
+			asked[c.backendID] = true
+			if cerr := g.eng.CanAsk(c.backendID); cerr != nil {
+				skipped[c.backendID] = true
+				noteUnswept(unswept, c.backendID, "skipped", cerr)
+			}
+		}
+		if skipped[c.backendID] {
+			unswept[c.backendID].count++
+			failed++
+			continue
 		}
 		outcome, err := g.sweepOne(ctx, c.scope, c.hash, c.backendID, c.key)
 		if err != nil {
-			g.logger.Error("sweep chunk",
-				zap.String("hash", c.hash), zap.Error(err))
+			noteUnswept(unswept, c.backendID, "asked", err)
+			unswept[c.backendID].count++
 			failed++
 			continue
 		}
@@ -208,7 +246,119 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int
 		}
 	}
 
-	return deleted, failed, pending, reclaimed, nil
+	return deleted, failed, pending, reclaimed, unsweptCounts(unswept), nil
+}
+
+// unsweptBackend is one backend's candidates left this run.
+type unsweptBackend struct {
+	count int
+	how   string // "skipped" (refused before a call) | "asked" (its calls failed)
+	first error
+}
+
+func noteUnswept(m map[string]*unsweptBackend, backend, how string, err error) {
+	if m[backend] == nil {
+		m[backend] = &unsweptBackend{how: how, first: err}
+	}
+}
+
+func unsweptCounts(m map[string]*unsweptBackend) map[string]int {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for b, u := range m {
+		out[b] = u.count
+	}
+	return out
+}
+
+// unsweptClass names an error's kind for the Warn line.
+func unsweptClass(err error) string {
+	switch {
+	case errors.Is(err, engine.ErrBackendNotRegistered):
+		return "not_registered"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return "deadline"
+	case errors.Is(err, engine.ErrAllBackendsUnavailable):
+		return "backend_unavailable"
+	}
+	return "error"
+}
+
+// reportUnswept logs one Warn per backend left this run.
+func (g *DedupGCRunner) reportUnswept(m map[string]*unsweptBackend) {
+	backends := make([]string, 0, len(m))
+	for b := range m {
+		backends = append(backends, b)
+	}
+	sort.Strings(backends)
+	for _, b := range backends {
+		u := m[b]
+		g.logger.Warn("dedup gc: chunks not swept — their backend could not be asked; they stay candidates",
+			zap.String("backend", b), zap.Int("not_swept", u.count), zap.String("how", u.how),
+			zap.String("class", unsweptClass(u.first)), zap.Error(u.first))
+	}
+}
+
+// notSweptNote is the per-backend part of the run's note.
+func notSweptNote(m map[string]int) string {
+	if len(m) == 0 {
+		return ""
+	}
+	backends := make([]string, 0, len(m))
+	for b := range m {
+		backends = append(backends, b)
+	}
+	sort.Strings(backends)
+	parts := make([]string, 0, len(backends))
+	for _, b := range backends {
+		parts = append(parts, fmt.Sprintf("%s: %d", b, m[b]))
+	}
+	return " (" + strings.Join(parts, ", ") + " — the backend could not be asked)"
+}
+
+// dedupGCCollector exports vaultaire_dedup_gc_unswept_chunks{backend}, READ
+// FROM job_runs.result: a process that has just started reports the run of
+// the process before it (the R13 lesson). Cached for a minute.
+type dedupGCCollector struct {
+	g    *DedupGCRunner
+	desc *prometheus.Desc
+
+	mu     sync.Mutex
+	readAt time.Time
+	last   map[string]int
+}
+
+func newDedupGCCollector(g *DedupGCRunner) *dedupGCCollector {
+	return &dedupGCCollector{g: g, desc: prometheus.NewDesc("vaultaire_dedup_gc_unswept_chunks",
+		"Chunks the dedup_gc job's last run could not sweep because their backend could not be asked (a failure, an open breaker, no driver), per backend; read from job_runs.result. They stay candidates.",
+		[]string{"backend"}, nil)}
+}
+
+func (c *dedupGCCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *dedupGCCollector) Collect(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
+	if time.Since(c.readAt) >= time.Minute {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		var raw []byte
+		if err := c.g.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, c.g.JobName).Scan(&raw); err == nil {
+			var res DedupGCResult
+			if len(raw) == 0 || json.Unmarshal(raw, &res) == nil {
+				c.last = res.NotSwept
+			}
+		} else if errors.Is(err, sql.ErrNoRows) {
+			c.last = nil
+		}
+		cancel()
+		c.readAt = time.Now()
+	}
+	last := c.last
+	c.mu.Unlock()
+	for b, n := range last {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, float64(n), b)
+	}
 }
 
 // sweepOutcome is what happened to one sweep candidate.
@@ -320,6 +470,9 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 	// different keys on a fixed-bucket backend). A failed blob delete leaks
 	// the blob (same as before WP-6), never corrupts a live object.
 	if err := store.delete(ctx, addr); err != nil {
+		// An Error: the row is gone and the blob is not — a leak nothing
+		// else will find (a backend that could not be asked never gets here:
+		// the exists above fails first and the row is kept).
 		g.logger.Error("delete chunk data (leaked, not corrupt)",
 			zap.String("hash", hash),
 			zap.String("key", key),

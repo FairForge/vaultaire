@@ -260,6 +260,13 @@ rule on `{job="retention"}` would never match. `internal/api/job_rules_test.go`
 checks that every job the server registers is named in exactly one staleness
 rule and that every series the file reads is exported.
 
+`dedup_gc` (RP8-1): a backend whose chunks cannot be asked (a dead key, an
+open breaker, no driver) is one Warn per run, not one Error per chunk; the
+count is `vaultaire_dedup_gc_unswept_chunks{backend}`, read from
+`job_runs.result`. No rule pages on it: the run stays `ok` and the chunks stay
+candidates. A count that does not fall after the backend is back is worth a
+look (`POST /api/v1/admin/jobs/dedup_gc/run`).
+
 `vaultaire-routing.yml` — routing truth (WP-R7-5). `object_head_cache.backend_name`
 is where an object's bytes are supposed to be; the daily `routing_truth` job
 (05:30 UTC) samples rows per backend and asks the RECORDED backend only.
