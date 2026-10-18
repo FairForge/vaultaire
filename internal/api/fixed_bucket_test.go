@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,6 +53,16 @@ type fixedBucketDriver struct {
 	// reader there: the address it was told about can change meanwhile).
 	onGet func(container, artifact string)
 }
+
+// backendAnswer is a backend's error ANSWER (an HTTP status): what the
+// SDK's ResponseError carries — nothing was committed (engine.PutOutcome).
+type backendAnswer struct {
+	status int
+	msg    string
+}
+
+func (e backendAnswer) Error() string       { return e.msg }
+func (e backendAnswer) HTTPStatusCode() int { return e.status }
 
 // midBodyFailure is a body that breaks after n bytes.
 type midBodyFailure struct {
@@ -126,7 +137,7 @@ func (d *fixedBucketDriver) Put(ctx context.Context, container, artifact string,
 	}
 	if d.failPut.Load() {
 		_, _ = io.Copy(io.Discard, data)
-		return errors.New("fixed bucket: 500 InternalError")
+		return backendAnswer{status: http.StatusInternalServerError, msg: "fixed bucket: 500 InternalError"}
 	}
 	p := d.path(tn, container, artifact)
 	if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {

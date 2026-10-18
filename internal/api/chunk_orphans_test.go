@@ -27,6 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 )
@@ -398,4 +400,54 @@ func TestChunkOrphans_TooManyOrphansOnOneBackendErasesNothing(t *testing.T) {
 	assert.Zero(t, b.Erased)
 	assert.True(t, b.Guarded)
 	assert.Contains(t, res.NotSwept[o.backend], "guard")
+}
+
+// zeroTimeLister is a page lister that returns no modification time (a zero
+// LastModified) for every key.
+type zeroTimeLister struct{ *fixedBucketDriver }
+
+func (d *zeroTimeLister) ListPage(ctx context.Context, container, prefix, startAfter string, limit int) ([]engine.ListedObject, bool, error) {
+	objs, more, err := d.fixedBucketDriver.ListPage(ctx, container, prefix, startAfter, limit)
+	for i := range objs {
+		objs[i].LastModified = time.Time{}
+	}
+	return objs, more, err
+}
+
+func TestChunkOrphans_AKeyWithNoModificationTimeIsNeverErased(t *testing.T) {
+	// Arrange (RP13-2): a lister whose keys carry a zero LastModified — read
+	// as infinitely old, every unnamed key was erased at its first sighting.
+	o := setupOrphanFixture(t)
+	core, logs := observer.New(zapcore.DebugLevel)
+	o.sweeper.logger = zap.New(core)
+	z := &zeroTimeLister{fixedBucketDriver: o.drv}
+	require.NoError(t, o.eng.AddDriver(o.backend, z))
+	k1, k2 := "_chunks/"+newHash(t), "_chunks/"+o.scope+"/"+newHash(t)
+	o.blob(k1, 3*time.Hour)
+	o.blob(k2, 3*time.Hour)
+
+	// Act: a dry run, then a real one.
+	dry, err := o.sweeper.Run(context.Background(), true)
+	require.NoError(t, err)
+	res, err := o.sweeper.Run(context.Background(), false)
+	require.NoError(t, err)
+
+	// Assert: nothing erased, both counted and reported with their zero time.
+	assert.True(t, o.present(k1))
+	assert.True(t, o.present(k2))
+	b := res.Backends[o.backend]
+	require.NotNil(t, b)
+	assert.Equal(t, 2, b.UnknownAge)
+	assert.Zero(t, b.Found)
+	assert.Zero(t, b.Erased)
+	db := dry.Backends[o.backend]
+	require.NotNil(t, db)
+	assert.Equal(t, 2, db.UnknownAge)
+	require.Len(t, db.Candidates, 2)
+	for _, c := range db.Candidates {
+		assert.True(t, c.LastModified.IsZero())
+	}
+	warns := logs.FilterMessage("chunk orphans: listed keys carry no modification time — never erased").All()
+	require.Len(t, warns, 2, "one Warn per run")
+	assert.Equal(t, o.backend, warns[0].ContextMap()["backend"])
 }

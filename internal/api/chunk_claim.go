@@ -37,11 +37,24 @@ import (
 //     only when the row now names another address (the same address holds
 //     the winner's bytes), and the loop references the winner.
 //
-// A PUT that fails drops its own claim (when no reference was taken on it —
-// the previous build, in the switch overlap, may take one), so the next
-// writer stores the chunk at once instead of waiting out the window. A
-// writer that dies leaves its claim: the next writer takes it over after the
-// window, or the chunk orphan sweep (B.2) erases it with any blob it left.
+// A PUT that fails keeps or drops its claim by what the backends said
+// (RP13-1, engine.PutOutcome):
+//   - an attempt that ended WITHOUT AN ANSWER — a deadline, a reset, a
+//     cancel that landed after the request went out (the client left, a
+//     sibling chunk failed) — may still commit: a backend that took the whole
+//     body can store it after the client gave up (RP8-11). The claim stays,
+//     so the next writer waits the window out and takes it over, and the late
+//     bytes land inside the window, never over the taker's (decision 8: the
+//     PUT ran under chunkPutBound from after the claim, a late commit lands
+//     within a second bound, the window is two).
+//   - every attempt ANSWERED with an error (a 500, a 403), never connected
+//     (a refused dial) or never asked (an open breaker, a request already
+//     gone): nothing was committed. The claim is dropped (when no reference
+//     was taken on it — the previous build, in the switch overlap, may take
+//     one), so the next writer stores the chunk at once.
+// A writer that dies leaves its claim: the next writer takes it over after
+// the window, or the chunk orphan sweep (B.2) erases it with any blob it
+// left.
 
 // errChunkWaitGaveUp: the request ended while another writer's claim on the
 // chunk was being waited on.
@@ -80,11 +93,21 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 			continue
 		}
 
-		putCtx, cancel := context.WithTimeout(ctx, chunkPutBound)
-		bn, putErr := a.chunks().put(putCtx, storageKey, storeData)
+		putCtx, cancel := context.WithTimeout(ctx, a.chunkPutBound)
+		bn, outcome, putErr := a.chunks().put(putCtx, storageKey, storeData)
 		cancel()
 		if putErr != nil {
-			a.dropChunkClaim(ctx, scope, entry.PlaintextHash, since)
+			if outcome.MayHaveLanded() {
+				// No answer: the backend may hold the whole body and commit
+				// it late (RP8-11). The claim stays, so the next writer
+				// waits the window out instead of storing over it (RP13-1).
+				a.logger.Warn("chunk store: a PUT ended with no answer and may still land — its claim is kept for the takeover window",
+					zap.String("scope", scope), zap.String("hash", shortHash(entry.PlaintextHash)),
+					zap.Strings("unanswered", outcome.Unanswered()), zap.Duration("takeover_after", a.chunkPendingTakeover),
+					zap.Error(putErr))
+			} else {
+				a.dropChunkClaim(ctx, scope, entry.PlaintextHash, since)
+			}
 			return chunkStoreResult{}, putErr
 		}
 		res, done, err := a.readyChunk(ctx, scope, storageKey, bn, since, entry)
@@ -258,7 +281,8 @@ func (a *S3ToEngine) readyChunk(ctx context.Context, scope, storageKey, bn strin
 	return chunkStoreResult{}, false, nil
 }
 
-// dropChunkClaim removes this writer's claim after its PUT failed, so the
+// dropChunkClaim removes this writer's claim after its PUT failed with an
+// answer (nothing committed — see the header), so the
 // next writer of the chunk stores it at once. A claim someone took a
 // reference on (the previous build, during the switch overlap) is kept: the
 // next writer takes it over after the window. Best effort on its own short

@@ -1064,6 +1064,9 @@ func (s *Server) writeAdapter() *S3ToEngine {
 	if s.chunkPendingTakeover > 0 {
 		a.chunkPendingTakeover = s.chunkPendingTakeover
 	}
+	if s.chunkPutBound > 0 {
+		a.chunkPutBound = s.chunkPutBound
+	}
 	return a
 }
 

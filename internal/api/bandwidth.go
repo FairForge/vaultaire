@@ -205,7 +205,14 @@ func (bt *BandwidthTracker) recordResponse(tenantID, backend string, ingress int
 // and backend+date, together with what earlier flushes could not write. Each
 // upsert has its own deadline; one that fails keeps its delta for the next
 // flush, up to bandwidthFlushMaxAttempts flushes.
-func (bt *BandwidthTracker) Flush() {
+func (bt *BandwidthTracker) Flush() { bt.flush(false) }
+
+// FinalFlush is the shutdown's flush: there is no next flush, so a delta it
+// cannot write is dropped at once with a Warn naming its bytes (RP13-3) —
+// never "kept for the next flush".
+func (bt *BandwidthTracker) FinalFlush() { bt.flush(true) }
+
+func (bt *BandwidthTracker) flush(final bool) {
 	bt.mu.Lock()
 	if len(bt.buffer) == 0 && len(bt.pendingTenant) == 0 && len(bt.pendingBackend) == 0 {
 		bt.mu.Unlock()
@@ -249,7 +256,7 @@ func (bt *BandwidthTracker) Flush() {
 		}
 	}
 
-	failedTenant := bt.upsertAll(totals, "tenant_id", `
+	failedTenant := bt.upsertAll(totals, final, "tenant_id", `
 			INSERT INTO bandwidth_usage_daily (tenant_id, date, ingress_bytes, egress_bytes, requests_count)
 			VALUES ($1, $2::date, $3, $4, $5)
 			ON CONFLICT (tenant_id, date)
@@ -258,7 +265,7 @@ func (bt *BandwidthTracker) Flush() {
 				egress_bytes = bandwidth_usage_daily.egress_bytes + EXCLUDED.egress_bytes,
 				requests_count = bandwidth_usage_daily.requests_count + EXCLUDED.requests_count
 		`)
-	failedBackend := bt.upsertAll(byBackend, "backend", `
+	failedBackend := bt.upsertAll(byBackend, final, "backend", `
 			INSERT INTO backend_bandwidth_daily (backend_name, date, ingress_bytes, egress_bytes, requests_count)
 			VALUES ($1, $2::date, $3, $4, $5)
 			ON CONFLICT (backend_name, date)
@@ -279,8 +286,9 @@ func (bt *BandwidthTracker) Flush() {
 
 // upsertAll runs one upsert per row, each under its own deadline, and returns
 // the rows to try again on the next flush. A row that has failed
-// bandwidthFlushMaxAttempts flushes is dropped with a Warn naming its bytes.
-func (bt *BandwidthTracker) upsertAll(rows map[bandwidthAggKey]*bandwidthAgg, field, query string) map[bandwidthAggKey]*bandwidthAgg {
+// bandwidthFlushMaxAttempts flushes — or any failed row of the final flush —
+// is dropped with a Warn naming its bytes.
+func (bt *BandwidthTracker) upsertAll(rows map[bandwidthAggKey]*bandwidthAgg, final bool, field, query string) map[bandwidthAggKey]*bandwidthAgg {
 	var failed map[bandwidthAggKey]*bandwidthAgg
 	for k, a := range rows {
 		ctx, cancel := context.WithTimeout(context.Background(), bt.stmtTimeout)
@@ -290,6 +298,15 @@ func (bt *BandwidthTracker) upsertAll(rows map[bandwidthAggKey]*bandwidthAgg, fi
 			continue
 		}
 		a.attempts++
+		if final {
+			if bt.logger != nil {
+				bt.logger.Warn("bandwidth delta dropped at shutdown",
+					zap.String(field, k.name), zap.String("date", k.day),
+					zap.Int64("ingress_bytes", a.ingress), zap.Int64("egress_bytes", a.egress),
+					zap.Int("requests", a.requests), zap.Int("attempts", a.attempts), zap.Error(err))
+			}
+			continue
+		}
 		if a.attempts >= bandwidthFlushMaxAttempts {
 			if bt.logger != nil {
 				bt.logger.Warn("bandwidth delta dropped after repeated flush failures",

@@ -50,6 +50,7 @@ type stallS3 struct {
 	// attempts for the same (key, part).
 	stall     func(a putAttempt, n int) bool
 	fail500   bool
+	failCode  int // when set, every PUT is answered with this status (fail500 = 500)
 	objects   map[string][]byte
 	parts     map[string]map[int][]byte // uploadID -> part -> bytes
 	completes map[string][]int          // uploadID -> part numbers in the Complete body
@@ -109,7 +110,10 @@ func (f *stallS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.seen[id]++
 		n := f.seen[id]
 		stall := f.stall != nil && f.stall(a, n)
-		fail := f.fail500
+		code := f.failCode
+		if code == 0 && f.fail500 {
+			code = http.StatusInternalServerError
+		}
 		f.mu.Unlock()
 		if stall {
 			select { // say nothing until the client gives up
@@ -118,9 +122,13 @@ func (f *stallS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		if fail {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`<?xml version="1.0"?><Error><Code>InternalError</Code><Message>boom</Message></Error>`))
+		if code != 0 {
+			errCode := map[int]string{http.StatusForbidden: "AccessDenied"}[code]
+			if errCode == "" {
+				errCode = "InternalError"
+			}
+			w.WriteHeader(code)
+			_, _ = fmt.Fprintf(w, `<?xml version="1.0"?><Error><Code>%s</Code><Message>boom</Message></Error>`, errCode)
 			return
 		}
 		f.mu.Lock()

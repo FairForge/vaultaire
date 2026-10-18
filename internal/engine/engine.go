@@ -377,6 +377,9 @@ func (e *CoreEngine) Put(ctx context.Context, container, artifact string, data i
 		if srcErr := sizeReader.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
 			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
 		}
+		// An attempt with no answer may still commit (RP13-1): the caller
+		// that owns the address is told.
+		options.Outcome.record(driverName, perr)
 		if perr != nil && !seekable && sizeReader.bytesRead > 0 {
 			return fmt.Errorf("%w: %w", ErrNoFailover, perr)
 		}

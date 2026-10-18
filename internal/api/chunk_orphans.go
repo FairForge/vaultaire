@@ -166,9 +166,12 @@ type ChunkOrphanBackend struct {
 	Unrecognized int `json:"unrecognized"` // not a chunk key: never touched
 	Young        int `json:"young"`        // no row, younger than the grace
 	Found        int `json:"found"`        // no row, older than the grace
-	Erased       int `json:"erased"`
-	Failed       int `json:"failed"`
-	Kept         int `json:"kept"` // a row named it by the locked re-check
+	// UnknownAge: no row, and the listing gave no modification time (a zero
+	// LastModified) — never erased, its age cannot be told (RP13-2).
+	UnknownAge int `json:"unknown_age,omitempty"`
+	Erased     int `json:"erased"`
+	Failed     int `json:"failed"`
+	Kept       int `json:"kept"` // a row named it by the locked re-check
 	// OrphanBytes: the bytes of orphans seen and still there after the run
 	// (young, failed, or a dry run's) — what is leaking now.
 	OrphanBytes   int64 `json:"orphan_bytes"`
@@ -269,6 +272,10 @@ func (c *ChunkOrphanSweeper) Run(ctx context.Context, dryRun bool) (ChunkOrphanR
 			continue
 		}
 		next, complete, orphans, err := c.listPass(ctx, b, cursor, dryRun, br)
+		if br.UnknownAge > 0 {
+			c.logger.Warn("chunk orphans: listed keys carry no modification time — never erased",
+				zap.String("backend", b), zap.Int("keys", br.UnknownAge))
+		}
 		if err == nil && len(orphans) > 0 {
 			if limit := c.guardLimit(br.Listed); len(orphans) > limit {
 				br.Guarded = true
@@ -524,6 +531,17 @@ func (c *ChunkOrphanSweeper) examine(ctx context.Context, backend string, objs [
 		scope, hash, ok := chunkBlobIdentity(o.Artifact)
 		if !ok {
 			br.Unrecognized++
+			continue
+		}
+		if o.LastModified.IsZero() {
+			// No time: never "old" (a zero time read as infinitely old
+			// would erase every unnamed key at its first sighting). Counted
+			// and reported, never erased (RP13-2).
+			br.UnknownAge++
+			br.OrphanBytes += o.Size
+			if dryRun && len(br.Candidates) < chunkOrphanReportMax {
+				br.Candidates = append(br.Candidates, ChunkOrphanCandidate{Key: o.Artifact, Size: o.Size})
+			}
 			continue
 		}
 		if now.Sub(o.LastModified) < c.Grace {
