@@ -447,7 +447,7 @@ func (k *KeyReencryptRunner) reencryptOne(ctx context.Context, c reencryptCandid
 		// move and legacyCopyExists keep working): the old blob stays where
 		// it is for readers that resolved it.
 		newKey := fmt.Sprintf("_chunks/%s/%s.k%d", c.scope, c.hash, cur)
-		backend, err := store.put(ctx, newKey, ct)
+		backend, _, err := store.put(ctx, newKey, ct)
 		if err != nil {
 			return fmt.Errorf("write the re-encrypted blob: %w", err)
 		}

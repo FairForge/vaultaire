@@ -93,9 +93,13 @@ func newChunkStore(eng engine.Engine, db *sql.DB, logger *zap.Logger) *chunkStor
 // put stores a NEW chunk's blob at the one address and returns the backend
 // it landed on (the caller records it as the row's backend_id). Placement is
 // the engine's: the primary, failing over among the general-purpose backends.
-func (c *chunkStore) put(ctx context.Context, storageKey string, data []byte) (string, error) {
-	return c.eng.Put(engine.ChunkContext(ctx), chunkContainer, storageKey,
-		bytes.NewReader(data), engine.WithContentLength(int64(len(data))))
+// The outcome names the backends whose attempt ended without an answer: a
+// failed PUT that may still commit (RP13-1).
+func (c *chunkStore) put(ctx context.Context, storageKey string, data []byte) (string, *engine.PutOutcome, error) {
+	o := &engine.PutOutcome{}
+	bn, err := c.eng.Put(engine.ChunkContext(ctx), chunkContainer, storageKey,
+		bytes.NewReader(data), engine.WithContentLength(int64(len(data))), engine.WithPutOutcome(o))
+	return bn, o, err
 }
 
 // getAt reads the blob at the address ctx names, from the row's backend only.

@@ -64,6 +64,9 @@ type S3ToEngine struct {
 	// chunkPendingTakeover: how old a pending chunk claim (WP-R8-2) must be
 	// before another writer takes it over (chunkPendingTakeoverDefault).
 	chunkPendingTakeover time.Duration
+	// chunkPutBound bounds one chunk blob's backend PUT, failover included
+	// (chunkPutBoundDefault).
+	chunkPutBound time.Duration
 
 	// chunkGetPrefetch bounds how many chunks a chunked GET holds at once
 	// — in flight, fetched and being written (default
@@ -150,6 +153,7 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		notifySvc:             NewNotificationDispatcher(db, logger),
 		chunkStoreConcurrency: defaultChunkStoreConcurrency,
 		chunkPendingTakeover:  chunkPendingTakeoverDefault,
+		chunkPutBound:         chunkPutBoundDefault,
 		chunkGetPrefetch:      defaultChunkGetPrefetch,
 		largeGet:              defaultLargeGetConfig(),
 	}

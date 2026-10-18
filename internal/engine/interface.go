@@ -190,6 +190,9 @@ type PutOptions struct {
 	ContentLength   int64
 	StorageClass    string
 	UserMetadata    map[string]string
+	// Outcome, when set (WithPutOutcome), is filled by CoreEngine.Put with
+	// the attempts that ended without an answer (put_outcome.go).
+	Outcome *PutOutcome
 }
 
 // ApplyPutOptions applies functional options and returns the result.

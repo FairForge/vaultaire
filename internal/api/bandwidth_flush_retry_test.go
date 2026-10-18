@@ -91,3 +91,42 @@ func TestBandwidthTracker_AStatementFailingEveryFlushIsDroppedWithAWarn(t *testi
 	assert.EqualValues(t, 7, fields["ingress_bytes"])
 	assert.Empty(t, logs.FilterLevelExact(zapcore.ErrorLevel).All(), "a kept delta is a Warn, not an Error")
 }
+
+func TestBandwidthTracker_TheShutdownFlushDropsAFailedDeltaWithAWarnNamingItsBytes(t *testing.T) {
+	// Arrange (RP13-3): the shutdown's flush is the last one — a delta it
+	// cannot write has no "next flush" to be kept for.
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	core, logs := observer.New(zapcore.DebugLevel)
+	bt := NewBandwidthTracker(db)
+	bt.SetLogger(zap.New(core))
+	day := bandwidthDay(time.Now())
+	bt.RecordWithBackend(context.Background(), "tenant-1", "lyve", 11, 4000)
+	mock.ExpectExec(`INSERT INTO bandwidth_usage_daily`).
+		WithArgs("tenant-1", day, int64(11), int64(4000), 1).
+		WillReturnError(errors.New("connection refused"))
+	mock.ExpectExec(`INSERT INTO backend_bandwidth_daily`).
+		WithArgs("lyve", day, int64(11), int64(4000), 1).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	s := &Server{bandwidthTracker: bt, logger: zap.NewNop()}
+
+	// Act: the shutdown's flush.
+	s.flushTrackers(context.Background())
+
+	// Assert: nothing is kept, and one Warn names the dropped bytes.
+	require.NoError(t, mock.ExpectationsWereMet())
+	bt.mu.Lock()
+	assert.Empty(t, bt.pendingTenant)
+	assert.Empty(t, bt.pendingBackend)
+	assert.Empty(t, bt.buffer)
+	bt.mu.Unlock()
+	dropped := logs.FilterMessage("bandwidth delta dropped at shutdown").All()
+	require.Len(t, dropped, 1)
+	fields := dropped[0].ContextMap()
+	assert.Equal(t, "tenant-1", fields["tenant_id"])
+	assert.EqualValues(t, 4000, fields["egress_bytes"])
+	assert.EqualValues(t, 11, fields["ingress_bytes"])
+	assert.Empty(t, logs.FilterMessage("bandwidth flush failed — delta kept for the next flush").All(),
+		"there is no next flush")
+}

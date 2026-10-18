@@ -143,6 +143,9 @@ type Server struct {
 	// claim must be before another writer takes it over (tests; the
 	// default is chunkPendingTakeoverDefault, WP-R8-2).
 	chunkPendingTakeover time.Duration
+	// chunkPutBound, when > 0, overrides the bound of one chunk blob's
+	// backend PUT (tests; the default is chunkPutBoundDefault).
+	chunkPutBound time.Duration
 	// chunkingThreshold, when > 0, overrides the size above which a write
 	// is chunked (defaultChunkingThreshold, 64 MiB); tests lower it.
 	chunkingThreshold int64
@@ -1552,7 +1555,7 @@ func (s *Server) flushTrackers(ctx context.Context) {
 		if s.egress != nil {
 			s.egress.drainUnrecorded(s.bandwidthTracker)
 		}
-		s.bandwidthTracker.Flush()
+		s.bandwidthTracker.FinalFlush()
 	}
 	if s.cdnAnalytics != nil {
 		s.cdnAnalytics.Flush()

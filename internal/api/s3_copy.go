@@ -822,15 +822,21 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	flip, dbErr := commitBlobWrite(r.Context(), s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey, Bill: bill,
 		Version: &versionWrite{Size: srcMeta.LogicalSize, ETag: srcETag, ContentType: contentType}, Upsert: func(tx *sql.Tx) error {
 			// Each destination ref is a new reference to its chunk. Incremented
-			// inside the same tx so a failed install leaves counts untouched.
+			// inside the same tx so a failed install leaves counts untouched —
+			// through the one reference-taker: a READY row, exactly one (a
+			// pending row is a store still landing and holds no reference,
+			// RP13-4).
 			for _, ref := range destRefs {
 				scope := ref.DedupScope
 				if scope == "" {
 					scope = crypto.GlobalDedupScope
 				}
-				if _, incErr := tx.ExecContext(r.Context(),
-					`SELECT increment_chunk_ref($1, $2)`, scope, ref.PlaintextHash); incErr != nil {
+				n, incErr := s.gci.IncrementRefTx(r.Context(), tx, scope, ref.PlaintextHash)
+				if incErr != nil {
 					return fmt.Errorf("increment chunk ref %s: %w", ref.PlaintextHash, incErr)
+				}
+				if n != 1 {
+					return fmt.Errorf("increment chunk ref %s: %d ready rows (the chunk is not ready)", ref.PlaintextHash, n)
 				}
 			}
 			if repErr := s.gci.ReplaceObjectManifestTx(r.Context(), tx, t.ID, destBucket, addr, destRefs, &crypto.ObjectMeta{
