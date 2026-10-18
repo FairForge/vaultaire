@@ -211,3 +211,14 @@ The picker was rendered through `https://stored.ge` the second the new build ser
 
 - **The region gate is what is live**, not unset pairs. `aws s3 mb --region eu-west-1` (or a `LocationConstraint`) now answers 503 with "temporarily unavailable" while iDrive's key is dead, and starts working on its own once that region's probe answers again.
 - The LET readiness read's "dead regions in the picker" line is closed. The picker shows ten regions disabled "(temporarily unavailable)", two "(not enabled)", and `us-central-1` enabled. The prompt's "eleven" counts the primary `idrive` with the ten region drivers.
+
+## Post-merge review (2026-10-18, meta session)
+
+Read on `origin/main` `c9ce46c`, prod `83f3d89` (slot 8000). Every claim above holds.
+
+- **The gate has no fourth door.** The three bucket-creation entry points (S3 `CreateBucket` with a `LocationConstraint` body or an `x-amz-bucket-region` header, the management `POST /buckets`, the dashboard form and picker) all pass `createBucketRegistry` → `regionCreateState`; no code path writes `buckets.region` after creation (`grep -rn "SET region\|UPDATE buckets.*region" internal/` is empty), so there is no second surface for the R4-22 class of gap.
+- **The dial budget is the budget.** `dialer` wraps the loop's context in `WithTimeout(budget)` before any address is tried, and `attemptContext` takes `min(floor, left)`, so the 2 s floor can never push the loop past its 10 s total; a caller's shorter deadline still wins.
+- **RP9-9 is the right rule.** `UpdateHealth`'s verdict is `ConsecutiveFailures < 2 && (ConsecutiveFailures == 0 || LastSuccess set)`: unhealthy at the first failure only while no probe has ever succeeded, two in a row after one has. The probe interval and the stagger are untouched, so a working region is offered at most 28 s after a slot start, as the note says.
+- **Prod, 13:45–13:50 UTC:** 0 `"level":"error"` lines since 04:00; 18/18 jobs `ok` (`dedup_gc` 03:05 with `not_swept idrive: 1049`, `routing_truth` 06:08 with the ten `idrive` errors — both expected while the key is dead); `vaultaire_region_create_refused_total` has no series on the current slot (nothing refused since the 00:01 switch); `/health` `degraded` naming the eleven iDrive drivers. One observation, not a finding: `vaultaire_driver_put_retries_total{idrive-eu-west-3} 2`, `{idrive-us-midwest-1} 3` — the canary PUT on the dead regions sometimes gets no answer within its deadline and is retried on a fresh connection before the `AccessDenied` arrives; the retry is the #740 behaviour working, the regions stay unhealthy either way.
+
+No P0/P1/P2 found; no fix PR. Residuals RP10-1/2/3/5 and RP9-2 stand as recorded.
