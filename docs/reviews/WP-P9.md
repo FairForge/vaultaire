@@ -270,6 +270,17 @@ The meta session read #745–#748 against the code and prod (`1e87be4`, 95 min a
 
 RP9-1 stays open with its home in WP-R7-4.
 
-### Part C on prod: the 2026-10-18 02:30 UTC `dedup_gc` run
+### Part C on prod: the 2026-10-18 `dedup_gc` run (scheduled 02:30 UTC)
 
-DEDUPPROOF
+Read only, on `83f3d89` (slot 8000).
+
+- **When it ran:** the run started at 03:05:20 UTC and took 0.22 s. That is not a delay of the job. The slot booted at about 00:05, and the scheduler runs a daily job at the first hourly check after its scheduled time (WP-R13-3). The 2026-10-17 run started at 03:20 for the same reason.
+- **`job_runs`:**
+  - outcome `ok`, `last_error` = `1049 chunk(s) not swept (idrive: 1049 — the backend could not be asked) (see the log); they stay candidates`;
+  - `result` = `{"failed": 1049, "deleted": 0, "not_swept": {"idrive": 1049}, "reconciled": 0, "bytes_reclaimed": 0}`.
+- **Journal:**
+  - one Warn `dedup gc: chunks not swept — their backend could not be asked; they stay candidates`, with `backend=idrive`, `not_swept=1049`, `how=asked`, `class=backend_unavailable`, and the first error (`exists _global/_chunks/…`);
+  - one Info `dedup gc run`;
+  - **0** `"level":"error"` lines from 02:20 UTC to the read at 03:07. Before #747, the same run wrote one Error line per chunk.
+- **Gauge:** `vaultaire_dedup_gc_unswept_chunks{backend="idrive"}` = **1049**, read from the box's Prometheus.
+- **1049, not 793:** more chunk rows on the dead iDrive account have passed the 7-day grace since the 10-17 run. Every candidate is still counted, and none is lost: they stay rows, and they stay candidates until the account answers.
