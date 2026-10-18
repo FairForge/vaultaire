@@ -225,7 +225,10 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
   resolved the old address and finds it gone re-reads the chunk's row once and
   continues at the new blob (`vaultaire_chunked_get_rereads_total{outcome=moved}`),
   so a download longer than the grace is not cut; the hour covers a reader that
-  cannot re-read (an older build during a switch). Watch the backlog drain:
+  cannot re-read (an older build during a switch). Only `ready` index rows are
+  candidates and only a `ready` row is swapped (WP-R8-2, migration 093): a
+  `pending` row's blob is still being written by the chunk store, which seals
+  it under the version current at that moment. Watch the backlog drain:
   `vaultaire_key_rotation_pending{kind="chunk"}` → 0, and
   `GET /api/v1/admin/jobs` → `key_reencrypt.result`. Rule:
   `KeyReencryptBacklogStuck`.

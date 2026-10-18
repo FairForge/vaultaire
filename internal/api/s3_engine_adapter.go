@@ -61,6 +61,10 @@ type S3ToEngine struct {
 	// CHUNK_PUT_CONCURRENCY via the Server; 1 = sequential stores).
 	chunkStoreConcurrency int
 
+	// chunkPendingTakeover: how old a pending chunk claim (WP-R8-2) must be
+	// before another writer takes it over (chunkPendingTakeoverDefault).
+	chunkPendingTakeover time.Duration
+
 	// chunkGetPrefetch bounds how many chunks a chunked GET holds at once
 	// — in flight, fetched and being written (default
 	// defaultChunkGetPrefetch; env CHUNK_GET_PREFETCH via the Server; 1 =
@@ -145,6 +149,7 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		logger:                logger,
 		notifySvc:             NewNotificationDispatcher(db, logger),
 		chunkStoreConcurrency: defaultChunkStoreConcurrency,
+		chunkPendingTakeover:  chunkPendingTakeoverDefault,
 		chunkGetPrefetch:      defaultChunkGetPrefetch,
 		largeGet:              defaultLargeGetConfig(),
 	}
@@ -1481,90 +1486,14 @@ func (a *S3ToEngine) handleChunkedPut(
 	return nil
 }
 
-// storeChunkLocked stores a chunk's blob and inserts its GCI row while holding
-// pg_advisory_xact_lock(hashtext(scope), hashtext(hash)) — the same lock the
-// dedup GC sweep takes around its row-delete + blob-delete (WP-6). Without it
-// the delete-vs-reref race interleaves: sweep deletes the row, this path
-// re-stores blob + row, sweep then deletes the blob out from under the live
-// row. The lock serializes the two so the sweep either finishes first (this
-// path stores fresh) or sees the re-inserted row's ref_count and skips.
-//
-// The row is re-checked UNDER the lock (R8-02): two requests that both missed
-// the lookup for a new chunk both encode it — possibly differently, since the
-// compression decision follows each request's Content-Type — and serialize
-// here. Without the re-check the loser overwrote the winner's blob while its
-// INSERT ... ON CONFLICT merely bumped the count, leaving the row's
-// compression flag and ciphertext hash describing bytes that were no longer
-// there: every object sharing the chunk then failed its integrity check on
-// every GET. The loser now takes a reference on the winner's row and reports
-// the winner's backend and ciphertext hash; its own encoding is discarded.
+// chunkStoreResult is what a chunk store took a reference on: the blob this
+// writer stored, or the row a concurrent first-store made ready (R8-02: the
+// loser's own encoding is discarded — chunk_claim.go).
 type chunkStoreResult struct {
 	backend        string  // backend holding the blob (the row's when reused)
 	ciphertextHash *string // SHA-256 of the blob that is actually stored, nil if unencrypted
 	keyVersion     *int    // the tenant key version that blob is sealed under, nil if unencrypted
-	reused         bool    // an existing row was found under the lock; nothing was written
-}
-
-func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, entry *crypto.GCIEntry) (chunkStoreResult, error) {
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return chunkStoreResult{}, fmt.Errorf("begin chunk store tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx,
-		`SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, scope, entry.PlaintextHash); err != nil {
-		return chunkStoreResult{}, fmt.Errorf("advisory lock: %w", err)
-	}
-
-	var rowBackend string
-	var rowCiphertextHash sql.NullString
-	var rowKeyVersion sql.NullInt32
-	err = tx.QueryRowContext(ctx, `
-		SELECT backend_id, ciphertext_hash, encryption_key_version FROM global_content_index
-		WHERE dedup_scope = $1 AND plaintext_hash = $2
-		FOR UPDATE`, scope, entry.PlaintextHash).Scan(&rowBackend, &rowCiphertextHash, &rowKeyVersion)
-	switch {
-	case err == nil:
-		rows, incErr := a.gci.IncrementRefTx(ctx, tx, scope, entry.PlaintextHash)
-		if incErr != nil {
-			return chunkStoreResult{}, fmt.Errorf("reference existing chunk: %w", incErr)
-		}
-		if rows != 1 {
-			return chunkStoreResult{}, fmt.Errorf("reference existing chunk: %d rows updated under lock", rows)
-		}
-		if err := tx.Commit(); err != nil {
-			return chunkStoreResult{}, fmt.Errorf("commit chunk reference: %w", err)
-		}
-		res := chunkStoreResult{backend: rowBackend, reused: true}
-		if rowCiphertextHash.Valid {
-			h := rowCiphertextHash.String
-			res.ciphertextHash = &h
-		}
-		if rowKeyVersion.Valid {
-			v := int(rowKeyVersion.Int32)
-			res.keyVersion = &v
-		}
-		return res, nil
-	case errors.Is(err, sql.ErrNoRows):
-		// New chunk: store it below.
-	default:
-		return chunkStoreResult{}, fmt.Errorf("check chunk index under lock: %w", err)
-	}
-
-	bn, putErr := a.chunks().put(ctx, storageKey, storeData)
-	if putErr != nil {
-		return chunkStoreResult{}, putErr
-	}
-	entry.BackendID = bn
-
-	if insertErr := a.gci.InsertChunkTx(ctx, tx, entry); insertErr != nil {
-		return chunkStoreResult{}, fmt.Errorf("insert chunk index: %w", insertErr)
-	}
-	if err := tx.Commit(); err != nil {
-		return chunkStoreResult{}, fmt.Errorf("commit chunk store: %w", err)
-	}
-	return chunkStoreResult{backend: bn, ciphertextHash: entry.CiphertextHash, keyVersion: entry.EncryptionKeyVersion}, nil
+	reused         bool    // an existing row was referenced; nothing of this writer's was kept
 }
 
 // errChunkDecrypt marks a chunk that was read but did not decrypt.

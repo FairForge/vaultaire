@@ -243,7 +243,7 @@ func (r *chunkMoveRun) rowBatch(ctx context.Context, afterScope, afterHash strin
 	rows, err := r.m.db.QueryContext(ctx, `
 		SELECT dedup_scope, plaintext_hash, storage_key
 		  FROM global_content_index
-		 WHERE backend_id = $1 AND (dedup_scope, plaintext_hash) > ($2, $3)
+		 WHERE backend_id = $1 AND state = 'ready' AND (dedup_scope, plaintext_hash) > ($2, $3)
 		 ORDER BY dedup_scope, plaintext_hash
 		 LIMIT $4`, r.opts.Backend, afterScope, afterHash, r.m.BatchSize)
 	if err != nil {
@@ -480,7 +480,7 @@ func (r *chunkMoveRun) moveOne(ctx context.Context, a chunkAddr, tenants []strin
 		var compression sql.NullString
 		err := conn.QueryRowContext(ctx, `
 			SELECT backend_id, storage_key, size_bytes, compression_algo, encrypted, ciphertext_hash
-			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2`,
+			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'`,
 			a.scope, a.hash).Scan(&row.backend, &row.key, &row.size, &compression, &row.encrypted, &row.ciphertextHash)
 		if errors.Is(err, sql.ErrNoRows) {
 			if countRow {

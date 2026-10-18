@@ -171,7 +171,7 @@ func (g *GlobalContentIndex) lookupChunkDB(ctx context.Context, scope, plaintext
 		       compressed_size, compression_algo, encrypted, encryption_algo,
 		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at, encryption_key_version
 		FROM global_content_index
-		WHERE dedup_scope = $1 AND plaintext_hash = $2
+		WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'
 	`, scope, plaintextHash).Scan(
 		&entry.DedupScope,
 		&entry.PlaintextHash,
@@ -262,7 +262,7 @@ func (g *GlobalContentIndex) LookupChunks(ctx context.Context, scope string, has
 		       compressed_size, compression_algo, encrypted, encryption_algo,
 		       ciphertext_hash, ref_count, first_seen_at, last_accessed_at, encryption_key_version
 		FROM global_content_index
-		WHERE dedup_scope = $1 AND plaintext_hash = ANY($2)
+		WHERE dedup_scope = $1 AND plaintext_hash = ANY($2) AND state = 'ready'
 	`, scope, uncachedHashes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch lookup chunks: %w", err)
@@ -421,7 +421,7 @@ func (g *GlobalContentIndex) incrementRef(ctx context.Context, ex execer, scope,
 		    last_accessed_at = NOW(),
 		    marked_for_deletion = FALSE,
 		    marked_at = NULL
-		WHERE dedup_scope = $1 AND plaintext_hash = $2
+		WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'
 	`, scope, plaintextHash)
 	if err != nil {
 		return 0, fmt.Errorf("failed to increment ref: %w", err)
@@ -844,6 +844,7 @@ func (g *GlobalContentIndex) GetGlobalDedupStats(ctx context.Context) (*DedupSta
 			COALESCE(SUM(size_bytes), 0) as total_bytes,
 			COALESCE(SUM(CASE WHEN ref_count > 1 THEN size_bytes * (ref_count - 1) ELSE 0 END), 0) as bytes_saved
 		FROM global_content_index
+		WHERE state = 'ready'
 	`).Scan(&stats.ChunksProcessed, &stats.BytesPhysical, &stats.BytesSaved)
 
 	if err != nil {

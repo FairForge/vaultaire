@@ -152,6 +152,7 @@ func (g *DedupGCRunner) reconcile(ctx context.Context) (int, error) {
 		LEFT JOIN actual a
 		       ON g2.dedup_scope = a.dedup_scope AND g2.plaintext_hash = a.plaintext_hash
 		WHERE g.dedup_scope = g2.dedup_scope AND g.plaintext_hash = g2.plaintext_hash
+		  AND g.state = 'ready'
 		  AND g.last_accessed_at < NOW() - make_interval(secs => $1)
 		  AND g.ref_count <> COALESCE(a.cnt, 0)
 	`, graceSecs)
@@ -181,6 +182,7 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int
 		FROM global_content_index
 		WHERE marked_for_deletion = TRUE
 		  AND ref_count = 0
+		  AND state = 'ready'
 		  AND marked_at < NOW() - make_interval(secs => $1)
 	`, graceSecs)
 	if err != nil {
@@ -449,6 +451,7 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 		  AND plaintext_hash = $2
 		  AND ref_count = 0
 		  AND marked_for_deletion = TRUE
+		  AND state = 'ready'
 	`, scope, hash)
 	if err != nil {
 		return sweepKept, fmt.Errorf("delete gci row: %w", err)
