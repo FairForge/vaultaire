@@ -53,6 +53,7 @@ const (
 	OpPutObjectLegalHold         = "PutObjectLegalHold"
 	OpInitiateMultipartUpload    = "InitiateMultipartUpload"
 	OpUploadPart                 = "UploadPart"
+	OpUploadPartCopy             = "UploadPartCopy"
 	OpCompleteMultipartUpload    = "CompleteMultipartUpload"
 	OpAbortMultipartUpload       = "AbortMultipartUpload"
 	OpListMultipartUploads       = "ListMultipartUploads"
@@ -77,7 +78,7 @@ var S3Operations = []string{
 	OpGetObjectAcl, OpPutObjectAcl,
 	OpGetObjectRetention, OpPutObjectRetention,
 	OpGetObjectLegalHold, OpPutObjectLegalHold,
-	OpInitiateMultipartUpload, OpUploadPart, OpCompleteMultipartUpload,
+	OpInitiateMultipartUpload, OpUploadPart, OpUploadPartCopy, OpCompleteMultipartUpload,
 	OpAbortMultipartUpload, OpListMultipartUploads, OpListParts,
 }
 
@@ -93,3 +94,15 @@ var ValidPermissions = func() map[string]bool {
 	}
 	return m
 }()
+
+// OperationAllowed reports whether a key granted perms may run op. An
+// UploadPartCopy writes a part of the destination's upload, so a key that
+// may UploadPart may run it too (WP-R3-2: aws-cli and rclone switch to it
+// on their own for large copies); its SOURCE is checked as a copy's —
+// GetObject and the source bucket in scope (copySourceScopeDenied, R5-02).
+func OperationAllowed(perms []string, op string) bool {
+	if CheckPermission(perms, op) {
+		return true
+	}
+	return op == OpUploadPartCopy && CheckPermission(perms, OpUploadPart)
+}

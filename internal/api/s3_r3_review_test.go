@@ -153,9 +153,11 @@ func TestCopyObject_RefusedOnLockedKey(t *testing.T) {
 	assert.Equal(t, "RETAINED", onDisk(t, f, key), "locked bytes must survive a CopyObject")
 }
 
-// ---- R3-02 (P1): UploadPartCopy is not implemented — never a silent empty part
+// ---- R3-02 (P1): UploadPartCopy stages the SOURCE, never the empty body
+// (it answered 501 from #514 until WP-R3-2; before that the empty request
+// body was stored as the part)
 
-func TestUploadPartCopy_RefusedNotImplemented(t *testing.T) {
+func TestUploadPartCopy_StagesTheSourceNotTheEmptyBody(t *testing.T) {
 	f := setupVersioningFixture(t)
 	f.putObject(t, "src.bin", "SOURCE-BYTES")
 	id := f.mpInitiate(t, "dest.bin", nil)
@@ -163,10 +165,12 @@ func TestUploadPartCopy_RefusedNotImplemented(t *testing.T) {
 	w := f.s3(t, "PUT", fmt.Sprintf("/%s/dest.bin?partNumber=1&uploadId=%s", f.bucket, id), nil,
 		map[string]string{"x-amz-copy-source": "/" + f.bucket + "/src.bin"})
 
-	assert.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
-	var n int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM multipart_parts WHERE upload_id = $1`, id).Scan(&n))
-	assert.Equal(t, 0, n, "a refused UploadPartCopy must not record a part")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var etag string
+	var size int64
+	require.NoError(t, f.db.QueryRow(`SELECT etag, size_bytes FROM multipart_parts WHERE upload_id = $1 AND part_number = 1`, id).Scan(&etag, &size))
+	assert.Equal(t, int64(len("SOURCE-BYTES")), size)
+	assert.NotEqual(t, `"d41d8cd98f00b204e9800998ecf8427e"`, etag, "never the empty-string MD5")
 }
 
 // ---- R3-03 / R3-04 (P1): the head row carries backend_name and the attributes

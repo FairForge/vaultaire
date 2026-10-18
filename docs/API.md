@@ -97,7 +97,10 @@ DELETE /<bucket>/<key>                DeleteObject   (?versionId; delete marker 
 POST   /<bucket>?delete               DeleteObjects  (≤ 1 000 keys, quiet mode)
 PUT    /<bucket>/<key> + x-amz-copy-source            CopyObject (metadata/tagging directives; whole SSE sources 501)
 POST   /<bucket>/<key>?uploads        CreateMultipartUpload
-PUT    /<bucket>/<key>?partNumber=&uploadId=          UploadPart (≥ 5 MB except the last; UploadPartCopy 501)
+PUT    /<bucket>/<key>?partNumber=&uploadId=          UploadPart (≥ 5 MB except the last)
+PUT    /<bucket>/<key>?partNumber=&uploadId= + x-amz-copy-source
+                                      UploadPartCopy (x-amz-copy-source-range bytes=first-last, ≤ 5 GiB;
+                                                      ?versionId; x-amz-copy-source-if-*; SSE-C sources 501)
 POST   /<bucket>/<key>?uploadId=      CompleteMultipartUpload
 DELETE /<bucket>/<key>?uploadId=      AbortMultipartUpload
 POST   /<bucket>/<key>?restore        RestoreObject  (GLACIER-class objects; 202 / 409 RestoreAlreadyInProgress)

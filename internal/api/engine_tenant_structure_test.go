@@ -37,7 +37,7 @@ var engineCallTenants = map[string]string{
 	"deletion_runner.go:deleteOnBackend":   "tctx = common.WithTenantID(ctx, d.TenantID) (eraseObjects → deleteObject)",
 	"object_write_shared.go:placeObject":   "its callers: the PUT, Complete and CopyObject request contexts (handleS3Request sets common.TenantIDKey) and the generated writer's tctx",
 	"s3_batch.go:batchDeleteKey":           "the request context (handleS3Request)",
-	"s3_copy.go:copyObject":                "the request context (handleS3Request)",
+	"s3_copy_source.go:openCopySource":     "its callers' request contexts: copyObject and uploadPartCopy (handleS3Request)",
 	"s3_engine_adapter.go:HandleDelete":    "the request context (handleS3Request)",
 	"s3_engine_adapter.go:HandleGet":       "the request context (handleS3Request)",
 	"sse_stream.go:openSealedGet":          "HandleGet's request context",

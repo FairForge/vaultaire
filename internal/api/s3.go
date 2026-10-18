@@ -66,8 +66,8 @@ func (p *S3Parser) ParseRequest(r *http.Request) (*S3Request, error) {
 		}
 	}
 
+	p.parseHeaders(req, r) // before the operation: UploadPartCopy is named by a header
 	p.determineOperation(req, r.Method)
-	p.parseHeaders(req, r)
 
 	p.logger.Info("Parsed S3 request",
 		zap.String("bucket", req.Bucket),
@@ -237,7 +237,12 @@ func (p *S3Parser) determineOperation(req *S3Request, method string) {
 		} else if _, ok := req.Query["legal-hold"]; ok {
 			req.Operation = auth.OpPutObjectLegalHold
 		} else if _, ok := req.Query["partNumber"]; ok {
-			req.Operation = auth.OpUploadPart
+			// x-amz-copy-source on an UploadPart = UploadPartCopy (WP-R3-2).
+			if req.Headers["X-Amz-Copy-Source"] != "" {
+				req.Operation = auth.OpUploadPartCopy
+			} else {
+				req.Operation = auth.OpUploadPart
+			}
 		} else if _, ok := req.Query["tagging"]; ok {
 			req.Operation = auth.OpPutObjectTagging
 		} else if _, ok := req.Query["acl"]; ok {
@@ -484,7 +489,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce permission and bucket scope now that we know the operation.
 	if scope != nil {
-		if !auth.CheckPermission(scope.Permissions, s3Req.Operation) {
+		if !auth.OperationAllowed(scope.Permissions, s3Req.Operation) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion(fmt.Sprintf("This key does not have %s access.", s3Req.Operation)))
 			return
@@ -494,9 +499,11 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				WithSuggestion(fmt.Sprintf("This key is restricted to buckets: %s", strings.Join(scope.BucketScope, ", "))))
 			return
 		}
-		// CopyObject reads the SOURCE with this key too (R5-02). Only the
-		// PutObject dispatch honours x-amz-copy-source, so only it is gated.
-		if hint, denied := copySourceScopeDenied(scope, r); denied && s3Req.Operation == "PutObject" {
+		// A copy reads the SOURCE with this key too (R5-02): CopyObject (a
+		// PutObject with x-amz-copy-source) and UploadPartCopy (WP-R3-2) —
+		// one gate, the two operations that honour the header.
+		if hint, denied := copySourceScopeDenied(scope, r); denied &&
+			(s3Req.Operation == auth.OpPutObject || s3Req.Operation == auth.OpUploadPartCopy) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithSuggestion(hint))
 			return
 		}
@@ -603,6 +610,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		s.handleInitiateMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "UploadPart":
 		s.handleUploadPart(cw, r, s3Req.Bucket, s3Req.Object)
+	case "UploadPartCopy":
+		s.handleUploadPartCopy(cw, r, s3Req.Bucket, s3Req.Object)
 	case "CompleteMultipartUpload":
 		s.handleCompleteMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "AbortMultipartUpload":

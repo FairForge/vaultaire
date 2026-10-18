@@ -262,51 +262,27 @@ func (s *Server) multipartUploadActive(r *http.Request, tenantID, bucket, object
 }
 
 func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket, object string) {
+	// UploadPartCopy (x-amz-copy-source on an UploadPart) is dispatched as
+	// its own operation (WP-R3-2); a caller that reaches this handler with
+	// the header gets the copy, never the empty request body as the part
+	// (R3-02: it was stored as a 0-byte part with the empty-string ETag).
+	if r.Header.Get("x-amz-copy-source") != "" {
+		s.handleUploadPartCopy(w, r, bucket, object)
+		return
+	}
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
 		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 		return
 	}
-
-	// UploadPartCopy (x-amz-copy-source on an UploadPart) is not implemented.
-	// It used to fall through here, read the EMPTY request body as the part
-	// and answer 200 with the empty-string ETag — a server-side copy of a
-	// large object through aws-cli / rclone completed as a 0-byte object
-	// (R3-02). Fail loudly until WP-R3-2 implements it.
-	if r.Header.Get("x-amz-copy-source") != "" {
-		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("UploadPartCopy is not supported yet. Copy the object with CopyObject, or download and re-upload it."))
+	uploadID, partNumber, ok := s.uploadPartTarget(w, r, t.ID, bucket, object)
+	if !ok {
 		return
 	}
 
-	uploadID := r.URL.Query().Get("uploadId")
-	partNumberStr := r.URL.Query().Get("partNumber")
-
-	partNumber, err := strconv.Atoi(partNumberStr)
-	if err != nil || partNumber < 1 || partNumber > maxPartNumber {
-		WriteS3Error(w, ErrInvalidPartNumber, r.URL.Path, generateRequestID())
-		return
-	}
-
-	// Verify upload exists, is active, and belongs to this tenant
-	active, err := s.multipartUploadActive(r, t.ID, bucket, object, uploadID)
-	if err != nil {
-		s.logger.Error("failed to query multipart upload", zap.Error(err))
-		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
-	}
-	if !active {
-		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-		return
-	}
-
-	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
-	// unbilled on local disk until complete, so without a cap one upload can
-	// fill the production disk at zero quota cost. Checked twice: against the
-	// DECLARED size here (reject before reading gigabytes we will discard)
-	// and against the MEASURED size after the write (declared sizes are
-	// client-controlled). Sum excludes this part number — re-uploading an
-	// existing part replaces its bytes, it does not add.
+	// Per-upload in-flight byte cap and the staging guard are checked
+	// against the DECLARED size (stageUploadPart): the decoded length of an
+	// aws-chunked body.
 	declared := r.ContentLength
 	if isAWSChunked(r) {
 		declared = -1
@@ -314,68 +290,6 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 			declared = v
 		}
 	}
-	var existingBytes int64
-	if s.db != nil && s.multipartMaxUploadBytes > 0 {
-		if err := s.db.QueryRowContext(r.Context(), `
-			SELECT COALESCE(SUM(size_bytes), 0) FROM multipart_parts
-			WHERE upload_id = $1 AND part_number <> $2
-		`, uploadID, partNumber).Scan(&existingBytes); err != nil {
-			s.logger.Error("failed to sum in-flight part bytes", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		if declared > 0 && existingBytes+declared > s.multipartMaxUploadBytes {
-			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
-				WithSuggestion(fmt.Sprintf(
-					"This part would push the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
-					s.multipartMaxUploadBytes)))
-			return
-		}
-	}
-
-	// The staging filesystem is shared by every tenant: a part that would
-	// leave it below its floor is refused before a byte is staged or
-	// reserved (WP-R10-8 Part C, the minimal guard of WP-R3-5).
-	if s.stagingWouldOverfill(declared) {
-		w.Header().Set("Retry-After", "60")
-		WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
-			WithMessage("Please reduce your request rate: the server's upload staging space is nearly full."),
-			WithSuggestion("Retry the part in a minute."))
-		return
-	}
-
-	// The part's bytes are reserved on the upload's floor before the first
-	// is staged (WP-R10-8 Part C, R10-24 / R3-14): a part past the tenant's
-	// quota is refused here, nothing staged. A re-upload of a part number
-	// reserves the difference; whatever stops the part before its install
-	// gives the reservation back.
-	partBilled := s.db != nil && s.quotaManager != nil
-	var reserved int64
-	if partBilled {
-		reserved, err = reserveUploadPart(r.Context(), s.db, t.ID, uploadID, partNumber, max(declared, 0))
-		switch {
-		case errors.Is(err, errUploadEnded):
-			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
-		case errors.Is(err, errPartOverQuota):
-			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
-			return
-		case err != nil:
-			s.logger.Error("upload part: reservation failed", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-	}
-	installed := false
-	defer func() {
-		if partBilled && !installed {
-			if relErr := releaseUploadPart(context.WithoutCancel(r.Context()), s.db, t.ID, uploadID, partNumber, reserved); relErr != nil {
-				s.logger.Error("upload part: reservation not given back — the reconcile and the upload's end release it",
-					zap.Error(relErr), zap.String("upload_id", uploadID), zap.Int64("bytes", reserved))
-			}
-		}
-	}()
 
 	// Stream part data to temp file while computing MD5 ETag.
 	// Decode aws-chunked framing first — aws-cli v2 over HTTPS sends parts
@@ -388,6 +302,164 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	}
 	src := newClientBody(body) // the client's own read failures (WP-R2-3)
 
+	etag, size, ok := s.stageUploadPart(w, r, t.ID, uploadID, partNumber, partBody{
+		r:        src,
+		declared: declared,
+		failed: func(w http.ResponseWriter, err error, received int64) bool {
+			if !clientBodyFault(r.Context(), src, err) {
+				return false
+			}
+			// The client's body broke off (a reset, a dropped tunnel, bad
+			// aws-chunked framing): its request, like PutObject's — not a
+			// 500 with a stack trace (Prompt 2b.3 D1.8, WP-R2-3).
+			answerClientBody(w, r, s.logger, "UploadPart", src, err,
+				zap.String("upload_id", uploadID), zap.Int("part", partNumber), zap.Int64("received", received))
+			return true
+		},
+	})
+	if !ok {
+		return
+	}
+
+	s.logger.Debug("uploaded part",
+		zap.String("bucket", bucket),
+		zap.String("key", object),
+		zap.String("uploadID", uploadID),
+		zap.Int("partNumber", partNumber),
+		zap.Int64("size", size),
+		zap.String("etag", etag))
+
+	w.Header().Set("ETag", etag)
+	w.WriteHeader(http.StatusOK)
+}
+
+// uploadPartTarget reads the part number and upload id of an UploadPart (or
+// UploadPartCopy) and checks that the upload is active and is this
+// tenant's, for this bucket and key. A refusal is written and ok is false.
+func (s *Server) uploadPartTarget(w http.ResponseWriter, r *http.Request, tenantID, bucket, object string) (uploadID string, partNumber int, ok bool) {
+	uploadID = r.URL.Query().Get("uploadId")
+	partNumber, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
+	if err != nil || partNumber < 1 || partNumber > maxPartNumber {
+		WriteS3Error(w, ErrInvalidPartNumber, r.URL.Path, generateRequestID())
+		return "", 0, false
+	}
+
+	// Verify upload exists, is active, and belongs to this tenant
+	active, err := s.multipartUploadActive(r, tenantID, bucket, object, uploadID)
+	if err != nil {
+		s.logger.Error("failed to query multipart upload", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return "", 0, false
+	}
+	if !active {
+		WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+		return "", 0, false
+	}
+	return uploadID, partNumber, true
+}
+
+// partBody is what one part is staged from: the client's request body
+// (UploadPart) or a copy source's bytes (UploadPartCopy, WP-R3-2).
+type partBody struct {
+	r io.Reader
+	// declared is the size the part says it has (-1 = unknown): the
+	// in-flight cap and the staging guard are checked against it before a
+	// byte is read or reserved.
+	declared int64
+	// failed answers a failure of the copy into the part file when it is
+	// the body's (true = answered); otherwise the failure is a 500.
+	failed func(w http.ResponseWriter, err error, received int64) bool
+	// begin, when set, runs once every refusal is decided — after the
+	// reservation, before the first byte is read (the keep-alive's
+	// longOpBegin for a copy).
+	begin func()
+}
+
+// stageUploadPart is the one part stager of UploadPart and UploadPartCopy:
+// the in-flight cap and the staging guard on the declared size, the
+// reservation on the upload's floor (WP-R10-8 Part C), a private temp file
+// with the MD5 computed as it is written, the measured cap, then the
+// install (rename over the part path) and the multipart_parts row with the
+// reservation settled — one transaction. Every refusal and failure is
+// written to w and leaves no temp file, no row and no reservation behind;
+// ok is true when the part is installed.
+func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantID, uploadID string, partNumber int, body partBody) (etag string, size int64, ok bool) {
+	var err error
+	declared := body.declared
+
+	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
+	// unbilled on local disk until complete, so without a cap one upload can
+	// fill the production disk at zero quota cost. Checked twice: against the
+	// DECLARED size here (reject before reading gigabytes we will discard)
+	// and against the MEASURED size after the write (declared sizes are
+	// client-controlled). Sum excludes this part number — re-uploading an
+	// existing part replaces its bytes, it does not add.
+	var existingBytes int64
+	if s.db != nil && s.multipartMaxUploadBytes > 0 {
+		if err := s.db.QueryRowContext(r.Context(), `
+			SELECT COALESCE(SUM(size_bytes), 0) FROM multipart_parts
+			WHERE upload_id = $1 AND part_number <> $2
+		`, uploadID, partNumber).Scan(&existingBytes); err != nil {
+			s.logger.Error("failed to sum in-flight part bytes", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return "", 0, false
+		}
+		if declared > 0 && existingBytes+declared > s.multipartMaxUploadBytes {
+			WriteS3ErrorWithContext(w, ErrEntityTooLarge, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf(
+					"This part would push the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
+					s.multipartMaxUploadBytes)))
+			return "", 0, false
+		}
+	}
+
+	// The staging filesystem is shared by every tenant: a part that would
+	// leave it below its floor is refused before a byte is staged or
+	// reserved (WP-R10-8 Part C, the minimal guard of WP-R3-5).
+	if s.stagingWouldOverfill(declared) {
+		w.Header().Set("Retry-After", "60")
+		WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
+			WithMessage("Please reduce your request rate: the server's upload staging space is nearly full."),
+			WithSuggestion("Retry the part in a minute."))
+		return "", 0, false
+	}
+
+	// The part's bytes are reserved on the upload's floor before the first
+	// is staged (WP-R10-8 Part C, R10-24 / R3-14): a part past the tenant's
+	// quota is refused here, nothing staged. A re-upload of a part number
+	// reserves the difference; whatever stops the part before its install
+	// gives the reservation back.
+	partBilled := s.db != nil && s.quotaManager != nil
+	var reserved int64
+	if partBilled {
+		reserved, err = reserveUploadPart(r.Context(), s.db, tenantID, uploadID, partNumber, max(declared, 0))
+		switch {
+		case errors.Is(err, errUploadEnded):
+			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+			return "", 0, false
+		case errors.Is(err, errPartOverQuota):
+			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
+				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
+			return "", 0, false
+		case err != nil:
+			s.logger.Error("upload part: reservation failed", zap.Error(err))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return "", 0, false
+		}
+	}
+	installed := false
+	defer func() {
+		if partBilled && !installed {
+			if relErr := releaseUploadPart(context.WithoutCancel(r.Context()), s.db, tenantID, uploadID, partNumber, reserved); relErr != nil {
+				s.logger.Error("upload part: reservation not given back — the reconcile and the upload's end release it",
+					zap.Error(relErr), zap.String("upload_id", uploadID), zap.Int64("bytes", reserved))
+			}
+		}
+	}()
+	if body.begin != nil {
+		body.begin()
+	}
+
 	// The part is written to a private temp file and renamed over the part
 	// path only once it is complete (R3-11). Writing the part path directly
 	// (os.Create truncates) meant a client retry of the same part number —
@@ -399,34 +471,29 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		s.logger.Error("failed to create part temp dir", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+		return "", 0, false
 	}
 	f, err := os.CreateTemp(dir, fmt.Sprintf(".part-%05d-*", partNumber))
 	if err != nil {
 		s.logger.Error("failed to create part temp file", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+		return "", 0, false
 	}
 	tmp := f.Name()
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	size, err := io.Copy(f, io.TeeReader(src, hasher))
+	size, err = io.Copy(f, io.TeeReader(body.r, hasher))
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
-		if clientBodyFault(r.Context(), src, err) {
-			// The client's body broke off (a reset, a dropped tunnel, bad
-			// aws-chunked framing): its request, like PutObject's — not a
-			// 500 with a stack trace (Prompt 2b.3 D1.8, WP-R2-3).
-			answerClientBody(w, r, s.logger, "UploadPart", src, err,
-				zap.String("upload_id", uploadID), zap.Int("part", partNumber), zap.Int64("received", size))
-			return
+		if body.failed != nil && body.failed(w, err, size) {
+			return "", 0, false
 		}
 		s.logger.Error("failed to write part data", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+		return "", 0, false
 	}
 
 	// Measured-size cap check: the declared pre-check above can be defeated
@@ -438,10 +505,10 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 			WithSuggestion(fmt.Sprintf(
 				"This part pushed the upload past the %d-byte in-flight limit. Complete or abort the upload, or use fewer/smaller parts.",
 				s.multipartMaxUploadBytes)))
-		return
+		return "", 0, false
 	}
 
-	etag := fmt.Sprintf("\"%x\"", hasher.Sum(nil))
+	etag = fmt.Sprintf("\"%x\"", hasher.Sum(nil))
 	// The install runs inside settleUploadPart's transaction: the id is
 	// checked where the path is built (the staging path's belt, as
 	// everywhere a path is built from an upload id — CodeQL go/path-injection).
@@ -459,7 +526,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if partBilled {
 		// The install, the part row and the reservation settled to the
 		// measured size: one transaction under the upload row's lock.
-		sErr := settleUploadPart(r.Context(), s.db, t.ID, uploadID, partNumber, reserved, size, etag, install)
+		sErr := settleUploadPart(r.Context(), s.db, tenantID, uploadID, partNumber, reserved, size, etag, install)
 		switch {
 		case sErr == nil:
 			installed = true
@@ -467,24 +534,24 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 			installed = true // ended meanwhile: its end released this part's reservation
 			_ = os.Remove(tmp)
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
-			return
+			return "", 0, false
 		case errors.Is(sErr, errPartOverQuota):
 			installed = true // settleUploadPart gave the reservation back
 			_ = os.Remove(tmp)
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+"."))
-			return
+			return "", 0, false
 		default:
 			_ = os.Remove(tmp)
 			s.logger.Error("failed to record part", zap.Error(sErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
+			return "", 0, false
 		}
 	} else if err := install(); err != nil {
 		_ = os.Remove(tmp)
 		s.logger.Error("failed to install part file", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		return
+		return "", 0, false
 	} else if s.db != nil {
 		_, err := s.db.ExecContext(r.Context(), `
 			INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes)
@@ -497,7 +564,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		if err != nil {
 			s.logger.Error("failed to record part metadata", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
+			return "", 0, false
 		}
 	} else {
 		memUploadsMu.Lock()
@@ -506,17 +573,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		}
 		memUploadsMu.Unlock()
 	}
-
-	s.logger.Debug("uploaded part",
-		zap.String("bucket", bucket),
-		zap.String("key", object),
-		zap.String("uploadID", uploadID),
-		zap.Int("partNumber", partNumber),
-		zap.Int64("size", size),
-		zap.String("etag", etag))
-
-	w.Header().Set("ETag", etag)
-	w.WriteHeader(http.StatusOK)
+	return etag, size, true
 }
 
 // partRecord holds part metadata from either DB or in-memory store.

@@ -153,12 +153,17 @@ func (c *cutReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// The three operations, as the metrics label them.
+// The operations, as the metrics label them.
 const (
 	longOpComplete = "CompleteMultipartUpload"
 	longOpCopy     = "CopyObject"
 	longOpBatch    = "DeleteObjects"
+
+	longOpUploadPartCopy = "UploadPartCopy"
 )
+
+// longOps is every operation the keep-alive runs, as the metrics label them.
+var longOps = []string{longOpComplete, longOpCopy, longOpBatch, longOpUploadPartCopy}
 
 // Outcomes of vaultaire_s3_long_op_total: a failure after the 200 is
 // committed is invisible to the request metrics (they say 200).
@@ -177,7 +182,7 @@ var longOpOutcomes = func() *prometheus.CounterVec {
 		Name: "vaultaire_s3_long_op_total",
 		Help: "Long S3 operations by outcome: ok, error_before_commit (a real 4xx/5xx), error_after_commit (an <Error> document inside a committed 200 — invisible to the request metrics). Rules: deploy/monitoring/vaultaire-longops.yml.",
 	}, []string{"op", "outcome"})
-	for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+	for _, op := range longOps {
 		for _, o := range []string{longOpOK, longOpErrorBeforeCommit, longOpErrorAfterCommit} {
 			c.WithLabelValues(op, o)
 		}
@@ -254,9 +259,9 @@ var (
 	longOpsInFlight = func() *prometheus.GaugeVec {
 		g := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "vaultaire_s3_long_ops_in_flight",
-			Help: "Detached long S3 operations (CompleteMultipartUpload, CopyObject, DeleteObjects) running right now, by operation. A stopping process waits for them up to 15 min from each one's start.",
+			Help: "Detached long S3 operations (CompleteMultipartUpload, CopyObject, DeleteObjects, UploadPartCopy) running right now, by operation. A stopping process waits for them up to 15 min from each one's start.",
 		}, []string{"op"})
-		for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+		for _, op := range longOps {
 			g.WithLabelValues(op)
 		}
 		return g

@@ -99,6 +99,7 @@ type chunkedObjectReader struct {
 	descs    []chunkDesc
 	size     int64
 	start    int64
+	end      int64 // the last byte read (inclusive): size-1, or a range's
 	r        *parfetch.Reader
 	stream   *parfetch.Stream
 }
@@ -137,7 +138,15 @@ func (a *S3ToEngine) openChunkedObject(ctx context.Context, tenantID, bucket, ke
 			}
 		}
 	}
-	return &chunkedObjectReader{a: a, ctx: ctx, tenantID: tenantID, descs: descs, size: size}, nil
+	return &chunkedObjectReader{a: a, ctx: ctx, tenantID: tenantID, descs: descs, size: size, end: size - 1}, nil
+}
+
+// setRange limits the read to [off, off+n) — a copy of a range of a chunked
+// source (UploadPartCopy, WP-R3-2): only the chunks the range spans are
+// fetched. Before the first read only.
+func (c *chunkedObjectReader) setRange(off, n int64) {
+	c.start = off
+	c.end = min(off+n, c.size) - 1
 }
 
 func (c *chunkedObjectReader) Seek(offset int64, whence int) (int64, error) {
@@ -150,10 +159,10 @@ func (c *chunkedObjectReader) Seek(offset int64, whence int) (int64, error) {
 
 func (c *chunkedObjectReader) Read(p []byte) (int, error) {
 	if c.r == nil {
-		if c.start >= c.size {
+		if c.start >= c.size || c.start > c.end {
 			return 0, io.EOF
 		}
-		c.stream = c.a.startChunkStream(c.ctx, c.tenantID, chunkPlan(c.descs, c.start, c.size-1))
+		c.stream = c.a.startChunkStream(c.ctx, c.tenantID, chunkPlan(c.descs, c.start, c.end))
 		c.r = parfetch.NewReader(c.stream, nil)
 	}
 	return c.r.Read(p)
