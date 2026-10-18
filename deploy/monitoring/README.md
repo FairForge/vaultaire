@@ -148,7 +148,7 @@ delivered at ~85s, RESOLVED notice followed after restart.
 `vaultaire-backends.yml` — backend-outage rules (BackendProbeFailing,
 PrimaryBackendProbeFailing, LyveProbeFailing, BackendWriteFailures
 warning/critical, BackendCircuitOpen warning + critical on the primary,
-VaultaireServerErrorRatio). They key off the `vaultaire_backend_*` series the
+VaultaireServerErrorRatio, ObjectIntegrityFailure). They key off the `vaultaire_backend_*` series the
 app exports from `/metrics` (`internal/api/prom_metrics.go`) and
 `vaultaire_primary_backend{backend}` (1 for the write primary — the rules
 join `on(backend)`); the probes behind `vaultaire_backend_health` are
@@ -218,6 +218,22 @@ has not answered a probe since boot, or its breaker is open: 503 +
 `Retry-After`). No rule: the region driver's
 own probe rule (`BackendProbeFailing`) already pages, and a refusal is the
 gate doing its job.
+
+**A whole object's body is checked against its row (WP-R8-3).** A GET of a
+whole object answered 200 (S3 — `path` `plain`, `parallel` (the parallel
+ranged reader), `sealed` (SSE after the open), `parity` (rebuilt from the
+vault parity) — and `/cdn`) hashes the body as it streams and compares it
+with the row's single-part ETag; the object's last byte is held until it
+matches. A mismatch cuts the response (the client sees a short read or a
+stream reset and retries) and counts in
+`vaultaire_object_integrity_failures_total{path,reason=md5|size}` with one
+Error line (`object integrity: …`: tenant, bucket, key, backend,
+storage_key, recorded ETag, measured MD5). Rule `ObjectIntegrityFailure`
+(critical, any increase in an hour). What is served without that check is
+counted once per response in `vaultaire_object_integrity_unverified_total{path,
+reason=range|multipart|etag}` (a 206, a `-N` ETag, a row whose ETag is not an
+MD5) — no rule; chunked objects verify every chunk and are in neither.
+Cost: MD5 at ~1.2 GB/s per core on the box (0.87 s of CPU per GiB served).
 
 The original rules (`VaultaireDown`, `VaultaireHighErrorRate`, node rules)
 live only on the box in `/etc/prometheus/rules/vaultaire-alerts.yml`.

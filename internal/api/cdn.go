@@ -318,6 +318,9 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			writeRangeNotSatisfiable(w, sizeBytes)
 			return
 		}
+		if !isChunked {
+			objectIntegrityUnverified.WithLabelValues(integrityPathCDN, "range").Inc()
+		}
 		serve := serveRange
 		if sealedRange != nil {
 			serve = writeRangeBody // already at rng.start: opened by segment
@@ -339,7 +342,27 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A whole object's body is checked against its single-part ETag as it
+	// streams, the last byte held until it matches (WP-R8-3); a chunked one
+	// verifies every chunk itself.
+	if !isChunked && sizeBytes > 0 {
+		var armed bool
+		if body, armed = newIntegrityReader(body, etag, sizeBytes); !armed {
+			objectIntegrityUnverified.WithLabelValues(integrityPathCDN, unverifiedReason(etag)).Inc()
+		}
+	}
 	written, err := io.Copy(w, body)
+	var ie *integrityError
+	if errors.As(err, &ie) && ctx.Err() == nil {
+		objectIntegrityFailures.WithLabelValues(integrityPathCDN, ie.reason).Inc()
+		s.logger.Error("object integrity: the body served does not match its row — the response is cut",
+			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key),
+			zap.String("backend", backendName), zap.String("storage_key", storageKey),
+			zap.String("recorded_etag", ie.recorded), zap.String("measured_md5", ie.measured),
+			zap.String("reason", ie.reason), zap.String("path", integrityPathCDN), zap.Int64("bytes_sent", written))
+		abortResponse(ctx)
+		return
+	}
 	if err != nil {
 		s.logger.Error("cdn stream failed",
 			zap.String("key", key),

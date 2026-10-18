@@ -239,3 +239,19 @@ groups:
         annotations:
           summary: "Chunk reads served from a legacy address"
           description: "{{ $value | printf \"%.0f\" }} chunk read(s) in the last 24 hours missed at the one address and were served from under a tenant's prefix. Before the chunk move this is expected; after it, POST /api/v1/admin/chunk-move?backend=<b> (a dry run) shows what is left. When the series stays at 0 the read fallback can be removed (docs/reviews/WP-R8-7.md)."
+
+      # WP-R8-3 (R8-10). A whole-object GET (S3 plain / parallel / sealed /
+      # parity, or /cdn) whose body did not hash to the row's single-part
+      # ETag, or gave another byte count than the row records. The response
+      # was cut before its last byte (the client retries), so no wrong bytes
+      # ended cleanly — but a backend served bytes that are not the object:
+      # corruption, a swapped or truncated blob, an address two rows share.
+      # One is a page.
+      - alert: ObjectIntegrityFailure
+        expr: increase(vaultaire_object_integrity_failures_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A whole-object GET served bytes that do not match the row ({{ $labels.path }}, {{ $labels.reason }})"
+          description: "{{ $value | printf \"%.0f\" }} response(s) in the last hour on path {{ $labels.path }} were cut because the body did not match its row (reason {{ $labels.reason }}: md5 = the bytes do not hash to the recorded ETag, size = another byte count). journalctl -u 'vaultaire@*' | grep 'object integrity' names tenant, bucket, key, backend, storage_key, the recorded ETag and the measured MD5. Read the blob at its address on that backend and compare; do not overwrite it before it has been looked at."

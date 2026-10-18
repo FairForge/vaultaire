@@ -205,7 +205,8 @@ func init() {
 
 // largeGetCollectors are registered on the server registry.
 func largeGetCollectors() []prometheus.Collector {
-	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated, chunkedGetRereads, largeGetParallelReads}
+	return []prometheus.Collector{largeGetHedges, largeGetHedgesWon, largeGetInflight, largeGetFallbacks, largeGetStreams, largeGetThroughput, chunkedGetTruncated, chunkedGetRereads, largeGetParallelReads,
+		objectIntegrityFailures, objectIntegrityUnverified}
 }
 
 func largeGetHooks(path string) parfetch.Hooks {
