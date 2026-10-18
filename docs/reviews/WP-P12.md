@@ -14,6 +14,7 @@ PRs:
 - **#762**: Part A, deployed `9b693fc`.
 - **#763**: Part B.1, migration 093, deployed `734f611`.
 - **#764**: Part B.2, deployed `e9181dd`.
+- **#766**: test-only fix of a flaky assertion in #763's connection test (see Gates).
 - this PR: docs only.
 
 Start sha: `origin/main` `bdd30d1`. **Migration 093** is taken by B.1. STATUS item 8 had reserved it for WP-PAY-1; WP-PAY-1 now takes **094**, and this PR moves that reservation in STATUS, `docs/PAYMENTS.md`, the plan and `WP-PAY-PROMPTS.md`. **The next migration is 094.**
@@ -296,5 +297,8 @@ Load: chunked 90 MB PUTs from 3 parallel streams for 3 minutes, direct to the ac
   - `TestExactSizeReader_OnlyUserIsTheCopyPath` (now `copyObject` and `uploadPartCopy`);
   - `TestChunkBlobCalls_GoThroughTheChunkStore` (the listing is `chunkStore.listPage`);
   - `TestWholeObjectReads_GoThroughTheBlobAddress`, `TestDataPathBounds_*`, `TestEngineRegistry_ReadOnlyUnderTheLock`, `TestS3ParserEmitsOnlyKnownOperations`, the ledger tests, `TestSQLLiteralsMatchSchema` (with 093).
-- `build-and-test` green on #761, #762, #763 and #764, and on their merge commits. Deploy succeeded for each.
+- `build-and-test` green on #761, #762, #763 and #764, and on the merge commits of #761–#763. Deploy succeeded for each.
+  - **One flake of this prompt's own**, on `e9181dd`'s push CI: `TestChunkStore_NoConnectionHeldAcrossTheBackendPut` read `InUse` = 1. Its single sample caught a neighbouring chunk's millisecond claim transaction.
+  - The other CI run of the same commit and the queue's run were green, and the deploy was not affected.
+  - Fixed by **#766** (test only): wait until the PUTs are all at the gate, then assert the *minimum* `InUse` over 2 s. The old store still fails it; 20/20 green under `-race`.
   - #762's PR showed a red `CodeQL` check: the repository-wide GO-2026-5932 alert on `go.mod` (x/crypto/openpgp, not called). There was no review thread to resolve, and the merge queue took the PR.
