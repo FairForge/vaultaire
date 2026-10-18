@@ -273,7 +273,8 @@ func TestVM1_R61_5_ASuspendedDeleteReplacesTheNullVersion_Whole(t *testing.T) {
 	assert.Equal(t, "null", d.Header().Get("x-amz-version-id"))
 
 	assert.Equal(t, http.StatusNotFound, f.req(t, "GET", "/test-bucket/k.txt", nil, nil).Code)
-	assert.Equal(t, http.StatusNotFound, f.req(t, "GET", "/test-bucket/k.txt?versionId=null", nil, nil).Code, "the null version is the marker now")
+	assert.Equal(t, http.StatusMethodNotAllowed, f.req(t, "GET", "/test-bucket/k.txt?versionId=null", nil, nil).Code,
+		"the null version is the marker now: a marker's version id is 405, as AWS (WP-R2-4)")
 	assert.Zero(t, f.used(t), "its bytes are released")
 	f.ledgerAgrees(t, "after the Suspended delete")
 	var markers, live, retired int

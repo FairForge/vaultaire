@@ -5,6 +5,22 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-19: HEAD and ranged downloads tell the same story
+
+- **HEAD and a ranged GET now carry every header a whole GET does**: the
+  ETag, Last-Modified, the storage class, your `x-amz-meta-*` metadata,
+  Cache-Control, Content-Disposition and the rest are the same on all three,
+  so `aws s3 sync`, rclone and the SDKs see one object, not three.
+  `HEAD` honours `Range` (206 / 416), as on AWS.
+- **SSE-C requests without the key answer `400 InvalidRequest`**, as on AWS
+  (it was 403), and say nothing about the object. A `GET` or `HEAD` with
+  `?versionId=` of a delete marker answers `405 MethodNotAllowed` with
+  `x-amz-delete-marker: true`, as on AWS (it was 404).
+- Objects stored encrypted in chunks now say so on the upload's answer
+  (`x-amz-server-side-encryption: AES256`), as HEAD always did.
+- A bucket that was never versioned no longer answers
+  `x-amz-version-id: null` on downloads.
+
 ## 2026-10-19: Downloads are checked against the object's checksum
 
 - **A whole-object download is checked as it streams.** The bytes of a

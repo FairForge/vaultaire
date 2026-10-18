@@ -833,38 +833,52 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		return
 	}
 
+	// An SSE-C object without the customer's key: AWS's 400, decided before
+	// any object header is set (R8-14; R2-22: size and ETag went out first).
+	if crypto.IsSSEC(encAlgo) && !crypto.HasSSECHeaders(r) {
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return
+	}
+
+	// The class follows the floor, not the backend (WP-R13-1): a Smart-demoted
+	// downstairs object is STANDARD while its bytes sit on the cold backend.
+	storageClass := engine.CustomerStorageClass(floor, backendName)
+	disposition := r.URL.Query().Get("response-content-disposition")
+	if disposition == "" {
+		disposition = contentDisposition
+	}
+	oh := objectHeaders{ETag: etag, LastModified: updatedAt, ContentType: contentType, Size: sizeBytes,
+		StorageClass: storageClass, Metadata: metadataJSON, TagCount: tagCount(tagsJSON),
+		Disposition: disposition, Encoding: contentEncoding, Language: contentLanguage,
+		CacheControl: echo.CacheControl, Expires: echo.Expires, WebsiteRedirect: echo.WebsiteRedirect,
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
+	switch {
+	case latestVID != "" && !latestMarker:
+		oh.VersionID = latestVID
+	case r.URL.Query().Get("versionId") != "":
+		oh.VersionID = r.URL.Query().Get("versionId")
+	}
+
 	// Conditionals apply to HEAD exactly as to GET (RFC 9110 §13; AWS
 	// answers 304 / 412 on HeadObject) — R2-11 / R4-07.
 	if code := evaluateConditionalGET(r, etag, updatedAt); code == http.StatusNotModified {
-		writeNotModified(w, etag, updatedAt, "")
+		oh.write(w, headersNotModified, nil)
+		w.WriteHeader(http.StatusNotModified)
 		return
 	} else if code == http.StatusPreconditionFailed {
 		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 		return
 	}
 
-	// Only emit Content-Length when we have a valid, known size.
-	// A value of 0 means the client uploaded without a Content-Length header
-	// (chunked transfer encoding); we stored 0 as a safe sentinel.
-	// Emitting "Content-Length: -1" is invalid HTTP and causes HAProxy to 502.
-	if sizeBytes >= 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", sizeBytes))
+	// A Range answers as on GET (AWS): 206 with the range's length, 416 when
+	// nothing satisfies it (any range of an empty object — R2-21); a
+	// multi-range is ignored (RFC 9110 §14.2).
+	mode, rng, ok := headRange(w, r, sizeBytes)
+	if !ok {
+		return
 	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
-	if !updatedAt.IsZero() {
-		w.Header().Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
-	} else {
-		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-	}
-	// The class follows the floor, not the backend (WP-R13-1): a Smart-demoted
-	// downstairs object is STANDARD while its bytes sit on the cold backend.
-	storageClass := engine.CustomerStorageClass(floor, backendName)
-	w.Header().Set("x-amz-storage-class", storageClass)
+	oh.write(w, mode, rng)
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	if latestVID != "" && !latestMarker {
-		w.Header().Set("x-amz-version-id", latestVID)
-	}
 	// V18.2: archive-class objects carry live restore state so Glacier restore
 	// pollers (rclone, aws-cli s3api head-object) work unmodified. This is the
 	// one deliberate exception to "HEAD never touches the backend" — the
@@ -887,32 +901,31 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 			}
 		}
 	}
-	if crypto.IsSSEC(encAlgo) {
-		if !crypto.HasSSECHeaders(r) {
-			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))
-			return
-		}
-		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
-	} else if encAlgo != "" {
-		w.Header().Set("x-amz-server-side-encryption", "AES256")
-	}
-	setS3MetadataHeaders(w, metadataJSON)
-	if n := tagCount(tagsJSON); n > 0 {
-		w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
-	}
-	if cd := sanitizeContentDisposition(contentDisposition); cd != "" {
-		w.Header().Set("Content-Disposition", cd)
-	}
-	if contentEncoding != "" {
-		w.Header().Set("Content-Encoding", contentEncoding)
-	}
-	if contentLanguage != "" {
-		w.Header().Set("Content-Language", contentLanguage)
-	}
-	setEchoHeaders(w.Header(), echo.CacheControl, echo.Expires, echo.WebsiteRedirect)
 	// HEAD must not write a body.
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(headStatus(mode))
+}
+
+// headRange reads a HEAD's Range against an object of size bytes: the mode
+// and the range to answer with, or false when it answered 416 itself.
+func headRange(w http.ResponseWriter, r *http.Request, size int64) (headerMode, *httpRange, bool) {
+	rh := r.Header.Get("Range")
+	if rh == "" || errors.Is(rangeParseErr(rh, size), errMultiRange) {
+		return headersHead, nil, true
+	}
+	rng, err := parseRangeHeader(rh, size)
+	if err != nil {
+		writeRangeNotSatisfiable(w, size)
+		return 0, nil, false
+	}
+	return headersRange, rng, true
+}
+
+// headStatus is the status a HEAD answers in mode.
+func headStatus(mode headerMode) int {
+	if mode == headersRange {
+		return http.StatusPartialContent
+	}
+	return http.StatusOK
 }
 
 // latestVersion is the key's latest version id on a versioned bucket ("" on
@@ -971,9 +984,9 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 		return true
 	}
 	if marker {
-		w.Header().Set("x-amz-version-id", vid)
-		w.Header().Set("x-amz-delete-marker", "true")
-		WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
+		// A version id naming a delete marker: AWS answers 405 (a marker has
+		// no object to read), naming the marker.
+		writeDeleteMarkerVersion(w, r, vid, createdAt)
 		return true
 	}
 	if latest {
@@ -985,47 +998,54 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 			WithSuggestion("This version was written before 2026-10-12, when versions began keeping their own bytes; its data is not retained."))
 		return true
 	}
+	if crypto.IsSSEC(encAlgo) && !crypto.HasSSECHeaders(r) {
+		w.Header().Del("x-amz-version-id")
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return true
+	}
+	if floor == "" {
+		floor = usage.FloorStandard
+	}
+	// What the version recorded (R61-8, 092): none of it for one written
+	// before — the current object's belong to the current object. Tags are
+	// the key's (per-version tags are not kept), as GET ?versionId sends.
+	disposition := r.URL.Query().Get("response-content-disposition")
+	if disposition == "" {
+		disposition = attrs.ContentDisposition
+	}
+	oh := objectHeaders{ETag: etag, LastModified: createdAt, ContentType: contentType, Size: size,
+		StorageClass: engine.CustomerStorageClass(floor, backend), VersionID: vid, Metadata: meta,
+		Disposition: disposition, Encoding: attrs.ContentEncoding, Language: attrs.ContentLanguage,
+		CacheControl: attrs.CacheControl, Expires: attrs.Expires, WebsiteRedirect: attrs.WebsiteRedirect,
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
 	if code := evaluateConditionalGET(r, etag, createdAt); code == http.StatusNotModified {
-		writeNotModified(w, etag, createdAt, "")
+		oh.write(w, headersNotModified, nil)
+		w.WriteHeader(http.StatusNotModified)
 		return true
 	} else if code == http.StatusPreconditionFailed {
 		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 		return true
 	}
-	if crypto.IsSSEC(encAlgo) {
-		if !crypto.HasSSECHeaders(r) {
-			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-				WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key to access metadata."))
-			return true
-		}
-		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
-	} else if encAlgo != "" {
-		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	mode, rng, ok := headRange(w, r, size)
+	if !ok {
+		return true
 	}
-	if floor == "" {
-		floor = usage.FloorStandard
-	}
-	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
-	w.Header().Set("Last-Modified", createdAt.UTC().Format(http.TimeFormat))
-	w.Header().Set("x-amz-storage-class", engine.CustomerStorageClass(floor, backend))
+	oh.write(w, mode, rng)
 	w.Header().Set("x-amz-request-id", generateRequestID())
-	// What the version recorded (R61-8, 092): none of it for one written
-	// before — the current object's belong to the current object.
-	setS3MetadataHeaders(w, meta)
-	if cd := sanitizeContentDisposition(attrs.ContentDisposition); cd != "" {
-		w.Header().Set("Content-Disposition", cd)
-	}
-	if attrs.ContentEncoding != "" {
-		w.Header().Set("Content-Encoding", attrs.ContentEncoding)
-	}
-	if attrs.ContentLanguage != "" {
-		w.Header().Set("Content-Language", attrs.ContentLanguage)
-	}
-	setEchoHeaders(w.Header(), attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect)
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(headStatus(mode))
 	return true
+}
+
+// writeDeleteMarkerVersion answers a GET or HEAD whose versionId names a
+// delete marker as AWS does: 405 MethodNotAllowed with the marker named.
+func writeDeleteMarkerVersion(w http.ResponseWriter, r *http.Request, vid string, at time.Time) {
+	w.Header().Set("x-amz-version-id", vid)
+	w.Header().Set("x-amz-delete-marker", "true")
+	if !at.IsZero() {
+		w.Header().Set("Last-Modified", at.UTC().Format(http.TimeFormat))
+	}
+	w.Header().Set("Allow", "DELETE")
+	WriteS3Error(w, ErrMethodNotAllowed, r.URL.Path, generateRequestID())
 }
 
 // readAdapter is the adapter a read runs on: the S3 GET and the CDN's read

@@ -92,7 +92,8 @@ PUT    /<bucket>/<key>                PutObject      (streamed; Content-MD5 veri
                                                       x-amz-server-side-encryption: AES256 and SSE-C headers)
 GET    /<bucket>/<key>                GetObject      (Range; If-Match / If-None-Match / If-Modified-Since /
                                                       If-Unmodified-Since; response-content-disposition)
-HEAD   /<bucket>/<key>                HeadObject     (from cache; all conditionals)
+HEAD   /<bucket>/<key>                HeadObject     (from cache; all conditionals; Range → 206 / 416;
+                                                      response-content-disposition)
 DELETE /<bucket>/<key>                DeleteObject   (?versionId; delete marker on versioned buckets)
 POST   /<bucket>?delete               DeleteObjects  (≤ 1 000 keys, quiet mode)
 PUT    /<bucket>/<key> + x-amz-copy-source            CopyObject (metadata/tagging directives; whole SSE sources 501)
@@ -224,6 +225,31 @@ Behaviour worth knowing before writing code against it:
   the header sent on CreateMultipartUpload included. A `Range` of a sealed
   object reads only the segments it spans; a sealed object can be copied
   (it was 501).
+- **HEAD, GET and a ranged GET carry the same object headers** (since
+  2026-10-19, WP-R2-4): `ETag`, `Last-Modified`, `Content-Type`,
+  `Accept-Ranges: bytes`, `x-amz-storage-class`, `x-amz-version-id` (on a
+  versioned bucket; a bucket never versioned names none), `x-amz-meta-*`,
+  `Content-Disposition` / `-Encoding` / `-Language`, `Cache-Control` (the
+  stored one, else `private, no-cache`), `Expires`,
+  `x-amz-website-redirect-location`, `x-amz-tagging-count` and the
+  encryption header. `Content-Length` is the object's on HEAD and 200 and the
+  range's on 206, which adds `Content-Range`. `HEAD` with a `Range` answers
+  as AWS does: 206 with the range's length, 416 + `Content-Range: bytes
+  */<size>` when nothing satisfies it (any range of an empty object, on GET
+  too). A 304 carries `ETag`, `Last-Modified`, `Cache-Control` and `Expires`.
+  `GET` / `HEAD ?versionId=` of a **delete marker** answers 405
+  `MethodNotAllowed` + `x-amz-delete-marker: true`. An SSE-C object read
+  without its key answers **400 `InvalidRequest`** ("The object was stored
+  using a form of Server Side Encryption…") with no object header; a GET with
+  a wrong key answers 403.
+- **Deviations from AWS** (each deliberate):
+
+  | Request | AWS | Stored | Why |
+  |---|---|---|---|
+  | `HEAD` of an SSE-C object with a **wrong** key | 403 | 200 | HEAD answers from the metadata index and never reads the object (~1 ms); the key can only be checked against the stored bytes. A GET with that key answers 403 |
+  | `GET` of a restored archive object | `x-amz-restore` | not sent (HEAD sends it) | the restore state lives on the tape backend; HEAD asks it, a GET does not ask twice |
+  | a `-N` ETag or a `Range` | — | the body's size is checked, not its MD5 | only the whole body of a single-part object hashes to its ETag (a whole GET of one is checked as it streams and cut on a mismatch) |
+
 - **Large uploads** (> 64 MiB, a single PUT or a multipart upload): stored as
   content-defined chunks, deduplicated and compressed, unless the bucket is
   versioned, pinned to a region, or of the archive / resilient / public /
