@@ -60,8 +60,8 @@ func TestSSEC_AboveChunkThreshold_NotChunked(t *testing.T) {
 	noKeyReq = noKeyReq.WithContext(s3Ctx(noKeyReq.Context(), f.tenant))
 	nw := httptest.NewRecorder()
 	f.adapter.HandleGet(nw, noKeyReq, "test-bucket", "ssec-big.bin")
-	assert.Equal(t, http.StatusForbidden, nw.Code,
-		"SSE-C object without the customer key must 403, not leak bytes")
+	assert.Equal(t, http.StatusBadRequest, nw.Code,
+		"SSE-C object without the customer key is refused (AWS's 400, R8-14), never its bytes")
 }
 
 func TestPlainPutOverChunked_ReleasesManifest(t *testing.T) {

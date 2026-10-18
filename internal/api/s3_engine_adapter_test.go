@@ -329,8 +329,9 @@ func TestGetObject_SSEC_RequiresKey(t *testing.T) {
 	gw := httptest.NewRecorder()
 	f.adapter.HandleGet(gw, getReq, "test-bucket", "ssec-need-key.txt")
 
-	assert.Equal(t, http.StatusForbidden, gw.Code)
-	assert.Contains(t, gw.Body.String(), "SSE-C")
+	// AWS's answer (R8-14, WP-R2-4): 400 InvalidRequest, not 403.
+	assert.Equal(t, http.StatusBadRequest, gw.Code)
+	assert.Contains(t, gw.Body.String(), "Server Side Encryption")
 }
 
 func TestGetObject_SSEC_WrongKey(t *testing.T) {
@@ -408,7 +409,8 @@ func TestHeadObject_SSEC_RequiresKey(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleHeadObject(w, req, s3Req)
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "AWS's 400 (R8-14)")
+	assert.Empty(t, w.Header().Get("ETag"), "no object header before the refusal (R2-22)")
 }
 
 func TestHeadObject_SSEC_WithKey(t *testing.T) {

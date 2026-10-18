@@ -779,7 +779,7 @@ func TestSSEC_Put_Get_Range_OverTheOldCap(t *testing.T) {
 		assert.NotContains(t, g.Body.String(), mpMarker)
 	}
 	g = f.getWith(t, "c.bin", "", nil)
-	assert.Equal(t, http.StatusForbidden, g.Code)
+	assert.Equal(t, http.StatusBadRequest, g.Code, "no key: AWS's 400 (R8-14)")
 
 	// The size gate is gone: a declared length over the old cap is read
 	// (this short body is the client's 400, never a 413).

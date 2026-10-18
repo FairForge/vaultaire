@@ -365,14 +365,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 		if isDeleteMarker {
-			w.Header().Set("x-amz-version-id", reqVersionID)
-			w.Header().Set("x-amz-delete-marker", "true")
-			reqID := generateRequestID()
-			if suggestion := keySuggestion(r.Context(), a.db, t.ID, bucket, artifact); suggestion != "" {
-				WriteS3ErrorWithContext(w, ErrNoSuchKey, r.URL.Path, reqID, WithSuggestion(suggestion))
-			} else {
-				WriteS3Error(w, ErrNoSuchKey, r.URL.Path, reqID)
-			}
+			// A version id naming a delete marker: 405, as AWS (WP-R2-4).
+			writeDeleteMarkerVersion(w, r, reqVersionID, vCreatedAt)
 			return
 		}
 		w.Header().Set("x-amz-version-id", reqVersionID)
@@ -500,19 +494,45 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}()
 	}
 
+	contentType := cachedContentType
+	if contentType == "" {
+		contentType = a.detectContentType(artifact)
+	}
+	// What every response of this object says about it — HEAD's set, one
+	// writer (object_headers.go, WP-R2-4). The version id the response
+	// names was set above (a requested or the latest version); a versioned
+	// bucket's object with no version row is the null version; a bucket
+	// never versioned names none.
+	disposition := r.URL.Query().Get("response-content-disposition")
+	if disposition == "" {
+		disposition = cachedContentDisposition
+	}
+	oh := objectHeaders{ETag: cachedETag, LastModified: cachedUpdatedAt, ContentType: contentType, Size: cachedSize,
+		StorageClass: storageClass, VersionID: w.Header().Get("x-amz-version-id"), Metadata: cachedMetadata,
+		TagCount: tagCount(cachedTags), Disposition: disposition, Encoding: cachedContentEncoding, Language: cachedContentLanguage,
+		CacheControl: cachedEcho.CacheControl, Expires: cachedEcho.Expires, WebsiteRedirect: cachedEcho.WebsiteRedirect,
+		SSE: sseOf(cachedEncAlgo, crypto.IsSSEC(cachedEncAlgo))}
+	if oh.VersionID == "" && (vStatus == "Enabled" || vStatus == "Suspended") {
+		oh.VersionID = "null"
+	}
+	// An SSE-C object without the customer's key: AWS's 400, before any
+	// object header (R8-14).
+	if cacheHit && crypto.IsSSEC(cachedEncAlgo) && !crypto.HasSSECHeaders(r) {
+		w.Header().Del("x-amz-version-id")
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return
+	}
+
 	if cacheHit {
 		if code := evaluateConditionalGET(r, cachedETag, cachedUpdatedAt); code == http.StatusNotModified {
-			writeNotModified(w, cachedETag, cachedUpdatedAt, "private, no-cache")
+			w.Header().Del("x-amz-version-id")
+			oh.write(w, headersNotModified, nil)
+			w.WriteHeader(http.StatusNotModified)
 			return
 		} else if code == http.StatusPreconditionFailed {
 			w.WriteHeader(http.StatusPreconditionFailed)
 			return
 		}
-	}
-
-	contentType := cachedContentType
-	if contentType == "" {
-		contentType = a.detectContentType(artifact)
 	}
 
 	// Chunked objects are reassembled from their individual chunk storage
@@ -525,9 +545,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// not be asked (sync and backup clients retry a 503 and alert on a 500 —
 	// Prompt 2b.5 F1.2), else 500.
 	if cacheHit && cachedIsChunked && a.gci != nil {
-		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact, manifestAddress(artifact, cachedStorageKey),
-			cachedSize, cachedETag, cachedContentType, cachedUpdatedAt,
-			cachedMetadata, cachedTags, cachedContentDisposition, cachedContentEncoding, cachedContentLanguage, cachedEcho, storageClass)
+		chunkErr := a.handleChunkedGet(w, r, t, bucket, artifact, manifestAddress(artifact, cachedStorageKey), oh)
 		if chunkErr != nil {
 			a.logger.Error("chunked get failed",
 				zap.Error(chunkErr),
@@ -575,11 +593,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		var op blobOpener
 		var ssecKey []byte
 		if crypto.IsSSEC(cachedEncAlgo) {
-			if !crypto.HasSSECHeaders(r) {
-				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
-					WithSuggestion("This object was encrypted with SSE-C. Provide the encryption key."))
-				return
-			}
 			var parseErr error
 			if ssecKey, parseErr = crypto.ParseSSECHeaders(r); parseErr != nil {
 				WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
@@ -634,11 +647,6 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		switch {
 		case err == nil:
 			nativeRange = wantRange
-			if ssecKey != nil {
-				w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
-			} else {
-				w.Header().Set("x-amz-server-side-encryption", "AES256")
-			}
 			if fromParity {
 				w.Header().Set("x-vaultaire-served-from", "parity")
 			}
@@ -755,54 +763,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	defer func() { _ = reader.Close() }()
 
 	var dataReader io.Reader = reader
-
-	// Content-Disposition: ?response-content-disposition overrides the stored
-	// value (applies to both presigned and plain authenticated GET, since it's
-	// part of the signed request). Set before the range branch so both 200 and
-	// 206 responses carry it.
-	disposition := r.URL.Query().Get("response-content-disposition")
-	if disposition == "" {
-		disposition = cachedContentDisposition
-	}
-	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
-		w.Header().Set("Content-Disposition", disposition)
-	}
-	if cachedContentEncoding != "" {
-		w.Header().Set("Content-Encoding", cachedContentEncoding)
-	}
-	if cachedContentLanguage != "" {
-		w.Header().Set("Content-Language", cachedContentLanguage)
-	}
-	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
-
-	// The object's identity headers are the same on a 200 and a 206: S3 sends
-	// ETag, Last-Modified, the storage class and the user metadata on ranged
-	// responses too, and multi-range downloaders (aws-cli, rclone, R2 Sippy on
-	// objects >199 MiB) compare the ETag across their ranged GETs — a 206
-	// without one read as "upstream ETag changed during read" (2026-10-04).
-	setIdentityHeaders := func() {
-		w.Header().Set("x-amz-request-id", generateRequestID())
-		if w.Header().Get("x-amz-version-id") == "" {
-			w.Header().Set("x-amz-version-id", "null")
-		}
-		w.Header().Set("Accept-Ranges", "bytes")
-		if w.Header().Get("Cache-Control") == "" {
-			w.Header().Set("Cache-Control", "private, no-cache")
-		}
-		w.Header().Set("x-amz-storage-class", storageClass)
-		if cacheHit {
-			if cachedETag != "" {
-				w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
-			}
-			if !cachedUpdatedAt.IsZero() {
-				w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
-			}
-			setS3MetadataHeaders(w, cachedMetadata)
-			if n := tagCount(cachedTags); n > 0 {
-				w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
-			}
-		}
-	}
+	w.Header().Set("x-amz-request-id", generateRequestID())
 
 	// Which path served the bytes, for the integrity counters (WP-R8-3).
 	integrityPath := integrityPathPlain
@@ -848,10 +809,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			{
 				rangeReader = rr
 				// rangeReader already positioned at rng.start — write headers and copy directly
-				setIdentityHeaders()
-				w.Header().Set("Content-Type", contentType)
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
-				w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
+				oh.write(w, headersRange, rng)
 				w.WriteHeader(http.StatusPartialContent)
 				if _, err := io.CopyN(w, rangeReader, rng.length); err != nil {
 					a.logger.Error("range stream failed",
@@ -865,7 +823,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 
 		// Fallback: serveRange with full-object reader (old path)
-		setIdentityHeaders()
+		oh.write(w, headersRange, rng)
 		if err := serveRange(w, rangeReader, rng, cachedSize, contentType); err != nil {
 			a.logger.Error("range serve failed",
 				zap.Error(err),
@@ -876,13 +834,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
-	w.Header().Set("Content-Type", contentType)
-	// The stored per-object Cache-Control (set earlier from head cache) wins;
-	// "private, no-cache" is only the default for objects without one.
-	setIdentityHeaders()
-	if cacheHit && cachedSize > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
-	}
+	oh.write(w, headersWhole, nil)
 
 	// The whole body is checked against the row's single-part ETag as it
 	// streams; its last byte waits for the match (object_integrity.go).
@@ -1513,6 +1465,9 @@ func (a *S3ToEngine) handleChunkedPut(
 	w.Header().Set("ETag", fmt.Sprintf(`"%s"`, res.ETag))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.Header().Set("x-amz-object-size", strconv.FormatInt(res.Size, 10))
+	if res.Encrypted {
+		w.Header().Set("x-amz-server-side-encryption", "AES256") // as HEAD and GET say (R8-15)
+	}
 	if res.Flip.VersionID != "" {
 		w.Header().Set("x-amz-version-id", res.Flip.VersionID)
 	}
@@ -1704,19 +1659,10 @@ func (a *S3ToEngine) handleChunkedGet(
 	w http.ResponseWriter, r *http.Request,
 	t *tenant.Tenant,
 	bucket, artifact, manifest string,
-	cachedSize int64,
-	cachedETag string,
-	cachedContentType string,
-	cachedUpdatedAt time.Time,
-	cachedMetadata []byte,
-	cachedTags []byte,
-	cachedContentDisposition string,
-	cachedContentEncoding string,
-	cachedContentLanguage string,
-	cachedEcho putEchoHeaders,
-	storageClass string,
+	oh objectHeaders, // the object's headers (HandleGet built them from its row)
 ) error {
 	ctx := r.Context()
+	cachedSize := oh.Size
 
 	container := t.NamespaceContainer(bucket)
 
@@ -1740,29 +1686,6 @@ func (a *S3ToEngine) handleChunkedGet(
 	if err != nil {
 		return err
 	}
-
-	contentType := cachedContentType
-	if contentType == "" {
-		contentType = a.detectContentType(artifact)
-	}
-
-	// Content-Disposition: ?response-content-disposition overrides the stored
-	// value (part of the signed request). Header mutations before the first
-	// WriteHeader are buffered, so this is safe to set up front.
-	disposition := r.URL.Query().Get("response-content-disposition")
-	if disposition == "" {
-		disposition = cachedContentDisposition
-	}
-	if disposition = sanitizeContentDisposition(disposition); disposition != "" {
-		w.Header().Set("Content-Disposition", disposition)
-	}
-	if cachedContentEncoding != "" {
-		w.Header().Set("Content-Encoding", cachedContentEncoding)
-	}
-	if cachedContentLanguage != "" {
-		w.Header().Set("Content-Language", cachedContentLanguage)
-	}
-	setEchoHeaders(w.Header(), cachedEcho.CacheControl, cachedEcho.Expires, cachedEcho.WebsiteRedirect)
 
 	// Build the byte plan: which chunks to read and the (skip, take) slice within
 	// each (chunkPlan). Full GET takes every chunk whole; a range takes only
@@ -1805,45 +1728,17 @@ func (a *S3ToEngine) handleChunkedGet(
 		}
 	}
 
-	// The object's identity headers are the same on a 200 and a 206 — the
-	// same rule the plain path follows (setIdentityHeaders in HandleGet):
+	// The object's headers are HEAD's on a 200 and a 206 (object_headers.go):
 	// R2 Sippy reads a chunked object above 199 MiB as several ranged GETs
 	// and compares their ETags, and a 206 without one failed every pull of a
 	// chunked object with "upstream ETag changed during read" (2026-10-05).
-	setIdentityHeaders := func() {
-		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("x-amz-request-id", generateRequestID())
-		if w.Header().Get("x-amz-version-id") == "" {
-			w.Header().Set("x-amz-version-id", "null")
-		}
-		w.Header().Set("Accept-Ranges", "bytes")
-		// The stored per-object Cache-Control (set earlier from head cache) wins;
-		// "private, no-cache" is only the default for objects without one.
-		if w.Header().Get("Cache-Control") == "" {
-			w.Header().Set("Cache-Control", "private, no-cache")
-		}
-		w.Header().Set("x-amz-storage-class", storageClass)
-		if cachedETag != "" {
-			w.Header().Set("ETag", fmt.Sprintf(`"%s"`, cachedETag))
-		}
-		if !cachedUpdatedAt.IsZero() {
-			w.Header().Set("Last-Modified", cachedUpdatedAt.UTC().Format(http.TimeFormat))
-		}
-		setS3MetadataHeaders(w, cachedMetadata)
-		if n := tagCount(cachedTags); n > 0 {
-			w.Header().Set("x-amz-tagging-count", strconv.Itoa(n))
-		}
-	}
 	write200Headers := func() {
-		setIdentityHeaders()
-		if cachedSize > 0 {
-			w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
-		}
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		oh.write(w, headersWhole, nil)
 	}
 	write206Headers := func() {
-		setIdentityHeaders()
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, cachedSize))
-		w.Header().Set("Content-Length", strconv.FormatInt(rng.length, 10))
+		w.Header().Set("x-amz-request-id", generateRequestID())
+		oh.write(w, headersRange, rng)
 		w.WriteHeader(http.StatusPartialContent)
 	}
 

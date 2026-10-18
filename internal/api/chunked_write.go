@@ -65,6 +65,9 @@ type chunkedResult struct {
 	Chunks       int
 	DedupRatio   float32
 	Flip         flipResult
+	// Encrypted: the chunks are sealed per chunk (AES256-CE) — the answer
+	// says x-amz-server-side-encryption as HEAD and GET do (R8-15).
+	Encrypted bool
 }
 
 // storeChunkedObject is the chunked write (file comment). On any error
@@ -332,7 +335,7 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 		zap.Int64("size", measuredSize))
 
 	return chunkedResult{ETag: etag, Size: measuredSize, PhysicalSize: physicalSize, Chunks: chunkCount,
-		DedupRatio: dedupRatio, Flip: flip}, nil
+		DedupRatio: dedupRatio, Flip: flip, Encrypted: encrypting}, nil
 }
 
 // upsertChunkedObjectHeadRow writes the head row of a CHUNKED object inside
