@@ -138,7 +138,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer func() { _ = claim.Rollback() }() // a no-op after Commit
 	}
 
-	if handleErr := h.handle(ctx, event); handleErr != nil {
+	tenantID, handleErr := h.handle(ctx, event)
+	if handleErr != nil {
 		// The claim is rolled back: Stripe retries, and the retry is handled.
 		h.logger.Error("stripe webhook: event not applied — left for Stripe to retry",
 			zap.String("type", string(event.Type)), zap.String("id", event.ID), zap.Error(handleErr))
@@ -147,8 +148,19 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A claim that cannot be committed is a retry too: the handlers are
-	// idempotent, so applying the event again is the safe side.
+	// idempotent, so applying the event again is the safe side. The claim
+	// row names the tenant the event was applied to (RP11-2: the support
+	// page lists a tenant's events by it), NULL when it was not ours.
 	if claim != nil {
+		if tenantID != "" {
+			if _, err := claim.ExecContext(ctx,
+				`UPDATE stripe_events SET tenant_id = $1 WHERE event_id = $2`, tenantID, event.ID); err != nil {
+				h.logger.Error("stripe webhook: record event tenant failed — left for Stripe to retry",
+					zap.String("id", event.ID), zap.Error(err))
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
 		if err := claim.Commit(); err != nil {
 			h.logger.Error("stripe webhook: record event failed", zap.String("id", event.ID), zap.Error(err))
 			w.WriteHeader(http.StatusInternalServerError)
@@ -218,24 +230,24 @@ func eventCustomer(event stripe.Event) string {
 	return ""
 }
 
-// handle applies one verified event; an error means it must be retried.
-func (h *WebhookHandler) handle(ctx context.Context, event stripe.Event) error {
-	var handleErr error
+// handle applies one verified event and returns the tenant it resolved ("" =
+// not ours, or nothing to resolve); an error means it must be retried.
+func (h *WebhookHandler) handle(ctx context.Context, event stripe.Event) (string, error) {
 	switch event.Type {
 	case "checkout.session.completed":
-		handleErr = h.handleCheckoutCompleted(ctx, event)
+		return h.handleCheckoutCompleted(ctx, event)
 	case "invoice.payment_succeeded":
-		handleErr = h.handlePaymentSucceeded(ctx, event)
+		return h.handlePaymentSucceeded(ctx, event)
 	case "invoice.payment_failed":
-		handleErr = h.handlePaymentFailed(ctx, event)
+		return h.handlePaymentFailed(ctx, event)
 	case "customer.subscription.created", "customer.subscription.updated":
-		handleErr = h.handleSubscriptionUpdated(ctx, event)
+		return h.handleSubscriptionUpdated(ctx, event)
 	case "customer.subscription.deleted":
-		handleErr = h.handleSubscriptionDeleted(ctx, event)
+		return h.handleSubscriptionDeleted(ctx, event)
 	default:
 		h.logger.Debug("unhandled webhook event", zap.String("type", string(event.Type)))
 	}
-	return handleErr
+	return "", nil
 }
 
 // stripeMissing reports a Stripe 404 (resource_missing): the object is not
@@ -315,10 +327,10 @@ func invoiceTenantHint(inv *stripe.Invoice) string {
 	return inv.SubscriptionDetails.Metadata["tenant_id"]
 }
 
-func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stripe.Event) error {
+func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stripe.Event) (string, error) {
 	var session stripe.CheckoutSession
 	if !h.unmarshal(event, "checkout session", &session) {
-		return nil
+		return "", nil
 	}
 
 	customerID := ""
@@ -333,16 +345,16 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 	if customerID == "" || subscriptionID == "" {
 		h.logger.Warn("checkout session missing customer or subscription",
 			zap.String("session", session.ID))
-		return nil
+		return "", nil
 	}
 
 	tenantID, ours, err := h.resolveTenant(ctx, event, customerID,
 		session.ClientReferenceID, session.Metadata["tenant_id"])
 	if err != nil {
-		return fmt.Errorf("lookup tenant for checkout customer %s: %w", customerID, err)
+		return tenantID, fmt.Errorf("lookup tenant for checkout customer %s: %w", customerID, err)
 	}
 	if !ours {
-		return nil
+		return tenantID, nil
 	}
 
 	// A house checkout: the subscription's items are the floor quotas. The
@@ -352,13 +364,13 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 	if stripeMissing(err) {
 		h.logger.Warn("stripe webhook: checkout names a subscription Stripe does not have — nothing applied",
 			zap.String("id", event.ID), zap.String("subscription", subscriptionID))
-		return nil
+		return tenantID, nil
 	}
 	if err != nil {
-		return fmt.Errorf("fetch subscription %s after checkout: %w", subscriptionID, err)
+		return tenantID, fmt.Errorf("fetch subscription %s after checkout: %w", subscriptionID, err)
 	}
 	if handled, err := h.applyHouse(ctx, tenantID, sub); handled || err != nil {
-		return err
+		return tenantID, err
 	}
 
 	// Determine plan from checkout metadata or default to "standard".
@@ -370,20 +382,20 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 	}
 
 	if err := h.stripe.SaveSubscription(ctx, tenantID, subscriptionID, "active", plan); err != nil {
-		return fmt.Errorf("save subscription after checkout: %w", err)
+		return tenantID, fmt.Errorf("save subscription after checkout: %w", err)
 	}
 
 	h.logger.Info("subscription activated",
 		zap.String("tenant", tenantID),
 		zap.String("subscription", subscriptionID),
 		zap.String("plan", plan))
-	return nil
+	return tenantID, nil
 }
 
-func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event stripe.Event) error {
+func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event stripe.Event) (string, error) {
 	var inv stripe.Invoice
 	if !h.unmarshal(event, "invoice", &inv) {
-		return nil
+		return "", nil
 	}
 
 	customerID := ""
@@ -391,35 +403,33 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 		customerID = inv.Customer.ID
 	}
 	if customerID == "" {
-		return nil
+		return "", nil
 	}
 
 	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, invoiceTenantHint(&inv))
 	if err != nil {
-		return fmt.Errorf("lookup tenant for payment: %w", err)
+		return tenantID, fmt.Errorf("lookup tenant for payment: %w", err)
 	}
 	if !ours {
-		return nil
+		return tenantID, nil
 	}
 
-	// Ensure subscription status is active after successful payment.
-	if h.stripe.db != nil {
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants SET subscription_status = 'active' WHERE id = $1`, tenantID); err != nil {
-			return fmt.Errorf("mark tenant %s active: %w", tenantID, err)
-		}
+	// The subscription is active again after a successful payment — when it
+	// is the tenant's current one (RP11-1).
+	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "active"); err != nil {
+		return tenantID, err
 	}
 
 	h.logger.Info("payment succeeded",
 		zap.String("tenant", tenantID),
 		zap.String("invoice", inv.ID))
-	return nil
+	return tenantID, nil
 }
 
-func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.Event) error {
+func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.Event) (string, error) {
 	var inv stripe.Invoice
 	if !h.unmarshal(event, "invoice", &inv) {
-		return nil
+		return "", nil
 	}
 
 	customerID := ""
@@ -427,30 +437,58 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 		customerID = inv.Customer.ID
 	}
 	if customerID == "" {
-		return nil
+		return "", nil
 	}
 
 	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, invoiceTenantHint(&inv))
 	if err != nil {
-		return fmt.Errorf("lookup tenant for failed payment: %w", err)
+		return tenantID, fmt.Errorf("lookup tenant for failed payment: %w", err)
 	}
 	if !ours {
-		return nil
+		return tenantID, nil
 	}
 
 	// past_due is the grace period: the house is kept (applyHouse grants
 	// for past_due) while Stripe's Smart Retries run; the dashboard's
 	// "after retries" setting then delivers canceled/unpaid, which clears it.
-	if h.stripe.db != nil {
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants SET subscription_status = 'past_due' WHERE id = $1`, tenantID); err != nil {
-			return fmt.Errorf("mark tenant %s past_due: %w", tenantID, err)
-		}
+	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "past_due"); err != nil {
+		return tenantID, err
 	}
 
 	h.logger.Warn("payment failed",
 		zap.String("tenant", tenantID),
 		zap.String("invoice", inv.ID))
+	return tenantID, nil
+}
+
+// writeInvoiceStatus writes an invoice event's status onto the tenant when
+// the invoice's subscription is the tenant's current one (RP11-1): an
+// invoice of a deleted or replaced subscription, delivered late, must not
+// mark a starter tenant active or the current subscription past_due. An
+// invoice never adopts a subscription (checkout and the subscription events
+// do), and one with no subscription (a one-off invoice) writes nothing.
+func (h *WebhookHandler) writeInvoiceStatus(ctx context.Context, event stripe.Event, tenantID string, inv *stripe.Invoice, status string) error {
+	if h.stripe.db == nil {
+		return nil
+	}
+	subID := ""
+	if inv.Subscription != nil {
+		subID = inv.Subscription.ID
+	}
+	if subID == "" {
+		return nil
+	}
+	res, err := h.stripe.db.ExecContext(ctx,
+		`UPDATE tenants SET subscription_status = $1 WHERE id = $2 AND stripe_subscription_id = $3`,
+		status, tenantID, subID)
+	if err != nil {
+		return fmt.Errorf("mark tenant %s %s: %w", tenantID, status, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		h.logger.Info("invoice status not written: not the tenant's current subscription",
+			zap.String("id", event.ID), zap.String("tenant", tenantID),
+			zap.String("subscription", subID), zap.String("status", status))
+	}
 	return nil
 }
 
@@ -460,10 +498,10 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 // older updated(active) delivered after updated(canceled) re-granted a
 // cancelled house (the reverse took a paid one away). The payload names the
 // subscription and its customer only.
-func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event stripe.Event) error {
+func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event stripe.Event) (string, error) {
 	var payload stripe.Subscription
 	if !h.unmarshal(event, "subscription", &payload) {
-		return nil
+		return "", nil
 	}
 
 	customerID := ""
@@ -471,25 +509,25 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		customerID = payload.Customer.ID
 	}
 	if customerID == "" || payload.ID == "" {
-		return nil
+		return "", nil
 	}
 
 	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, payload.Metadata["tenant_id"])
 	if err != nil {
-		return fmt.Errorf("lookup tenant for subscription update: %w", err)
+		return tenantID, fmt.Errorf("lookup tenant for subscription update: %w", err)
 	}
 	if !ours {
-		return nil
+		return tenantID, nil
 	}
 
 	sub, err := h.fetchSubscription(ctx, payload.ID)
 	if stripeMissing(err) {
 		h.logger.Warn("stripe webhook: subscription event for a subscription Stripe does not have — nothing applied",
 			zap.String("id", event.ID), zap.String("subscription", payload.ID), zap.String("tenant", tenantID))
-		return nil
+		return tenantID, nil
 	}
 	if err != nil {
-		return fmt.Errorf("fetch subscription %s for %s: %w", payload.ID, event.Type, err)
+		return tenantID, fmt.Errorf("fetch subscription %s for %s: %w", payload.ID, event.Type, err)
 	}
 
 	status := string(sub.Status)
@@ -500,28 +538,40 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		plan = sub.Metadata["plan"]
 	}
 
+	// The status (and plan) are the tenant's only for its current
+	// subscription (RP11-1b): a stale event of an old subscription is not
+	// written over the current one's. A tenant with none recorded adopts a
+	// subscription that is not over (a created delivered before
+	// checkout.session.completed); a canceled or incomplete_expired one is
+	// never adopted. A stale event writes neither status nor plan.
 	if h.stripe.db != nil {
-		var execErr error
-		if plan != "" {
-			_, execErr = h.stripe.db.ExecContext(ctx,
-				`UPDATE tenants SET subscription_status = $1, plan = $2 WHERE id = $3`,
-				status, plan, tenantID)
-		} else {
-			_, execErr = h.stripe.db.ExecContext(ctx,
-				`UPDATE tenants SET subscription_status = $1 WHERE id = $2`,
-				status, tenantID)
-		}
+		adopt := sub.Status != stripe.SubscriptionStatusCanceled &&
+			sub.Status != stripe.SubscriptionStatusIncompleteExpired
+		res, execErr := h.stripe.db.ExecContext(ctx,
+			`UPDATE tenants
+			    SET subscription_status = $1,
+			        plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
+			        stripe_subscription_id = $3
+			  WHERE id = $4
+			    AND (stripe_subscription_id = $3
+			         OR ($5 AND (stripe_subscription_id IS NULL OR stripe_subscription_id = '')))`,
+			status, plan, sub.ID, tenantID, adopt)
 		if execErr != nil {
-			return fmt.Errorf("save subscription status for tenant %s: %w", tenantID, execErr)
+			return tenantID, fmt.Errorf("save subscription status for tenant %s: %w", tenantID, execErr)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			h.logger.Info("subscription status not written: not the tenant's current subscription",
+				zap.String("id", event.ID), zap.String("tenant", tenantID),
+				zap.String("subscription", sub.ID), zap.String("status", status))
+		} else {
+			h.logger.Info("subscription updated",
+				zap.String("tenant", tenantID),
+				zap.String("status", status))
 		}
 	}
 
-	h.logger.Info("subscription updated",
-		zap.String("tenant", tenantID),
-		zap.String("status", status))
-
 	_, err = h.applyHouse(ctx, tenantID, sub)
-	return err
+	return tenantID, err
 }
 
 // applyHouse turns a house subscription into floor quotas. handled is false
@@ -602,10 +652,10 @@ func (h *WebhookHandler) isCurrentSubscription(ctx context.Context, tenantID, su
 // payload: canceled is terminal at Stripe (a deleted subscription is never
 // reactivated), so a fetch cannot tell anything newer; an older updated
 // delivered after it fetches the canceled state and clears again.
-func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event stripe.Event) error {
+func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event stripe.Event) (string, error) {
 	var sub stripe.Subscription
 	if !h.unmarshal(event, "subscription", &sub) {
-		return nil
+		return "", nil
 	}
 
 	customerID := ""
@@ -613,15 +663,15 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 		customerID = sub.Customer.ID
 	}
 	if customerID == "" {
-		return nil
+		return "", nil
 	}
 
 	tenantID, ours, err := h.resolveTenant(ctx, event, customerID, sub.Metadata["tenant_id"])
 	if err != nil {
-		return fmt.Errorf("lookup tenant for subscription delete: %w", err)
+		return tenantID, fmt.Errorf("lookup tenant for subscription delete: %w", err)
 	}
 	if !ours {
-		return nil
+		return tenantID, nil
 	}
 
 	// A deleted subscription that is not the tenant's current one (an old
@@ -629,19 +679,19 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 	if h.stripe.db != nil {
 		current, err := h.isCurrentSubscription(ctx, tenantID, sub.ID)
 		if err != nil {
-			return err
+			return tenantID, err
 		}
 		if !current {
 			h.logger.Info("ignoring deletion of a stale subscription",
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
-			return nil
+			return tenantID, nil
 		}
 	}
 
 	// A house: floor quotas go, data stays.
 	if _, isHouse := h.stripe.HouseFromSubscription(&sub); isHouse && h.quotas != nil {
 		if err := h.quotas.ClearHouse(ctx, tenantID); err != nil {
-			return fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
+			return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
 		}
 	}
 
@@ -654,13 +704,13 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 			     plan = 'starter',
 			     house_period = ''
 			 WHERE id = $1`, tenantID); err != nil {
-			return fmt.Errorf("downgrade tenant %s after subscription delete: %w", tenantID, err)
+			return tenantID, fmt.Errorf("downgrade tenant %s after subscription delete: %w", tenantID, err)
 		}
 	}
 
 	h.logger.Info("subscription deleted — downgraded to starter",
 		zap.String("tenant", tenantID))
-	return nil
+	return tenantID, nil
 }
 
 // OverageService tracks grace periods for tenants exceeding quotas.

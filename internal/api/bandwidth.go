@@ -83,6 +83,31 @@ type BandwidthTracker struct {
 	mu     sync.Mutex
 	buffer []bandwidthEvent
 	logger *zap.Logger
+
+	// pending holds the aggregates a flush could not write, re-sent (merged
+	// with newer events) by the next one (RP11-3).
+	pendingTenant  map[bandwidthAggKey]*bandwidthAgg
+	pendingBackend map[bandwidthAggKey]*bandwidthAgg
+
+	// stmtTimeout bounds ONE upsert: a slow statement no longer spends the
+	// deadline of the ones after it (they shared one 10 s context before
+	// RP11-3, and the per-backend rows written last were dropped under load).
+	stmtTimeout time.Duration
+}
+
+// bandwidthFlushMaxAttempts is how many flushes in a row an aggregate may fail
+// before it is dropped — with one Warn naming its bytes, never silently.
+const bandwidthFlushMaxAttempts = 5
+
+// bandwidthAggKey is one row of a flush: (tenant or backend, UTC day).
+type bandwidthAggKey struct{ name, day string }
+
+// bandwidthAgg is a row's delta; attempts counts the flushes that failed it.
+type bandwidthAgg struct {
+	ingress  int64
+	egress   int64
+	requests int
+	attempts int
 }
 
 // NewBandwidthTracker creates a new tracker. Pass nil db to buffer without flushing.
@@ -90,6 +115,8 @@ func NewBandwidthTracker(db *sql.DB) *BandwidthTracker {
 	return &BandwidthTracker{
 		db:     db,
 		buffer: make([]bandwidthEvent, 0, 128),
+
+		stmtTimeout: 10 * time.Second,
 	}
 }
 
@@ -174,61 +201,55 @@ func (bt *BandwidthTracker) recordResponse(tenantID, backend string, ingress int
 	bt.recordOn(now, tenantID, backend, ingress, egress)
 }
 
-// Flush writes all buffered events to the database, aggregated by tenant+date.
+// Flush writes all buffered events to the database, aggregated by tenant+date
+// and backend+date, together with what earlier flushes could not write. Each
+// upsert has its own deadline; one that fails keeps its delta for the next
+// flush, up to bandwidthFlushMaxAttempts flushes.
 func (bt *BandwidthTracker) Flush() {
 	bt.mu.Lock()
-	if len(bt.buffer) == 0 {
+	if len(bt.buffer) == 0 && len(bt.pendingTenant) == 0 && len(bt.pendingBackend) == 0 {
+		bt.mu.Unlock()
+		return
+	}
+	if bt.db == nil {
+		bt.buffer = make([]bandwidthEvent, 0, 128)
 		bt.mu.Unlock()
 		return
 	}
 	events := bt.buffer
 	bt.buffer = make([]bandwidthEvent, 0, 128)
+	totals, byBackend := bt.pendingTenant, bt.pendingBackend
+	bt.pendingTenant, bt.pendingBackend = nil, nil
 	bt.mu.Unlock()
 
-	if bt.db == nil {
-		return
+	if totals == nil {
+		totals = make(map[bandwidthAggKey]*bandwidthAgg)
 	}
-
-	// Aggregate by (tenant, UTC day) and (backend, UTC day).
-	type aggKey struct{ name, day string }
-	type agg struct {
-		ingress  int64
-		egress   int64
-		requests int
+	if byBackend == nil {
+		byBackend = make(map[bandwidthAggKey]*bandwidthAgg)
 	}
-	totals := make(map[aggKey]*agg)
-	byBackend := make(map[aggKey]*agg)
+	add := func(m map[bandwidthAggKey]*bandwidthAgg, k bandwidthAggKey, e bandwidthEvent) {
+		a, ok := m[k]
+		if !ok {
+			a = &bandwidthAgg{}
+			m[k] = a
+		}
+		a.ingress += e.ingress
+		a.egress += e.egress
+		a.requests++
+	}
 	for _, e := range events {
 		day := e.day
 		if day == "" {
 			day = bandwidthDay(time.Now())
 		}
-		a, ok := totals[aggKey{e.tenantID, day}]
-		if !ok {
-			a = &agg{}
-			totals[aggKey{e.tenantID, day}] = a
-		}
-		a.ingress += e.ingress
-		a.egress += e.egress
-		a.requests++
-
+		add(totals, bandwidthAggKey{e.tenantID, day}, e)
 		if e.backend != "" {
-			b, ok := byBackend[aggKey{e.backend, day}]
-			if !ok {
-				b = &agg{}
-				byBackend[aggKey{e.backend, day}] = b
-			}
-			b.ingress += e.ingress
-			b.egress += e.egress
-			b.requests++
+			add(byBackend, bandwidthAggKey{e.backend, day}, e)
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	for k, a := range totals {
-		_, err := bt.db.ExecContext(ctx, `
+	failedTenant := bt.upsertAll(totals, "tenant_id", `
 			INSERT INTO bandwidth_usage_daily (tenant_id, date, ingress_bytes, egress_bytes, requests_count)
 			VALUES ($1, $2::date, $3, $4, $5)
 			ON CONFLICT (tenant_id, date)
@@ -236,15 +257,8 @@ func (bt *BandwidthTracker) Flush() {
 				ingress_bytes = bandwidth_usage_daily.ingress_bytes + EXCLUDED.ingress_bytes,
 				egress_bytes = bandwidth_usage_daily.egress_bytes + EXCLUDED.egress_bytes,
 				requests_count = bandwidth_usage_daily.requests_count + EXCLUDED.requests_count
-		`, k.name, k.day, a.ingress, a.egress, a.requests)
-		if err != nil && bt.logger != nil {
-			bt.logger.Error("flush bandwidth",
-				zap.String("tenant_id", k.name), zap.Error(err))
-		}
-	}
-
-	for k, a := range byBackend {
-		_, err := bt.db.ExecContext(ctx, `
+		`)
+	failedBackend := bt.upsertAll(byBackend, "backend", `
 			INSERT INTO backend_bandwidth_daily (backend_name, date, ingress_bytes, egress_bytes, requests_count)
 			VALUES ($1, $2::date, $3, $4, $5)
 			ON CONFLICT (backend_name, date)
@@ -252,10 +266,70 @@ func (bt *BandwidthTracker) Flush() {
 				ingress_bytes = backend_bandwidth_daily.ingress_bytes + EXCLUDED.ingress_bytes,
 				egress_bytes = backend_bandwidth_daily.egress_bytes + EXCLUDED.egress_bytes,
 				requests_count = backend_bandwidth_daily.requests_count + EXCLUDED.requests_count
-		`, k.name, k.day, a.ingress, a.egress, a.requests)
-		if err != nil && bt.logger != nil {
-			bt.logger.Error("flush backend bandwidth",
-				zap.String("backend", k.name), zap.Error(err))
-		}
+		`)
+
+	if len(failedTenant) == 0 && len(failedBackend) == 0 {
+		return
 	}
+	bt.mu.Lock()
+	bt.pendingTenant = mergeBandwidthAggs(bt.pendingTenant, failedTenant)
+	bt.pendingBackend = mergeBandwidthAggs(bt.pendingBackend, failedBackend)
+	bt.mu.Unlock()
+}
+
+// upsertAll runs one upsert per row, each under its own deadline, and returns
+// the rows to try again on the next flush. A row that has failed
+// bandwidthFlushMaxAttempts flushes is dropped with a Warn naming its bytes.
+func (bt *BandwidthTracker) upsertAll(rows map[bandwidthAggKey]*bandwidthAgg, field, query string) map[bandwidthAggKey]*bandwidthAgg {
+	var failed map[bandwidthAggKey]*bandwidthAgg
+	for k, a := range rows {
+		ctx, cancel := context.WithTimeout(context.Background(), bt.stmtTimeout)
+		_, err := bt.db.ExecContext(ctx, query, k.name, k.day, a.ingress, a.egress, a.requests)
+		cancel()
+		if err == nil {
+			continue
+		}
+		a.attempts++
+		if a.attempts >= bandwidthFlushMaxAttempts {
+			if bt.logger != nil {
+				bt.logger.Warn("bandwidth delta dropped after repeated flush failures",
+					zap.String(field, k.name), zap.String("date", k.day),
+					zap.Int64("ingress_bytes", a.ingress), zap.Int64("egress_bytes", a.egress),
+					zap.Int("requests", a.requests), zap.Int("attempts", a.attempts), zap.Error(err))
+			}
+			continue
+		}
+		if bt.logger != nil {
+			bt.logger.Warn("bandwidth flush failed — delta kept for the next flush",
+				zap.String(field, k.name), zap.String("date", k.day),
+				zap.Int("attempt", a.attempts), zap.Error(err))
+		}
+		if failed == nil {
+			failed = make(map[bandwidthAggKey]*bandwidthAgg)
+		}
+		failed[k] = a
+	}
+	return failed
+}
+
+// mergeBandwidthAggs adds src's rows into dst (a concurrent flush may have
+// put rows back meanwhile) and returns dst.
+func mergeBandwidthAggs(dst, src map[bandwidthAggKey]*bandwidthAgg) map[bandwidthAggKey]*bandwidthAgg {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		return src
+	}
+	for k, a := range src {
+		if d, ok := dst[k]; ok {
+			d.ingress += a.ingress
+			d.egress += a.egress
+			d.requests += a.requests
+			d.attempts = max(d.attempts, a.attempts)
+			continue
+		}
+		dst[k] = a
+	}
+	return dst
 }
