@@ -5,6 +5,23 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-18: Server-side copies of large objects
+
+- **`aws s3 cp` and `aws s3 mv` between keys work for large objects.**
+  aws-cli, rclone and Cyberduck copy anything above their multipart
+  threshold (8 MB for aws-cli) on the server, one part at a time, with
+  `UploadPartCopy`. It answered `501 NotImplemented`, so a server-side copy
+  or move of anything but a small file failed. It now copies the part from
+  the source object: a byte range (`x-amz-copy-source-range`) or the whole
+  object, from the current object or a version (`?versionId=`), encrypted
+  or not, with the `x-amz-copy-source-if-*` conditions. Nothing is
+  downloaded to your machine, and a server-side copy counts no download
+  traffic.
+- A part is up to 5 GiB, as on AWS. A copied part counts against your
+  storage while the upload is in progress, as an uploaded part does.
+  Objects encrypted with your own key (SSE-C) still cannot be copied
+  server-side.
+
 ## 2026-10-13: Encryption at rest has no size limit
 
 - **Any object can be encrypted at rest.** Server-side encryption

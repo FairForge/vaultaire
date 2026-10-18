@@ -36,7 +36,7 @@ func TestExactSizeReader_OnlyUserIsTheCopyPath(t *testing.T) {
 		require.NoError(t, err)
 		users = append(users, exactSizeReaderUsers(name, f)...)
 	}
-	assert.Equal(t, []string{"s3_copy.go:copyObject"}, users)
+	assert.Equal(t, []string{"s3_copy.go:copyObject", "s3_upload_part_copy.go:uploadPartCopy"}, users)
 }
 
 // exactSizeReaderUsers names "file:func" (or "file:package-level") for every

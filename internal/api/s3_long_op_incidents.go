@@ -116,7 +116,7 @@ func (c *longOpIncidentsCollector) Collect(ch chan<- prometheus.Metric) {
 	if counts == nil {
 		return // never read: unknown, not zero
 	}
-	for _, op := range []string{longOpComplete, longOpCopy, longOpBatch} {
+	for _, op := range longOps {
 		ch <- prometheus.MustNewConstMetric(c.abandoned, prometheus.CounterValue, counts[[2]string{longOpAbandoned, op}], op)
 		ch <- prometheus.MustNewConstMetric(c.drainErrs, prometheus.CounterValue, counts[[2]string{longOpErrorAfterCommit, op}], op)
 	}

@@ -53,7 +53,7 @@ var errCopySourceSize = errors.New("the copy source's bytes are not its recorded
 
 var copySourceSizeMismatch = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "vaultaire_copy_source_size_mismatch_total",
-	Help: "CopyObject requests refused because the source's bytes were not the size its head row records (a drifted row, or the key overwritten between the row read and the read of its bytes); answered 503.",
+	Help: "Copies (CopyObject, UploadPartCopy) refused because the source's bytes were not the size its head row records (a drifted row, or the key overwritten between the row read and the read of its bytes); answered 503.",
 })
 
 // exactSizeReader fails a stream that ends before, or runs past, want
@@ -234,7 +234,6 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		return
 	}
 
-	srcContainer := t.NamespaceContainer(srcBucket)
 	destContainer := t.NamespaceContainer(destBucket)
 
 	s.logger.Debug("CopyObject",
@@ -251,65 +250,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// sources (including per-chunk AES256-CE — same tenant, same convergent
 	// keys) take the manifest-copy path instead: no data moves, each shared
 	// chunk just gains a reference.
-	var srcSize int64
-	var srcEnc string
-	var srcChunked bool
-	var srcBackend string
-	var srcFloor, srcStorageKey, srcETag string
-	var srcModified time.Time
-	// versionAttrs: the attributes of a non-current source version — what
-	// its own row recorded (R61-8, 092; a version written before 092 has its
-	// content type alone), never the current object's.
-	var versionAttrs *objectAttrs
-	if s.db != nil {
-		// The source's row is the one authority for where its bytes are
-		// (WP-R6-1): a row that cannot be read is a 500 and a key with no row
-		// is NoSuchKey — neither is read from the primary at a guess, which
-		// is what the ignored error did (Stage 1a Prompt 6 Part 0).
-		rowErr := s.db.QueryRowContext(r.Context(), `
-			SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, ''),
-			       etag, updated_at
-			FROM object_head_cache
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, srcBucket, srcKey).Scan(&srcSize, &srcEnc, &srcChunked, &srcBackend, &srcFloor, &srcStorageKey, &srcETag, &srcModified)
-		srcFound := rowErr == nil
-		if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
-			s.logger.Error("copy: source row read failed", zap.Error(rowErr), zap.String("bucket", srcBucket), zap.String("key", srcKey))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		if srcVersionID != "" {
-			v, code := s.copySourceVersion(r.Context(), t.ID, srcBucket, srcKey, srcVersionID)
-			switch {
-			case code != "":
-				WriteS3Error(w, code, r.URL.Path, generateRequestID())
-				return
-			case !v.current:
-				srcFound = true
-				// A chunked version is copied through its own manifest
-				// (WP-VM-1); a whole one from its own blob.
-				srcSize, srcEnc, srcChunked, srcBackend, srcStorageKey = v.size, v.enc, v.backend == chunkedBackendSentinel, v.backend, v.storageKey
-				srcETag, srcModified = v.etag, v.createdAt
-				va := v.attrs
-				versionAttrs = &va
-				if v.floor != "" {
-					srcFloor = v.floor
-				}
-			}
-		}
-		if !srcFound {
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
-			return
-		}
-		// x-amz-copy-source-if-* (R61-8): decided on the source the copy
-		// reads — its ETag and Last-Modified — before anything is written.
-		if code := evaluateCopySourceConditions(r, srcETag, srcModified); code != 0 {
-			WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
-			return
-		}
+	cs, ok := s.resolveCopySource(w, r, t.ID, srcBucket, srcKey, srcVersionID)
+	if !ok {
+		return
 	}
-	// The source's bytes are at its row's address (WP-R2-1).
-	srcBlob := blobArtifact(srcKey, srcStorageKey)
+	srcSize, srcEnc, srcChunked, srcStorageKey, srcETag := cs.Size, cs.Enc, cs.Chunked, cs.StorageKey, cs.ETag
+	versionAttrs := cs.VersionAttrs
 	// A plaintext source copied into an sse_enabled bucket is sealed there
 	// exactly as a PUT into it is (WP-R8-1 follow-up A1: it used to land
 	// plaintext). Refused before anything is read or written when it cannot
@@ -384,7 +330,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// ceremony every object a new bucket holds is sealed or chunk-encrypted.
 	// SSE-C needs the customer's key on the copy (x-amz-copy-source-server-
 	// side-encryption-customer-*): still 501.
-	srcSealedS3 := !srcChunked && srcEnc != "" && !crypto.IsSSEC(srcEnc)
+	srcSealedS3 := cs.sealedS3()
 	if (srcEnc != "" && !sourceWhole && !srcSealedS3) || (srcChunked && !sourceWhole) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("Copying objects encrypted with a customer-provided key (SSE-C) is not yet supported. Download and re-upload instead."))
@@ -419,75 +365,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	attrs := resolveCopyAttrs(directive, requestAttrs, sourceAttrs)
 	attrs.Tags = resolveCopyTags(r.Header.Get("x-amz-tagging-directive"), requestAttrs, sourceAttrs)
 
-	// The read goes to the backend that holds the source (routing truth).
-	if srcBackend != "" && s.engine != nil && !srcChunked {
-		noteRecordedBackend(s.engine, s.logger, "copy_source", srcBackend)
-	}
-	// The source's recorded size goes with the read and the write (Prompt
-	// 2b.2 C3): a backend holding two versions of the key after an
-	// interrupted commit (the multi-bridge Sync driver's plain file and
-	// striped manifest) serves the one of this size — the copy took the
-	// stale plain bytes and recorded their MD5 as the new object — and a
-	// destination of known length is striped over the Sync bridges (an
-	// unsized one was one plain file on one bridge, ~30 MB/s).
-	// Read from the backend the source's row records, and no other (WP-R6-1;
-	// a chunked row's name is a sentinel: its chunks have their own rows).
-	gctx := r.Context()
-	if !srcChunked {
-		gctx = engine.WithRecordedBackend(gctx, srcBackend)
-	}
-	if srcSize > 0 {
-		stored := srcSize
-		if srcSealedS3 {
-			stored = s.sseService.SealedLength(srcSize)
-		}
-		gctx = engine.WithExpectedSize(gctx, stored)
-	}
-	var reader io.ReadCloser
-	if srcSealedS3 {
-		// Opened as it streams: the header and first segment are verified
-		// before anything is reserved or written (sse_stream.go).
-		reader, err = openSealed(r.Context(), sseS3Opener{svc: s.sseService, tenantID: t.ID}, sealedSource{
-			whole: func() (io.ReadCloser, error) { return s.engine.Get(gctx, srcContainer, srcBlob) },
-		}, sealedRead{Size: srcSize})
-		if errors.Is(err, errSealedUnreadable) {
-			s.logger.Error("copy: the encrypted source does not open", zap.Error(err),
-				zap.String("bucket", srcBucket), zap.String("key", srcKey))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-	} else if sourceWhole {
-		// The chunked source as one stream: every backend its chunks are
-		// on is asked first (503 before anything is reserved or written);
-		// each chunk decrypted and verified as it is read.
-		var cr *chunkedObjectReader
-		if cr, err = s.readAdapter().openChunkedObject(r.Context(), t.ID, srcBucket, srcKey, srcStorageKey, srcSize); err == nil {
-			reader = cr
-		}
-	} else {
-		reader, err = s.engine.Get(gctx, srcContainer, srcBlob)
-	}
+	// The source's plaintext, opened by the one copy-source opener
+	// (s3_copy_source.go): a plain blob on its recorded backend, a sealed
+	// one opened as it streams, a chunked one through the content index.
+	reader, err := s.openCopySource(r.Context(), t.ID, cs, copySourceRange{})
 	if err != nil {
-		switch {
-		case errors.Is(err, engine.ErrAllBackendsUnavailable):
-			w.Header().Set("Retry-After", "30")
-			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		case errors.Is(err, engine.ErrArchived):
-			// The source's bytes are on tape (this was a 500). Same rule as
-			// GET (WP-R13-1): a downstairs source is recalled on the
-			// caller's behalf and the copy answers a retryable 503; an attic
-			// source answers what AWS answers for a GLACIER copy source.
-			writeArchivedRead(w, r, s.smartPromoter, t.ID, srcBucket, srcKey, srcBlob, srcFloor,
-				"The source object is archived on tape. Restore it (POST ?restore), then retry the copy.")
-		case isObjectMissingErr(err):
-			WriteS3Error(w, ErrNoSuchKey, r.URL.Path, generateRequestID())
-		default:
-			s.logger.Error("copy: source get failed",
-				zap.Error(err),
-				zap.String("container", srcContainer),
-				zap.String("key", srcKey))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		}
+		s.writeCopySourceOpenError(w, r, t.ID, cs, err)
 		return
 	}
 	defer func() { _ = reader.Close() }()
@@ -607,15 +490,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		releaseReservation()
 		switch {
 		case errors.Is(err, errCopySourceSize):
-			// The source's head row and its bytes disagree: drift, or the key
-			// overwritten between the row read and the read of the bytes. A
-			// retry after the row is repaired (or the overwrite settled) works.
-			copySourceSizeMismatch.Inc()
-			s.logger.Warn("copy: the source's bytes are not its recorded size (head-row drift or a concurrent overwrite) — 503",
-				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
-				zap.Int64("recorded_size", srcSize), zap.Error(err))
-			w.Header().Set("Retry-After", "30")
-			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+			s.copySourceReadFailed(w, r, t.ID, cs, source, err)
 		case errors.Is(err, errRegionDriverUnavailable):
 			s.logger.Error("copy: region-pinned bucket has no driver — refused",
 				zap.String("bucket", destBucket), zap.Error(err))
@@ -625,20 +500,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
-		case source.err != nil && (errors.Is(source.err, crypto.ErrStreamCorrupt) || errors.Is(source.err, errSealedUnreadable)):
-			// A sealed source that does not open (a truncated or corrupt
-			// blob) is an integrity failure, as on the GET: 500 and an
-			// Error line — a 503 would be retried for ever (R85-10).
-			s.logger.Error("copy: the sealed source does not open — 500",
-				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
-				zap.NamedError("source_error", source.err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-		case source.err != nil && r.Context().Err() == nil:
-			s.logger.Warn("copy: the source could not be read — 503",
-				zap.String("tenant_id", t.ID), zap.String("source_bucket", srcBucket), zap.String("source_key", srcKey),
-				zap.NamedError("source_error", source.err))
-			w.Header().Set("Retry-After", "30")
-			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
+		case s.copySourceReadFailed(w, r, t.ID, cs, source, err):
+			// The source broke while it was read: a sealed source that does
+			// not open (500), a backend body that broke off (503).
 		default:
 			s.logger.Error("copy: dest put failed",
 				zap.Error(err),

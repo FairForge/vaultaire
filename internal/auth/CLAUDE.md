@@ -81,6 +81,7 @@ Password reset rate limiting is in-memory (per-email, 3/hour, sliding window). T
 
 `scoped_keys.go` — permission check functions reusable by S3 enforcement and future STS (Phase 5.11.5):
 - `CheckPermission(keyPerms, operation)` — `["*"]` allows all; otherwise exact match
+- `OperationAllowed(keyPerms, operation)` — what the S3 dispatcher calls: `CheckPermission`, plus `UploadPartCopy` (WP-R3-2) is allowed to a key that may `UploadPart` (it writes a part of the destination's upload; its SOURCE is checked by the dispatcher as a copy's — `GetObject` + the source bucket in scope, R5-02). `OpUploadPartCopy` is in `S3Operations`, so it can be granted on its own too
 - `CheckBucketScope(scopes, bucket)` — empty = unrestricted
 - `CheckIPAllowlist(allowlist, clientIP)` — CIDR networks and single addresses, both sides PARSED (`::FFFF:1.2.3.4` matches `1.2.3.4`, case/zero-padding of IPv6 does not matter — R5-23); empty = unrestricted; a junk entry grants nothing
 - `ValidateIPAllowlist(entries)` — every entry an address or a CIDR network, returned canonical (`net.IP.String` / `net.IPNet.String`); junk is `ErrInvalidIPAllowlist` naming the entry
