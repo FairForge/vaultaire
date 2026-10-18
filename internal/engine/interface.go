@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Engine is the universal interface for storage, compute, and ML
@@ -81,6 +82,26 @@ type TenantObject struct {
 // prefix. The caller decides what it may touch.
 type TenantWalker interface {
 	WalkTenant(ctx context.Context, tenantID string, fn func(TenantObject) error) error
+}
+
+// ListedObject is one key a PageLister returned: the artifact under the
+// listed container (what Get/Delete address), its stored size and the
+// backend's last-modified time.
+type ListedObject struct {
+	Artifact     string
+	Size         int64
+	LastModified time.Time
+}
+
+// PageLister is an optional interface for drivers that list a container's
+// keys under a prefix one page at a time, in key order, starting after a
+// key, with each key's size and last-modified time — what the chunk orphan
+// sweep (WP-R8-2 B.2) walks with a cursor persisted between runs. The
+// tenant is the context's, as for every call. more reports that keys remain
+// after the page. Implemented by the S3-class drivers that hold chunk blobs:
+// the fixed-bucket driver (idrive, idrive-<region>, wasabi) and lyve.
+type PageLister interface {
+	ListPage(ctx context.Context, container, prefix, startAfter string, limit int) (objs []ListedObject, more bool, err error)
 }
 
 // RangeGetter is an optional interface for drivers that support byte-range

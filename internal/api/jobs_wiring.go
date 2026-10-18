@@ -23,6 +23,7 @@ import (
 //
 //	job               UTC    boot   ceiling  a run FAILS (and is retried hourly) when
 //	inventory         00:30  +4 m   6 h      the configuration list cannot be read
+//	chunk_orphans     01:30  +8 m   1 h      the index cannot be read (a backend that cannot be asked, an orphan not erased: notes)
 //	dedup_gc          02:30  +3 m   2 h      the reconcile or the candidate scan fails
 //	retention         03:30  +1 m   10 m     any table could not be pruned
 //	account_deletion  04:30  +2 m   6 h      a tenant was deferred (Stripe, a backend)
@@ -60,6 +61,9 @@ func (s *Server) registerJobs() {
 	// --- daily ---
 	if s.inventoryRunner != nil {
 		s.jobs.Register(s.inventoryRunner.spec(s.jobs))
+	}
+	if s.chunkOrphans != nil {
+		s.jobs.Register(s.chunkOrphans.spec())
 	}
 	if s.dedupGCRunner != nil {
 		s.jobs.Register(s.dedupGCRunner.spec())

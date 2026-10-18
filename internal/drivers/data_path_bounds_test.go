@@ -144,6 +144,7 @@ var boundSites = map[string]string{
 	"WithTimeout onedrive.go:NewOneDriveFleetDriver": "boot only: the fleet's first token and drive ids, 30 s",
 	"WithTimeout quotaless.go:HealthCheck":           "the quotaless probe, 10 s",
 	"WithTimeout tenant_walk.go:s3WalkPrefix":        "a job (the erasure sweep): one listing page, 60 s over a 15 s transport bound",
+	"WithTimeout list_page.go:s3ListPage":            "a job (the chunk orphan sweep, WP-R8-2 B.2): one listing page, 60 s over a 15 s transport bound",
 	"WithTimeout webdav_resilience.go:send":          "the Sync bridge exception: the caller's per-request timeout",
 	"WithTimeout webdav_folder_limit.go:notePut":     "the Sync bridge exception: a folder count, 2 × 60 s",
 	"WithTimeout webdav_stripe.go:dropGeneration":    "the Sync bridge exception: a failed striped upload's cleanup, detached, 5 min",

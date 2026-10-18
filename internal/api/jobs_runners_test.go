@@ -295,6 +295,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	want := map[string]string{
 		"vault_parity":        "every 2m0s",
 		"inventory":           "daily 00:30 UTC",
+		"chunk_orphans":       "daily 01:30 UTC",
 		"dedup_gc":            "daily 02:30 UTC",
 		"retention":           "daily 03:30 UTC",
 		"routing_truth":       "daily 05:30 UTC",
