@@ -5,6 +5,23 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-19: Downloads are checked against the object's checksum
+
+- **A whole-object download is checked as it streams.** The bytes of a
+  `GET` of a whole object (and of a public `/cdn/` link) are hashed on the
+  way out and compared with the object's ETag — the MD5 of what you
+  uploaded. If a storage backend ever hands back other bytes (a corrupted,
+  truncated or misplaced copy), the download is **cut before its last
+  byte**: your client sees a connection that ended early (aws-cli, rclone
+  and the SDKs report it and retry) instead of a file that looks complete
+  and is wrong. Every byte but the last has been sent by then — HTTP has no
+  place for a checksum after the body that S3 clients read, so the cut is
+  the signal. We are alerted on every one.
+- What this check cannot cover: a ranged download (`Range:`) and an object
+  uploaded in parts (an ETag ending in `-N`) are checked for their size
+  only, as before. Large deduplicated objects already verify every piece
+  they are made of.
+
 ## 2026-10-18: Server-side copies of large objects
 
 - **`aws s3 cp` and `aws s3 mv` between keys work for large objects.**

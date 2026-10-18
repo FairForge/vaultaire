@@ -654,6 +654,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			return
 		}
 	}
+	parallelRead := false // the bytes come from the parallel ranged reader
 	if rh := r.Header.Get("Range"); rh != "" && cacheHit && cachedEncAlgo == "" &&
 		!errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 		rng, parseErr := parseRangeHeader(rh, cachedSize)
@@ -667,7 +668,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		// is read as parallel ranges within it (`parallel_get`, s3_large_get.go).
 		if cachedFloor != usage.FloorVault {
 			if pr := a.openParallelGet(gctx, t.ID, container, blob, cachedSize, rng.start, rng.length); pr != nil {
-				reader, nativeRange = pr, rng
+				reader, nativeRange, parallelRead = pr, rng, true
 			}
 		}
 		if reader == nil {
@@ -693,6 +694,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// restore semantics stay on the single stream).
 	if reader == nil && cacheHit && cachedEncAlgo == "" && cachedFloor != usage.FloorVault && r.Header.Get("Range") == "" {
 		reader = a.openParallelGet(gctx, t.ID, container, blob, cachedSize, 0, cachedSize)
+		parallelRead = reader != nil
 	}
 	if reader == nil && err == nil && !sealed {
 		reader, err = a.engine.Get(gctx, container, blob)
@@ -802,6 +804,17 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// Which path served the bytes, for the integrity counters (WP-R8-3).
+	integrityPath := integrityPathPlain
+	switch {
+	case w.Header().Get("x-vaultaire-served-from") == "parity":
+		integrityPath = integrityPathParity
+	case sealed:
+		integrityPath = integrityPathSealed
+	case parallelRead:
+		integrityPath = integrityPathParallel
+	}
+
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader != "" && cacheHit && errors.Is(rangeParseErr(rangeHeader, cachedSize), errMultiRange) {
 		rangeHeader = "" // RFC 9110 §14.2: a multi-range request may be served whole
@@ -812,6 +825,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			writeRangeNotSatisfiable(w, cachedSize)
 			return
 		}
+		// A range does not hash to the ETag: served size-checked only.
+		objectIntegrityUnverified.WithLabelValues(integrityPath, "range").Inc()
 
 		// Use backend-native range GET when available (avoids downloading the
 		// full object and discarding prefix bytes — 10-50× faster for large files).
@@ -869,7 +884,27 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		w.Header().Set("Content-Length", strconv.FormatInt(cachedSize, 10))
 	}
 
+	// The whole body is checked against the row's single-part ETag as it
+	// streams; its last byte waits for the match (object_integrity.go).
+	if cacheHit && cachedSize > 0 {
+		var armed bool
+		if dataReader, armed = newIntegrityReader(dataReader, cachedETag, cachedSize); !armed {
+			objectIntegrityUnverified.WithLabelValues(integrityPath, unverifiedReason(cachedETag)).Inc()
+		}
+	}
+
 	written, err := io.Copy(w, dataReader)
+	var ie *integrityError
+	if errors.As(err, &ie) && r.Context().Err() == nil {
+		objectIntegrityFailures.WithLabelValues(integrityPath, ie.reason).Inc()
+		a.logger.Error("object integrity: the body served does not match its row — the response is cut",
+			zap.String("tenant_id", t.ID), zap.String("bucket", bucket), zap.String("key", artifact),
+			zap.String("backend", cachedBackendName), zap.String("storage_key", cachedStorageKey),
+			zap.String("recorded_etag", ie.recorded), zap.String("measured_md5", ie.measured),
+			zap.String("reason", ie.reason), zap.String("path", integrityPath), zap.Int64("bytes_sent", written))
+		abortResponse(r.Context())
+		return
+	}
 	if err != nil {
 		a.logger.Error("failed to stream artifact",
 			zap.Error(err),
