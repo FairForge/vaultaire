@@ -22,7 +22,7 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 | `SMTP_USER` | No | SMTP auth username |
 | `SMTP_PASSWORD` | No | SMTP auth password |
 
-**Production sets none of these** (checked 2026-09-30, Review R14): prod runs the `LogSender`. Wiring a provider is the last open launch item on the e-mail side (sequence 5.6).
+**Production runs `smtp`** since 2026-10-12: `EMAIL_PROVIDER=smtp`, `SMTP_HOST=smtp.mx.cloudflare.net` (the Cloudflare Email Service on `stored.cloud`, `docs/CLOUDFLARE.md` item 7; verified on the prod env 2026-10-18). Before that (checked 2026-09-30, Review R14) prod ran the `LogSender`. Payment reminders and receipts (WP-PAY-3, `docs/PAYMENTS.md` § 3.8) will send through this sender.
 
 ## Which flows send mail
 
