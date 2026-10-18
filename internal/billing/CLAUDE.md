@@ -119,6 +119,26 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
   +1 per later `customer.subscription.updated` (a resize, a dunning step);
   the dashboard's own calls (live-subscription list, checkout session) are
   unchanged.
+- **The status belongs to the current subscription (RP11-1 / RP11-1b,
+  Prompt 12)**: `tenants.subscription_status` (and `plan`) are written only
+  for the tenant's CURRENT subscription (`stripe_subscription_id`), each in
+  one guarded `UPDATE … WHERE stripe_subscription_id = <the event's>`.
+  `invoice.payment_succeeded` / `payment_failed` (`writeInvoiceStatus`) take
+  the id from `invoice.subscription` and never adopt one (a one-off invoice
+  writes nothing); `customer.subscription.{created,updated}` write the
+  fetched status, and a tenant with NONE recorded adopts the subscription
+  (id set with the status — a `created` delivered before
+  `checkout.session.completed` lands) unless it is `canceled` /
+  `incomplete_expired`. A stale event writes neither status nor plan (an Info
+  line). Before: a late `payment_succeeded` after `subscription.deleted`
+  marked a starter tenant `active`; a stale `updated` of an old cancelled
+  subscription wrote `canceled` while the current house stayed.
+  `applyHouse` is unchanged (it grants without the guard, clears with it).
+- **`stripe_events.tenant_id` (RP11-2)**: every handler returns the tenant it
+  resolved and `ServeHTTP` writes it onto the claim row inside the claim
+  transaction, before the commit (NULL = not ours) — the admin support page
+  lists a tenant's events by it (`idx_stripe_events_tenant`, 019); it was
+  never written before.
 - **Dunning**: `invoice.payment_failed` → `past_due`, house **kept** (grace =
   Stripe Smart Retries); the dashboard's "after retries" setting delivers
   `canceled`/`unpaid`, which clears the house. Set it to **cancel**.
