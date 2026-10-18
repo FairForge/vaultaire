@@ -2,6 +2,8 @@
 
 Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 
+> **Planned (2026-10-18, WP-PAY): this package becomes the Stripe provider behind a provider-neutral entitlement record (`paid_through` in our DB, a `payments` ledger, BTCPay as a second provider). Design of record: `docs/PAYMENTS.md`; plan § WP-PAY; prompts `docs/reviews/WP-PAY-PROMPTS.md`.**
+
 ## Key Types
 
 - **StripeService** — manages Stripe customers, checkout sessions, subscriptions, invoices, and billing portal. Holds `*sql.DB` for persisting Stripe IDs to the `tenants` table.
