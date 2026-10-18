@@ -195,7 +195,7 @@ const keyRotationPendingSQL = `
 	)
 	SELECT
 		(SELECT COUNT(*) FROM global_content_index g JOIN cur ON cur.tenant_id = g.dedup_scope
-		  WHERE g.encrypted AND g.encryption_key_version < cur.v),
+		  WHERE g.encrypted AND g.state = 'ready' AND g.encryption_key_version < cur.v),
 		(SELECT COUNT(*) FROM object_head_cache h JOIN cur ON cur.tenant_id = h.tenant_id
 		  WHERE h.encryption_algorithm = $1 AND NOT h.is_chunked AND COALESCE(h.encryption_key_version, 1) < cur.v)
 		+ (SELECT COUNT(*) FROM ` + usage.RetainedVersionsFrom + `

@@ -137,6 +137,10 @@ type Server struct {
 	// chunkPutConcurrency, when > 0, overrides the adapter's default
 	// parallel chunk-store worker count (env CHUNK_PUT_CONCURRENCY).
 	chunkPutConcurrency int
+	// chunkPendingTakeover, when > 0, overrides how old a pending chunk
+	// claim must be before another writer takes it over (tests; the
+	// default is chunkPendingTakeoverDefault, WP-R8-2).
+	chunkPendingTakeover time.Duration
 	// chunkingThreshold, when > 0, overrides the size above which a write
 	// is chunked (defaultChunkingThreshold, 64 MiB); tests lower it.
 	chunkingThreshold int64

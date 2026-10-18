@@ -1052,6 +1052,9 @@ func (s *Server) writeAdapter() *S3ToEngine {
 		a.chunkStoreConcurrency = s.chunkPutConcurrency
 	}
 	a.chunkingThreshold = s.chunkingThreshold
+	if s.chunkPendingTakeover > 0 {
+		a.chunkPendingTakeover = s.chunkPendingTakeover
+	}
 	return a
 }
 

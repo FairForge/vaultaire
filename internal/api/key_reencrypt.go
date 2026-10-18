@@ -320,7 +320,10 @@ type reencryptCandidate struct {
 	size        int64
 }
 
-func (k *KeyReencryptRunner) reencrypt(ctx context.Context, res *KeyReencryptResult) error {
+// candidates are the ready rows below their tenant's newest version, oldest
+// first, one scan's worth. A pending row (WP-R8-2: its blob is still being
+// written) is never one.
+func (k *KeyReencryptRunner) candidates(ctx context.Context) ([]reencryptCandidate, error) {
 	rows, err := k.db.QueryContext(ctx, `
 		WITH cur AS (
 			SELECT tenant_id, MAX(key_version) AS v FROM tenant_key_versions
@@ -328,26 +331,34 @@ func (k *KeyReencryptRunner) reencrypt(ctx context.Context, res *KeyReencryptRes
 		)
 		SELECT g.dedup_scope, g.plaintext_hash, g.size_bytes
 		  FROM global_content_index g JOIN cur ON cur.tenant_id = g.dedup_scope
-		 WHERE g.encrypted AND g.encryption_key_version < cur.v AND ($2 = '' OR g.dedup_scope = $2)
+		 WHERE g.encrypted AND g.state = 'ready' AND g.encryption_key_version < cur.v AND ($2 = '' OR g.dedup_scope = $2)
 		 ORDER BY g.first_seen_at, g.dedup_scope, g.plaintext_hash
 		 LIMIT $1`, keyReencryptScanLimit, k.onlyScope)
 	if err != nil {
-		return fmt.Errorf("scan re-encrypt candidates: %w", err)
+		return nil, fmt.Errorf("scan re-encrypt candidates: %w", err)
 	}
 	var cands []reencryptCandidate
 	for rows.Next() {
 		var c reencryptCandidate
 		if err := rows.Scan(&c.scope, &c.hash, &c.size); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan re-encrypt candidate: %w", err)
+			return nil, fmt.Errorf("scan re-encrypt candidate: %w", err)
 		}
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return fmt.Errorf("scan re-encrypt candidates: %w", err)
+		return nil, fmt.Errorf("scan re-encrypt candidates: %w", err)
 	}
 	_ = rows.Close()
+	return cands, nil
+}
+
+func (k *KeyReencryptRunner) reencrypt(ctx context.Context, res *KeyReencryptResult) error {
+	cands, err := k.candidates(ctx)
+	if err != nil {
+		return err
+	}
 	res.Candidates = len(cands)
 
 	current := map[string]int{} // tenant → newest version, read once per run past every cache
@@ -398,7 +409,7 @@ func (k *KeyReencryptRunner) reencryptOne(ctx context.Context, c reencryptCandid
 		var encrypted bool
 		err := conn.QueryRowContext(ctx, `
 			SELECT backend_id, storage_key, ciphertext_hash, encryption_key_version, encrypted
-			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2`,
+			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'`,
 			c.scope, c.hash).Scan(&old.backend, &old.key, &ctHash, &version, &encrypted)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // swept since the scan
@@ -449,7 +460,7 @@ func (k *KeyReencryptRunner) reencryptOne(ctx context.Context, c reencryptCandid
 		upd, err := tx.ExecContext(ctx, `
 			UPDATE global_content_index
 			   SET backend_id = $3, storage_key = $4, ciphertext_hash = $5, encryption_key_version = $6
-			 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND storage_key = $7 AND ciphertext_hash = $8`,
+			 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND storage_key = $7 AND ciphertext_hash = $8 AND state = 'ready'`,
 			c.scope, c.hash, backend, newKey, newHash, cur, old.key, ctHash.String)
 		if err != nil {
 			return fmt.Errorf("swap the row: %w", err)

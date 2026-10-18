@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 )
@@ -17,6 +18,21 @@ import (
 // while keeping peak in-flight memory bounded (workers + chunker buffer,
 // ≤ ~19 chunks of ≤ 16 MB). Override via CHUNK_PUT_CONCURRENCY.
 const defaultChunkStoreConcurrency = 8
+
+// chunkPutBound bounds ONE chunk blob's backend PUT, failover included
+// (WP-R8-2): a chunk is ≤ 16 MiB, its per-attempt deadline is
+// s3PutDeadline's 15 s (10 s floor, 60 s per 64 MiB) with one retry on a
+// fresh connection = 30 s per backend, and the engine fails over to at most
+// two more general-purpose backends: 90 s.
+const chunkPutBound = 90 * time.Second
+
+// chunkPendingTakeoverDefault is how old a pending claim must be before
+// another writer of the chunk takes it over: twice chunkPutBound. The
+// claimer's PUT ran under chunkPutBound from after its claim, so by then it
+// has ended — and a backend that committed a PUT the client had already
+// given up on (RP8-11) did so within the second bound — so the taker's
+// bytes are never overwritten by the claimer's late ones.
+const chunkPendingTakeoverDefault = 2 * chunkPutBound
 
 // defaultChunkGetPrefetch caps how many chunks a chunked GET holds at once
 // (in flight + fetched + being written); the byte window

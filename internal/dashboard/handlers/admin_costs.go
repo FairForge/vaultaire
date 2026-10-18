@@ -407,7 +407,7 @@ const bytesByBackendSQL = `
 		SELECT backend_name AS backend, size_bytes FROM object_head_cache
 		 WHERE NOT is_chunked AND COALESCE(backend_name, '') <> ''
 		UNION ALL
-		SELECT backend_id, size_bytes FROM global_content_index
+		SELECT backend_id, size_bytes FROM global_content_index WHERE state = 'ready'
 	) b GROUP BY backend ORDER BY SUM(size_bytes) DESC`
 
 func populateActualBackends(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger, mode costMode) {

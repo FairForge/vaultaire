@@ -331,7 +331,7 @@ const tenantBytesByBackendSQL = `
 		UNION ALL
 		SELECT g.backend_id, g.size_bytes FROM tenant_chunk_refs r
 		  JOIN global_content_index g ON g.dedup_scope = r.dedup_scope AND g.plaintext_hash = r.plaintext_hash
-		 WHERE r.tenant_id = $1
+		 WHERE r.tenant_id = $1 AND g.state = 'ready'
 	) b GROUP BY backend`
 
 func populateCarbonBadge(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
