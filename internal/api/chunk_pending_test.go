@@ -136,16 +136,31 @@ func TestChunkStore_NoConnectionHeldAcrossTheBackendPut(t *testing.T) {
 		done <- w.Code
 	}()
 	waitFor(t, "two chunk PUTs in flight", func() bool { return f.gated.inFlight.Load() >= 2 })
-	time.Sleep(50 * time.Millisecond) // the stores settle on the gate
+	// Every chunk the body has reaches the gate: the in-flight count stops
+	// growing (a neighbouring chunk's claim is a millisecond transaction —
+	// a single sample on a slow runner caught one, CI 2026-10-18).
+	stable, last := time.Now(), f.gated.inFlight.Load()
+	for time.Since(stable) < 300*time.Millisecond {
+		time.Sleep(20 * time.Millisecond)
+		if n := f.gated.inFlight.Load(); n != last {
+			stable, last = time.Now(), n
+		}
+	}
 
-	// Act
-	inUse := f.db.Stats().InUse
+	// Act: the fewest pooled connections in use while the PUTs wait. Before
+	// 093 every waiting store held one for its whole PUT, so it never fell
+	// below the number of PUTs in flight.
+	minInUse := f.db.Stats().InUse
+	for deadline := time.Now().Add(2 * time.Second); minInUse > 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		minInUse = min(minInUse, f.db.Stats().InUse)
+	}
 	inFlight := f.gated.inFlight.Load()
 
 	// Assert: no pooled connection waits on the backend.
 	close(f.gated.gate)
 	require.Equal(t, http.StatusOK, <-done)
-	assert.Equal(t, 0, inUse, "%d pooled connections held while %d chunk PUTs waited on the backend", inUse, inFlight)
+	assert.Equal(t, 0, minInUse, "%d pooled connections held throughout while %d chunk PUTs waited on the backend", minInUse, inFlight)
 	assert.Equal(t, body, f.getObj(t, "slow.bin"))
 	var pending int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index g
