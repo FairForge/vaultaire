@@ -966,7 +966,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			// The ETag stays the -N of the parts; size and ETag are the
 			// plaintext's, as a sealed PUT records them.
 			var sErr error
-			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, t.ID, body, totalSize); sErr != nil {
+			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, body, totalSize); sErr != nil {
 				s.writeCompleteStoreError(w, r, sErr, bucket, object, uploadID, tierClass)
 				return
 			}

@@ -19,8 +19,9 @@ const (
 	// SSEVersion is the whole-buffer format written from WP-R8-1 until
 	// WP-R8-5: [0x02][key_version uint32 BE][ML-KEM ct 1088][nonce 12]
 	// [AES-GCM ct+tag], the first five bytes bound to the ciphertext as AAD.
-	// Every writer seals 0x03 (stream.go) since; 0x01 and 0x02 blobs are
-	// only opened, by the compatibility opener below.
+	// Every writer seals the streaming format (stream.go: 0x03 from WP-R8-5,
+	// 0x04 since WP-R8-3 A.2); 0x01 and 0x02 blobs are only opened, by the
+	// compatibility opener below.
 	SSEVersion byte = 0x02
 	// SSEVersionV1 is the format before it ([0x01][KEM ct][nonce][ct], no
 	// version, no AAD); such a blob was sealed under key version 1.
@@ -36,7 +37,7 @@ const (
 
 // SSEService is SSE-S3: a fresh ML-KEM-768 encapsulation per object against
 // the tenant's current key version, the object sealed by the streaming codec
-// (stream.go, format 0x03) under a DEK derived from the shared secret. The
+// (stream.go, format 0x04) under a DEK derived from the shared secret. The
 // decapsulation key is the version's random seed, wrapped under the master
 // key in tenant_key_versions (TenantKeys, WP-R8-1).
 type SSEService struct {
@@ -55,7 +56,7 @@ func NewSSEService(keys *TenantKeys) *SSEService {
 func (s *SSEService) SetSegmentSize(n int) { s.segment = n }
 
 // OnOpen sets the function called once per blob opened, with its format
-// ("0x01", "0x02", "0x03"): vaultaire_sse_blobs_opened_total.
+// ("0x01", "0x02", "0x03", "0x04"): vaultaire_sse_blobs_opened_total.
 func (s *SSEService) OnOpen(fn func(format string)) { s.onOpen = fn }
 
 // Current makes sure the tenant has a key and returns its current version
@@ -73,12 +74,20 @@ func (s *SSEService) SealedLength(size int64) int64 {
 	return StreamCiphertextLength(StreamHeaderSSES3, s.segment, size)
 }
 
-// Seal returns a reader of the 0x03 blob of src — exactly size bytes; a
-// source that ends early or runs long fails the read — and the key version
-// it is sealed under (the tenant's current one; the caller records it on the
-// row). Nothing is read from src before the first Read.
-func (s *SSEService) Seal(ctx context.Context, tenantID string, src io.Reader, size int64) (io.Reader, int, error) {
-	kv, err := s.keys.Current(ctx, tenantID)
+// Seal returns a reader of the 0x04 blob of src for the object id — exactly
+// size bytes; a source that ends early or runs long fails the read — and the
+// key version it is sealed under (id.Tenant's current one; the caller
+// records it on the row). Nothing is read from src before the first Read.
+func (s *SSEService) Seal(ctx context.Context, id StreamIdentity, src io.Reader, size int64) (io.Reader, int, error) {
+	return s.sealFormat(ctx, id, src, size, StreamFormat)
+}
+
+// sealFormat is Seal in a given streaming format (tests make 0x03 blobs).
+func (s *SSEService) sealFormat(ctx context.Context, id StreamIdentity, src io.Reader, size int64, format byte) (io.Reader, int, error) {
+	if err := id.check(); err != nil {
+		return nil, 0, err
+	}
+	kv, err := s.keys.Current(ctx, id.Tenant)
 	if err != nil {
 		return nil, 0, fmt.Errorf("tenant key: %w", err)
 	}
@@ -86,7 +95,7 @@ func (s *SSEService) Seal(ctx context.Context, tenantID string, src io.Reader, s
 	defer clear(sharedKey)
 	material := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(kemCiphertext)), uint32(kv.Version)) // #nosec G115 -- versions are small
 	material = append(material, kemCiphertext...)
-	header, err := newStreamHeader(StreamKindSSES3, material, s.segment)
+	header, err := newStreamHeaderFormat(format, StreamKindSSES3, material, s.segment)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -94,14 +103,15 @@ func (s *SSEService) Seal(ctx context.Context, tenantID string, src io.Reader, s
 	if err != nil {
 		return nil, 0, err
 	}
-	sealer, err := newStreamSealer(src, aead, header, s.segment, size)
+	sealer, err := newStreamSealer(src, aead, header, streamAAD(header, id), s.segment, size)
 	if err != nil {
 		return nil, 0, err
 	}
 	return sealer, kv.Version, nil
 }
 
-// streamAEADFor decapsulates a 0x03 SSE-S3 header under the version it names.
+// streamAEADFor decapsulates a streaming SSE-S3 header under the version it
+// names.
 func (s *SSEService) streamAEADFor(ctx context.Context, tenantID string, h *StreamHeader) (cipher.AEAD, error) {
 	if h.Kind != StreamKindSSES3 {
 		return nil, fmt.Errorf("%w: kind 0x%02x is not SSE-S3", ErrStreamCorrupt, h.Kind)
@@ -118,18 +128,21 @@ func (s *SSEService) streamAEADFor(ctx context.Context, tenantID string, h *Stre
 	return streamAEAD(sharedKey, nil, sseStreamInfo, h.Raw)
 }
 
-// Open opens a whole SSE-S3 blob read from src. A 0x03 blob streams: the
-// header and the first segment are verified before Open returns, each later
-// segment before its first byte is read. A 0x01/0x02 blob (written before
-// WP-R8-5, ≤ 256 MiB by construction) is read whole and opened by the
-// compatibility opener — the only whole-object buffer left on an SSE-S3 path.
-func (s *SSEService) Open(ctx context.Context, tenantID string, src io.Reader) (io.Reader, error) {
+// Open opens a whole SSE-S3 blob of the object id read from src. A streaming
+// blob (0x03, 0x04) streams: the header and the first segment are verified
+// before Open returns, each later segment before its first byte is read; a
+// 0x04 blob opens only as id (its segments' AAD carries it). A 0x01/0x02 blob
+// (written before WP-R8-5, ≤ 256 MiB by construction) is read whole and
+// opened by the compatibility opener — the only whole-object buffer left on
+// an SSE-S3 path.
+func (s *SSEService) Open(ctx context.Context, id StreamIdentity, src io.Reader) (io.Reader, error) {
+	tenantID := id.Tenant
 	var first [1]byte
 	if _, err := io.ReadFull(src, first[:]); err != nil {
 		return nil, fmt.Errorf("encrypted data too short: %w", err)
 	}
 	r := io.MultiReader(bytes.NewReader(first[:]), src)
-	if first[0] != StreamFormat {
+	if !IsStreamFormat(first[0]) {
 		blob, err := io.ReadAll(io.LimitReader(r, legacySSEMaxPlaintext+SSEOverheadBytes+1))
 		if err != nil {
 			return nil, fmt.Errorf("read SSE blob: %w", err)
@@ -148,52 +161,65 @@ func (s *SSEService) Open(ctx context.Context, tenantID string, src io.Reader) (
 	if err != nil {
 		return nil, err
 	}
+	aad, err := openAAD(h, id)
+	if err != nil {
+		return nil, err
+	}
 	aead, err := s.streamAEADFor(ctx, tenantID, h)
 	if err != nil {
 		return nil, err
 	}
-	o := newStreamOpener(r, aead, h)
+	o := newStreamOpener(r, aead, h, aad)
 	if err := o.prime(); err != nil {
 		return nil, err
 	}
-	s.onOpen("0x03")
+	s.onOpen(fmt.Sprintf("0x%02x", h.Format))
 	return o, nil
 }
 
-// OpenRange opens plaintext [rg.Offset, +rg.Length) of a 0x03 object of size
-// bytes whose header is h (PlanStreamRange made rg); src is the stored bytes
-// [rg.CipherOffset, +rg.CipherLength). The first segment is verified before
-// it returns.
-func (s *SSEService) OpenRange(ctx context.Context, tenantID string, h *StreamHeader, size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
-	aead, err := s.streamAEADFor(ctx, tenantID, h)
+// OpenRange opens plaintext [rg.Offset, +rg.Length) of a streaming object
+// id of size bytes whose header is h (PlanStreamRange made rg); src is the
+// stored bytes [rg.CipherOffset, +rg.CipherLength). The first segment is
+// verified before it returns.
+func (s *SSEService) OpenRange(ctx context.Context, id StreamIdentity, h *StreamHeader, size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
+	aad, err := openAAD(h, id)
 	if err != nil {
 		return nil, err
 	}
-	r, err := openRange(src, aead, h, size, rg)
+	aead, err := s.streamAEADFor(ctx, id.Tenant, h)
 	if err != nil {
 		return nil, err
 	}
-	s.onOpen("0x03")
+	r, err := openRange(src, aead, h, aad, size, rg)
+	if err != nil {
+		return nil, err
+	}
+	s.onOpen(fmt.Sprintf("0x%02x", h.Format))
 	return r, nil
 }
 
-// RangeOpener derives the key of a 0x03 SSE-S3 blob whose header is h once,
-// for many ranges of it (a parallel ranged read). Counted as one open.
-func (s *SSEService) RangeOpener(ctx context.Context, tenantID string, h *StreamHeader) (*StreamRangeOpener, error) {
-	aead, err := s.streamAEADFor(ctx, tenantID, h)
+// RangeOpener derives the key of a streaming SSE-S3 blob of the object id
+// whose header is h once, for many ranges of it (a parallel ranged read).
+// Counted as one open.
+func (s *SSEService) RangeOpener(ctx context.Context, id StreamIdentity, h *StreamHeader) (*StreamRangeOpener, error) {
+	aad, err := openAAD(h, id)
 	if err != nil {
 		return nil, err
 	}
-	s.onOpen("0x03")
-	return &StreamRangeOpener{aead: aead, h: h}, nil
+	aead, err := s.streamAEADFor(ctx, id.Tenant, h)
+	if err != nil {
+		return nil, err
+	}
+	s.onOpen(fmt.Sprintf("0x%02x", h.Format))
+	return &StreamRangeOpener{aead: aead, h: h, aad: aad}, nil
 }
 
 // SSEBlobKeyVersion reads the key version a blob was sealed under from its
-// first bytes (a 0x03 header, or a whole 0x01/0x02 blob): the 0x03 or 0x02
-// field, 1 for a 0x01 blob.
+// first bytes (a 0x03/0x04 header, or a whole 0x01/0x02 blob): the header's
+// or the 0x02 field, 1 for a 0x01 blob.
 func SSEBlobKeyVersion(data []byte) (int, error) {
 	switch {
-	case len(data) > 0 && data[0] == StreamFormat:
+	case len(data) > 0 && IsStreamFormat(data[0]):
 		h, err := ParseStreamHeader(data)
 		if err != nil {
 			return 0, err
@@ -220,8 +246,8 @@ func SSEBlobKeyVersion(data []byte) (int, error) {
 // DecryptBytes opens a whole 0x01/0x02 blob under the key version it
 // records: the compatibility opener (Open calls it; no writer makes these).
 func (s *SSEService) DecryptBytes(ctx context.Context, tenantID string, data []byte) ([]byte, error) {
-	if len(data) > 0 && data[0] == StreamFormat {
-		return nil, errors.New("DecryptBytes: a 0x03 blob opens through Open")
+	if len(data) > 0 && IsStreamFormat(data[0]) {
+		return nil, errors.New("DecryptBytes: a streaming (0x03/0x04) blob opens through Open")
 	}
 	version, err := SSEBlobKeyVersion(data)
 	if err != nil {

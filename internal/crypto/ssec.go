@@ -57,10 +57,13 @@ func ssecAEAD(key []byte, h *StreamHeader) (cipher.AEAD, error) {
 	return streamAEAD(key, h.Salt, ssecStreamInfo, h.Raw)
 }
 
-// SSECSeal returns a reader of the streaming SSE-C blob of src (exactly size
-// bytes) under the customer's key. The DEK is derived before it returns:
-// the caller may zero key at once.
-func SSECSeal(key []byte, src io.Reader, size int64) (io.Reader, error) {
+// SSECSeal returns a reader of the streaming (0x04) SSE-C blob of src
+// (exactly size bytes) of the object id under the customer's key. The DEK is
+// derived before it returns: the caller may zero key at once.
+func SSECSeal(key []byte, id StreamIdentity, src io.Reader, size int64) (io.Reader, error) {
+	if err := id.check(); err != nil {
+		return nil, err
+	}
 	salt := make([]byte, streamSaltSize)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, fmt.Errorf("ssec: salt: %w", err)
@@ -77,17 +80,23 @@ func SSECSeal(key []byte, src io.Reader, size int64) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newStreamSealer(src, aead, raw, StreamSegmentSize, size)
+	return newStreamSealer(src, aead, raw, streamAAD(raw, id), StreamSegmentSize, size)
 }
 
 // SSECOpen opens a whole streaming SSE-C blob read from src. The header and
 // the first segment are verified before it returns: a first segment that
 // does not open is ErrSSECKeyMismatch (the key is not stored, so a wrong key
 // and a damaged first segment look alike — as with the old format); a later
-// one is ErrStreamCorrupt from the reader. The DEK is derived before it
-// returns: the caller may zero key at once.
-func SSECOpen(key []byte, src io.Reader) (io.Reader, error) {
+// one is ErrStreamCorrupt from the reader. A 0x04 blob opens only as the
+// object id (a blob of another key, under the right customer key, is the
+// same ErrSSECKeyMismatch). The DEK is derived before it returns: the caller
+// may zero key at once.
+func SSECOpen(key []byte, id StreamIdentity, src io.Reader) (io.Reader, error) {
 	h, err := ReadStreamHeader(src)
+	if err != nil {
+		return nil, err
+	}
+	aad, err := openAAD(h, id)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +104,7 @@ func SSECOpen(key []byte, src io.Reader) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	o := newStreamOpener(src, aead, h)
+	o := newStreamOpener(src, aead, h, aad)
 	if err := o.prime(); err != nil {
 		if errors.Is(err, ErrStreamCorrupt) {
 			return nil, ErrSSECKeyMismatch
@@ -108,12 +117,16 @@ func SSECOpen(key []byte, src io.Reader) (io.Reader, error) {
 // SSECOpenRange opens a planned range of a streaming SSE-C object of size
 // bytes whose header is h; src is the stored bytes the plan names. A first
 // segment that does not open is ErrSSECKeyMismatch.
-func SSECOpenRange(key []byte, h *StreamHeader, size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
+func SSECOpenRange(key []byte, id StreamIdentity, h *StreamHeader, size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
+	aad, err := openAAD(h, id)
+	if err != nil {
+		return nil, err
+	}
 	aead, err := ssecAEAD(key, h)
 	if err != nil {
 		return nil, err
 	}
-	r, err := openRange(src, aead, h, size, rg)
+	r, err := openRange(src, aead, h, aad, size, rg)
 	if err != nil {
 		if errors.Is(err, ErrStreamCorrupt) {
 			return nil, ErrSSECKeyMismatch
@@ -125,12 +138,16 @@ func SSECOpenRange(key []byte, h *StreamHeader, size int64, rg StreamRange, src 
 
 // SSECRangeOpener derives the DEK of a streaming SSE-C blob whose header is
 // h once, for many ranges of it. The caller may zero key when it returns.
-func SSECRangeOpener(key []byte, h *StreamHeader) (*StreamRangeOpener, error) {
+func SSECRangeOpener(key []byte, id StreamIdentity, h *StreamHeader) (*StreamRangeOpener, error) {
+	aad, err := openAAD(h, id)
+	if err != nil {
+		return nil, err
+	}
 	aead, err := ssecAEAD(key, h)
 	if err != nil {
 		return nil, err
 	}
-	return &StreamRangeOpener{aead: aead, h: h, ssec: true}, nil
+	return &StreamRangeOpener{aead: aead, h: h, aad: aad, ssec: true}, nil
 }
 
 // SSECOpenLegacy opens a whole old-format SSE-C blob read from src (≤ 256

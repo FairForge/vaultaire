@@ -383,7 +383,7 @@ func TestCDN_SSEObject_IsDecrypted(t *testing.T) {
 	f := setupCDNFixture(t)
 	sse := sseFor(t, f.db, f.tenantID)
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
-	ct, v := sealedBlob(t, sse, f.tenantID, f.content)
+	ct, v := sealedBlob(t, sse, crypto.StreamIdentity{Tenant: f.tenantID, Bucket: f.bucket, Key: f.key}, f.content)
 	_, err := f.server.engine.Put(ctx, f.tenantID+"_"+f.bucket, f.key, bytes.NewReader(ct))
 	require.NoError(t, err)
 	_, err = f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $4, encryption_key_version = $5

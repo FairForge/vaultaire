@@ -163,7 +163,7 @@ func (s *Server) openCopySource(ctx context.Context, tenantID string, src copySo
 		if rng.Ranged {
 			req.Ranged, req.Off, req.N = true, rng.Off, rng.N
 		}
-		return openSealed(ctx, sseS3Opener{svc: s.sseService, tenantID: tenantID}, sealedSource{
+		return openSealed(ctx, sseS3Opener{svc: s.sseService, id: crypto.StreamIdentity{Tenant: tenantID, Bucket: src.Bucket, Key: src.Key}}, sealedSource{
 			whole:  func() (io.ReadCloser, error) { return s.engine.Get(gctx, container, blob) },
 			ranged: func(off, n int64) (io.ReadCloser, error) { return s.engine.GetRange(gctx, container, blob, off, n) },
 		}, req)

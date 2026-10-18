@@ -454,7 +454,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		// the blob sealed as it streams (WP-R8-5), of a length known in
 		// advance. An empty source is stored empty, as an empty PUT is.
 		var sErr error
-		if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, t.ID, tee, srcSize); sErr != nil {
+		if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, crypto.StreamIdentity{Tenant: t.ID, Bucket: destBucket, Key: destKey}, tee, srcSize); sErr != nil {
 			releaseReservation()
 			s.logger.Error("copy: SSE-S3 tenant key unavailable", zap.Error(sErr))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())

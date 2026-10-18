@@ -29,15 +29,21 @@ tenant_key_versions  (one row per tenant per version; the newest encrypts)
 - **Every blob records the version it was sealed under.** A chunk records it
   on its index row (`global_content_index.encryption_key_version`, with a copy
   on each ref). A whole SSE-S3 object records it in its blob header and
-  on `object_head_cache.encryption_key_version`. The format is **`0x03`**
-  since WP-R8-5 (`internal/crypto/stream.go`): `[0x03][0x01][version u32][KEM
+  on `object_head_cache.encryption_key_version`. The format is **`0x04`**
+  since WP-R8-3 A.2 (`internal/crypto/stream.go`; `0x03` from WP-R8-5 until
+  then, the same layout): `[0x04][0x01][version u32][KEM
   ct 1088][segment_size u32][nonce_prefix 7]`, then the object in 1 MiB
-  segments, each AES-256-GCM under a per-object DEK with the header as AAD and
-  a nonce of `prefix ‖ index ‖ last` — sealed and opened as it streams, one
-  segment in memory, so there is no size limit and a `Range` reads only the
-  segments it spans. Blobs written before (`0x02`: `[0x02][version
-  u32][KEM ct][nonce][ct+tag]`, `0x01`: no version) still open; prod holds
-  none. A read always uses the
+  segments, each AES-256-GCM under a per-object DEK with AAD = the header ‖
+  the object's tenant, bucket and key, and a nonce of `prefix ‖ index ‖
+  last` — sealed and opened as it streams, one segment in memory, so there
+  is no size limit and a `Range` reads only the segments it spans. **A blob
+  copied to another key's address does not open** (the first segment fails:
+  the GET answers 500 before any byte, and the whole-object integrity check
+  would cut it if it did); under `0x03` the AAD was the header alone and such
+  a blob decrypted and was served as the other key (R8-10). Blobs written
+  before (`0x03`, `0x02`: `[0x02][version u32][KEM ct][nonce][ct+tag]`,
+  `0x01`: no version) still open; prod held none when 0x04 shipped. A read
+  always uses the
   recorded version; a write always uses the newest.
 - **Dedup across a rotation.** The same bytes uploaded after a rotation
   dedup onto the existing blob, sealed under the old version, and the new
@@ -184,9 +190,17 @@ unset K
    to start`): the switch then leaves the active slot untouched.
 7. What changes: **new** buckets get `sse_enabled`; objects in such a
    bucket, or sent with `x-amz-server-side-encryption: AES256`, are sealed
-   whole at any size (streaming, `0x03`) where they are not chunked; chunked objects are sealed per chunk in the tenant's own
+   whole at any size (streaming, `0x04`) where they are not chunked; chunked objects are sealed per chunk in the tenant's own
    dedup scope; a tenant's first key version is created on its first
    encrypted write. Existing objects are not touched.
+8. **Prove the identity binding (WP-R8-3 A.2), with the bench tenant:** PUT
+   two objects A and B of the same size with
+   `x-amz-server-side-encryption: AES256`; on the backend, with the
+   backend's own key pair, copy A's blob (`object_head_cache.storage_key` of
+   A) over B's address; GET B through Stored → **500 before any byte** (the
+   `encrypted object does not open` Error line names B) — never A's bytes
+   under B's ETag; GET A → 200 byte-equal; delete both. Then one
+   `aws s3 cp` (UploadPartCopy) of a sealed object of 100 MB (RP12-3).
 
 `ENCRYPTION_MASTER_KEY_FILE=<path>` (and `ENCRYPTION_MASTER_KEY` itself) still
 work — precedence credential > file > env, each `_PREVIOUS` the same — for
@@ -238,8 +252,8 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
   version's (`object_versions.storage_key`) — is read from the backend its row
   records, checked (the header names the row's version; the plaintext
   matches the ETag — after the write, as both stream), re-sealed under N as
-  `0x03` (a `0x02`/`0x01` blob too: a rotation is what upgrades the format;
-  no format-only pass is scheduled — prod holds none) and written to a **new** address
+  `0x04` for its own key (a `0x03`/`0x02`/`0x01` blob too: a rotation is what
+  upgrades the format; no format-only pass is scheduled — prod held none) and written to a **new** address
   `<key>@<26>` on the same backend. One transaction (head-row lock, then
   version lock) re-points every row still naming the old address at the old
   version; the ETag does not change. The old address goes to `retired_blobs`

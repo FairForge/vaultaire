@@ -215,7 +215,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 				zap.String("bucket", bucket), zap.String("key", key), zap.Int64("bytes", size))
 			return deliveredObject{}, refusal
 		}
-		sealer, encErr := newSSEWriteSealer(tctx, g.sse, tenantID, spool, size)
+		sealer, encErr := newSSEWriteSealer(tctx, g.sse, crypto.StreamIdentity{Tenant: tenantID, Bucket: bucket, Key: key}, spool, size)
 		if encErr != nil {
 			return deliveredObject{}, fmt.Errorf("encrypt %s/%s: %w", bucket, key, encErr)
 		}

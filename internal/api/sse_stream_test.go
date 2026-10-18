@@ -47,11 +47,11 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// sealedBlob seals pt as every writer does (0x03) and returns the blob and
-// its key version.
-func sealedBlob(t *testing.T, sse *crypto.SSEService, tenantID string, pt []byte) ([]byte, int) {
+// sealedBlob seals pt for the object id as every writer does (0x04) and
+// returns the blob and its key version.
+func sealedBlob(t *testing.T, sse *crypto.SSEService, id crypto.StreamIdentity, pt []byte) ([]byte, int) {
 	t.Helper()
-	r, v, err := sse.Seal(context.Background(), tenantID, bytes.NewReader(pt), int64(len(pt)))
+	r, v, err := sse.Seal(context.Background(), id, bytes.NewReader(pt), int64(len(pt)))
 	require.NoError(t, err)
 	blob, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -473,7 +473,7 @@ func TestVaultParity_SealedObject_RebuiltThenOpened(t *testing.T) {
 	_, _ = rand.Read(body)
 	sum := md5.Sum(body) // #nosec G401
 	etag := hex.EncodeToString(sum[:])
-	blob, v := sealedBlob(t, sse, f.tenantID, body)
+	blob, v := sealedBlob(t, sse, crypto.StreamIdentity{Tenant: f.tenantID, Bucket: f.bucket, Key: "sealed.bin"}, body)
 	container := f.tn.NamespaceContainer(f.bucket)
 	require.NoError(t, os.MkdirAll(filepath.Join(f.geyserDir, container), 0o750))
 	require.NoError(t, os.WriteFile(filepath.Join(f.geyserDir, container, "sealed.bin"), blob, 0o600))
@@ -511,7 +511,7 @@ func TestCDN_SealedPublicObject_StreamsAndRanges(t *testing.T) {
 	sse.SetSegmentSize(64)
 	content := mpBody(64*20+13, 4)
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
-	ct, v := sealedBlob(t, sse, f.tenantID, content)
+	ct, v := sealedBlob(t, sse, crypto.StreamIdentity{Tenant: f.tenantID, Bucket: f.bucket, Key: f.key}, content)
 	_, err := f.server.engine.Put(ctx, f.tenantID+"_"+f.bucket, f.key, bytes.NewReader(ct))
 	require.NoError(t, err)
 	sum := md5.Sum(content) // #nosec G401
@@ -669,7 +669,7 @@ func TestSmartDemotion_SealedObject_CopiedAtItsStoredLength(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM tenant_key_versions WHERE tenant_id = $1`, f.tenantID) })
 	body := mpBody(3000, 2)
-	blob, v := sealedBlob(t, sse, f.tenantID, body)
+	blob, v := sealedBlob(t, sse, crypto.StreamIdentity{Tenant: f.tenantID, Bucket: "b", Key: "sealed.bin"}, body)
 	h := f.object("b", "sealed.bin", int64(len(body)), 60, 60)
 	_, err = f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $3, encryption_key_version = $4 WHERE tenant_id = $1 AND object_key = $2`,
 		f.tenantID, h.key, crypto.SSEAlgorithm, v)

@@ -1,6 +1,7 @@
 package crypto
 
-// The streaming SSE codec (WP-R8-5, keystone K1): blob format 0x03.
+// The streaming SSE codec (WP-R8-5, keystone K1): blob formats 0x03 and
+// 0x04 (WP-R8-3 A.2). Every writer seals 0x04; 0x03 blobs still open.
 //
 // Before it, SSE-S3 (0x01/0x02) and SSE-C sealed an object with ONE AES-GCM
 // over the whole plaintext, so every writer held the object (and its
@@ -12,12 +13,24 @@ package crypto
 // (developers.google.com/tink/streaming-aead/aes_gcm_hkdf_streaming) and
 // age's payload (age-encryption.org/v1, "Payload") use:
 //
-//	header   = [0x03][kind u8][kind material][segment_size u32 BE][nonce_prefix 7]
+//	header   = [format][kind u8][kind material][segment_size u32 BE][nonce_prefix 7]
+//	format   = 0x04 (every writer since WP-R8-3 A.2) | 0x03 (before; opened only)
 //	kind 0x01 SSE-S3: material = [key_version u32 BE][ML-KEM-768 ciphertext 1088]
 //	kind 0x02 SSE-C:  material = [salt 16]
 //	body     = segment_0 ‖ … ‖ segment_{n-1}
-//	segment_i = AES-256-GCM(DEK, nonce_i, aad = header, plaintext_i)  (ct ‖ tag 16)
+//	segment_i = AES-256-GCM(DEK, nonce_i, aad, plaintext_i)  (ct ‖ tag 16)
+//	aad      = 0x04: header ‖ "vaultaire-sse-identity-v4" ‖ len‖tenant ‖ len‖bucket ‖ len‖key (len u32 BE)
+//	           0x03: header
 //	nonce_i  = nonce_prefix(7) ‖ i (u32 BE) ‖ last (0x01 on the final segment, else 0x00)
+//
+// The two formats differ only in their first byte and their AAD: a 0x04
+// segment is authentic only as the object it was sealed for (StreamIdentity:
+// tenant, bucket, key — the KEY, never the blob's address, so a retained
+// version and a re-addressed blob still open). A 0x03 blob copied to another
+// key's address under the same tenant decrypted and was served as that key
+// (R8-10); a 0x04 one fails at its first segment. The format byte is inside
+// the header, so rewriting 0x04 to 0x03 changes the DEK and the AAD: it fails
+// too.
 //
 // Every segment but the last holds segment_size plaintext bytes; the last
 // holds 0..segment_size (an empty plaintext is one empty final segment, so a
@@ -44,10 +57,14 @@ package crypto
 //     is an error, never an empty object;
 //   - extended (bytes appended after the final segment): the final segment
 //     is then read as a middle one (last = 0) and fails;
-//   - the header changed (kind, key version, KEM ciphertext, segment size,
-//     nonce prefix): the DEK is derived over the header and every segment's
-//     AAD is the header, so the first segment fails; a header naming an
-//     absurd segment size is refused before any allocation.
+//   - the header changed (format, kind, key version, KEM ciphertext, segment
+//     size, nonce prefix): the DEK is derived over the header and every
+//     segment's AAD holds the header, so the first segment fails; a header
+//     naming an absurd segment size is refused before any allocation;
+//   - (0x04) the blob copied to another object's address — another key, another
+//     bucket, another tenant's key store: every segment's AAD holds the
+//     identity it was sealed for, so the first segment fails as the other
+//     object (stream_identity_test.go).
 //
 // The opener verifies a segment before the first byte of its plaintext
 // leaves it, and its constructors (SSEService.Open, OpenStreamRange,
@@ -72,8 +89,12 @@ import (
 )
 
 const (
-	// StreamFormat is the first byte of a streaming blob.
-	StreamFormat byte = 0x03
+	// StreamFormat is the first byte of the streaming blob every writer
+	// seals: 0x04, the identity-bound AAD (WP-R8-3 A.2).
+	StreamFormat byte = 0x04
+	// StreamFormatV3 is the format before it (header-only AAD): opened,
+	// never written.
+	StreamFormatV3 byte = 0x03
 	// StreamKindSSES3 / StreamKindSSEC are the header's kind byte.
 	StreamKindSSES3 byte = 0x01
 	StreamKindSSEC  byte = 0x02
@@ -103,7 +124,58 @@ const (
 
 	sseStreamInfo  = "vaultaire-sse-stream-v3"
 	ssecStreamInfo = "vaultaire-sse-c-stream-v3"
+	// streamIdentityLabel separates the header from the identity in a 0x04
+	// AAD.
+	streamIdentityLabel = "vaultaire-sse-identity-v4"
 )
+
+// IsStreamFormat reports whether b is the first byte of a streaming blob
+// (0x03 or 0x04).
+func IsStreamFormat(b byte) bool { return b == StreamFormat || b == StreamFormatV3 }
+
+// StreamIdentity is the object a 0x04 blob is sealed for: the tenant, the
+// bucket and the KEY (never the blob's address — a retained version, a
+// re-addressed or re-encrypted blob of the key keeps its identity).
+type StreamIdentity struct {
+	Tenant, Bucket, Key string
+}
+
+// ErrStreamIdentity is a seal, or an open of a 0x04 blob, without a whole
+// identity: a caller's bug, never the blob's.
+var ErrStreamIdentity = errors.New("sse stream: the object identity (tenant, bucket, key) is incomplete")
+
+func (id StreamIdentity) check() error {
+	if id.Tenant == "" || id.Bucket == "" || id.Key == "" {
+		return fmt.Errorf("%w: tenant %q, bucket %q, key %q", ErrStreamIdentity, id.Tenant, id.Bucket, id.Key)
+	}
+	return nil
+}
+
+// streamAAD is every segment's associated data: the header, and for a 0x04
+// header the identity, each field length-prefixed (so "a"+"bc" ≠ "ab"+"c").
+func streamAAD(header []byte, id StreamIdentity) []byte {
+	if len(header) == 0 || header[0] != StreamFormat {
+		return header
+	}
+	aad := make([]byte, 0, len(header)+len(streamIdentityLabel)+12+len(id.Tenant)+len(id.Bucket)+len(id.Key))
+	aad = append(append(aad, header...), streamIdentityLabel...)
+	for _, f := range []string{id.Tenant, id.Bucket, id.Key} {
+		aad = binary.BigEndian.AppendUint32(aad, uint32(len(f))) // #nosec G115 -- names are far below 4 GiB
+		aad = append(aad, f...)
+	}
+	return aad
+}
+
+// openAAD is the AAD a blob with header h opens under: a 0x04 blob needs the
+// whole identity.
+func openAAD(h *StreamHeader, id StreamIdentity) ([]byte, error) {
+	if h.Format == StreamFormat {
+		if err := id.check(); err != nil {
+			return nil, err
+		}
+	}
+	return streamAAD(h.Raw, id), nil
+}
 
 // ErrStreamCorrupt is a streaming blob that does not authenticate: a segment
 // changed, moved, dropped, duplicated, truncated or appended to, or a header
@@ -128,9 +200,10 @@ func StreamCiphertextLength(headerLen, segmentSize int, size int64) int64 {
 	return int64(headerLen) + size + StreamSegments(size, segmentSize)*streamTagSize
 }
 
-// StreamHeader is a parsed 0x03 header.
+// StreamHeader is a parsed 0x03 / 0x04 header.
 type StreamHeader struct {
 	Raw         []byte
+	Format      byte // 0x03 or 0x04
 	Kind        byte
 	KeyVersion  int    // SSE-S3
 	KEMCipher   []byte // SSE-S3
@@ -154,8 +227,8 @@ func streamHeaderLen(kind byte) (int, error) {
 // hold more bytes: a ranged reader's first fetch). The header is only
 // authenticated by the first segment that opens under it.
 func ParseStreamHeader(b []byte) (*StreamHeader, error) {
-	if len(b) < 2 || b[0] != StreamFormat {
-		return nil, fmt.Errorf("%w: not a 0x03 blob", ErrStreamCorrupt)
+	if len(b) < 2 || !IsStreamFormat(b[0]) {
+		return nil, fmt.Errorf("%w: not a streaming (0x03/0x04) blob", ErrStreamCorrupt)
 	}
 	n, err := streamHeaderLen(b[1])
 	if err != nil {
@@ -165,7 +238,7 @@ func ParseStreamHeader(b []byte) (*StreamHeader, error) {
 		return nil, fmt.Errorf("%w: header cut at %d of %d bytes", ErrStreamCorrupt, len(b), n)
 	}
 	raw := append([]byte(nil), b[:n]...)
-	h := &StreamHeader{Raw: raw, Kind: raw[1]}
+	h := &StreamHeader{Raw: raw, Format: raw[0], Kind: raw[1]}
 	off := 2
 	switch h.Kind {
 	case StreamKindSSES3:
@@ -190,7 +263,7 @@ func ParseStreamHeader(b []byte) (*StreamHeader, error) {
 	return h, nil
 }
 
-// ReadStreamHeader reads exactly one header from r (whose 0x03 byte has NOT
+// ReadStreamHeader reads exactly one header from r (whose format byte has NOT
 // been consumed).
 func ReadStreamHeader(r io.Reader) (*StreamHeader, error) {
 	var lead [2]byte
@@ -210,13 +283,22 @@ func ReadStreamHeader(r io.Reader) (*StreamHeader, error) {
 }
 
 // newStreamHeader builds a header of a kind around its material, with a
-// fresh nonce prefix.
+// fresh nonce prefix, in the format every writer seals.
 func newStreamHeader(kind byte, material []byte, segmentSize int) ([]byte, error) {
+	return newStreamHeaderFormat(StreamFormat, kind, material, segmentSize)
+}
+
+// newStreamHeaderFormat is newStreamHeader in a given format (tests make 0x03
+// blobs with it).
+func newStreamHeaderFormat(format, kind byte, material []byte, segmentSize int) ([]byte, error) {
 	if segmentSize < minStreamSegment || segmentSize > maxStreamSegment {
 		return nil, fmt.Errorf("sse stream: segment size %d out of bounds", segmentSize)
 	}
+	if !IsStreamFormat(format) {
+		return nil, fmt.Errorf("sse stream: format 0x%02x", format)
+	}
 	h := make([]byte, 0, 2+len(material)+streamTail)
-	h = append(h, StreamFormat, kind)
+	h = append(h, format, kind)
 	h = append(h, material...)
 	h = binary.BigEndian.AppendUint32(h, uint32(segmentSize)) // #nosec G115 -- bounded above
 	prefix := make([]byte, streamNoncePrefixSize)
@@ -264,6 +346,7 @@ type streamSealer struct {
 	src       io.Reader
 	aead      cipher.AEAD
 	header    []byte
+	aad       []byte
 	prefix    []byte
 	seg       int
 	remaining int64
@@ -274,7 +357,7 @@ type streamSealer struct {
 	err       error
 }
 
-func newStreamSealer(src io.Reader, aead cipher.AEAD, header []byte, segmentSize int, size int64) (*streamSealer, error) {
+func newStreamSealer(src io.Reader, aead cipher.AEAD, header, aad []byte, segmentSize int, size int64) (*streamSealer, error) {
 	if size < 0 {
 		return nil, fmt.Errorf("sse stream: negative size %d", size)
 	}
@@ -283,7 +366,7 @@ func newStreamSealer(src io.Reader, aead cipher.AEAD, header []byte, segmentSize
 		return nil, fmt.Errorf("sse stream: %d bytes is more than %d segments", size, maxStreamSegments)
 	}
 	return &streamSealer{
-		src: src, aead: aead, header: header, prefix: header[len(header)-streamNoncePrefixSize:],
+		src: src, aead: aead, header: header, aad: aad, prefix: header[len(header)-streamNoncePrefixSize:],
 		seg: segmentSize, remaining: size, n: n,
 		pt: make([]byte, segmentSize), out: make([]byte, 0, segmentSize+streamTagSize),
 		pending: header,
@@ -336,7 +419,7 @@ func (s *streamSealer) sealNext() error {
 		}
 	}
 	streamNonce(s.nonce[:], s.prefix, uint32(s.i), last) // #nosec G115 -- n ≤ 2^32
-	s.out = s.aead.Seal(s.out[:0], s.nonce[:], s.pt[:want], s.header)
+	s.out = s.aead.Seal(s.out[:0], s.nonce[:], s.pt[:want], s.aad)
 	s.pending = s.out
 	s.i++
 	if last {
@@ -352,7 +435,7 @@ func (s *streamSealer) sealNext() error {
 type streamOpener struct {
 	src        io.Reader
 	aead       cipher.AEAD
-	header     []byte
+	aad        []byte
 	prefix     []byte
 	seg        int
 	i          int64
@@ -368,9 +451,9 @@ type streamOpener struct {
 	err        error
 }
 
-func newStreamOpener(src io.Reader, aead cipher.AEAD, h *StreamHeader) *streamOpener {
+func newStreamOpener(src io.Reader, aead cipher.AEAD, h *StreamHeader, aad []byte) *streamOpener {
 	return &streamOpener{
-		src: src, aead: aead, header: h.Raw, prefix: h.NoncePrefix, seg: h.SegmentSize,
+		src: src, aead: aead, aad: aad, prefix: h.NoncePrefix, seg: h.SegmentSize,
 		finalIndex: -1, stopAfter: -1,
 		buf: make([]byte, h.SegmentSize+streamTagSize+1),
 		pt:  make([]byte, 0, h.SegmentSize),
@@ -439,7 +522,7 @@ func (o *streamOpener) openNext() error {
 		return fmt.Errorf("%w: segment %d cut short", ErrStreamCorrupt, o.i)
 	}
 	streamNonce(o.nonce[:], o.prefix, uint32(o.i), last) // #nosec G115 -- bounded above
-	pt, err := o.aead.Open(o.pt[:0], o.nonce[:], ct, o.header)
+	pt, err := o.aead.Open(o.pt[:0], o.nonce[:], ct, o.aad)
 	if err != nil {
 		return fmt.Errorf("%w: segment %d", ErrStreamCorrupt, o.i)
 	}
@@ -495,8 +578,8 @@ func segmentPlainLen(size, seg, i int64) int64 {
 // openRange opens the segments of rg read from src (the bytes at
 // rg.CipherOffset), verifies the first before returning, and yields exactly
 // rg.Length plaintext bytes.
-func openRange(src io.Reader, aead cipher.AEAD, h *StreamHeader, size int64, rg StreamRange) (io.Reader, error) {
-	o := newStreamOpener(src, aead, h)
+func openRange(src io.Reader, aead cipher.AEAD, h *StreamHeader, aad []byte, size int64, rg StreamRange) (io.Reader, error) {
+	o := newStreamOpener(src, aead, h, aad)
 	n := StreamSegments(size, h.SegmentSize)
 	o.i, o.finalIndex, o.stopAfter = rg.FirstSegment, n-1, rg.LastSegment
 	o.lastLen = int(segmentPlainLen(size, int64(h.SegmentSize), n-1)) + streamTagSize
@@ -509,7 +592,7 @@ func openRange(src io.Reader, aead cipher.AEAD, h *StreamHeader, size int64, rg 
 	return io.LimitReader(o, rg.Length), nil
 }
 
-// StreamRangeOpener opens planned ranges of ONE 0x03 blob under a key
+// StreamRangeOpener opens planned ranges of ONE streaming blob under a key
 // derived once — a parallel ranged read opens many ranges of the same blob
 // (Prompt 8 Part B) and an SSE-C reader zeroes the customer's key as soon
 // as the opener exists. Safe for concurrent use: AES-GCM's Open keeps no
@@ -517,6 +600,7 @@ func openRange(src io.Reader, aead cipher.AEAD, h *StreamHeader, size int64, rg 
 type StreamRangeOpener struct {
 	aead cipher.AEAD
 	h    *StreamHeader
+	aad  []byte
 	ssec bool
 }
 
@@ -528,7 +612,7 @@ func (o *StreamRangeOpener) Header() *StreamHeader { return o.h }
 // first segment is verified before it returns; for SSE-C a first segment
 // that does not open is ErrSSECKeyMismatch, as SSECOpenRange answers.
 func (o *StreamRangeOpener) OpenRange(size int64, rg StreamRange, src io.Reader) (io.Reader, error) {
-	r, err := openRange(src, o.aead, o.h, size, rg)
+	r, err := openRange(src, o.aead, o.h, o.aad, size, rg)
 	if err != nil && o.ssec && errors.Is(err, ErrStreamCorrupt) {
 		return nil, ErrSSECKeyMismatch
 	}
