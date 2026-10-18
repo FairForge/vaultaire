@@ -27,7 +27,7 @@ func codecSeal(t *testing.T, pt []byte, seg int) []byte {
 	require.NoError(t, err)
 	aead, err := streamAEAD(codecSecret, salt, ssecStreamInfo, header)
 	require.NoError(t, err)
-	s, err := newStreamSealer(bytes.NewReader(pt), aead, header, seg, int64(len(pt)))
+	s, err := newStreamSealer(bytes.NewReader(pt), aead, header, header, seg, int64(len(pt)))
 	require.NoError(t, err)
 	blob, err := io.ReadAll(s)
 	require.NoError(t, err)
@@ -46,7 +46,7 @@ func codecOpen(blob []byte) (io.Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	o := newStreamOpener(src, aead, h)
+	o := newStreamOpener(src, aead, h, h.Raw)
 	if err := o.prime(); err != nil {
 		return nil, err
 	}
@@ -60,6 +60,9 @@ func readUntilErr(r io.Reader) ([]byte, error) {
 	_, err := io.Copy(&out, r)
 	return out.Bytes(), err
 }
+
+// tid is an object identity of tenant for the codec tests.
+func tid(tenant string) StreamIdentity { return StreamIdentity{Tenant: tenant, Bucket: "b", Key: "k"} }
 
 func randBytes(n int) []byte {
 	b := make([]byte, n)
@@ -101,12 +104,12 @@ func TestStream_SealerHoldsTheSourceToItsSize(t *testing.T) {
 	aead, err := streamAEAD(codecSecret, salt, ssecStreamInfo, header)
 	require.NoError(t, err)
 
-	short, err := newStreamSealer(bytes.NewReader(randBytes(100)), aead, header, 64, 200)
+	short, err := newStreamSealer(bytes.NewReader(randBytes(100)), aead, header, header, 64, 200)
 	require.NoError(t, err)
 	_, err = io.ReadAll(short)
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
 
-	long, err := newStreamSealer(bytes.NewReader(randBytes(300)), aead, header, 64, 200)
+	long, err := newStreamSealer(bytes.NewReader(randBytes(300)), aead, header, header, 64, 200)
 	require.NoError(t, err)
 	_, err = io.ReadAll(long)
 	assert.ErrorContains(t, err, "longer than its declared size")
@@ -114,7 +117,7 @@ func TestStream_SealerHoldsTheSourceToItsSize(t *testing.T) {
 	// An error that comes with the last bytes (a staged part's failed
 	// check) is not lost behind a full buffer.
 	bad := errors.New("part check failed")
-	late, err := newStreamSealer(&lateErrReader{b: randBytes(200), err: bad}, aead, header, 64, 200)
+	late, err := newStreamSealer(&lateErrReader{b: randBytes(200), err: bad}, aead, header, header, 64, 200)
 	require.NoError(t, err)
 	_, err = io.ReadAll(late)
 	assert.ErrorIs(t, err, bad)
@@ -152,7 +155,7 @@ func TestStream_OneGiB_BoundedMemory(t *testing.T) {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	sealer, err := newStreamSealer(io.TeeReader(src, inHash), aead, header, seg, size)
+	sealer, err := newStreamSealer(io.TeeReader(src, inHash), aead, header, header, seg, size)
 	require.NoError(t, err)
 	pr, pw := io.Pipe()
 	written := make(chan int64, 1)
@@ -165,7 +168,7 @@ func TestStream_OneGiB_BoundedMemory(t *testing.T) {
 	require.NoError(t, err)
 	oa, err := streamAEAD(codecSecret, h.Salt, ssecStreamInfo, h.Raw)
 	require.NoError(t, err)
-	o := newStreamOpener(pr, oa, h)
+	o := newStreamOpener(pr, oa, h, h.Raw)
 	require.NoError(t, o.prime())
 	outHash := sha256.New()
 	n, err := io.Copy(outHash, o)
@@ -332,7 +335,7 @@ func TestStream_RangeAtTheBoundaries(t *testing.T) {
 			aead, err := streamAEAD(codecSecret, h.Salt, ssecStreamInfo, h.Raw)
 			require.NoError(t, err)
 			span := blob[plan.CipherOffset : plan.CipherOffset+plan.CipherLength]
-			r, err := openRange(bytes.NewReader(span), aead, h, size, plan)
+			r, err := openRange(bytes.NewReader(span), aead, h, h.Raw, size, plan)
 			require.NoError(t, err)
 			got, err := io.ReadAll(r)
 			require.NoError(t, err)
@@ -358,11 +361,11 @@ func TestStream_Range_TamperedOrShortSpanFails(t *testing.T) {
 
 	// The span of other segments (shifted by one): the first fails.
 	shifted := blob[plan.CipherOffset+s+streamTagSize : plan.CipherOffset+plan.CipherLength+s+streamTagSize]
-	_, err = openRange(bytes.NewReader(shifted), aead, h, size, plan)
+	_, err = openRange(bytes.NewReader(shifted), aead, h, h.Raw, size, plan)
 	assert.ErrorIs(t, err, ErrStreamCorrupt)
 
 	// A span cut short: the segment is an error, never a short answer.
-	r, err := openRange(bytes.NewReader(span[:len(span)-10]), aead, h, size, plan)
+	r, err := openRange(bytes.NewReader(span[:len(span)-10]), aead, h, h.Raw, size, plan)
 	require.NoError(t, err)
 	_, err = io.ReadAll(r)
 	assert.ErrorIs(t, err, ErrStreamCorrupt)
@@ -380,7 +383,7 @@ func TestSSEStream_SealOpen_KeyVersionInHeader(t *testing.T) {
 	ctx := context.Background()
 	pt := randBytes(3*4096 + 100)
 
-	r, v, err := svc.Seal(ctx, tenantID, bytes.NewReader(pt), int64(len(pt)))
+	r, v, err := svc.Seal(ctx, tid(tenantID), bytes.NewReader(pt), int64(len(pt)))
 	require.NoError(t, err)
 	assert.Equal(t, 1, v)
 	blob, err := io.ReadAll(r)
@@ -393,7 +396,7 @@ func TestSSEStream_SealOpen_KeyVersionInHeader(t *testing.T) {
 
 	_, err = keys.Rotate(ctx, tenantID)
 	require.NoError(t, err)
-	o, err := svc.Open(ctx, tenantID, bytes.NewReader(blob))
+	o, err := svc.Open(ctx, tid(tenantID), bytes.NewReader(blob))
 	require.NoError(t, err, "a blob opens under the version it names, after a rotation too")
 	out, err := io.ReadAll(o)
 	require.NoError(t, err)
@@ -403,7 +406,7 @@ func TestSSEStream_SealOpen_KeyVersionInHeader(t *testing.T) {
 	require.NoError(t, err)
 	plan, err := PlanStreamRange(h, int64(len(pt)), 4090, 20)
 	require.NoError(t, err)
-	rr, err := svc.OpenRange(ctx, tenantID, h, int64(len(pt)), plan,
+	rr, err := svc.OpenRange(ctx, tid(tenantID), h, int64(len(pt)), plan,
 		bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
 	require.NoError(t, err)
 	part, err := io.ReadAll(rr)
@@ -414,7 +417,7 @@ func TestSSEStream_SealOpen_KeyVersionInHeader(t *testing.T) {
 	// fails at the constructor.
 	moved := append([]byte(nil), blob...)
 	binary.BigEndian.PutUint32(moved[2:6], 2)
-	_, err = svc.Open(ctx, tenantID, bytes.NewReader(moved))
+	_, err = svc.Open(ctx, tid(tenantID), bytes.NewReader(moved))
 	assert.ErrorIs(t, err, ErrStreamCorrupt)
 }
 
@@ -424,11 +427,11 @@ func TestSSEStream_WrongTenantFails(t *testing.T) {
 	ctx := context.Background()
 	_, err := svc.Current(ctx, tenant2)
 	require.NoError(t, err)
-	r, _, err := svc.Seal(ctx, tenant1, bytes.NewReader([]byte("secret")), 6)
+	r, _, err := svc.Seal(ctx, tid(tenant1), bytes.NewReader([]byte("secret")), 6)
 	require.NoError(t, err)
 	blob, err := io.ReadAll(r)
 	require.NoError(t, err)
-	_, err = svc.Open(ctx, tenant2, bytes.NewReader(blob))
+	_, err = svc.Open(ctx, tid(tenant2), bytes.NewReader(blob))
 	assert.Error(t, err)
 }
 
@@ -442,7 +445,7 @@ func TestSSEStream_OldBlobs_0x01_0x02_StillOpen(t *testing.T) {
 
 	v2, _, err := legacyEncryptV2(ctx, svc, tenantID, []byte("a 0x02 blob"))
 	require.NoError(t, err)
-	r, err := svc.Open(ctx, tenantID, bytes.NewReader(v2))
+	r, err := svc.Open(ctx, tid(tenantID), bytes.NewReader(v2))
 	require.NoError(t, err)
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -451,23 +454,25 @@ func TestSSEStream_OldBlobs_0x01_0x02_StillOpen(t *testing.T) {
 	kv1, err := keys.Version(ctx, tenantID, 1)
 	require.NoError(t, err)
 	v1 := legacyEncryptV1(t, kv1, []byte("a 0x01 blob"))
-	r, err = svc.Open(ctx, tenantID, bytes.NewReader(v1))
+	r, err = svc.Open(ctx, tid(tenantID), bytes.NewReader(v1))
 	require.NoError(t, err)
 	got, err = io.ReadAll(r)
 	require.NoError(t, err)
 	assert.Equal(t, "a 0x01 blob", string(got))
 
-	s, _, err := svc.Seal(ctx, tenantID, bytes.NewReader([]byte("new")), 3)
+	s, _, err := svc.Seal(ctx, tid(tenantID), bytes.NewReader([]byte("new")), 3)
 	require.NoError(t, err)
-	_, err = svc.Open(ctx, tenantID, s)
+	_, err = svc.Open(ctx, tid(tenantID), s)
 	require.NoError(t, err)
 
-	assert.Equal(t, map[string]int{"0x01": 1, "0x02": 1, "0x03": 1}, seen)
+	assert.Equal(t, map[string]int{"0x01": 1, "0x02": 1, "0x04": 1}, seen, "a new seal is 0x04")
 
-	_, err = svc.DecryptBytes(ctx, tenantID, []byte{StreamFormat, 1, 2})
-	assert.Error(t, err, "a 0x03 blob never goes through the whole-buffer opener")
-	_, err = svc.Open(ctx, tenantID, bytes.NewReader(nil))
+	for _, f := range []byte{StreamFormatV3, StreamFormat} {
+		_, err = svc.DecryptBytes(ctx, tenantID, []byte{f, 1, 2})
+		assert.Error(t, err, "a streaming blob never goes through the whole-buffer opener")
+	}
+	_, err = svc.Open(ctx, tid(tenantID), bytes.NewReader(nil))
 	assert.Error(t, err)
-	_, err = svc.Open(ctx, tenantID, bytes.NewReader([]byte{0x7f, 1, 2, 3}))
+	_, err = svc.Open(ctx, tid(tenantID), bytes.NewReader([]byte{0x7f, 1, 2, 3}))
 	assert.True(t, err != nil && !errors.Is(err, io.EOF))
 }

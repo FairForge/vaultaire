@@ -17,6 +17,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// ssecTestID is the object the SSE-C codec tests seal for.
+var ssecTestID = StreamIdentity{Tenant: "t", Bucket: "b", Key: "k"}
+
 func testSSECKey(t *testing.T) []byte {
 	t.Helper()
 	key := make([]byte, 32)
@@ -226,7 +229,7 @@ func TestSSECStream_RoundTripRangeWrongKey(t *testing.T) {
 	pt := make([]byte, 3*StreamSegmentSize+777)
 	_, _ = rand.Read(pt)
 
-	r, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	r, err := SSECSeal(key, ssecTestID, bytes.NewReader(pt), int64(len(pt)))
 	require.NoError(t, err)
 	blob, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -234,7 +237,7 @@ func TestSSECStream_RoundTripRangeWrongKey(t *testing.T) {
 	assert.Equal(t, StreamFormat, blob[0])
 	assert.Equal(t, StreamKindSSEC, blob[1])
 
-	o, err := SSECOpen(key, bytes.NewReader(blob))
+	o, err := SSECOpen(key, ssecTestID, bytes.NewReader(blob))
 	require.NoError(t, err)
 	got, err := io.ReadAll(o)
 	require.NoError(t, err)
@@ -244,16 +247,16 @@ func TestSSECStream_RoundTripRangeWrongKey(t *testing.T) {
 	require.NoError(t, err)
 	plan, err := PlanStreamRange(h, int64(len(pt)), StreamSegmentSize-5, 10)
 	require.NoError(t, err)
-	rr, err := SSECOpenRange(key, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
+	rr, err := SSECOpenRange(key, ssecTestID, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
 	require.NoError(t, err)
 	part, err := io.ReadAll(rr)
 	require.NoError(t, err)
 	assert.Equal(t, pt[StreamSegmentSize-5:StreamSegmentSize+5], part)
 
 	wrong := testSSECKey(t)
-	_, err = SSECOpen(wrong, bytes.NewReader(blob))
+	_, err = SSECOpen(wrong, ssecTestID, bytes.NewReader(blob))
 	assert.ErrorIs(t, err, ErrSSECKeyMismatch, "decided at the first segment, before any byte")
-	_, err = SSECOpenRange(wrong, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
+	_, err = SSECOpenRange(wrong, ssecTestID, h, int64(len(pt)), plan, bytes.NewReader(blob[plan.CipherOffset:plan.CipherOffset+plan.CipherLength]))
 	assert.ErrorIs(t, err, ErrSSECKeyMismatch)
 }
 
@@ -262,9 +265,9 @@ func TestSSECStream_RoundTripRangeWrongKey(t *testing.T) {
 func TestSSECStream_SameKeySameBytes_DifferentBlobs(t *testing.T) {
 	key := testSSECKey(t)
 	pt := []byte("the same plaintext under the same customer key")
-	a, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	a, err := SSECSeal(key, ssecTestID, bytes.NewReader(pt), int64(len(pt)))
 	require.NoError(t, err)
-	b, err := SSECSeal(key, bytes.NewReader(pt), int64(len(pt)))
+	b, err := SSECSeal(key, ssecTestID, bytes.NewReader(pt), int64(len(pt)))
 	require.NoError(t, err)
 	ab, _ := io.ReadAll(a)
 	bb, _ := io.ReadAll(b)
@@ -298,7 +301,7 @@ func TestSSECStream_OldBlobAndTheMagicCollision(t *testing.T) {
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	assert.Equal(t, pt, got, "the row said old format: opened as one")
-	_, err = SSECOpen(key, bytes.NewReader(old))
+	_, err = SSECOpen(key, ssecTestID, bytes.NewReader(old))
 	assert.Error(t, err, "read as a streaming blob it does not open: the row is what decides")
 
 	assert.True(t, IsSSEC(SSECAlgorithm) && IsSSEC(SSECAlgorithmV3))

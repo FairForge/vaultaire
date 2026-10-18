@@ -258,7 +258,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 			whole:  func() (io.ReadCloser, error) { return s.engine.Get(ctx, container, blob) },
 			ranged: func(off, n int64) (io.ReadCloser, error) { return s.engine.GetRange(ctx, container, blob, off, n) },
 		}
-		reader, err = openSealed(ctx, sseS3Opener{svc: s.sseService, tenantID: tenantID}, src, req)
+		reader, err = openSealed(ctx, sseS3Opener{svc: s.sseService, id: crypto.StreamIdentity{Tenant: tenantID, Bucket: bucket, Key: key}}, src, req)
 	} else {
 		reader, err = s.engine.Get(ctx, container, blob)
 	}

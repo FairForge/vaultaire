@@ -237,7 +237,10 @@ func (k *KeyReencryptRunner) reencryptObject(ctx context.Context, ce *engine.Cor
 	} else if v != c.keyVersion {
 		return "failed", fmt.Errorf("the blob is sealed under v%d, its row says v%d", v, c.keyVersion)
 	}
-	plaintext, err := k.sse.Open(tctx, c.tenantID, br)
+	// The blob was sealed for its KEY (a retained version's too, whatever
+	// its address), and is re-sealed for it — a 0x03 blob comes out 0x04.
+	id := crypto.StreamIdentity{Tenant: c.tenantID, Bucket: c.bucket, Key: c.key}
+	plaintext, err := k.sse.Open(tctx, id, br)
 	if err != nil {
 		return "failed", fmt.Errorf("open under v%d: %w", c.keyVersion, err)
 	}
@@ -245,7 +248,7 @@ func (k *KeyReencryptRunner) reencryptObject(ctx context.Context, ce *engine.Cor
 	// 2. Seal under the newest version as it streams, at a new address on
 	// the same backend; the plaintext's MD5 is taken on the way.
 	hasher := md5.New() // #nosec G401 -- S3 ETag semantics
-	sealer, err := newSSEWriteSealer(tctx, k.sse, c.tenantID,
+	sealer, err := newSSEWriteSealer(tctx, k.sse, id,
 		io.TeeReader(&plaintextSized{r: plaintext, want: c.size}, hasher), c.size)
 	if err != nil {
 		return "failed", fmt.Errorf("seal under the newest version: %w", err)

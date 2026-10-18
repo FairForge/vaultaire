@@ -599,7 +599,7 @@ func readStreamHeaderRange(ctx context.Context, rg engine.VersionedRangeGetter, 
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, fmt.Errorf("sealed header: read: %w", err)
 	}
-	if k == 0 || hb[0] != crypto.StreamFormat {
+	if k == 0 || !crypto.IsStreamFormat(hb[0]) {
 		return nil, errSealedLegacy
 	}
 	h, err := crypto.ParseStreamHeader(hb[:k])

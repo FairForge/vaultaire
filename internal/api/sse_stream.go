@@ -38,11 +38,11 @@ import (
 // Registered in initMetrics, every format at 0.
 var sseBlobsOpened = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_sse_blobs_opened_total",
-	Help: "SSE-S3 blobs opened, by blob format (0x01/0x02: whole-buffer, before WP-R8-5; 0x03: streaming).",
+	Help: "SSE-S3 blobs opened, by blob format (0x01/0x02: whole-buffer, before WP-R8-5; 0x03: streaming, header-only AAD; 0x04: streaming, the object's identity in the AAD — WP-R8-3).",
 }, []string{"format"})
 
 func init() {
-	for _, f := range []string{"0x01", "0x02", "0x03"} {
+	for _, f := range []string{"0x01", "0x02", "0x03", "0x04"} {
 		sseBlobsOpened.WithLabelValues(f)
 	}
 }
@@ -86,11 +86,13 @@ type sseWriteSealer struct {
 	version int
 }
 
-// newSSEWriteSealer starts a seal of size bytes of src under the tenant's
-// current key version. It reads nothing from src before the first Read; it
-// fails only when the tenant key cannot be had.
-func newSSEWriteSealer(ctx context.Context, svc *crypto.SSEService, tenantID string, src io.Reader, size int64) (*sseWriteSealer, error) {
-	r, v, err := svc.Seal(ctx, tenantID, src, size)
+// newSSEWriteSealer starts a seal of size bytes of src for the object id
+// (the DESTINATION's tenant, bucket and key: the 0x04 AAD binds them) under
+// the tenant's current key version. It reads nothing from src before the
+// first Read; it fails only when the tenant key cannot be had or the
+// identity is incomplete.
+func newSSEWriteSealer(ctx context.Context, svc *crypto.SSEService, id crypto.StreamIdentity, src io.Reader, size int64) (*sseWriteSealer, error) {
+	r, v, err := svc.Seal(ctx, id, src, size)
 	if err != nil {
 		return nil, fmt.Errorf("seal: %w", err)
 	}
@@ -124,25 +126,27 @@ type blobOpener interface {
 	rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error)
 }
 
-// sseS3Opener opens SSE-S3 blobs of one tenant: 0x03, or 0x01/0x02 by the
-// compatibility opener (their first bytes are those markers).
+// sseS3Opener opens the SSE-S3 blob of one object (id: its tenant, bucket
+// and KEY — a version or a re-addressed blob of the key has the key's): 0x04
+// as that object only, 0x03, or 0x01/0x02 by the compatibility opener (their
+// first bytes are those markers).
 type sseS3Opener struct {
-	svc      *crypto.SSEService
-	tenantID string
+	svc *crypto.SSEService
+	id  crypto.StreamIdentity
 }
 
 func (o sseS3Opener) whole(ctx context.Context, src io.Reader) (io.Reader, error) {
-	return o.svc.Open(ctx, o.tenantID, src)
+	return o.svc.Open(ctx, o.id, src)
 }
 
 func (o sseS3Opener) rangeOf(ctx context.Context, h *crypto.StreamHeader, size int64, rg crypto.StreamRange, src io.Reader) (io.Reader, error) {
-	return o.svc.OpenRange(ctx, o.tenantID, h, size, rg, src)
+	return o.svc.OpenRange(ctx, o.id, h, size, rg, src)
 }
 
 func (sseS3Opener) streaming() bool { return true }
 
 func (o sseS3Opener) rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error) {
-	return o.svc.RangeOpener(ctx, o.tenantID, h)
+	return o.svc.RangeOpener(ctx, o.id, h)
 }
 
 // sseCOpener opens SSE-C blobs under the customer's key: the format is the
@@ -150,17 +154,18 @@ func (o sseS3Opener) rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*
 type sseCOpener struct {
 	key    []byte
 	legacy bool
+	id     crypto.StreamIdentity // the object (the 0x04 AAD binds it)
 }
 
 func (o sseCOpener) whole(_ context.Context, src io.Reader) (io.Reader, error) {
 	if o.legacy {
 		return crypto.SSECOpenLegacy(o.key, src)
 	}
-	return crypto.SSECOpen(o.key, src)
+	return crypto.SSECOpen(o.key, o.id, src)
 }
 
 func (o sseCOpener) rangeOf(_ context.Context, h *crypto.StreamHeader, size int64, rg crypto.StreamRange, src io.Reader) (io.Reader, error) {
-	return crypto.SSECOpenRange(o.key, h, size, rg, src)
+	return crypto.SSECOpenRange(o.key, o.id, h, size, rg, src)
 }
 
 func (o sseCOpener) streaming() bool { return !o.legacy }
@@ -169,7 +174,7 @@ func (o sseCOpener) rangeOpener(_ context.Context, h *crypto.StreamHeader) (*cry
 	if o.legacy {
 		return nil, errSealedLegacy
 	}
-	return crypto.SSECRangeOpener(o.key, h)
+	return crypto.SSECRangeOpener(o.key, o.id, h)
 }
 
 // sealedSource is where a sealed object's stored bytes are read from.

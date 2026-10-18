@@ -301,7 +301,7 @@ func TestProbe_CDN_SealedBlobOfTheWrongLength(t *testing.T) {
 	sse.SetSegmentSize(64)
 	f.server.sseService = sse
 	content := mpBody(64*10+13, 4)
-	ct, v := sealedBlob(t, sse, f.tenantID, content)
+	ct, v := sealedBlob(t, sse, crypto.StreamIdentity{Tenant: f.tenantID, Bucket: f.bucket, Key: f.key}, content)
 	ctx := common.WithTenantID(context.Background(), f.tenantID)
 	sum := md5hex(content)
 	_, err := f.db.Exec(`UPDATE object_head_cache SET encryption_algorithm = $4, encryption_key_version = $5, size_bytes = $6, etag = $7

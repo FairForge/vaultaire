@@ -586,7 +586,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 					WithSuggestion(parseErr.Error()))
 				return
 			}
-			op = sseCOpener{key: ssecKey, legacy: cachedEncAlgo == crypto.SSECAlgorithm}
+			op = sseCOpener{key: ssecKey, legacy: cachedEncAlgo == crypto.SSECAlgorithm,
+				id: crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: artifact}}
 		} else {
 			if a.sseService == nil {
 				// The row says the blob is SSE-S3 ciphertext and this process
@@ -599,7 +600,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
 			}
-			op = sseS3Opener{svc: a.sseService, tenantID: t.ID}
+			op = sseS3Opener{svc: a.sseService, id: crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: artifact}}
 		}
 		if rh := r.Header.Get("Range"); rh != "" && !errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 			rng, parseErr := parseRangeHeader(rh, cachedSize)
@@ -1171,7 +1172,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// long of its size fails the sealer's read (the client's 400), a
 		// Content-MD5 mismatch retires the written blob below — as on the
 		// plain path.
-		sealed, encErr := crypto.SSECSeal(ssecKey, hashingBody, metadataSize)
+		sealed, encErr := crypto.SSECSeal(ssecKey, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, hashingBody, metadataSize)
 		clear(ssecKey)
 		if encErr != nil {
 			a.logger.Error("SSE-C encryption failed", zap.Error(encErr))
@@ -1192,7 +1193,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// source failure as the caller's (IncompleteBody, no breaker
 			// charge); a Content-MD5 mismatch is found after the write and
 			// retires the orphan below, as on the plain path.
-			sealed, keyVersion, encErr := a.sseService.Seal(r.Context(), t.ID, hashingBody, metadataSize)
+			sealed, keyVersion, encErr := a.sseService.Seal(r.Context(), crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, hashingBody, metadataSize)
 			if encErr != nil {
 				a.logger.Error("SSE-S3: tenant key unavailable", zap.Error(encErr))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
