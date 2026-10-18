@@ -276,6 +276,37 @@ func (c *chunkStore) delete(ctx context.Context, a chunkAddr) error {
 	return err
 }
 
+// errChunkCannotList: the backend's driver cannot list a container in pages
+// (engine.PageLister) — the chunk orphan sweep skips it.
+var errChunkCannotList = errors.New("chunk: the backend cannot list its chunks in pages")
+
+// listPage lists one page of the chunk container at the one address on
+// backend — keys `_chunks/…` after startAfter, with their size and
+// last-modified time (the chunk orphan sweep, WP-R8-2 B.2). Asked of the
+// backend's driver directly: the engine's breaker is read first by the
+// caller (CanAsk), never charged by a listing.
+func (c *chunkStore) listPage(ctx context.Context, backend, startAfter string, limit int) ([]engine.ListedObject, bool, error) {
+	ge, ok := c.eng.(interface {
+		GetDriver(name string) (engine.Driver, bool)
+	})
+	if !ok {
+		return nil, false, errChunkCannotList
+	}
+	d, ok := ge.GetDriver(backend)
+	if !ok {
+		return nil, false, fmt.Errorf("list chunks on %s: %w", backend, engine.ErrBackendNotRegistered)
+	}
+	pl, ok := d.(engine.PageLister)
+	if !ok {
+		return nil, false, errChunkCannotList
+	}
+	objs, more, err := pl.ListPage(engine.ChunkContext(ctx), chunkContainer, chunkKeyPrefix, startAfter, limit)
+	if err != nil {
+		return nil, false, fmt.Errorf("list chunks on %s: %w", backend, err)
+	}
+	return objs, more, nil
+}
+
 func shortHash(h string) string {
 	if len(h) > 16 {
 		return h[:16]

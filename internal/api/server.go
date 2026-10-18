@@ -120,6 +120,8 @@ type Server struct {
 	chunkMover         *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
 	routingTruth       *RoutingTruthChecker   // boot check + the routing_truth job (WP-R7-5, routing_truth.go)
 	chunkMoveGate      jobGate                // one chunk move at a time
+	chunkOrphans       *ChunkOrphanSweeper    // the chunk_orphans job (WP-R8-2 B.2) + its dry run (POST /admin/chunk-orphans)
+	chunkOrphansGate   jobGate                // one dry run at a time
 	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
 	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
@@ -355,6 +357,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
+	// Chunk blobs no index row names (WP-R8-2 B.2).
+	s.chunkOrphans = NewChunkOrphanSweeper(s.db, s.engine, logger)
 	// The retired_blobs collector (WP-R2-1 Part C): the one deleter of
 	// displaced whole-object blobs.
 	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, s.gci, logger)
@@ -1021,6 +1025,10 @@ func (s *Server) registerComplianceRoutes() {
 		// Chunk blobs written before WP-R8-7 → the one address. Dry run by
 		// default; ?backend= is required.
 		r.Post("/chunk-move", s.requireAdmin(s.handleChunkMove))
+		// Chunk blobs no index row names (WP-R8-2 B.2): the dry run, the
+		// candidates per backend with their sizes. A real run is the job's
+		// (POST /jobs/chunk_orphans/run).
+		r.Post("/chunk-orphans", s.requireAdmin(s.handleChunkOrphans))
 		// Tenant key rotation (WP-R8-1). Idempotency-Key replays the first
 		// answer: a retried request does not rotate twice.
 		_, im := s.jsonAPIMiddleware()

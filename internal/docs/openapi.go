@@ -1408,6 +1408,28 @@ func generateAdminPaths() map[string]*PathItem {
 				queryParam("dry_run", "Report only (the default). `false` moves and deletes", &Schema{Type: "boolean", Default: true}),
 				queryParam("tenant", "Repeatable. An extra tenant id to look under, an erased tenant whose `account.erased` row shows `chunk_blobs_left` > 0", &Schema{Type: "string"}))),
 		},
+		"/api/v1/admin/chunk-orphans": {
+			Post: admin(withParams(jsonOp("Admin", "Report chunk blobs no index row names", "AdminChunkOrphans",
+				"The dry run of the daily `chunk_orphans` job (WP-R8-2): on every registered backend that holds chunk rows, lists the chunk container "+
+					"at the one address (`t-_global/_global/_chunks/…` on a fixed-bucket backend) and reports the blobs no `global_content_index` row and "+
+					"no `retired_chunk_blobs` row names that are older than `CHUNK_ORPHAN_GRACE` (24 h), with their sizes (≤ 1,000 listed per backend), "+
+					"and the abandoned `pending` claims. Nothing is erased and no cursor moves; the erasing run is the job's "+
+					"(`POST /api/v1/admin/jobs/chunk_orphans/run`). A backend that cannot be asked is named in `not_swept`. Writes an "+
+					"`admin.chunk_orphans_dry_run` audit row. No request body.",
+				map[string]Response{
+					"200": jsonResp("What a run would erase, per backend", &Schema{Type: "object", Properties: map[string]*Schema{
+						"dry_run":       {Type: "boolean"},
+						"orphans_found": {Type: "integer", Description: "Orphans past the grace, all backends"},
+						"not_swept":     {Type: "object", Description: "Backend → why it could not be asked"},
+						"backends":      {Type: "object", Description: "Backend → listed, named, retired, young, found, orphan_bytes, pending_found, candidates[{key, size, last_modified}]"},
+					}}),
+					"400": textResp("`dry_run=false`: erase through the job, not this endpoint"),
+					"409": jsonResp("A dry run is already running", ref("JobAlreadyRunning")),
+					"500": textResp("`chunk orphans dry run failed (see the log)`"),
+					"503": textResp("`chunk orphans not available` (no database or engine)"),
+				}),
+				queryParam("dry_run", "Only `true` (the default) is accepted", &Schema{Type: "boolean", Default: true}))),
+		},
 		"/api/v1/admin/tenants/{tenant_id}/encryption-key/rotate": {
 			Parameters: []Parameter{pathParam("tenant_id", "The tenant whose key is rotated")},
 			Post: admin(jsonOp("Admin", "Rotate one tenant's encryption key", "AdminRotateTenantKey",

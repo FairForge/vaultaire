@@ -144,6 +144,11 @@ func (s *Server) initMetrics() {
 		if s.dedupGCRunner != nil {
 			reg.MustRegister(newDedupGCCollector(s.dedupGCRunner))
 		}
+		// The chunk orphan sweep (WP-R8-2 B.2): what it did, and — from
+		// job_runs.result — the orphan bytes it left.
+		if s.chunkOrphans != nil {
+			reg.MustRegister(chunkOrphanOutcomes, newChunkOrphanCollector(s.chunkOrphans))
+		}
 
 		var src engineMetricsSource
 		if s.engine != nil {

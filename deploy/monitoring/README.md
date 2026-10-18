@@ -268,7 +268,7 @@ and `BackendProbeFailing` excludes it).
 copy of an object removed bytes a write of the same key had just stored (the
 log line names tenant, bucket and key; the customer must upload again). The
 other four:
-`JobStale` (a daily job — `inventory`, `dedup_gc`, `retention`,
+`JobStale` (a daily job — `inventory`, `chunk_orphans`, `dedup_gc`, `retention`,
 `account_deletion`, `smart_demotion` — with no success in 36 h, `for: 30m`),
 `PeriodicJobStale` (an hourly job, or the 5-minute access-log delivery, with
 none in 3 h), `JobFailing` (three failed runs of one job in 6 h) and
@@ -300,6 +300,15 @@ count is `vaultaire_dedup_gc_unswept_chunks{backend}`, read from
 `job_runs.result`. No rule pages on it: the run stays `ok` and the chunks stay
 candidates. A count that does not fall after the backend is back is worth a
 look (`POST /api/v1/admin/jobs/dedup_gc/run`).
+
+`chunk_orphans` (WP-R8-2 B.2, daily 01:30 UTC): chunk blobs at the one address
+that no index row names, erased once older than `CHUNK_ORPHAN_GRACE` (24 h).
+`vaultaire_chunk_orphans_total{backend,outcome}` counts what it did (`erased`,
+`failed`, `kept` — a store named it by the locked re-check —, `pending_erased`);
+`vaultaire_chunk_orphan_bytes{backend}` (read from `job_runs.result`) is what the
+last run saw and left: blobs younger than the grace, and deletes that failed.
+No rule pages on either: a run that cannot ask a backend stays `ok` (the
+backend is in `not_swept`). The dry run is `POST /api/v1/admin/chunk-orphans`.
 
 `vaultaire-routing.yml` — routing truth (WP-R7-5). `object_head_cache.backend_name`
 is where an object's bytes are supposed to be; the daily `routing_truth` job
