@@ -10,6 +10,7 @@ PRs:
 
 - **#780**: Part A.
 - **#781**: Part B.
+- **#782**: test-only — the two WP-P14 tests that failed three CI runs today wait for their condition instead of sleeping; CI `max_connections` 1000.
 - this PR: Part 0's clause (RP15-9 in the root CLAUDE.md `job_runs` entry) and this note, docs only.
 
 Start sha: `origin/main` `75afd31` (#779). **No migration** (095 stays reserved for WP-PAY-1). Engine lane; the surfaces are the developer surface's S3 contract (docs/surfaces/DEVELOPER.md) and `docs/ARCHITECTURE_CONTRACT.md` end state 2 (a refusal is a refusal on every path that reaches the bytes).
@@ -88,6 +89,8 @@ PROD_AB_PLACEHOLDER
 | RP16-6 | note | The integrity Error line's field `recorded_etag` carries the `body_md5` digest on a `-N` row; `expected_md5` would read right. | a one-line rename |
 | RP16-7 | note | `shellcheck` is not installed on the box, so `vaultaire-switch_test.sh` reports FAILED there on that check alone (every functional case passes; the whole test passes on the Mac). | operator (`apt install shellcheck`) |
 | RP16-8 | note | The Mac's homebrew golangci-lint (v1.64.8, built with go1.25) cannot lint a go1.26 module, so the pre-commit hook fails; v2.14.0 (CI's) was used. | the hook config could pin v2 |
+| RP16-9 | P3 | **The test DB pools are unbounded.** 66 `sql.Open` sites in the tests, none with `SetMaxOpenConns`; CI's Postgres at 400 connections still answered `too many clients` to `auth` and `database` when `api`, `auth`, `dashboard`, `dashboard/handlers` and `drivers` converged (#781's first run). #782 raises CI to 1000; the fix is one `testutil` opener with a bound and a `t.Cleanup` close, swept over every site. | a test-hygiene WP |
+| RP16-10 | note | **Why today's merges took hours** (the owner's question): a PR is two 7–11 min CI runs (the PR's and the merge group's), serialized by the queue; two #777/#774 tests failed three runs on timing (fixed by #782); a failed merge-group run ejects the PR and clears auto-merge, and nothing re-arms it — #780 sat ejected 85 min because the session's watcher polled the PR's state, not its queue membership (the watcher now re-arms and re-runs, `scratchpad/queuewatch.sh`); and a GitHub Actions incident (15:49 UTC, "critical") held #781's third run queued with no runner. | done; a `gh` alias or a workflow that re-arms auto-merge after an ejection would close the human gap for good |
 | RP15-6 | note | **Owner:** the unit's memory lines (`GOMEMLIMIT=40GiB`, `MemoryHigh=48G`, `MemoryMax=56G`) and `MULTIPART_STAGING_DIR=/opt/vaultaire/data/multipart` (`docs/DEPLOY.md`). | owner |
 | RP15-1, RP15-2, RP15-7, RP15-9, RP16-1 (prod) | — | closed here | — |
 | WP-R3-4 (R4-17), WP-R2-7 | — | closed by #780, #781 | — |
@@ -96,4 +99,4 @@ PROD_AB_PLACEHOLDER
 
 - `/verify` of Part A and Part B against a local server on the private migrated DB `vaultaire_p15` with aws-cli (A: a batch without the code 403 with 3 rows kept, with a valid code all 3 deleted; B: every row of the table above).
 - The full `go test -race ./...` on `vaultaire_p15` (DATABASE_URL): 40 packages ok, exit 0.
-- golangci-lint v2.14.0: 0. `build-and-test` green on both PRs. CI flakes on the way, unrelated to the diffs: Postgres `too many clients` (auth, database) on #781's first run; `TestChunkedPut_WorkerFailureReleasesRefs` ("needs at least one successful store") in #780's first merge group. Both re-run.
+- golangci-lint v2.14.0: 0. `build-and-test` green on both PRs. CI failures on the way, none in the diffs: Postgres `too many clients` (auth, database) on #781's first run (RP16-9); `TestChunkedPut_WorkerFailureReleasesRefs` in #780's first merge group and `TestChunkPutBudget_AWriteDegradesToFewerChunksInFlightRatherThanRefusing` in #781's second run — both again on the main push after #780 merged — fixed in #782 (both tests 5 × `-race` and 3 × `GOMAXPROCS=1` clean on `vaultaire_p15`).
