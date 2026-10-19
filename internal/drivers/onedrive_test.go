@@ -55,19 +55,6 @@ func TestOneDriveDriver_TenantCount(t *testing.T) {
 	assert.Equal(t, 3, d.TenantCount())
 }
 
-func TestOneDriveDriver_PickTenant_SkipsThrottled(t *testing.T) {
-	t1 := &odTenant{name: "t1"}
-	t2 := &odTenant{name: "t2"}
-	t3 := &odTenant{name: "t3"}
-
-	t1.throttledUntil.Store(9999999999)
-
-	d := &OneDriveDriver{tenants: []*odTenant{t1, t2, t3}}
-
-	picked := d.pickTenant()
-	assert.NotEqual(t, "t1", picked.name)
-}
-
 func TestOneDriveDriver_BuildPath(t *testing.T) {
 	d := &OneDriveDriver{}
 	path, err := d.buildPath(testCtxWithTenant("tenant-abc"), "Get", "my-bucket", "path/to/obj.bin")

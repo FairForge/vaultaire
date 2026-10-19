@@ -26,6 +26,8 @@
 #                                                  is kept; WP-R7-6)
 #   vaultaire_lyve_bucket_lock_enabled{region}      1 when stored-<region> has Object Lock or a default retention
 #                                                  (read at boot; WP-R7-7) — lyve is then target-only
+#   vaultaire_permafrost_fleet_mismatch             1 when the OneDrive fleet's TENANT_N order is not the one its
+#                                                  accounts' markers recorded (read at boot; WP-R7-4, R7-09)
 #
 # Triage:
 #   curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/metrics | grep -E '^vaultaire_driver_(hedges|op_seconds_(sum|count))'
@@ -86,3 +88,18 @@ groups:
         annotations:
           summary: "Lyve bucket stored-{{ $labels.region }} has Object Lock enabled — lyve is target-only"
           description: "At boot the Lyve driver read an object-lock configuration (ObjectLockEnabled or a default retention) on stored-{{ $labels.region }}. Every object written there under a default retention is undeletable until it lapses, so lyve is no longer a fail-over destination and cannot be the primary (STORAGE_MODE=lyve stops the boot). Find who enabled it (Lyve console audit), whether a default retention is set (aws s3api get-object-lock-configuration), and what was written since. Never enable a default retention on stored-* (R7-16, docs/reviews/R7-drivers.md)."
+
+      # WP-R7-4 (R7-09): the permafrost fleet's order — TENANT_1..15, gaps
+      # skipped — is not the one its accounts' markers
+      # (vaultaire/_fleet/fingerprint.json) recorded at first boot. Placement
+      # is hash(path) % fleet size over that order, so every object whose home
+      # moved is now read through a walk of the whole fleet. Read at boot;
+      # never blocks it. Warning: reads still work.
+      - alert: PermafrostFleetMismatch
+        expr: vaultaire_permafrost_fleet_mismatch == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The permafrost fleet's account order changed since its markers were written"
+          description: "At boot the OneDrive fleet driver found an account order (TENANT_N slots, gaps skipped) other than the one its accounts' markers recorded: a TENANT_N was removed, reordered or appended. Every object whose home account moved is read through the fleet walk. The boot's Error line 'permafrost fleet fingerprint mismatch' names the diff and the current fingerprint. Restore the TENANT_N order and restart, or rebalance and accept the new order with PERMAFROST_FLEET_ACCEPT=<fingerprint> (internal/drivers/onedrive_README.md § Fleet fingerprint)."

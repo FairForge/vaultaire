@@ -10,9 +10,13 @@
 //   - Multi-tenant fleet: deterministic placement (FNV-1a of path picks the
 //     home account; reads probe home first, then the fleet for pre-placement
 //     data), throttle tracking on every Graph call
-//   - 60MB upload chunks (Microsoft's max, 35% faster than 10MB)
+//   - 60MB upload chunks (Microsoft's max, 35% faster than 10MB), one pooled
+//     buffer per upload in flight
 //   - 4MB read/write buffers
-//   - Decorrelated jitter backoff on 429/503
+//   - Decorrelated jitter backoff on 429/503, bounded like the S3-class
+//     drivers (WP-R7-4): 2 attempts on a request path, 3 under a job, every
+//     wait on ctx
+//   - Ranged downloads through a bounded window (internal/parfetch)
 package drivers
 
 import (
@@ -37,7 +41,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/parfetch"
 	"go.uber.org/zap"
 
 	mrand "math/rand/v2"
@@ -52,6 +58,32 @@ const (
 	odChunkAlign    = 320 * 1024
 
 	odRootFolder = "vaultaire"
+
+	// odRangePart is one ranged read of a large Get; odAdaptiveStreams of
+	// them are held at most (odRangeWindow — 64 MiB at 8 streams, Geyser's
+	// bound).
+	odRangePart = 8 << 20
+
+	// odMaxRetryWait caps one wait between attempts, Retry-After included
+	// (it was honoured unbounded: a 429 with Retry-After: 120 slept 120 s
+	// inside a request).
+	odMaxRetryWait = 30 * time.Second
+
+	// Response-header bounds by request class (RP9-1, WP-R7-4; the bound
+	// invariant in CLAUDE.md): a Graph call is metadata — an S3-class meta
+	// call's 15 s; a CDN range's first byte a GET's 25 s; an upload fragment
+	// is answered after its body, and the LAST one commits the file (the
+	// exception, like a Complete), so 2 min.
+	odGraphHeaderTimeout  = 15 * time.Second
+	odCDNHeaderTimeout    = 25 * time.Second
+	odUploadHeaderTimeout = 2 * time.Minute
+
+	// odProbeConcurrency is the accounts HealthCheck asks at once.
+	odProbeConcurrency = 8
+
+	// odListMaxFolders bounds the folders one List walks per account: a
+	// listing past it is an error, never a truncated answer.
+	odListMaxFolders = 100_000
 )
 
 // Fleet-wide TLS session cache: enables 0-RTT resumption across tenants.
@@ -81,7 +113,6 @@ func odPooledDrain(src io.Reader) {
 // OneDriveDriver implements engine.Driver for a fleet of OneDrive tenants.
 type OneDriveDriver struct {
 	tenants []*odTenant
-	idx     atomic.Uint64
 	logger  *zap.Logger
 }
 
@@ -114,6 +145,13 @@ type odTenant struct {
 	// RateLimit tracking from Microsoft Graph response headers.
 	rateLimitRemaining atomic.Int64
 	rateLimitReset     atomic.Int64
+
+	// probeState is the account's last probe outcome (0 none yet, 1 up, 2
+	// down): HealthCheck logs a change.
+	probeState atomic.Int32
+
+	// wait waits between attempts (nil = odWait); tests record the waits.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // NewOneDriveFleetDriver creates a multi-tenant OneDrive driver.
@@ -195,25 +233,6 @@ func (d *OneDriveDriver) Name() string { return "permafrost" }
 
 func (d *OneDriveDriver) TenantCount() int { return len(d.tenants) }
 
-// pickTenant rotates across the fleet, skipping throttled tenants. Only safe
-// for operations with no placement affinity (HealthCheck). Data operations
-// MUST use tenantsFor: an object lives on exactly ONE fleet account, and
-// rotating reads was the root cause of the 2026-07-30 read-after-write
-// failure — Get asked a different account than Put stored on, and 404'd on
-// data that existed.
-func (d *OneDriveDriver) pickTenant() *odTenant {
-	now := time.Now().Unix()
-	n := len(d.tenants)
-	start := int(d.idx.Add(1) - 1)
-	for i := 0; i < n; i++ {
-		t := d.tenants[(start+i)%n]
-		if t.throttledUntil.Load() <= now {
-			return t
-		}
-	}
-	return d.tenants[start%n]
-}
-
 // homeTenantIndex is the deterministic fleet placement for a path: FNV-1a of
 // the full storage path mod fleet size. Every operation on the same path
 // lands on the same account, restart-stable and config-order-stable as long
@@ -224,7 +243,9 @@ func (d *OneDriveDriver) homeTenantIndex(path string) int {
 	return int(h.Sum32() % uint32(len(d.tenants)))
 }
 
-// tenantsFor returns the fleet ordered for a data operation on path: the
+// tenantsFor returns the fleet ordered for a data operation on path (an object
+// lives on exactly ONE account — a rotating read was the 2026-07-30
+// read-after-write failure): the
 // deterministic home tenant first, then the rest as fallbacks. The fallback
 // probe exists for data written before deterministic placement (the old
 // round-robin Put scattered objects across accounts) — reads walk the fleet
@@ -241,25 +262,42 @@ func (d *OneDriveDriver) tenantsFor(path string) []*odTenant {
 	return ordered
 }
 
-// odStatusError is a Graph answer >= 400 (other than throttling and the
-// retried 5xx): the account, the status and an excerpt of the body.
-type odStatusError struct {
+// odError is a Graph answer >= 400 (other than throttling and the retried
+// 5xx): the account, the status, Graph's error code ({"error":{"code":…}})
+// and an excerpt of the body. Callers classify by Status and Code, never by
+// the text (Prompt 2b.5 F1.1; WP-R7-4 R7-18).
+type odError struct {
 	tenant string
-	status int
+	Status int
+	Code   string
 	body   []byte
 }
 
-func (e *odStatusError) Error() string {
-	return fmt.Sprintf("onedrive [%s] HTTP %d: %s", e.tenant, e.status, e.body)
+func (e *odError) Error() string {
+	return fmt.Sprintf("onedrive [%s] HTTP %d: %s", e.tenant, e.Status, e.body)
 }
 
-// odIsNotFound reports whether a Graph error is an item-absence: a 404 by
-// STATUS. It read "404" in the error text until Prompt 2b.5 F1.1 — and the
-// callers wrap the path into that text, so a key named `404.html` answered
-// with a 500 or a 403 was "absent".
+// newODError reads Graph's error code out of an excerpt of the body.
+func newODError(tenant string, status int, body []byte) *odError {
+	var g struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &g)
+	return &odError{tenant: tenant, Status: status, Code: g.Error.Code, body: body}
+}
+
+// odIsNotFound reports whether a Graph error is an item-absence: a 404 whose
+// code is itemNotFound (or a 404 with no Graph body). It read "404" in the
+// error text until Prompt 2b.5 F1.1 — and the callers wrap the path into
+// that text, so a key named `404.html` answered with a 500 or a 403 was
+// "absent". Another 404 code (ResourceNotFound: the drive or the user gone)
+// is the account's failure, never an object miss.
 func odIsNotFound(err error) bool {
-	var se *odStatusError
-	return errors.As(err, &se) && se.status == http.StatusNotFound
+	var oe *odError
+	return errors.As(err, &oe) && oe.Status == http.StatusNotFound &&
+		(oe.Code == "" || oe.Code == "itemNotFound")
 }
 
 // logFallbackHit records an operation that found its object on a non-home
@@ -330,7 +368,9 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 		return t.streamingChunkedUpload(ctx, driveID, rootID, path, data, options.ContentLength)
 	}
 
-	// Fallback: materialize to determine size
+	// Unknown length: spool it to learn the size (materialize: in memory up
+	// to 64 MiB, else a temp file), then upload FROM the spool. It was read
+	// whole into memory a second time for chunkedUpload (R7-07).
 	body, size, cleanup, err := materialize(data)
 	if err != nil {
 		return fmt.Errorf("onedrive buffer: %w", err)
@@ -350,12 +390,7 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 		}
 		return t.simpleUpload(ctx, driveID, rootID, path, buf)
 	}
-
-	buf, err := io.ReadAll(body)
-	if err != nil {
-		return fmt.Errorf("onedrive read body: %w", err)
-	}
-	return t.chunkedUpload(ctx, driveID, rootID, path, buf)
+	return t.streamingChunkedUpload(ctx, driveID, rootID, path, body, size)
 }
 
 // Get retrieves an artifact from OneDrive.
@@ -441,63 +476,61 @@ func odAdaptiveStreams(fileSize int64) int {
 	}
 }
 
-// downloadRanges splits a file into N parallel byte-range downloads via
-// HTTP/1.1 CDN transport, then pipes them out in order. Each range downloads
-// concurrently; the pipe writer emits ranges sequentially so the caller
-// receives a correctly ordered stream.
+// odRangeWindow is the most a large Get holds: streams × one range.
+func odRangeWindow(fileSize int64) int64 {
+	return int64(odAdaptiveStreams(fileSize)) * odRangePart
+}
+
+// downloadRanges reads a file as odRangePart byte ranges over the HTTP/1.1
+// CDN transport, `streams` of them in flight, handed to the caller in order
+// through a bounded window (parfetch): at most streams × odRangePart held —
+// ranges in flight, fetched and waiting, and the one being read. Every range
+// read whole into memory before the first byte went out until R7-07 (a 5 GB
+// GET held 5 GB). A range that is not exactly the 206 asked for fails the
+// stream: never a splice.
 func (t *odTenant) downloadRanges(ctx context.Context, dlURL string, fileSize int64, streams int) (io.ReadCloser, error) {
-	pr, pw := io.Pipe()
-	rangeSize := fileSize / int64(streams)
-
-	type rangeResult struct {
-		data []byte
-		err  error
+	n := int((fileSize + odRangePart - 1) / odRangePart)
+	sizes := make([]int64, n)
+	for i := range sizes {
+		sizes[i] = odRangePart
 	}
-	results := make([]chan rangeResult, streams)
-	for i := range results {
-		results[i] = make(chan rangeResult, 1)
+	sizes[n-1] = fileSize - int64(n-1)*odRangePart
+	cfg := parfetch.Config{
+		Window:      int64(streams) * odRangePart,
+		MaxParts:    streams,
+		StrictSizes: true,
 	}
+	stream := parfetch.Start(ctx, cfg, sizes, func(ctx context.Context, i int) ([]byte, error) {
+		return t.fetchRange(ctx, dlURL, int64(i)*odRangePart, sizes[i], fileSize)
+	})
+	return parfetch.NewReader(stream, nil), nil
+}
 
-	for i := 0; i < streams; i++ {
-		start := int64(i) * rangeSize
-		end := start + rangeSize - 1
-		if i == streams-1 {
-			end = fileSize - 1
-		}
-		go func(idx int, s, e int64) {
-			req, _ := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", s, e))
-			resp, err := t.cdnHTTP.Do(req)
-			if err != nil {
-				results[idx] <- rangeResult{err: err}
-				return
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != 206 && resp.StatusCode != 200 {
-				odPooledDrain(resp.Body)
-				results[idx] <- rangeResult{err: fmt.Errorf("range HTTP %d", resp.StatusCode)}
-				return
-			}
-			data, err := io.ReadAll(resp.Body)
-			results[idx] <- rangeResult{data: data, err: err}
-		}(i, start, end)
+// fetchRange is one ranged CDN read of size bytes at start.
+func (t *odTenant) fetchRange(ctx context.Context, dlURL string, start, size, total int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("onedrive range request: %w", err)
 	}
-
-	go func() {
-		defer func() { _ = pw.Close() }()
-		for _, ch := range results {
-			r := <-ch
-			if r.err != nil {
-				_ = pw.CloseWithError(r.err)
-				return
-			}
-			if _, err := pw.Write(r.data); err != nil {
-				return
-			}
-		}
-	}()
-
-	return pr, nil
+	end := start + size - 1
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	resp, err := t.cdnHTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("onedrive range %d-%d: %w", start, end, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusPartialContent {
+		// Never drained: a 200 is the whole object.
+		return nil, fmt.Errorf("onedrive range %d-%d: HTTP %d, not 206", start, end, resp.StatusCode)
+	}
+	if want, got := fmt.Sprintf("bytes %d-%d/%d", start, end, total), resp.Header.Get("Content-Range"); got != want {
+		return nil, fmt.Errorf("onedrive range %d-%d: Content-Range %q, asked %q", start, end, got, want)
+	}
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		return nil, fmt.Errorf("onedrive range %d-%d: %w", start, end, err)
+	}
+	return buf, nil
 }
 
 // Delete removes an artifact from OneDrive. It sweeps the WHOLE fleet, not
@@ -558,27 +591,127 @@ func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string)
 	return nil
 }
 
-// List returns artifacts under a container with optional prefix filtering.
-// Placement scatters a container's objects across the WHOLE fleet (each
-// object hashes to its own home tenant), so a listing must union every
-// account — the old single-tenant listing showed a third of the namespace.
+// List returns every key under a container — relative to it, `prefix`
+// honoured, all pages — the union of the fleet. Placement scatters a
+// container's objects across the WHOLE fleet (each object hashes to its own
+// home tenant), so a listing must union every account. A key with '/' is a
+// folder tree on Graph: the walk descends every folder that can hold a key
+// under prefix (R7-06: List returned the container's direct children — a
+// folder's name in place of its keys, nested keys never). A folder that
+// cannot be listed fails the listing; never a partial answer.
 func (d *OneDriveDriver) List(ctx context.Context, container string, prefix string) ([]string, error) {
 	tenantID, tErr := requireTenant(ctx, d.Name(), "List", "", d.logger)
 	if tErr != nil {
 		return nil, tErr
 	}
-	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
-	children, err := d.children(ctx, folderPath)
-	if err != nil {
-		return nil, err
-	}
-	var artifacts []string
-	for _, c := range children {
-		if prefix == "" || strings.HasPrefix(c.name, prefix) {
-			artifacts = append(artifacts, c.name)
+	base := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
+	seen := make(map[string]struct{})
+	var keys []string
+	for _, t := range d.tenants {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("onedrive get drive: %w", err)
+		}
+		err = t.walkFiles(ctx, driveID, base, prefix, func(key string) {
+			if _, dup := seen[key]; !dup {
+				seen[key] = struct{}{}
+				keys = append(keys, key)
+			}
+		})
+		if err != nil {
+			return nil, fmt.Errorf("onedrive list %s: %w", base, err)
 		}
 	}
-	return artifacts, nil
+	return keys, nil
+}
+
+// walkFiles calls fn with every file under base on this account, relative
+// to base, whose name starts with prefix; a folder is descended only when a
+// key under prefix can be in it. A folder that is gone (deleted since its
+// parent was listed) holds nothing.
+func (t *odTenant) walkFiles(ctx context.Context, driveID, base, prefix string, fn func(key string)) error {
+	queue := []string{""}
+	for walked := 0; len(queue) > 0; walked++ {
+		if walked >= odListMaxFolders {
+			return fmt.Errorf("more than %d folders on account %s", odListMaxFolders, t.name)
+		}
+		rel := queue[0]
+		queue = queue[1:]
+		folder := base
+		if rel != "" {
+			folder += "/" + rel
+		}
+		err := t.listChildren(ctx, driveID, folder, func(c odChild) {
+			key := c.name
+			if rel != "" {
+				key = rel + "/" + c.name
+			}
+			switch {
+			case c.folder:
+				if dir := key + "/"; strings.HasPrefix(dir, prefix) || strings.HasPrefix(prefix, dir) {
+					queue = append(queue, key)
+				}
+			case strings.HasPrefix(key, prefix):
+				fn(key)
+			}
+		})
+		if err != nil && !odIsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// RemoveContainerTree removes the container's folder — the empty folders
+// under it too, whose names are the keys' prefixes — on every account, when
+// no account holds a key in it (List is empty): ErrDirNotEmpty otherwise.
+// The account-erasure sweep calls it after deleting every key List returned
+// (a Graph folder DELETE is recursive: what a write landed between that List
+// and the DELETE goes with it — an erased tenant's). A folder missing
+// everywhere is fine.
+func (d *OneDriveDriver) RemoveContainerTree(ctx context.Context, container string) error {
+	tenantID, tErr := requireTenant(ctx, d.Name(), "RemoveContainerTree", "", d.logger)
+	if tErr != nil {
+		return tErr
+	}
+	if container == "" || strings.Contains(container, "/") {
+		return fmt.Errorf("onedrive remove container: %q is not a container", container)
+	}
+	keys, err := d.List(ctx, container, "")
+	if err != nil {
+		return fmt.Errorf("onedrive remove container %s: %w", container, err)
+	}
+	if len(keys) > 0 {
+		return fmt.Errorf("onedrive remove container %s: %d key(s) left: %w", container, len(keys), ErrDirNotEmpty)
+	}
+	path := fmt.Sprintf("t-%s/%s", tenantID, container)
+	for _, t := range d.tenants {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			return fmt.Errorf("onedrive get drive: %w", err)
+		}
+		itemID, err := t.getItemID(ctx, driveID, path)
+		if odIsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("onedrive remove container %s: %w", container, err)
+		}
+		u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+		if err != nil {
+			return fmt.Errorf("onedrive remove container request: %w", err)
+		}
+		resp, err := t.graphDo(ctx, req)
+		if err != nil && !odIsNotFound(err) {
+			return fmt.Errorf("onedrive remove container %s on %s: %w", container, t.name, err)
+		}
+		if resp != nil {
+			odPooledDrain(resp.Body)
+			_ = resp.Body.Close()
+		}
+	}
+	return nil
 }
 
 // ListDir lists the direct members of the folder dir under container ("" =
@@ -651,46 +784,60 @@ func (d *OneDriveDriver) children(ctx context.Context, folderPath string) ([]odC
 		if err != nil {
 			return nil, fmt.Errorf("onedrive get drive: %w", err)
 		}
-		// Graph pages children (default 200). Follow @odata.nextLink to the
-		// end — a single-page read silently truncated every listing of a
-		// container with more objects than one page.
-		u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children?$top=999",
-			graphBase, driveID, odEscapePath(folderPath))
-		for u != "" {
-			req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-			resp, err := t.graphDo(ctx, req)
-			if err != nil {
-				if odIsNotFound(err) {
-					break // this account holds nothing under the folder
-				}
-				return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
+		err = t.listChildren(ctx, driveID, folderPath, func(c odChild) {
+			i, ok := seen[c.name]
+			if !ok {
+				seen[c.name] = len(out)
+				out = append(out, c)
+				return
 			}
-
-			var result struct {
-				Value []struct {
-					Name   string           `json:"name"`
-					Folder *json.RawMessage `json:"folder"`
-				} `json:"value"`
-				NextLink string `json:"@odata.nextLink"`
-			}
-			decodeErr := json.NewDecoder(resp.Body).Decode(&result)
-			_ = resp.Body.Close()
-			if decodeErr != nil {
-				return nil, fmt.Errorf("onedrive list decode: %w", decodeErr)
-			}
-			for _, item := range result.Value {
-				i, ok := seen[item.Name]
-				if !ok {
-					seen[item.Name] = len(out)
-					out = append(out, odChild{name: item.Name, folder: item.Folder != nil})
-					continue
-				}
-				out[i].folder = out[i].folder || item.Folder != nil
-			}
-			u = result.NextLink
+			out[i].folder = out[i].folder || c.folder
+		})
+		if odIsNotFound(err) {
+			continue // this account holds nothing under the folder
+		}
+		if err != nil {
+			return nil, fmt.Errorf("onedrive list %s: %w", folderPath, err)
 		}
 	}
 	return out, nil
+}
+
+// listChildren calls fn with every direct child of the folder on this
+// account. Graph pages children (default 200): @odata.nextLink is followed
+// to the end — a single-page read silently truncated every listing of a
+// container with more objects than one page. A missing folder is the odError
+// odIsNotFound reports.
+func (t *odTenant) listChildren(ctx context.Context, driveID, folderPath string, fn func(odChild)) error {
+	u := fmt.Sprintf("%s/drives/%s/items/root:/%s:/children?$top=999",
+		graphBase, driveID, odEscapePath(folderPath))
+	for u != "" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return fmt.Errorf("onedrive list request: %w", err)
+		}
+		resp, err := t.graphDo(ctx, req)
+		if err != nil {
+			return err
+		}
+		var result struct {
+			Value []struct {
+				Name   string           `json:"name"`
+				Folder *json.RawMessage `json:"folder"`
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return fmt.Errorf("onedrive list decode: %w", decodeErr)
+		}
+		for _, item := range result.Value {
+			fn(odChild{name: item.Name, folder: item.Folder != nil})
+		}
+		u = result.NextLink
+	}
+	return nil
 }
 
 // Exists checks if an artifact exists in OneDrive (home tenant first, then
@@ -734,23 +881,73 @@ func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string)
 	return false, nil
 }
 
-// HealthCheck validates connectivity by querying the drive metadata.
+// HealthCheck asks EVERY account for its drive metadata, odProbeConcurrency
+// at once, within the caller's (the probe's 15 s) context, and reports the
+// worst: an error naming each failing account (R7-18: one rotating account
+// per call saw a dead one 1/N of the time). An account whose outcome changed
+// since its last probe is logged — the first probe after a boot names every
+// account.
 func (d *OneDriveDriver) HealthCheck(ctx context.Context) error {
-	t := d.pickTenant()
+	errs := make([]error, len(d.tenants))
+	sem := make(chan struct{}, odProbeConcurrency)
+	var wg sync.WaitGroup
+	for i, t := range d.tenants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			errs[i] = t.probe(ctx)
+		}()
+	}
+	wg.Wait()
+	var failing []string
+	for i, t := range d.tenants {
+		d.logProbeChange(t, errs[i])
+		if errs[i] != nil {
+			failing = append(failing, fmt.Sprintf("%s: %v", t.name, errs[i]))
+		}
+	}
+	if len(failing) > 0 {
+		return fmt.Errorf("onedrive health: %d of %d accounts failing: %s",
+			len(failing), len(d.tenants), strings.Join(failing, "; "))
+	}
+	return nil
+}
+
+// probe is one account's health: its drive's metadata.
+func (t *odTenant) probe(ctx context.Context) error {
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
-		return fmt.Errorf("onedrive health: %w", err)
+		return err
 	}
-
-	u := fmt.Sprintf("%s/drives/%s", graphBase, driveID)
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/drives/%s", graphBase, driveID), nil)
+	if err != nil {
+		return fmt.Errorf("probe request: %w", err)
+	}
 	resp, err := t.graphDo(ctx, req)
 	if err != nil {
-		return fmt.Errorf("onedrive health: %w", err)
+		return err
 	}
 	odPooledDrain(resp.Body)
 	_ = resp.Body.Close()
 	return nil
+}
+
+// logProbeChange logs an account whose probe outcome differs from its last.
+func (d *OneDriveDriver) logProbeChange(t *odTenant, err error) {
+	state := int32(1)
+	if err != nil {
+		state = 2
+	}
+	if t.probeState.Swap(state) == state {
+		return
+	}
+	if err != nil {
+		d.logger.Warn("permafrost account probe: failing", zap.String("account", t.name), zap.Error(err))
+		return
+	}
+	d.logger.Info("permafrost account probe: up", zap.String("account", t.name))
 }
 
 // ── Tenant methods ──────────────────────────────────────────────────────────
@@ -774,8 +971,61 @@ func (t *odTenant) token(ctx context.Context) (string, error) {
 	return tok.Token, nil
 }
 
+// odAttempts is the attempts a Graph call or an upload fragment gets — the
+// S3-class drivers' bound (hedge.go, WP-R6-3): 2 on a request path, 3 under
+// common.WithJob. It was 5 for every Graph call and 3 per fragment (R7-08).
+func odAttempts(ctx context.Context) int {
+	if common.IsJob(ctx) {
+		return jobRetryMaxAttempts
+	}
+	return requestRetryMaxAttempts
+}
+
+// odWait waits d, or until ctx is done (every wait between attempts did a
+// time.Sleep that no caller could end).
+func odWait(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// retryWait is the wait before another attempt, capped at odMaxRetryWait;
+// false when there is no attempt to make: the caller is gone, or the wait
+// would outlast the caller's deadline (a Retry-After past it is given up on
+// at once, never slept through).
+func retryWait(ctx context.Context, d time.Duration) (time.Duration, bool) {
+	if ctx.Err() != nil {
+		return 0, false
+	}
+	if d > odMaxRetryWait {
+		d = odMaxRetryWait
+	}
+	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= d {
+		return 0, false
+	}
+	return d, true
+}
+
+// sleep is the tenant's wait between attempts.
+func (t *odTenant) sleep(ctx context.Context, d time.Duration) error {
+	if t.wait != nil {
+		return t.wait(ctx, d)
+	}
+	return odWait(ctx, d)
+}
+
+// graphDo sends one Graph request with the bounded retries: a transport
+// error, a 429/503 (Retry-After honoured up to odMaxRetryWait) or another
+// 5xx is tried again, odAttempts attempts in all, decorrelated jitter, every
+// wait on ctx; a caller already gone is never retried. Any other answer >= 400
+// is an *odError at once.
 func (t *odTenant) graphDo(ctx context.Context, req *http.Request) (*http.Response, error) {
-	const maxAttempts = 5
+	attempts := odAttempts(ctx)
 	base := 500 * time.Millisecond
 	prev := base
 
@@ -784,71 +1034,92 @@ func (t *odTenant) graphDo(ctx context.Context, req *http.Request) (*http.Respon
 		return nil, err
 	}
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if attempt > 0 && req.GetBody != nil {
-			body, _ := req.GetBody()
-			req.Body = body
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			if req.GetBody == nil && req.Body != nil && req.Body != http.NoBody {
+				return nil, lastErr // a body that cannot be sent again
+			}
+			if req.GetBody != nil {
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, fmt.Errorf("onedrive [%s] rewind body: %w", t.name, err)
+				}
+				req.Body = body
+			}
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("User-Agent", odUserAgent)
 
 		resp, err := t.graphHTTP.Do(req)
 		t.totalReqs.Add(1)
-		if err != nil {
-			if attempt < maxAttempts-1 {
-				prev = odDecorrelatedJitter(base, prev, 30*time.Second)
-				time.Sleep(prev)
-				continue
+		var wait time.Duration
+		switch {
+		case err != nil:
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("onedrive [%s]: %w", t.name, ctxErr)
 			}
-			return nil, err
-		}
-		// Track RateLimit headers for throttle visibility
-		if remaining := resp.Header.Get("RateLimit-Remaining"); remaining != "" {
-			if n, err := strconv.ParseInt(remaining, 10, 64); err == nil {
-				t.rateLimitRemaining.Store(n)
-			}
-		}
-		if reset := resp.Header.Get("RateLimit-Reset"); reset != "" {
-			if n, err := strconv.ParseInt(reset, 10, 64); err == nil {
-				t.rateLimitReset.Store(time.Now().Add(time.Duration(n) * time.Second).Unix())
-			}
-		}
-
-		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			lastErr = fmt.Errorf("onedrive [%s]: %w", t.name, err)
+			prev = odDecorrelatedJitter(base, prev, odMaxRetryWait)
+			wait = prev
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
 			t.throttleCount.Add(1)
 			retryAfter, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-			wait := odDecorrelatedJitter(base, prev, 30*time.Second)
+			wait = odDecorrelatedJitter(base, prev, odMaxRetryWait)
 			if ra := time.Duration(retryAfter) * time.Second; ra > wait {
 				wait = ra
+			}
+			if wait > odMaxRetryWait {
+				wait = odMaxRetryWait
 			}
 			t.throttledUntil.Store(time.Now().Add(wait).Unix())
 			prev = wait
 			odPooledDrain(resp.Body)
 			_ = resp.Body.Close()
-			if attempt < maxAttempts-1 {
-				time.Sleep(wait)
-				continue
-			}
-			return nil, fmt.Errorf("onedrive throttled [%s] (%d)", t.name, resp.StatusCode)
-		}
-		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("onedrive throttled [%s] (%d)", t.name, resp.StatusCode)
+		case resp.StatusCode >= 500:
 			odPooledDrain(resp.Body)
 			_ = resp.Body.Close()
-			if attempt < maxAttempts-1 {
-				prev = odDecorrelatedJitter(base, prev, 30*time.Second)
-				time.Sleep(prev)
-				continue
-			}
-			return nil, fmt.Errorf("onedrive [%s] HTTP %d", t.name, resp.StatusCode)
-		}
-		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("onedrive [%s] HTTP %d", t.name, resp.StatusCode)
+			prev = odDecorrelatedJitter(base, prev, odMaxRetryWait)
+			wait = prev
+		case resp.StatusCode >= 400:
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 			_ = resp.Body.Close()
-			return nil, &odStatusError{tenant: t.name, status: resp.StatusCode, body: b}
+			return nil, newODError(t.name, resp.StatusCode, b)
+		default:
+			t.trackRateLimit(resp)
+			return resp, nil
 		}
-		return resp, nil
+		if attempt == attempts-1 {
+			break
+		}
+		w, ok := retryWait(ctx, wait)
+		if !ok {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("%w (%w)", lastErr, ctxErr)
+			}
+			return nil, lastErr
+		}
+		if err := t.sleep(ctx, w); err != nil {
+			return nil, fmt.Errorf("%w (waiting to retry: %w)", lastErr, err)
+		}
 	}
-	return nil, fmt.Errorf("onedrive [%s] exhausted retries", t.name)
+	return nil, lastErr
+}
+
+// trackRateLimit records Graph's RateLimit headers for throttle visibility.
+func (t *odTenant) trackRateLimit(resp *http.Response) {
+	if remaining := resp.Header.Get("RateLimit-Remaining"); remaining != "" {
+		if n, err := strconv.ParseInt(remaining, 10, 64); err == nil {
+			t.rateLimitRemaining.Store(n)
+		}
+	}
+	if reset := resp.Header.Get("RateLimit-Reset"); reset != "" {
+		if n, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			t.rateLimitReset.Store(time.Now().Add(time.Duration(n) * time.Second).Unix())
+		}
+	}
 }
 
 func (t *odTenant) getDriveID(ctx context.Context) (string, error) {
@@ -906,8 +1177,10 @@ func (t *odTenant) ensureRootFolder(ctx context.Context, driveID string) (string
 
 	resp, err := t.graphDo(ctx, req)
 	if err != nil {
-		// 409 = folder already exists — fetch its ID instead
-		if strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "nameAlreadyExists") {
+		// A conflict = the folder exists — fetch its ID instead. By status
+		// and code: the text matched "409" anywhere, a message included.
+		var oe *odError
+		if errors.As(err, &oe) && (oe.Status == http.StatusConflict || oe.Code == "nameAlreadyExists") {
 			return t.getFolderID(ctx, driveID, odRootFolder)
 		}
 		return "", fmt.Errorf("create root folder [%s]: %w", t.name, err)
@@ -1001,53 +1274,44 @@ func (t *odTenant) simpleUpload(ctx context.Context, driveID, parentID, path str
 	return nil
 }
 
-func (t *odTenant) chunkedUpload(ctx context.Context, driveID, parentID, path string, data []byte) error {
-	sessionURL := fmt.Sprintf("%s/drives/%s/items/%s:/%s:/createUploadSession",
-		graphBase, driveID, parentID, odEscapePath(path))
-	sb, _ := json.Marshal(map[string]any{
-		"item": map[string]any{"@microsoft.graph.conflictBehavior": "replace"},
-	})
-	req, _ := http.NewRequestWithContext(ctx, "POST", sessionURL, bytes.NewReader(sb))
-	req.Header.Set("Content-Type", "application/json")
-	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(sb)), nil }
-	resp, err := t.graphDo(ctx, req)
-	if err != nil {
-		return fmt.Errorf("onedrive create upload session: %w", err)
-	}
-	var session struct {
-		UploadURL string `json:"uploadUrl"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&session)
-	_ = resp.Body.Close()
-
-	if session.UploadURL == "" {
-		return fmt.Errorf("onedrive: empty upload session URL")
-	}
-
-	total := len(data)
-	for offset := 0; offset < total; offset += odChunkSize {
-		end := offset + odChunkSize
-		if end > total {
-			end = total
-		}
-		chunk := data[offset:end]
-		if err := t.putChunk(ctx, session.UploadURL, chunk, offset, end-1, total); err != nil {
-			return fmt.Errorf("onedrive chunk at offset %d: %w", offset, err)
-		}
-	}
-	return nil
-}
-
+// putChunk sends one upload fragment with the bounded retries (odAttempts;
+// 1 s, then 2 s between, on ctx): a transport error, a 429 or a 5xx is sent
+// again — the same byte range of the same session, so nothing is doubled; a
+// caller already gone is never retried. The body is fenced after each
+// attempt: the transport may still read a request body after Do returns,
+// and chunk is the caller's pooled buffer.
 func (t *odTenant) putChunk(ctx context.Context, uploadURL string, chunk []byte, start, endInc, total int) error {
-	for attempt := 0; attempt < 3; attempt++ {
-		req, _ := http.NewRequestWithContext(ctx, "PUT", uploadURL, bytes.NewReader(chunk))
+	attempts := odAttempts(ctx)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if attempt > 0 {
+			w, ok := retryWait(ctx, time.Duration(1<<uint(attempt-1))*time.Second)
+			if !ok {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return fmt.Errorf("onedrive chunk: %w (%w)", lastErr, ctxErr)
+				}
+				break
+			}
+			if err := t.sleep(ctx, w); err != nil {
+				return fmt.Errorf("onedrive chunk: %w (waiting to retry: %w)", lastErr, err)
+			}
+		}
+		body := &odFragment{b: chunk}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, body)
+		if err != nil {
+			return fmt.Errorf("onedrive chunk request: %w", err)
+		}
 		req.ContentLength = int64(len(chunk))
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, endInc, total))
 		// No Authorization header on chunk PUTs — the upload URL is pre-authenticated
 		resp, err := t.uploadHTTP.Do(req)
+		body.fence()
 		t.totalReqs.Add(1)
 		if err != nil {
-			time.Sleep(time.Duration(1<<uint(attempt)) * time.Second)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("onedrive chunk: %w", ctxErr)
+			}
+			lastErr = err
 			continue
 		}
 		odPooledDrain(resp.Body)
@@ -1055,18 +1319,63 @@ func (t *odTenant) putChunk(ctx context.Context, uploadURL string, chunk []byte,
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
 		}
-		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-			time.Sleep(time.Duration(1<<uint(attempt)) * time.Second)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("onedrive chunk HTTP %d", resp.StatusCode)
 			continue
 		}
 		return fmt.Errorf("onedrive chunk HTTP %d", resp.StatusCode)
 	}
-	return fmt.Errorf("onedrive chunk exhausted retries")
+	return fmt.Errorf("onedrive chunk exhausted retries: %w", lastErr)
+}
+
+// errFragmentFenced is a read of a fragment body after its attempt ended.
+var errFragmentFenced = errors.New("onedrive: upload fragment read after its attempt ended")
+
+// odFragment is an upload fragment's request body over a pooled buffer;
+// fence ends its reads, so the buffer can be refilled for the next fragment
+// while a transport goroutine still holds the request.
+type odFragment struct {
+	mu     sync.Mutex
+	b      []byte
+	off    int
+	fenced bool
+}
+
+func (f *odFragment) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fenced {
+		return 0, errFragmentFenced
+	}
+	if f.off >= len(f.b) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.b[f.off:])
+	f.off += n
+	return n, nil
+}
+
+func (f *odFragment) Close() error { return nil }
+
+func (f *odFragment) fence() {
+	f.mu.Lock()
+	f.fenced = true
+	f.mu.Unlock()
+}
+
+// odChunkPool holds the upload fragment buffers (odChunkSize each): one per
+// upload in flight, reused across uploads (a fresh 60 MiB per PUT before).
+var odChunkPool = sync.Pool{New: newODChunkBuffer}
+
+func newODChunkBuffer() any {
+	b := make([]byte, odChunkSize)
+	return &b
 }
 
 // streamingChunkedUpload reads chunks directly from the io.Reader without
-// buffering the entire body. Requires totalSize from ContentLength.
-// Eliminates the materialize() + io.ReadAll() double-copy.
+// buffering the entire body: the caller's ContentLength, or the size of the
+// spool an unknown-length Put was materialised into. One pooled fragment
+// buffer per upload.
 func (t *odTenant) streamingChunkedUpload(ctx context.Context, driveID, parentID, path string, data io.Reader, totalSize int64) error {
 	sessionURL := fmt.Sprintf("%s/drives/%s/items/%s:/%s:/createUploadSession",
 		graphBase, driveID, parentID, odEscapePath(path))
@@ -1090,7 +1399,9 @@ func (t *odTenant) streamingChunkedUpload(ctx context.Context, driveID, parentID
 		return fmt.Errorf("onedrive: empty upload session URL")
 	}
 
-	buf := make([]byte, odChunkSize)
+	bp := odChunkPool.Get().(*[]byte)
+	defer odChunkPool.Put(bp)
+	buf := *bp
 	offset := int64(0)
 	for offset < totalSize {
 		chunkEnd := offset + int64(odChunkSize)
@@ -1100,7 +1411,8 @@ func (t *odTenant) streamingChunkedUpload(ctx context.Context, driveID, parentID
 		toRead := chunkEnd - offset
 
 		n, err := io.ReadFull(data, buf[:toRead])
-		if err != nil && err != io.ErrUnexpectedEOF {
+		if err != nil {
+			// A body shorter than its length is an error, never a shorter file.
 			return fmt.Errorf("onedrive read chunk at offset %d: %w", offset, err)
 		}
 
@@ -1140,15 +1452,16 @@ func odCachedDialContext() func(ctx context.Context, network, addr string) (net.
 
 func odGraphTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), tlsCache tls.ClientSessionCache) *http.Transport {
 	t := &http.Transport{
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 200,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:      1 << 20,
-		WriteBufferSize:     1 << 20,
-		DisableCompression:  true,
-		ForceAttemptHTTP2:   true,
-		DialContext:         dial,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   200,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: odGraphHeaderTimeout,
+		ReadBufferSize:        1 << 20,
+		WriteBufferSize:       1 << 20,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     true,
+		DialContext:           dial,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tlsCache,
@@ -1160,15 +1473,16 @@ func odGraphTransport(dial func(ctx context.Context, network, addr string) (net.
 // HTTP/1.1 for CDN bulk downloads — bypasses Go HTTP/2 flow-control bugs
 func odCDNTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), tlsCache tls.ClientSessionCache) *http.Transport {
 	return &http.Transport{
-		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		MaxConnsPerHost:     128,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     60 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:      4 * 1024 * 1024,
-		WriteBufferSize:     4 * 1024 * 1024,
-		DisableCompression:  true,
-		DialContext:         dial,
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		MaxConnsPerHost:       128,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       60 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: odCDNHeaderTimeout,
+		ReadBufferSize:        4 * 1024 * 1024,
+		WriteBufferSize:       4 * 1024 * 1024,
+		DisableCompression:    true,
+		DialContext:           dial,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tlsCache,
@@ -1183,15 +1497,16 @@ func odCDNTransport(dial func(ctx context.Context, network, addr string) (net.Co
 // The Graph API calls (small, multiplexed) stay on HTTP/2 via odGraphTransport.
 func odUploadTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error), tlsCache tls.ClientSessionCache) *http.Transport {
 	return &http.Transport{
-		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 200,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-		ReadBufferSize:      4 * 1024 * 1024,
-		WriteBufferSize:     4 * 1024 * 1024,
-		DisableCompression:  true,
-		DialContext:         dial,
+		TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   200,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: odUploadHeaderTimeout,
+		ReadBufferSize:        4 * 1024 * 1024,
+		WriteBufferSize:       4 * 1024 * 1024,
+		DisableCompression:    true,
+		DialContext:           dial,
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tlsCache,

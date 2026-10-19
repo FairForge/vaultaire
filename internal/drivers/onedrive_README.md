@@ -106,6 +106,24 @@ On **429** (Too Many Requests) or **503** (Server Too Busy):
 4. Use decorrelated jitter for backoff (not fixed exponential)
 5. Cap backoff at 60 seconds
 
+**What the driver does (WP-R7-4, R7-08):** the S3-class drivers' bound —
+**2 attempts on a request path, 3 under `common.WithJob`** (a job run) — for
+every Graph call and every upload fragment; every wait between attempts
+selects on the caller's context (it was a `time.Sleep` no caller could end:
+5 attempts, up to 30 s each, so one call to a dead account held a request
+~30 s after its client left); `Retry-After` is honoured up to 30 s
+(`odMaxRetryWait`) and a wait that would outlast the caller's deadline is not
+waited for at all — the call fails at once; a caller already gone is never
+retried. Responses are bounded by request class (RP9-1): a Graph call's
+headers 15 s, a CDN range's first byte 25 s, an upload fragment's answer
+2 min (the last fragment commits the file — the exception, like an S3
+Complete). Errors are typed: `odError{Status, Code}` (Graph's
+`{"error":{"code":…}}`); a miss is a 404 `itemNotFound` (or a 404 with no
+Graph body), wrapped as `engine.NotFoundError` by Get/Delete; another 404
+code (`ResourceNotFound`: the drive or the user gone) is the account's
+failure. A conflict creating the root folder is decided by status/code, never
+the text.
+
 **User-Agent decoration** (prioritized by Microsoft):
 ```
 ISV|FairForge|Vaultaire/1.0
@@ -419,13 +437,26 @@ wall-clock numbers from current tools.
 
 ## Production Driver Status
 
-`internal/drivers/onedrive.go` — fully implemented (~1,100 lines), wired in
-`cmd/vaultaire/main.go`. Complete `engine.Driver` contract: Put (simple <4MB,
-chunked upload sessions above, streaming when ContentLength is known), Get
-(CDN download URL + HTTP/1.1 parallel byte ranges, adaptive 1/2/4/8 streams),
-List (all-fleet union with Graph pagination), Delete (whole-fleet sweep),
-Exists (home-first probe), HealthCheck (rotation), RateLimit-header throttle
-tracking with decorrelated-jitter backoff, token refresh mutex.
+`internal/drivers/onedrive.go` — fully implemented, wired in
+`cmd/vaultaire/main.go`. Complete `engine.Driver` contract (conformance
+WP-R7-4, 2026-10-19): Put (simple <4MB, chunked upload sessions above —
+streamed from the body when ContentLength is known, from the spool
+`materialize` made when it is not; one pooled 60 MiB fragment buffer per
+upload), Get (CDN download URL; ≥ 10 MiB = 8 MiB HTTP/1.1 ranges, adaptive
+2/4/8 in flight, through `internal/parfetch`'s ordered window: at most
+streams × 8 MiB held — 64 MiB — never the object; a range that is not
+exactly the 206 asked for fails the stream), List (**recursive**: every key
+relative to the container, `prefix` honoured — a folder is walked only when a
+key under the prefix can be in it — all pages, the fleet's union; a folder
+that cannot be listed fails the listing; ≤ 100,000 folders per account),
+`RemoveContainerTree` (the erasure sweep's last step on this backend: the
+container's emptied folders, on every account, only when List is empty),
+Delete (whole-fleet sweep), Exists (home-first probe), HealthCheck (**every
+account**, 8 at once, within the probe's 15 s: the worst is reported, each
+failing account named; an account whose outcome changed is logged
+`permafrost account probe: up|failing` — the first probe after a boot names
+them all), RateLimit-header throttle tracking with bounded decorrelated-jitter
+backoff (above), token refresh mutex, the fleet fingerprint (below).
 
 ### Fleet placement (deterministic, 2026-07-30)
 
@@ -444,7 +475,8 @@ home = FNV-1a(path) % fleetSize     // path = t-<tenant>/<container>/<artifact>
   could leave copies of one path on several accounts, and deleting only the
   first copy found lets the next Get resurrect a stale duplicate.
 - **List** unions every account (placement scatters each container across
-  the whole fleet) and follows `@odata.nextLink` pagination.
+  the whole fleet), walks every folder (a key with `/` is a folder tree) and
+  follows `@odata.nextLink` pagination.
 - **Fallback hits are logged** (`onedrive fallback hit`, Info level, with
   op/path/tenant). They mark pre-placement data being served off its home
   account. When they stop appearing in prod, the fleet-wide probe on misses
@@ -457,6 +489,41 @@ changes the modulus and remaps most objects: correctness survives (the probe
 finds them) but every remapped read pays the fleet-walk penalty. A rebalance
 or consistent-hashing scheme is a prerequisite for growing the fleet to 15 —
 planned, not built.
+
+### Fleet fingerprint (WP-R7-4, R7-09)
+
+The rule above is now checked. Every account carries a marker,
+`vaultaire/_fleet/fingerprint.json` (outside every `t-<tenant>/` tree): its
+index in the fleet and the ordered fleet — one 16-hex hash per account of its
+`TENANT_N_ID` + `TENANT_N_USER`, never a secret — and the fleet's digest.
+`cmd/vaultaire` reads every marker at boot (`CheckFleetFingerprint`, 20 s):
+
+| Found | Outcome |
+|---|---|
+| no account has a marker | first boot: written on every account (`state=recorded`, Info) |
+| every marker records this fleet | `match`, nothing written |
+| the markers present match, some accounts have none | `repaired`: the missing ones written |
+| a marker records another order or size | `mismatch`: **one Error line** `permafrost fleet fingerprint mismatch` with `diffs` (`size 3 → 2`, `index 1: was <hash>, now <hash>`, `account tenant-3 (<hash>) is index 1, recorded index 2`) and `fingerprint` (the current digest); `vaultaire_permafrost_fleet_mismatch` 1, rule `PermafrostFleetMismatch` (warning); nothing rewritten |
+| a marker cannot be read | `unknown`: a Warn, no verdict, nothing written, the gauge stays 0 |
+
+Boot is never blocked: reads find a remapped object by the fleet walk.
+
+**Procedure when the order must change** (an account lost for good, a new
+account added):
+
+1. Expect the mismatch. Note the Error line's `fingerprint`.
+2. Rebalance: move every object whose home changed to its new home account
+   (`hash(path) % new size` — `homeTenantIndex`), deleting the old copy. No
+   tool does this yet; until one exists, the fleet walk keeps reads working
+   and the `onedrive fallback hit` Info lines name what is off its home.
+3. Accept the new order: `PERMAFROST_FLEET_ACCEPT=<fingerprint>` in the
+   `.env`, `sudo vaultaire-switch restart`. The boot rewrites every marker
+   (`state=accepted`, a Warn line) and the gauge goes to 0. A value left set
+   does nothing once the markers match, and never accepts a different order
+   (it must equal that order's digest). Remove it at the next edit.
+
+Restoring the old `TENANT_N` order instead is a plain restart: the markers
+match again.
 
 ### Bench caveat
 

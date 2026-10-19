@@ -1,0 +1,31 @@
+# promtool unit test of vaultaire-drivers.yml's PermafrostFleetMismatch
+# (WP-R7-4, Stage 1a Prompt 16 Part A).
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-drivers.yml deploy/monitoring/tests/vaultaire-drivers_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-drivers_test.yml'
+rule_files:
+  - vaultaire-drivers.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The gauge is exported at 0 from boot (drivers.Collectors); a boot that
+  # finds another order sets it to 1 for the life of the process.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_permafrost_fleet_mismatch{instance="slc",job="vaultaire"}'
+        values: '0 0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: PermafrostFleetMismatch
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: PermafrostFleetMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: slc
+              job: vaultaire
+            exp_annotations:
+              summary: "The permafrost fleet's account order changed since its markers were written"
+              description: "At boot the OneDrive fleet driver found an account order (TENANT_N slots, gaps skipped) other than the one its accounts' markers recorded: a TENANT_N was removed, reordered or appended. Every object whose home account moved is read through the fleet walk. The boot's Error line 'permafrost fleet fingerprint mismatch' names the diff and the current fingerprint. Restore the TENANT_N order and restart, or rebalance and accept the new order with PERMAFROST_FLEET_ACCEPT=<fingerprint> (internal/drivers/onedrive_README.md § Fleet fingerprint)."
