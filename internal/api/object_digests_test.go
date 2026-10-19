@@ -339,3 +339,66 @@ func TestSSECKeyMD5_AVersionIdUsesTheVersionRows(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, f.req(t, "HEAD", "/test-bucket/v.bin", nil, ssecHeaders(one)).Code)
 	assert.Equal(t, http.StatusOK, f.req(t, "HEAD", "/test-bucket/v.bin", nil, ssecHeaders(two)).Code)
 }
+
+// --- RP16-1 (WP-P14 post-merge review): the repointed head row -------------
+
+func TestBodyDigest_ARepointedHeadRowCarriesTheNewLatestVersionsDigest(t *testing.T) {
+	// DELETE ?versionId of the CURRENT version re-points the head row to
+	// the newly-latest version (repointHeadAfterVersionDelete). It copied
+	// every attribute of that version but the 094 columns: the head row
+	// kept the DELETED version's body_md5 and every whole GET of the
+	// re-pointed object was cut against the wrong digest.
+	f, _ := setupWholeFixture(t, false)
+	f.bucketSet(t, "versioning_status = 'Enabled'")
+	v1 := randomBody(t, 200<<10)
+	u := f.upload(t, "k.bin", splitParts(v1, 2), nil)
+	require.Equal(t, http.StatusOK, f.complete(t, "k.bin", u).Code)
+	v2 := randomBody(t, 160<<10)
+	u = f.upload(t, "k.bin", splitParts(v2, 2), nil)
+	w := f.complete(t, "k.bin", u)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	vid2 := w.Header().Get("x-amz-version-id")
+	require.NotEmpty(t, vid2)
+
+	// Act: delete the current version; v1 is the object again.
+	require.Equal(t, http.StatusNoContent, f.req(t, "DELETE", "/test-bucket/k.bin?versionId="+vid2, nil, nil).Code)
+
+	// Assert: the head row carries v1's digest, and a whole GET serves v1
+	// to the last byte instead of being cut.
+	_, bodyMD5, _ := f.digests(t, "k.bin")
+	require.True(t, bodyMD5.Valid, "the re-pointed head row has a digest")
+	assert.Equal(t, md5Hex(v1), bodyMD5.String, "the digest is the newly-latest version's")
+	ts := integrityServer(t, f)
+	fail0 := integrityFailures(integrityPathPlain, "md5")
+	resp, got, readErr := clientGet(t, ts, "/test-bucket/k.bin", nil)
+	require.NoError(t, readErr, "the whole GET is served, not cut")
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, v1, got)
+	assert.Equal(t, fail0, integrityFailures(integrityPathPlain, "md5"))
+}
+
+func TestSSECKeyMD5_ARepointedHeadRowAnswersToTheNewLatestVersionsKey(t *testing.T) {
+	// The SSE-C half of the same repoint: the head row kept the deleted
+	// version's ssec_key_md5, so the right key was 403 from the row.
+	f, _ := setupWholeFixture(t, false)
+	f.bucketSet(t, "versioning_status = 'Enabled'")
+	one, two := ssecKey(t), ssecKey(t)
+	b1 := randomBody(t, 8<<10)
+	require.Equal(t, http.StatusOK, f.req(t, "PUT", "/test-bucket/v.bin", b1, ssecHeaders(one)).Code)
+	w := f.req(t, "PUT", "/test-bucket/v.bin", randomBody(t, 8<<10), ssecHeaders(two))
+	require.Equal(t, http.StatusOK, w.Code)
+	vid2 := w.Header().Get("x-amz-version-id")
+	require.NotEmpty(t, vid2)
+
+	// Act
+	require.Equal(t, http.StatusNoContent, f.req(t, "DELETE", "/test-bucket/v.bin?versionId="+vid2, nil, nil).Code)
+
+	// Assert: the current object is v1 again — its own key answers, the
+	// deleted version's key is refused.
+	assert.Equal(t, http.StatusOK, f.req(t, "HEAD", "/test-bucket/v.bin", nil, ssecHeaders(one)).Code)
+	g := f.req(t, "GET", "/test-bucket/v.bin", nil, ssecHeaders(one))
+	assert.Equal(t, http.StatusOK, g.Code, g.Body.String())
+	assert.Equal(t, b1, g.Body.Bytes())
+	assert.Equal(t, http.StatusForbidden, f.req(t, "HEAD", "/test-bucket/v.bin", nil, ssecHeaders(two)).Code)
+	assert.Equal(t, http.StatusForbidden, f.req(t, "GET", "/test-bucket/v.bin", nil, ssecHeaders(two)).Code)
+}
