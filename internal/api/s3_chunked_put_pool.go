@@ -55,7 +55,10 @@ type dupChunkWaiter struct {
 	offset int64
 }
 
-type chunkStoreJob struct{ chunk crypto.Chunk }
+type chunkStoreJob struct {
+	chunk crypto.Chunk
+	held  int64 // bytes of the write's budget hold assigned to this chunk
+}
 
 type chunkStoreOutcome struct {
 	chunk          crypto.Chunk
@@ -97,6 +100,10 @@ type chunkStorePool struct {
 	takenRefs    []takenChunkRef
 	newRefs      []crypto.TenantChunkRef
 	inFlight     map[string][]dupChunkWaiter
+
+	// hold is the write's share of the process budget (WP-R2-6); nil =
+	// unaccounted (a pool built without one).
+	hold *chunkPutHold
 }
 
 func newChunkStorePool(
@@ -199,12 +206,12 @@ func (p *chunkStorePool) addRef(index int, offset int64, hash string, ciphertext
 // submit marks the hash in flight and hands the chunk to a worker. Blocks
 // when all workers are busy — that bound, plus the chunker's own buffer, is
 // what keeps a chunked PUT's peak memory independent of object size.
-func (p *chunkStorePool) submit(c crypto.Chunk) {
+func (p *chunkStorePool) submit(c crypto.Chunk, held int64) {
 	p.mu.Lock()
 	p.inFlight[c.Hash] = []dupChunkWaiter{}
 	p.mu.Unlock()
 	select {
-	case p.jobs <- chunkStoreJob{chunk: c}:
+	case p.jobs <- chunkStoreJob{chunk: c, held: held}:
 	case <-p.ctx.Done():
 		// The upload is over: the workers may be finishing PUTs that
 		// outlived it (RP14-1) — never wait on them for a chunk nobody
@@ -212,6 +219,7 @@ func (p *chunkStorePool) submit(c crypto.Chunk) {
 		p.mu.Lock()
 		delete(p.inFlight, c.Hash)
 		p.mu.Unlock()
+		p.hold.release(held)
 	}
 }
 
@@ -226,6 +234,14 @@ func (p *chunkStorePool) worker() {
 // old sequential loop's mustStore branch, unchanged in order and semantics.
 func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 	chunk := &job.chunk
+	// The chunk's share of the write's budget hold (WP-R2-6): shrunk to its
+	// buffers' real size once compressed and sealed, given back when the
+	// store ends — or, for a PUT that outlives the request, when it ends.
+	var lease *chunkLease
+	if p.hold != nil {
+		lease = &chunkLease{h: p.hold, left: job.held}
+	}
+	defer lease.releaseAll()
 	// A chunk not yet started when the upload ended is never attempted
 	// (RP14-1): no claim, no PUT.
 	if err := p.ctx.Err(); err != nil {
@@ -272,8 +288,20 @@ func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 	if ciphertextHash != "" {
 		entryCiphertextHash = &ciphertextHash
 	}
+	// What this chunk really holds now: the chunk, its compressed form when
+	// one was kept, its ciphertext when sealed.
+	actual := int64(len(chunk.Data))
+	if compressedSize != nil {
+		actual += *compressedSize
+	}
+	if encrypted {
+		actual += int64(len(storeData))
+	}
+	if lease != nil {
+		lease.release(job.held - actual)
+	}
 
-	res, storeErr := p.a.storeChunkLocked(p.ctx, p.scope, storageKey, storeData, &crypto.GCIEntry{
+	res, storeErr := p.a.storeChunkLocked(p.ctx, p.scope, storageKey, storeData, lease, &crypto.GCIEntry{
 		DedupScope:      p.scope,
 		PlaintextHash:   chunk.Hash,
 		StorageKey:      storageKey,

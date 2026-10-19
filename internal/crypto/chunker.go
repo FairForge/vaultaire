@@ -199,7 +199,19 @@ func (c *RabinChunker) Chunk(r io.Reader) (<-chan ChunkResult, error) {
 // cancellation. If ctx is cancelled the goroutine exits promptly instead of
 // blocking on a full channel send.
 func (c *RabinChunker) ChunkContext(ctx context.Context, r io.Reader) (<-chan ChunkResult, error) {
-	ch := make(chan ChunkResult, 10) // Buffer for smooth streaming
+	return c.ChunkContextDepth(ctx, r, 10)
+}
+
+// ChunkContextDepth is ChunkContext with the channel's depth chosen by the
+// caller: the chunker allocates every chunk before the consumer takes it, so
+// depth + 1 chunks (plus the 16 MiB work buffer) is what it holds beyond
+// what the consumer has accounted for (WP-R2-6: the chunked write keeps it
+// small and budgets the rest).
+func (c *RabinChunker) ChunkContextDepth(ctx context.Context, r io.Reader, depth int) (<-chan ChunkResult, error) {
+	if depth < 0 {
+		depth = 0
+	}
+	ch := make(chan ChunkResult, depth)
 
 	go func() {
 		defer close(ch)

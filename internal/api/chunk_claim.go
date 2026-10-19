@@ -79,7 +79,7 @@ const (
 
 // storeChunkLocked stores a new chunk's blob and makes its index row ready,
 // or references the row a concurrent writer made ready (see above).
-func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, entry *crypto.GCIEntry) (chunkStoreResult, error) {
+func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey string, storeData []byte, lease *chunkLease, entry *crypto.GCIEntry) (chunkStoreResult, error) {
 	const waitMin, waitMax = 25 * time.Millisecond, time.Second
 	wait := waitMin
 	for {
@@ -111,7 +111,7 @@ func (a *S3ToEngine) storeChunkLocked(ctx context.Context, scope, storageKey str
 		// The PUT runs detached from the request under chunkPutBound
 		// (chunk_put_detached.go): if the request ends first, the PUT's own
 		// goroutine settles the claim and this writer takes no reference.
-		r, detached := a.putChunk(ctx, scope, storageKey, storeData, since, entry)
+		r, detached := a.putChunk(ctx, scope, storageKey, storeData, since, entry, lease)
 		if detached {
 			return chunkStoreResult{}, fmt.Errorf("chunk %s: the request ended while its PUT ran (it finishes detached): %w", shortHash(entry.PlaintextHash), ctx.Err())
 		}

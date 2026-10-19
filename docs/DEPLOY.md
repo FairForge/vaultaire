@@ -125,6 +125,34 @@ The deploy user's passwordless sudo is pinned to four exact invocations
 `restart`, `rollback` and `status`. sudo matches arguments literally, so no
 other file or verb is reachable.
 
+### Memory (owner item, Stage 1a Prompt 14 Part C)
+
+Read on the box on 2026-10-19 (`systemctl cat vaultaire@8001`, `free -g`): the
+unit sets **no `MemoryHigh=`, no `MemoryMax=` and no `GOMEMLIMIT`**; the box
+has 121 GiB with ~4 GiB used. The process now bounds what the large GETs
+(`LARGE_GET_PARALLEL_BUDGET_BYTES`, 2 GiB) and the chunked PUTs
+(`CHUNK_PUT_BUDGET_BYTES`, a quarter of `GOMEMLIMIT` when one is set, else
+2 GiB) may hold, but with no `GOMEMLIMIT` the Go runtime only collects at
+`GOGC`'s pace and the kernel's OOM killer is the only ceiling. Two slots
+overlap during a switch, so each gets under half the box. Recommended, in
+`deploy/systemd/vaultaire@.service` (`[Service]`) — **not installed; the
+owner's sudo**:
+
+```ini
+Environment=GOMEMLIMIT=40GiB
+MemoryHigh=48G
+MemoryMax=56G
+```
+
+`GOMEMLIMIT=40GiB` makes the runtime collect harder as it nears 40 GiB and
+sets the chunked-PUT budget's default to 10 GiB (≈ 200 concurrent chunked
+writes at the typical 48 MiB reserve; `CHUNK_PUT_BUDGET_BYTES` overrides);
+`MemoryHigh=` throttles the slot above 48 GiB, `MemoryMax=` kills it above
+56 GiB — two slots at 56 GiB still leave the box 9 GiB. Install with
+`systemctl daemon-reload` and a `vaultaire-switch restart` (the running slot
+keeps its old limits until it is restarted). Note `EnvironmentFile=` overrides
+`Environment=`, so `GOMEMLIMIT` can equally go in `.env`.
+
 ## The pipeline: push to `main`
 
 `main` is protected: no direct pushes, CI must pass, merges are squash merges
