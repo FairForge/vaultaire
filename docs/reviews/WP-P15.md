@@ -77,7 +77,21 @@ Bucket `p15-rp16-1792417188`, versioned. Two 20 MB `-3` versions; `DELETE ?versi
 
 ### Parts A and B on prod
 
-PROD_AB_PLACEHOLDER
+Deploys: #780 `a484692` 15:24 UTC, #782 `7ae486c` 16:51, #781 `f47ef3a` 16:58 (slot 8000). All as the bench tenant through `s3.stored.ge` with aws-cli (`AWS_MAX_ATTEMPTS=1`), every bucket created for the proof and removed after it.
+
+**Part A (`a484692`), bucket `p15-mfa-1792425142`:** three objects; `mfa_delete_enabled` set on that one row by SQL. DeleteObjects of the three without `x-amz-mfa` → `AccessDenied`, 3 head rows kept. The flag cleared → the same batch answers 3 Deleted, 0 rows.
+
+**Part B (`f47ef3a`), bucket `p15-names-1792429107`:**
+
+| Request | Answer |
+|---|---|
+| GET / DELETE / PUT of a 1,100-byte key | 400 `KeyTooLongError` each; HEAD 400 (no body) |
+| GET of a 1,024-byte key | 404 `NoSuchKey` (not the gate's) |
+| GET on `Locked`, `ab`, `a..b`, 64 × `a` | 400 `InvalidBucketName` each |
+| DeleteObjects of `a`, the 1,100-byte key, `b` | Deleted `a`, `b`; `<Error>` `KeyTooLongError` on the long key |
+| PUT / GET / DELETE of `rt.txt` | ETag `eff5bc1e…`, GET byte-equal, DELETE 204 |
+
+After the deploy: 0 Error lines since 16:58; alerts `BackendProbeFailing` × 4 + `DriverHedgesWinning` × 1 (the 0.1 `ObjectIntegrityFailure` has cleared).
 
 ## Residuals
 
@@ -99,4 +113,4 @@ PROD_AB_PLACEHOLDER
 
 - `/verify` of Part A and Part B against a local server on the private migrated DB `vaultaire_p15` with aws-cli (A: a batch without the code 403 with 3 rows kept, with a valid code all 3 deleted; B: every row of the table above).
 - The full `go test -race ./...` on `vaultaire_p15` (DATABASE_URL): 40 packages ok, exit 0.
-- golangci-lint v2.14.0: 0. `build-and-test` green on both PRs. CI failures on the way, none in the diffs: Postgres `too many clients` (auth, database) on #781's first run (RP16-9); `TestChunkedPut_WorkerFailureReleasesRefs` in #780's first merge group and `TestChunkPutBudget_AWriteDegradesToFewerChunksInFlightRatherThanRefusing` in #781's second run — both again on the main push after #780 merged — fixed in #782 (both tests 5 × `-race` and 3 × `GOMAXPROCS=1` clean on `vaultaire_p15`).
+- golangci-lint v2.14.0: 0. `build-and-test` green on both PRs. CI failures on the way, none in the diffs: Postgres `too many clients` (auth, database) on #781's first run (RP16-9); `TestChunkedPut_WorkerFailureReleasesRefs` in #780's first merge group and `TestChunkPutBudget_AWriteDegradesToFewerChunksInFlightRatherThanRefusing` in #781's second run — both again on the main push after #780 merged, and the budget test a fourth time on #781's third run — fixed in #782 (both tests 5 × `-race` and 3 × `GOMAXPROCS=1` clean on `vaultaire_p15`; #781's merge group, built on #782's main, was the first run of the day to pass with the fix under load).
