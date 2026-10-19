@@ -47,6 +47,7 @@ type exportSection struct {
 // exportExcludedTables are the tenant/user tables the export deliberately
 // leaves out, with the reason.
 var exportExcludedTables = map[string]string{
+	"webhook_outbox": "delivery bookkeeping (attempts, next attempt) of the webhooks exported in `webhooks`; terminal rows are kept 30 days",
 	// internal placement and dedup state: the customer-visible facts (size,
 	// etag, class) are in `objects`; where the bytes sit is the service's
 	"object_locations":     "internal placement ledger; the object's class is in `objects`",

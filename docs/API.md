@@ -288,7 +288,7 @@ Management  /api/v1/manage
 Account     /api/v1/user
   GET / · GET /quota · GET /quota/history · GET /usage · GET /usage/alerts · GET /presigned
   GET/POST /apikeys · DELETE /apikeys/{id} · POST /apikeys/{id}/rotate · POST /apikeys/{id}/expire · GET /apikeys/audit
-Webhooks    GET/POST /api/v1/webhooks · PATCH/DELETE /webhooks/{id} · GET /webhooks/{id}/deliveries · POST /webhooks/{id}/test
+Webhooks    GET/POST /api/v1/webhooks · PATCH/DELETE /webhooks/{id} · GET /webhooks/{id}/deliveries · POST /webhooks/{id}/test · POST /webhooks/{id}/rotate-secret
 Events      GET /api/v1/events   (object.created/deleted/downloaded, bucket.*, key.*, sts.token_created, webhook.test)
 STS         POST /api/v1/sts/token {"duration_seconds","permissions","bucket_scope","parent_key_id"}
 Admin       /api/v1/admin/*  (admin role: audit, flags, quota-reconcile; jobs = the background jobs' state,
@@ -304,9 +304,21 @@ Conventions (Stripe-style):
 - `Idempotency-Key` on PUT/POST/DELETE: the 2xx response is cached 24 h and
   replayed with `Idempotency-Replayed: true`; reusing a key on a different
   method/path is 409 `idempotency_key_reuse`
-- webhooks are signed `X-Webhook-Signature: sha256=<hmac-hex>` with the
-  `whsec_` secret shown once at creation; one delivery attempt per event, no
-  retries yet (WP-R11-3); targets may not be private or loopback addresses
+- webhooks are signed `X-Webhook-Signature: t=<unix>,v1=<hex>,sha256=<hex>`
+  with the `whsec_` secret shown once at creation (and by
+  `POST /webhooks/{id}/rotate-secret`, which replaces it at once — retries of
+  earlier events are signed with the new one): `v1` is HMAC-SHA256 over
+  `<t>.<raw body>`; verify it and refuse a `t` more than **5 minutes** from
+  your clock (a replayed delivery). `sha256` is the old body-only HMAC, sent
+  **for one release** while receivers move to `v1` — it will be removed;
+  split the header on `,` rather than comparing it whole
+- a delivery that does not answer 2xx (an error status, a redirect, a
+  timeout after 10 s, a connection failure) is retried — up to **5 attempts**,
+  1 s, 5 s, 25 s and 125 s apart (±20 %, picked up within 30 s); then the
+  event is given up for that endpoint. An attempt can arrive twice:
+  deduplicate on `X-Event-ID`. `GET /webhooks/{id}/deliveries` lists every
+  attempt with its `retry_count` (0 = first) and `next_retry_at`; targets may
+  not be private or loopback addresses
 - every response carries `X-Request-Id` and `X-Vaultaire-Version` (a date)
 
 The management bucket create applies the same rules as S3 CreateBucket

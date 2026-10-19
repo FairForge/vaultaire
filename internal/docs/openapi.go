@@ -1152,7 +1152,11 @@ func generateWebhookPaths() map[string]*PathItem {
 	return map[string]*PathItem{
 		"/api/v1/webhooks": {
 			Post: mut(withBody(jsonOp("Webhooks", "Create a webhook endpoint", "CreateWebhook",
-				"Registers a URL the server POSTs matching events to, signed with `X-Webhook-Signature: sha256=<hmac>` over the body using the returned secret. "+
+				"Registers a URL the server POSTs matching events to. Each POST carries `X-Webhook-Signature: t=<unix>,v1=<hex>,sha256=<hex>`: "+
+					"`v1` is HMAC-SHA256 with the returned secret over `<t>.<body>` — verify it and refuse a `t` more than 5 minutes from your clock (a replay); "+
+					"`sha256` is the legacy HMAC of the body alone, sent for one release while receivers move to `v1`. "+
+					"A delivery that does not get a 2xx is retried: up to 5 attempts, 1 s, 5 s, 25 s and 125 s apart (jittered ±20 %, picked up within 30 s); "+
+					"deduplicate on `X-Event-ID`, an attempt may arrive twice. "+
 					"Target policy (Review R11-04): `http` or `https` only, no credentials in the URL, not `localhost`, and not a literal loopback, private, "+
 					"link-local or metadata address; hostnames are re-checked against their resolved addresses at dial time. Refusals are 400 `invalid_url`.",
 				map[string]Response{
@@ -1205,7 +1209,9 @@ func generateWebhookPaths() map[string]*PathItem {
 		"/api/v1/webhooks/{id}/deliveries": {
 			Parameters: []Parameter{id},
 			Get: rateLimited(withParams(jsonOp("Webhooks", "List deliveries of a webhook", "ListWebhookDeliveries",
-				"Delivery attempts newest first. `next_cursor` is the `created_at` of the last row; pass it back as `cursor`. `total_count` is the endpoint's delivery count.",
+				"Delivery attempts newest first, one row per attempt: `retry_count` is the attempt's place among its event's retries (0 = the first attempt), "+
+					"`next_retry_at` when the next attempt is due after a failed one (null when none follows: delivered, or the fifth attempt). "+
+					"`next_cursor` is the `created_at` of the last row; pass it back as `cursor`. `total_count` is the endpoint's delivery count.",
 				map[string]Response{
 					"200": jsonResp("Deliveries", listSchema("", ref("WebhookDelivery"))),
 					"404": errResp("`webhook_not_found`"),
@@ -1213,6 +1219,23 @@ func generateWebhookPaths() map[string]*PathItem {
 				}),
 				refParam("Limit"),
 				queryParam("cursor", "Return deliveries created before this RFC 3339 timestamp (the previous page's `next_cursor`)", &Schema{Type: "string", Format: "date-time"}))),
+		},
+		"/api/v1/webhooks/{id}/rotate-secret": {
+			Parameters: []Parameter{id},
+			Post: mut(jsonOp("Webhooks", "Rotate a webhook's signing secret", "RotateWebhookSecret",
+				"Replaces the endpoint's `whsec_` secret; the new one is shown only in this answer. Every POST from now on — retries of earlier events included — "+
+					"is signed with it; the old secret verifies nothing. Recorded in the audit log (`webhook.secret_rotated`). No request body.",
+				map[string]Response{
+					"200": jsonResp("The new secret", objectPtr("", map[string]*Schema{
+						"object":     strEnum("", "webhook"),
+						"id":         str("Webhook id"),
+						"secret":     str("The new `whsec_...` secret, shown only here"),
+						"rotated_at": dateTime(""),
+						"request_id": str(""),
+					}, "object", "id", "secret", "rotated_at", "request_id")),
+					"404": errResp("`webhook_not_found`"),
+					"500": errResp("`internal_error`"),
+				})),
 		},
 		"/api/v1/webhooks/{id}/test": {
 			Parameters: []Parameter{id},
@@ -1964,7 +1987,7 @@ func generateJSONSchemas() map[string]Schema {
 			"id":         str("Webhook id (UUID)"),
 			"url":        str("Delivery URL"),
 			"events":     strArray("Event filters (exact types, `prefix.*`, or `*`)"),
-			"secret":     str("`whsec_...` HMAC-SHA256 key for `X-Webhook-Signature`, returned only on create"),
+			"secret":     str("`whsec_...` HMAC-SHA256 key for `X-Webhook-Signature`, returned only on create (and by rotate-secret)"),
 			"enabled":    boolean(""),
 			"created_at": dateTime(""),
 			"updated_at": dateTime("Present on list and update"),
@@ -1977,9 +2000,10 @@ func generateJSONSchemas() map[string]Schema {
 			"status":        strEnum("", "delivered", "failed"),
 			"response_code": {Type: "integer", Description: "HTTP status the target answered (0 when the request failed)"},
 			"latency_ms":    {Type: "integer"},
-			"retry_count":   {Type: "integer"},
+			"retry_count":   {Type: "integer", Description: "0 for an event's first attempt, n for its n-th retry"},
+			"next_retry_at": {Type: "string", Format: "date-time", Nullable: true, Description: "When the next attempt is due after this failed one; null when none follows"},
 			"created_at":    dateTime(""),
-		}, "object", "id", "event_id", "status", "response_code", "latency_ms", "retry_count", "created_at"),
+		}, "object", "id", "event_id", "status", "response_code", "latency_ms", "retry_count", "next_retry_at", "created_at"),
 		"Event": object("A tenant event; webhooks receive `{id, type, tenant_id, data, created_at}`", map[string]*Schema{
 			"object":     strEnum("", "event"),
 			"id":         str("Event id (UUID)"),

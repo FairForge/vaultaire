@@ -294,6 +294,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	// Assert: the jobs NewServer registers (account_deletion joins in Start).
 	want := map[string]string{
 		"vault_parity":        "every 2m0s",
+		"webhook_retry":       "every 30s",
 		"inventory":           "daily 00:30 UTC",
 		"chunk_orphans":       "daily 01:30 UTC",
 		"dedup_gc":            "daily 02:30 UTC",

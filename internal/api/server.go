@@ -128,6 +128,7 @@ type Server struct {
 	chunkOrphansGate   jobGate                // one dry run at a time
 	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
 	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
+	webhookRetry       *WebhookRetrier        // the webhook outbox's retry job (WP-R11-3); nil without a database
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
 	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
 	synthetic          *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
@@ -500,6 +501,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Start() on the shutdown-cancelled context. Synthetic customer check
 	// (Review R13-13): off unless SYNTHETIC_CHECK_URL is set.
 	s.retention = NewRetentionJob(s.db, logger)
+	// The webhook outbox's retry job (WP-R11-3): due rows back to the pool.
+	s.webhookRetry = NewWebhookRetrier(s.db, logger)
 	// The one GDPR export service (WP-R10-3b): the management API and the
 	// dashboard request through it, the account_export job renders, the
 	// retention job purges expired objects through it.

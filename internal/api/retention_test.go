@@ -232,6 +232,9 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		"s3_access_log": 30 * 24 * time.Hour, "events": 90 * 24 * time.Hour, "quota_usage_events": 90 * 24 * time.Hour,
 		"stripe_events": 90 * 24 * time.Hour, "cdn_access_log": 2 * 24 * time.Hour, "webhook_deliveries": 30 * 24 * time.Hour,
 		"waitlist_signups": 90 * 24 * time.Hour,
+		// The outbox is a webhook delivery record too (WP-R11-3): the
+		// policy's "webhook delivery records, 30 days".
+		"webhook_outbox": 30 * 24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {

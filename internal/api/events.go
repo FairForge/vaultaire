@@ -93,9 +93,13 @@ func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev
 		}
 		return
 	}
-	if len(owedRows(endpoints, eventID, eventType)) == 0 {
+	owed := owedRows(endpoints, eventID, eventType)
+	if len(owed) == 0 {
 		return
 	}
+	// The outbox rows first: the durable intent the retry job works from
+	// (WP-R11-3); the pool job is attempt 1.
+	recordWebhookIntents(lctx, db, logger, tenantID, owed)
 	eventDeliveries.submit(webhookJob(db, logger, endpoints, gen, eventID, eventType, tenantID, payload))
 }
 
@@ -207,12 +211,12 @@ func deliverWebhook(ctx context.Context, db *sql.DB, logger *zap.Logger, client 
 	deliveryID := uuid.New().String()
 	start := time.Now()
 
-	sig := generateWebhookSignature(body, secret)
+	sig := webhookSignature(body, secret, webhookNow())
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		logger.Error("create webhook request", zap.Error(err), zap.String("url", url))
-		recordDelivery(ctx, db, logger, deliveryID, webhookID, eventID, "failed", 0, err.Error(), 0)
+		finishWebhookAttempt(ctx, db, logger, deliveryID, webhookID, eventID, "failed", 0, err.Error(), 0)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -227,7 +231,7 @@ func deliverWebhook(ctx context.Context, db *sql.DB, logger *zap.Logger, client 
 			zap.Error(err),
 			zap.String("webhook_id", webhookID),
 			zap.String("url", url))
-		recordDelivery(ctx, db, logger, deliveryID, webhookID, eventID, "failed", 0, err.Error(), latencyMs)
+		finishWebhookAttempt(ctx, db, logger, deliveryID, webhookID, eventID, "failed", 0, err.Error(), latencyMs)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -238,12 +242,14 @@ func deliverWebhook(ctx context.Context, db *sql.DB, logger *zap.Logger, client 
 	n, _ := resp.Body.Read(buf)
 	respBody.Write(buf[:n])
 
+	// Only a 2xx delivers (a 3xx is not followed — the client refuses
+	// redirects — and is not a delivery either).
 	status := "delivered"
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		status = "failed"
 	}
 
-	recordDelivery(ctx, db, logger, deliveryID, webhookID, eventID, status, resp.StatusCode, respBody.String(), latencyMs)
+	finishWebhookAttempt(ctx, db, logger, deliveryID, webhookID, eventID, status, resp.StatusCode, respBody.String(), latencyMs)
 }
 
 func recordDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, deliveryID, webhookID, eventID, status string, responseCode int, responseBody string, latencyMs int) {
@@ -262,10 +268,28 @@ func recordDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, deliver
 	}
 }
 
+// generateWebhookSignature is the legacy signature: HMAC-SHA256 of the body
+// alone — nothing in it dates the request, so one captured delivery could
+// be replayed for ever.
 func generateWebhookSignature(payload []byte, secret string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write(payload)
 	return "sha256=" + hex.EncodeToString(h.Sum(nil))
+}
+
+// webhookSignature is the X-Webhook-Signature value (WP-R11-3 B.2, the
+// Stripe shape): `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>`,
+// followed for one release by the legacy `sha256=<hex HMAC(body)>` element
+// so a receiver that verifies the body-only HMAC keeps working while it
+// moves to v1. A receiver checks v1 and refuses a t more than 5 minutes
+// from its clock (docs/API.md).
+func webhookSignature(body []byte, secret string, at time.Time) string {
+	t := strconv.FormatInt(at.Unix(), 10)
+	h := hmac.New(sha256.New, []byte(secret))
+	h.Write([]byte(t))
+	h.Write([]byte("."))
+	h.Write(body)
+	return "t=" + t + ",v1=" + hex.EncodeToString(h.Sum(nil)) + "," + generateWebhookSignature(body, secret)
 }
 
 func generateWebhookSecret() (string, error) {

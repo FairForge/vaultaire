@@ -101,14 +101,21 @@ func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket 
 	sort.SliceStable(pending, func(i, j int) bool { return position(pending[i].key) < position(pending[j].key) })
 	const eventName, eventType = "s3:ObjectRemoved:Delete", "object.deleted"
 	jobs := make([]deliveryJob, 0, 2*len(pending))
+	var intents []droppedDelivery
 	for _, p := range pending {
 		if len(f.targets) > 0 {
 			jobs = append(jobs, d.notify.notificationJob(f.targets, tenantID, bucket, eventName, p.key, 0, ""))
 		}
-		if p.eventID != "" && len(owedRows(f.endpoints, p.eventID, eventType)) > 0 {
+		if p.eventID == "" {
+			continue
+		}
+		if owed := owedRows(f.endpoints, p.eventID, eventType); len(owed) > 0 {
+			intents = append(intents, owed...)
 			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, f.webhookGen, p.eventID, eventType, tenantID, p.dataJSON))
 		}
 	}
+	// The batch's outbox rows in one statement before its jobs (WP-R11-3).
+	recordWebhookIntents(context.Background(), d.db, d.logger, tenantID, intents)
 	eventDeliveries.submit(jobs...)
 }
 

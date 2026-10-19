@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -375,6 +376,24 @@ func insertDroppedDeliveries(ctx context.Context, db *sql.DB, rows []droppedDeli
 		if got, err := res.RowsAffected(); err == nil {
 			filtered += n - int(got)
 		}
+		// Not attempted is not an attempt (WP-R11-3): the outbox row is due
+		// again shortly, attempts unchanged — created when there is none
+		// (an event whose endpoints could not be read had no intent row).
+		now := webhookNow()
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO webhook_outbox (id, tenant_id, endpoint_id, event_id, state, attempts, next_attempt_at, last_error, created_at, updated_at)
+			SELECT DISTINCT ON (u.hook, u.event) u.id, w.tenant_id, u.hook, u.event, 'pending', 0, $4::timestamptz, $5, $6::timestamptz, $6::timestamptz
+			FROM unnest($1::text[], $2::text[], $3::text[]) AS u(id, hook, event)
+			JOIN webhook_endpoints w ON w.id = u.hook
+			JOIN events e ON e.id = u.event
+			ON CONFLICT (event_id, endpoint_id) DO UPDATE SET next_attempt_at = EXCLUDED.next_attempt_at,
+				last_error = EXCLUDED.last_error, updated_at = EXCLUDED.updated_at
+			WHERE webhook_outbox.state = 'pending'`,
+			pq.Array(freshIDs(n)), pq.Array(hooks), pq.Array(events), now.Add(webhookDroppedRetryAfter), reason, now); err != nil {
+			// The failure rows are in; only the retry is not scheduled (the
+			// row's lease still makes it due later, if it has one).
+			return filtered, fmt.Errorf("dropped webhook deliveries recorded, but their outbox rows were not made due: %w", err)
+		}
 		rows = rows[n:]
 	}
 	return filtered, nil
@@ -543,11 +562,23 @@ func revalidateEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, en
 		case ok:
 			deliveriesDropped.WithLabelValues(deliveryKindWebhook, "removed").Inc()
 			recordDelivery(ctx, db, logger, uuid.New().String(), ep.id, eventID, "failed", 0, endpointSkipped, 0)
+			if err := skipOutboxRows(ctx, db, ep.id, eventID); err != nil {
+				logger.Warn("webhook outbox row not skipped; the retry job skips it when due", zap.Error(err))
+			}
 		default:
 			deliveriesDropped.WithLabelValues(deliveryKindWebhook, "removed").Inc()
 			logger.Info("webhook deleted while its delivery was queued; not sent",
 				zap.String("tenant_id", tenantID), zap.String("webhook_id", ep.id), zap.String("event_id", eventID))
 		}
+	}
+	return out
+}
+
+// freshIDs is n new row ids.
+func freshIDs(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = uuid.New().String()
 	}
 	return out
 }
