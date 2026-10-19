@@ -514,6 +514,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if systemBucketRefused(w, r, s3Req) {
 		return
 	}
+	// The bucket name and the key length, for every operation (WP-R2-7).
+	if requestNameRefused(w, r, s3Req) {
+		return
+	}
 
 	if tenantID == "" {
 		tenantID = "default"

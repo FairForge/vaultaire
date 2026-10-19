@@ -312,13 +312,20 @@ support:
 </Error>
 ```
 
+Names are checked before anything else: a bucket name that is not a valid
+S3 name (3–63 characters, lower-case letters, digits, `.` and `-`, no `..`)
+is 400 `InvalidBucketName` and a key over 1,024 bytes 400 `KeyTooLongError`,
+on every operation. A write takes keys up to 857 bytes (the rest is the room
+the service's own addressing needs); a `DeleteObjects` key over 1,024 bytes
+is that key's error, the other keys are deleted.
+
 Some messages carry a suggestion after the standard text (closest bucket or
 key name within the tenant, the auth header that was malformed, the lock that
 refused a delete). The full code list from `internal/api/s3_errors.go`:
 
 | HTTP | Codes |
 |------|-------|
-| 400 | `InvalidBucketName`, `InvalidObjectName`, `InvalidRequest`, `IncompleteBody`, `BadDigest`, `InvalidDigest`, `MalformedXML`, `XAmzContentSHA256Mismatch`, `InvalidArgument`, `InvalidPart`, `InvalidPartOrder`, `EntityTooSmall`, `InvalidPartNumber`, `AccessControlListNotSupported`, `InvalidRetentionPeriod`, `AuthorizationQueryParametersError`, `AuthorizationQueryParametersError_Expires`, `InvalidLocationConstraint`, `InvalidTag` |
+| 400 | `InvalidBucketName`, `KeyTooLongError`, `InvalidObjectName`, `InvalidRequest`, `IncompleteBody`, `BadDigest`, `InvalidDigest`, `MalformedXML`, `XAmzContentSHA256Mismatch`, `InvalidArgument`, `InvalidPart`, `InvalidPartOrder`, `EntityTooSmall`, `InvalidPartNumber`, `AccessControlListNotSupported`, `InvalidRetentionPeriod`, `AuthorizationQueryParametersError`, `AuthorizationQueryParametersError_Expires`, `InvalidLocationConstraint`, `InvalidTag` |
 | 403 | `AccessDenied`, `SignatureDoesNotMatch`, `RequestTimeTooSkewed`, `AccountSuspended`, `ExpiredToken`, `QuotaExceeded`, `InvalidObjectState` |
 | 404 | `NoSuchBucket`, `NoSuchKey`, `NoSuchUpload`, `NoSuchVersion` |
 | 405 | `MethodNotAllowed` |

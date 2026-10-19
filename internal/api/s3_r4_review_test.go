@@ -385,7 +385,7 @@ func TestListObjects_V1MarkerAndMissingBucket(t *testing.T) {
 	assert.Equal(t, []string{"k3"}, keysOf(res))
 	assert.Equal(t, "k2", res.Marker)
 
-	req := httptest.NewRequest("GET", "/no-such-bucket-"+f.tenantID+"?list-type=2", nil)
+	req := httptest.NewRequest("GET", "/no-such-bucket-r4?list-type=2", nil) // a valid name the tenant has no bucket under (WP-R2-7 gates malformed ones)
 	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, req)
