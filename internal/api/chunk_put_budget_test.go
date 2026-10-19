@@ -109,8 +109,13 @@ func TestChunkPutBudget_AWriteDegradesToFewerChunksInFlightRatherThanRefusing(t 
 	// each (chunkPutHoldBytes); once compressed (a constant block shrinks
 	// to nothing) each holds its 16 MiB. With a budget of one reserve
 	// (48 MiB) the write can keep ONE chunk at the backend at a time; with
-	// a roomy budget the eight workers run.
-	run := func(limit int64) (inFlightMax int32, code int) {
+	// a roomy budget the eight workers run. The gate holds every chunk PUT
+	// that reaches the backend, so the write is waited for at the width
+	// the budget allows (`want` PUTs at the gate — in flight can only grow
+	// while the gate is closed) and never sampled on a clock: a fixed 2 s
+	// settle saw two of three chunks on a loaded CI runner. The width is
+	// then read from the driver's high-water mark after the whole write.
+	run := func(limit int64, want int32) (widest int32, code int) {
 		f := setupPendingFixture(t)
 		f.server.chunkPutBudget = newChunkPutBudget(limit)
 		body := blockBody(t, 3)
@@ -123,33 +128,33 @@ func TestChunkPutBudget_AWriteDegradesToFewerChunksInFlightRatherThanRefusing(t 
 			done <- f.do(t, "PUT", "/test-bucket/blocks.bin", body, map[string]string{"Content-Type": "application/octet-stream"})
 		}()
 		deadline := time.Now().Add(time.Minute)
-		for f.gated.inFlight.Load() == 0 {
+		for f.gated.inFlight.Load() < want {
 			select {
 			case w := <-done:
-				t.Fatalf("the write ended before any chunk PUT: %d %s", w.Code, w.Body.String())
+				t.Fatalf("the write ended before %d chunk PUTs were in flight: %d %s", want, w.Code, w.Body.String())
 			default:
 			}
-			require.True(t, time.Now().Before(deadline), "no chunk PUT in flight")
+			require.True(t, time.Now().Before(deadline), "only %d of %d chunk PUTs in flight", f.gated.inFlight.Load(), want)
 			time.Sleep(20 * time.Millisecond)
 		}
-		// Let the write settle at its width.
-		time.Sleep(2 * time.Second)
-		inFlightMax = f.gated.inFlight.Load()
 		assert.LessOrEqual(t, f.server.chunkPutBudget.inUse(), limit, "never over the budget")
 		openGate()
 		code = (<-done).Code
 		assert.Zero(t, f.server.chunkPutBudget.inUse(), "everything given back")
 		assert.Equal(t, body, f.getObj(t, "blocks.bin"))
-		return inFlightMax, code
+		return f.gated.maxInFlight.Load(), code
 	}
 
 	// Act
-	narrow, codeNarrow := run(chunkPutReserveBytes)
-	wide, codeWide := run(1 << 30)
+	narrow, codeNarrow := run(chunkPutReserveBytes, 1)
+	wide, codeWide := run(1<<30, 3)
 
 	// Assert
 	assert.Equal(t, http.StatusOK, codeNarrow, "a write that holds its reserve is never refused")
 	assert.Equal(t, http.StatusOK, codeWide)
+	// A chunk's buffers go back to the budget only after its PUT returned,
+	// so under one reserve no second PUT ever overlaps the first — over the
+	// whole write, not at one sample.
 	assert.Equal(t, int32(1), narrow, "one chunk at a time under a one-reserve budget")
 	assert.GreaterOrEqual(t, wide, int32(3), "the workers run under a roomy budget")
 }

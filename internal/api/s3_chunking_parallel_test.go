@@ -132,10 +132,15 @@ func TestChunkedPut_DuplicateChunksSingleStore(t *testing.T) {
 // TestChunkedPut_WorkerFailureReleasesRefs injects a store failure after one
 // success: the PUT must 5xx, install nothing, and compensate every reference
 // taken by the chunks that did succeed (F10 semantics under concurrency).
+// The handler answers as soon as a sibling fails while the PUT that
+// succeeds finishes detached (RP14-1), so the test waits for it to end
+// before reading what it stored — it used to read `storedKeys` before the
+// detached PUT had landed on a loaded CI runner.
 func TestChunkedPut_WorkerFailureReleasesRefs(t *testing.T) {
 	f := setupChunkingFixture(t)
 	ie := &instrumentedEngine{Engine: f.eng, delay: 5 * time.Millisecond, failAfter: 1}
 	f.adapter.engine = ie
+	f.adapter.chunkPuts = &chunkPutRegistry{} // this test's own, not the package-wide fallback
 
 	content := generateTestData(48 << 20)
 	req := httptest.NewRequest("PUT", "/test-bucket/fail.bin", bytes.NewReader(content))
@@ -144,6 +149,7 @@ func TestChunkedPut_WorkerFailureReleasesRefs(t *testing.T) {
 	w := httptest.NewRecorder()
 	f.adapter.HandlePut(w, req, "test-bucket", "fail.bin")
 	require.GreaterOrEqual(t, w.Code, 500, "failed chunk store must fail the PUT")
+	waitFor(t, "the detached chunk PUT to end", func() bool { return f.adapter.chunkPuts.count() == 0 })
 
 	var headRows int
 	require.NoError(t, f.db.QueryRow(`

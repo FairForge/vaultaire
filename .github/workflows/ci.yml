@@ -67,8 +67,13 @@ jobs:
         # merges that touched nothing near the failing package. A service
         # container takes no command, so the limit is raised with ALTER
         # SYSTEM (persisted in postgresql.auto.conf) and a container restart.
+        # 400 still ran out on 2026-10-19 (#781's first run: auth and
+        # database died at the second api, auth, dashboard, handlers and
+        # drivers all converged); the pools are unbounded until the test
+        # sites share one bounded opener (WP-P15 residual), so 1000 — a
+        # connection costs nothing until it is used.
         run: |
-          psql -h localhost -U postgres -c "ALTER SYSTEM SET max_connections = 400;"
+          psql -h localhost -U postgres -c "ALTER SYSTEM SET max_connections = 1000;"
           docker restart "${{ job.services.postgres.id }}"
           for i in $(seq 1 30); do pg_isready -h localhost -U postgres && break; sleep 1; done
           psql -h localhost -U postgres -tAc "SHOW max_connections;"
