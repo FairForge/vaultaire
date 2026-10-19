@@ -18,6 +18,9 @@
 #   vaultaire_driver_hedges_won_total{driver,op}    ... whose hedge answered first: the first attempt had stalled
 #   vaultaire_driver_put_retries_total{driver}      PUT / UploadPart past its per-size deadline, retried once on a
 #                                                  fresh connection (WP-VAULT-1, #740/#742)
+#   vaultaire_geyser_put_materialized_total{reason}  Geyser PUTs whose body was buffered to learn its length because
+#                                                  the caller passed none (reason unknown_length); a known length
+#                                                  streams (WP-R7-2). Every Vault write passes one: expect 0
 #   vaultaire_driver_dns_refreshes_total{host,outcome}  lookups of a driver endpoint by the shared DNS cache, one per
 #                                                  host per DRIVER_DNS_TTL (5 min): ok | error (the stale answer
 #                                                  is kept; WP-R7-6)
