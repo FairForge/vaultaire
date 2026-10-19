@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"os"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -66,6 +68,19 @@ func WithGeyserEndpoint(ep string) GeyserOption {
 }
 
 // geyserOpTimeouts are Geyser's per-class response-header bounds.
+// geyserPutMaterialized counts Geyser PUTs whose body had to be read into
+// RAM or a temp file to learn its length (WP-R7-2: a caller that passes no
+// engine.WithContentLength; every Vault write path passes one). The series
+// exists at 0 from boot.
+var geyserPutMaterialized = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_geyser_put_materialized_total",
+	Help: "Geyser PUTs whose body was buffered (RAM up to 64 MiB, else a temp file) to learn its length because the caller passed none; a known length streams (WP-R7-2).",
+}, []string{"reason"})
+
+func init() {
+	geyserPutMaterialized.WithLabelValues("unknown_length")
+}
+
 var geyserOpTimeouts = OpTimeouts{
 	Meta:     15 * time.Second,
 	Get:      5 * time.Minute,
@@ -265,7 +280,14 @@ func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data
 	key := d.buildKey(tenantID, container, artifact)
 
 	// Geyser's Spectra Vail gateway requires Content-Length on every PUT
-	// (HTTP 411 otherwise). We materialise the data to know the size.
+	// (HTTP 411 otherwise). A caller that knows the length (every Vault
+	// write path passes engine.WithContentLength) streams the body through
+	// in ONE attempt (WP-R7-2); only an unknown length is materialised to
+	// learn it — into RAM up to 64 MiB, else a temp file — and counted.
+	if n := engine.ApplyPutOptions(opts...).ContentLength; n > 0 {
+		return d.putStreamed(ctx, tenantID, key, data, n)
+	}
+	geyserPutMaterialized.WithLabelValues("unknown_length").Inc()
 	body, contentLength, cleanup, err := materialize(data)
 	if err != nil {
 		return fmt.Errorf("geyser buffer %s: %w", key, err)
@@ -291,8 +313,42 @@ func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data
 	return nil
 }
 
+// putStreamed sends a body of a known length as it is read: Content-Length
+// from the caller, the payload unsigned (the SDK cannot hash a stream it
+// has not read; UNSIGNED-PAYLOAD is what the S3 CLIs send) and no trailer
+// checksum (an unseekable body would otherwise go aws-chunked with a
+// trailing CRC32, which Vail does not take). One attempt: a stream cannot
+// be rewound, so the SDK's retryer and a fresh-connection retry are both
+// out — the engine reports a failure after bytes went out as ErrNoFailover
+// and, with no answer, as an attempt that may still land (RP13-1). The
+// request is bounded by Geyser's own PUT-answer bound (geyserOpTimeouts.Put,
+// 5 min: tape) and the caller's context; the per-size
+// FIXED_BUCKET_PUT_TIMEOUT deadline is the fixed-bucket and Lyve drivers'.
+func (d *GeyserDriver) putStreamed(ctx context.Context, tenantID, key string, data io.Reader, n int64) error {
+	d.logger.Debug("geyser put (streamed)",
+		zap.String("tenant_id", tenantID),
+		zap.String("bucket", d.bucket),
+		zap.String("key", key),
+		zap.Int64("size", n),
+	)
+	opts := append(sdkCallOptions(ctx), func(o *s3.Options) {
+		o.RetryMaxAttempts = 1
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.APIOptions = append(o.APIOptions, v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+	})
+	if _, err := d.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(d.bucket),
+		Key:           aws.String(key),
+		Body:          data,
+		ContentLength: aws.Int64(n),
+	}, opts...); err != nil {
+		return fmt.Errorf("geyser put %s: %w", key, err)
+	}
+	return nil
+}
+
 // materialize reads the entire body to determine its length (required by
-// Geyser/Spectra Vail). Small objects (<=64 MB) are buffered in RAM;
+// Geyser/Spectra Vail) when the caller passed none. Small objects (<=64 MB) are buffered in RAM;
 // larger objects are spilled to a temp file to avoid OOM.
 func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func(), err error) {
 	buf := &bytes.Buffer{}
