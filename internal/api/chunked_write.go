@@ -83,6 +83,16 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 		contentType = "application/octet-stream"
 	}
 
+	// The write's first act (WP-R2-6, chunk_put_budget.go): one worker's
+	// buffers from the process budget, before a byte of the body is read
+	// or a chunk claimed — refused as errChunkPutBudget (503 SlowDown) when
+	// the budget cannot spare them within the wait.
+	hold, err := a.chunkBudget().reserve(ctx, chunkPutReserveBytes, chunkPutBudgetWait)
+	if err != nil {
+		return chunkedResult{}, err
+	}
+	defer hold.close()
+
 	// pctx cancels the chunker, the store workers, and their DB work as one
 	// unit: the first error anywhere stops the whole upload promptly.
 	pctx, cancelStores := context.WithCancel(ctx)
@@ -92,7 +102,7 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 	if err != nil {
 		return chunkedResult{}, fmt.Errorf("create chunker: %w", err)
 	}
-	chunkCh, err := chunker.ChunkContext(pctx, cw.Body)
+	chunkCh, err := chunker.ChunkContextDepth(pctx, cw.Body, chunkerLookahead)
 	if err != nil {
 		return chunkedResult{}, fmt.Errorf("start streaming chunker: %w", err)
 	}
@@ -129,6 +139,7 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 	// decision; only compress → encrypt → storeChunkLocked runs on workers.
 	pool := newChunkStorePool(pctx, a, cancelStores,
 		cw.TenantID, cw.TenantID, cw.Bucket, addr, dedupScope, contentType, encrypting)
+	pool.hold = hold
 
 	// Every chunk processed takes one GCI reference (fresh insert at
 	// ref_count 1, ON CONFLICT increment, or IncrementRef on a dedup hit). If
@@ -223,7 +234,16 @@ func (a *S3ToEngine) storeChunkedObject(ctx context.Context, cw chunkedWrite) (c
 			continue
 		}
 
-		pool.submit(chunk)
+		// The chunk's buffers (itself, compressed, sealed — the worst case;
+		// shrunk once known) from what the write holds, else the budget:
+		// the dispatcher waits here when neither has them, until a chunk of
+		// this write finishes — fewer in flight, never a refusal.
+		held := chunkPutHoldBytes(chunk.Size)
+		if err := hold.hold(pctx, held); err != nil {
+			pool.fail(fmt.Errorf("chunk %s buffers: %w", chunk.Hash[:16], err))
+			break
+		}
+		pool.submit(chunk, held)
 	}
 
 	if joinErr := pool.join(); joinErr != nil {

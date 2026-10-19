@@ -70,6 +70,9 @@ type S3ToEngine struct {
 	// chunkPuts is the server's registry of chunk PUTs in flight (RP14-1;
 	// nil = a package default, for adapters built without a server).
 	chunkPuts *chunkPutRegistry
+	// chunkPutBudget is the process budget of chunked writes' buffers
+	// (WP-R2-6; nil = the package default).
+	chunkPutBudget *chunkPutBudget
 
 	// chunkGetPrefetch bounds how many chunks a chunked GET holds at once
 	// — in flight, fetched and being written (default
@@ -1206,6 +1209,18 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				// and an Error line before.
 				answerClientBody(w, r, a.logger, "PutObject", src, chunkErr,
 					zap.String("bucket", bucket), zap.String("key", artifact), zap.Bool("chunked", true))
+				return
+			}
+			if errors.Is(chunkErr, errChunkPutBudget) {
+				// The process cannot take another large upload now (WP-R2-6):
+				// nothing was read or stored; the client retries. Real
+				// saturation — it counts in vaultaire_errors_total.
+				a.logger.Warn("chunked upload refused: the chunk-buffer budget could not spare one worker's buffers — 503",
+					zap.String("bucket", bucket), zap.String("key", artifact), zap.Int64("budget_in_use", a.chunkBudget().inUse()))
+				w.Header().Set("Retry-After", "30")
+				WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
+					WithMessage("Please reduce your request rate: the server cannot take another large upload right now."),
+					WithSuggestion("Retry in 30 seconds."))
 				return
 			}
 			a.logger.Error("chunked upload failed",

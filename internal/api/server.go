@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,8 +65,9 @@ type Server struct {
 	longOpsOnce      sync.Once
 	chunkPutsReg     *chunkPutRegistry // chunk PUTs in flight, detached from their requests (chunk_put_detached.go)
 	chunkPutsOnce    sync.Once
-	longOpGrace      time.Duration // tests; 0 = defaultLongOpAnswerGrace
-	draining         atomic.Bool   // Shutdown has started (s3_long_op.go)
+	chunkPutBudget   *chunkPutBudget // the process budget of chunked writes' buffers (WP-R2-6, chunk_put_budget.go)
+	longOpGrace      time.Duration   // tests; 0 = defaultLongOpAnswerGrace
+	draining         atomic.Bool     // Shutdown has started (s3_long_op.go)
 	db               *sql.DB
 	events           chan Event
 	engine           *engine.CoreEngine
@@ -491,6 +493,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
+	s.chunkPutBudget = newChunkPutBudget(chunkPutBudgetFromEnv(os.Getenv, debug.SetMemoryLimit(-1), logger))
+	chunkPutBudgetSize.Set(float64(s.chunkPutBudget.limit()))
 
 	// Retention (Review R13-14): nightly prune of the log tables; started in
 	// Start() on the shutdown-cancelled context. Synthetic customer check

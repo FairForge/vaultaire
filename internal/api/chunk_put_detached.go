@@ -129,10 +129,14 @@ type chunkPutResult struct {
 // under the chunk bound, and returns its result — or detached = true when
 // the request ended first: the PUT then finishes its claim by itself
 // (finishDetachedChunkPut), and this writer must take no reference.
-func (a *S3ToEngine) putChunk(ctx context.Context, scope, storageKey string, data []byte, since time.Time, entry *crypto.GCIEntry) (chunkPutResult, bool) {
+func (a *S3ToEngine) putChunk(ctx context.Context, scope, storageKey string, data []byte, since time.Time, entry *crypto.GCIEntry, lease *chunkLease) (chunkPutResult, bool) {
 	putCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.chunkPutBound)
 	reg := a.chunkPutReg()
 	reg.add()
+	// The blob's share of the write's budget hold (WP-R2-6): the goroutine
+	// keeps the bytes it sends until it ends, so it owns their share — the
+	// worker gives back the rest when it leaves.
+	blobLease := lease.split(int64(len(data)))
 	// decided: whoever sets it first owns the result — the worker (the
 	// request ended; the goroutine finishes the claim) or the goroutine
 	// (the PUT ended; the worker reads the result).
@@ -140,6 +144,7 @@ func (a *S3ToEngine) putChunk(ctx context.Context, scope, storageKey string, dat
 	res := make(chan chunkPutResult, 1)
 	go func() {
 		defer reg.done()
+		defer blobLease.releaseAll()
 		bn, outcome, err := a.chunks().put(putCtx, storageKey, data)
 		cancel()
 		r := chunkPutResult{backend: bn, outcome: outcome, err: err}

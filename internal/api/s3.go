@@ -1105,6 +1105,7 @@ func (s *Server) writeAdapter() *S3ToEngine {
 		a.chunkPutBound = s.chunkPutBound
 	}
 	a.chunkPuts = s.chunkPuts()
+	a.chunkPutBudget = s.chunkPutBudget
 	return a
 }
 

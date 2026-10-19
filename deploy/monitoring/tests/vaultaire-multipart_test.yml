@@ -1,0 +1,28 @@
+# promtool unit test of vaultaire-multipart.yml (WP-R2-6, Stage 1a Prompt 14 Part C).
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-multipart.yml deploy/monitoring/tests/vaultaire-multipart_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-multipart_test.yml'
+rule_files:
+  - vaultaire-multipart.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The counter exists at 0 from boot (RP14-9): a first refusal is a rise
+  # from 0 to 1 that increase() sees.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_chunk_put_budget_refusals_total'
+        values: '0 0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ChunkPutBudgetRefusing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Large uploads are refused: the chunk-buffer budget is spent"
+              description: "1 chunked write(s) answered 503 SlowDown in 15 min: the process budget for chunked PUTs' buffers (vaultaire_chunk_put_budget_bytes, CHUNK_PUT_BUDGET_BYTES) could not spare one worker's 48 MiB within 2 s. In use: vaultaire_chunk_put_budget_bytes_in_use. Writes that got in run narrower first, so this is the box at its memory bound — raise the budget with GOMEMLIMIT and the unit's MemoryHigh= (docs/DEPLOY.md), or accept the retries."
+      - eval_time: 2m
+        alertname: ChunkPutBudgetRefusing
+        exp_alerts: []

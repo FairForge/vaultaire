@@ -65,7 +65,7 @@ func TestStoreChunkLocked_ReusesExistingRowUnderLock(t *testing.T) {
 	}))
 
 	secondCT := "2222222222222222222222222222222222222222222222222222222222222222"
-	res, err := f.adapter.storeChunkLocked(ctx, scope, storageKey, []byte("second writer's different encoding"),
+	res, err := f.adapter.storeChunkLocked(ctx, scope, storageKey, []byte("second writer's different encoding"), nil,
 		&crypto.GCIEntry{
 			DedupScope: scope, PlaintextHash: hash, StorageKey: storageKey,
 			SizeBytes: int64(len(chunk)), Encrypted: true, CiphertextHash: &secondCT, RefCount: 1,

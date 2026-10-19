@@ -1130,6 +1130,15 @@ func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request,
 		w.Header().Set("Retry-After", "300")
 		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 			WithSuggestion("This bucket's region is not enabled on this deployment."))
+	case errors.Is(err, errChunkPutBudget):
+		// The process cannot take another large upload now (WP-R2-6): nothing
+		// read or stored, the upload stays active, the client retries.
+		s.logger.Warn("multipart complete refused: the chunk-buffer budget could not spare one worker's buffers — 503",
+			zap.String("bucket", bucket), zap.String("key", object), zap.String("upload_id", uploadID))
+		w.Header().Set("Retry-After", "30")
+		WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
+			WithMessage("Please reduce your request rate: the server cannot take another large upload right now."),
+			WithSuggestion("Retry the complete in 30 seconds."))
 	case errors.Is(err, engine.ErrAllBackendsUnavailable):
 		// A 503 the client retries: Warn, no stack trace (Prompt 2b.3 D1.7).
 		s.logger.Warn("multipart complete: the backend is unavailable — 503",
