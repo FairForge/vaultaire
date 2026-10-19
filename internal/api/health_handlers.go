@@ -245,6 +245,7 @@ func (s *Server) handleHealthEnhanced(w http.ResponseWriter, r *http.Request) {
 	// HAProxy — the peer it appends is never loopback.
 	if ip := net.ParseIP(clientip.FromRequest(r)); ip != nil && ip.IsLoopback() {
 		resp["long_ops_in_flight"] = s.longOps().count()
+		resp["chunk_puts_in_flight"] = s.chunkPuts().count()
 	}
 
 	// Add backend details if requested

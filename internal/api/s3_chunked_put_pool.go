@@ -28,10 +28,11 @@ const chunkPutBoundDefault = 90 * time.Second
 
 // chunkPendingTakeoverDefault is how old a pending claim must be before
 // another writer of the chunk takes it over: twice chunkPutBoundDefault. The
-// claimer's PUT ran under chunkPutBound from after its claim, so by then it
-// has ended — and a backend that committed a PUT the client had already
-// given up on (RP8-11) did so within the second bound — so the taker's
-// bytes are never overwritten by the claimer's late ones.
+// claimer's PUT ran under chunkPutBound from after its claim — detached from
+// its request since RP14-1, so a request that ends does not end it — so by
+// then it has ended, and a backend that committed a PUT nobody waited for
+// (RP8-11) did so within the second bound: the taker's bytes are never
+// overwritten by the claimer's late ones.
 const chunkPendingTakeoverDefault = 2 * chunkPutBoundDefault
 
 // defaultChunkGetPrefetch caps how many chunks a chunked GET holds at once
@@ -202,7 +203,16 @@ func (p *chunkStorePool) submit(c crypto.Chunk) {
 	p.mu.Lock()
 	p.inFlight[c.Hash] = []dupChunkWaiter{}
 	p.mu.Unlock()
-	p.jobs <- chunkStoreJob{chunk: c}
+	select {
+	case p.jobs <- chunkStoreJob{chunk: c}:
+	case <-p.ctx.Done():
+		// The upload is over: the workers may be finishing PUTs that
+		// outlived it (RP14-1) — never wait on them for a chunk nobody
+		// will store.
+		p.mu.Lock()
+		delete(p.inFlight, c.Hash)
+		p.mu.Unlock()
+	}
 }
 
 func (p *chunkStorePool) worker() {
@@ -216,6 +226,11 @@ func (p *chunkStorePool) worker() {
 // old sequential loop's mustStore branch, unchanged in order and semantics.
 func (p *chunkStorePool) storeOne(job chunkStoreJob) chunkStoreOutcome {
 	chunk := &job.chunk
+	// A chunk not yet started when the upload ended is never attempted
+	// (RP14-1): no claim, no PUT.
+	if err := p.ctx.Err(); err != nil {
+		return chunkStoreOutcome{chunk: job.chunk, err: fmt.Errorf("chunk %s not attempted, the upload ended: %w", chunk.Hash[:16], err)}
+	}
 	storeData := chunk.Data
 	var compressedSize *int64
 	var compressionAlgo *string

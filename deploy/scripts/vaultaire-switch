@@ -100,12 +100,13 @@ sessions_of() {
   echo "$total"
 }
 
-# Detached long S3 operations still running on a slot, from its own port
-# (/health answers `long_ops_in_flight` to loopback only). A slot whose unit is
-# not running has nothing left (0). A running slot that does not answer — busy,
-# or a poll that timed out — is unknown ("?"), never 0: the caller keeps
-# waiting until LONG_OP_TIMEOUT (Prompt 2a.2 G1; it used to stop the slot on
-# the first failed poll).
+# Detached long S3 operations still running on a slot, plus the chunk blob
+# PUTs that outlived their requests (Prompt 14 RP14-1; a build before it has
+# no `chunk_puts_in_flight` field: 0), from its own port (/health answers both
+# to loopback only). A slot whose unit is not running has nothing left (0). A
+# running slot that does not answer — busy, or a poll that timed out — is
+# unknown ("?"), never 0: the caller keeps waiting until LONG_OP_TIMEOUT
+# (Prompt 2a.2 G1; it used to stop the slot on the first failed poll).
 long_ops_of() {
   local body n
   if ! systemctl is-active --quiet "vaultaire@$1"; then
@@ -116,7 +117,8 @@ long_ops_of() {
   n=$(printf '%s' "$body" | python3 -c '
 import json, sys
 try:
-    print(int(json.load(sys.stdin)["long_ops_in_flight"]))
+    h = json.load(sys.stdin)
+    print(int(h["long_ops_in_flight"]) + int(h.get("chunk_puts_in_flight", 0)))
 except Exception:
     print("?")' 2>/dev/null) || n="?"
   echo "${n:-?}"

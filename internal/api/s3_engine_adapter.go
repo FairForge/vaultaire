@@ -67,6 +67,9 @@ type S3ToEngine struct {
 	// chunkPutBound bounds one chunk blob's backend PUT, failover included
 	// (chunkPutBoundDefault).
 	chunkPutBound time.Duration
+	// chunkPuts is the server's registry of chunk PUTs in flight (RP14-1;
+	// nil = a package default, for adapters built without a server).
+	chunkPuts *chunkPutRegistry
 
 	// chunkGetPrefetch bounds how many chunks a chunked GET holds at once
 	// — in flight, fetched and being written (default

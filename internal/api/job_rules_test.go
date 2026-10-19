@@ -191,7 +191,7 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	// Assert: the five rules and their severities — a jump pages, drift
 	// warns, unknown rows inform, a shared store pages.
 	for name, sev := range map[string]string{
-		"RoutingTruthMissing": "warning", "RoutingTruthMissingJump": "critical",
+		"RoutingTruthMissing": "warning", "RoutingTruthMissingJump": "critical", "RoutingTruthNoVerdict": "warning",
 		"RoutingUnknownBackendRows": "info", "RoutingSharedStore": "critical", "RoutingUnknownBackendReads": "warning",
 	} {
 		require.Contains(t, rules, name)
@@ -199,6 +199,7 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	}
 	assert.Contains(t, rules["RoutingTruthMissing"].expr, "vaultaire_routing_truth_last_run_missing_ratio > 0")
 	assert.Contains(t, rules["RoutingTruthMissingJump"].expr, "vaultaire_routing_truth_last_run_missing_ratio offset 25h) > 0.1", "a jump is a delta against yesterday's run, so the known backlog does not page daily")
+	assert.Contains(t, rules["RoutingTruthNoVerdict"].expr, "vaultaire_routing_truth_last_run_rows > 0 and vaultaire_routing_truth_last_run_verdicts == 0", "a backend with rows and no verdict (RP14-12)")
 	assert.Contains(t, rules["RoutingUnknownBackendRows"].expr, "vaultaire_routing_unknown_backend_rows")
 	assert.Contains(t, rules["RoutingSharedStore"].expr, "vaultaire_routing_shared_store_backends > 0")
 	assert.Contains(t, rules["RoutingUnknownBackendReads"].expr, "increase(vaultaire_routing_unknown_backend_reads_total[")
@@ -212,11 +213,15 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 		`vaultaire_routing_truth_checks_total{backend="geyser",result="error"} 0`,
 		`vaultaire_routing_truth_chunk_checks_total{backend="idrive",result="legacy"} 0`,
 		`vaultaire_routing_shared_store_backends 0`,
+		`vaultaire_routing_unknown_backend_rows{backend="",table="object_head_cache"} 0`,
+		`vaultaire_routing_unknown_backend_rows{backend="",table="object_versions"} 0`,
 	} {
 		assert.True(t, strings.Contains(body, "\n"+series+" ") || strings.Contains(body, "\n"+series+"\n"), "exported before any run: %s", series)
 	}
 	for _, series := range []string{"vaultaire_routing_truth_checks_total", "vaultaire_routing_truth_chunk_checks_total",
-		"vaultaire_routing_truth_last_run_missing_ratio", "vaultaire_routing_unknown_backend_rows",
+		"vaultaire_routing_truth_last_run_missing_ratio", "vaultaire_routing_truth_last_run_rows",
+		"vaultaire_routing_truth_last_run_verdicts", "vaultaire_routing_truth_last_run_errors",
+		"vaultaire_routing_unknown_backend_rows",
 		"vaultaire_routing_shared_store_backends", "vaultaire_routing_unknown_backend_reads_total"} {
 		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
 	}

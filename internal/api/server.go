@@ -62,6 +62,8 @@ type Server struct {
 	longOpsReg       *longOpRegistry // detached long S3 operations in flight (s3_long_op.go)
 	longOpPreludeMax time.Duration   // tests; 0 = defaultLongOpPreludeMax
 	longOpsOnce      sync.Once
+	chunkPutsReg     *chunkPutRegistry // chunk PUTs in flight, detached from their requests (chunk_put_detached.go)
+	chunkPutsOnce    sync.Once
 	longOpGrace      time.Duration // tests; 0 = defaultLongOpAnswerGrace
 	draining         atomic.Bool   // Shutdown has started (s3_long_op.go)
 	db               *sql.DB
@@ -1535,6 +1537,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	longBound := longOpDrainBoundFromEnv(s.log(), os.Getenv)
 	if n := s.drainLongOps(longBound); n > 0 {
 		s.log().Warn("long S3 operations abandoned at shutdown", zap.Int("count", n))
+	}
+	// The chunk PUTs that outlived their requests (and those of the long
+	// operations just drained): each ends within its bound and flips or
+	// drops its claim before the engine closes the database (RP14-1).
+	if n := s.drainChunkPuts(s.chunkPutDrainBound()); n > 0 {
+		s.log().Warn("chunk PUTs still in flight at shutdown — their claims are taken over after the window or erased by the orphan sweep", zap.Int("count", n))
 	}
 	// The notifications and webhooks those operations (and every request
 	// before them) queued: delivered, or recorded as failed (event_delivery.go).

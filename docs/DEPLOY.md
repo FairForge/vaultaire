@@ -224,10 +224,14 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     to 10 min (`DRAIN_TIMEOUT`) for its sessions to reach 0, and up to 15 min
     (`LONG_OP_TIMEOUT`) while it reports detached long S3 operations
     (`long_ops_in_flight` on its own `/health`: a CompleteMultipartUpload,
-    CopyObject or DeleteObjects that has already sent 200 + keep-alive), then
-    `maint` and stop. On SIGTERM the process itself drains HTTP for 30 s, waits
-    for those operations, cuts each one when it is 15 min old (its own start;
-    `LONG_OP_DRAIN_BOUND`), logs it and writes it to `s3_long_op_incidents`
+    CopyObject or DeleteObjects that has already sent 200 + keep-alive — plus,
+    since Prompt 14 (RP14-1), `chunk_puts_in_flight`: chunk blob PUTs that
+    outlived their request and finish on their own within 90 s; the script
+    adds the two), then `maint` and stop. On SIGTERM the process itself drains
+    HTTP for 30 s, waits for those operations, cuts each one when it is 15 min
+    old (its own start; `LONG_OP_DRAIN_BOUND`), logs it and writes it to
+    `s3_long_op_incidents`, then waits for the chunk PUTs (each bounded by
+    90 s + the row flip that follows it)
     (the active slot exports `vaultaire_s3_long_ops_abandoned_total` from that
     table), drains the webhook/notification queue for up to 30 s (the rest is
     recorded as failed `dropped: shutdown`), flushes and exits

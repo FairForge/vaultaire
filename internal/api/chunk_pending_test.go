@@ -64,10 +64,25 @@ func setupPendingFixture(t *testing.T) *pendingFixture {
 	f := setupMPChunkFixture(t, false)
 	g := &gatedChunkDriver{fixedBucketDriver: f.fixed, gate: make(chan struct{})}
 	require.NoError(t, f.server.engine.AddDriver("fixed", g))
+	// Abandoned claims on this fixture's own backend name (a run that died
+	// mid-test) hold no reference and belong to no tenant, so no tenant
+	// cleanup reaches them: swept before and after, because the detached-
+	// PUT tests count the pending rows on this backend.
+	sweep := func() {
+		_, _ = f.db.Exec(`DELETE FROM global_content_index WHERE backend_id = 'fixed' AND state = 'pending' AND ref_count = 0`)
+	}
+	sweep()
+	t.Cleanup(sweep)
 	return &pendingFixture{mpChunkFixture: f, gated: g}
 }
 
 func (f *pendingFixture) do(t *testing.T, method, target string, body []byte, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.doCtx(context.Background(), t, method, target, body, hdr)
+}
+
+// doCtx is do on the caller's context (a client that is cut: cancel it).
+func (f *pendingFixture) doCtx(ctx context.Context, t *testing.T, method, target string, body []byte, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	var rd io.Reader
 	if body != nil {
@@ -80,7 +95,7 @@ func (f *pendingFixture) do(t *testing.T, method, target string, body []byte, hd
 	for k, v := range hdr {
 		r.Header.Set(k, v)
 	}
-	r = r.WithContext(s3Ctx(r.Context(), f.tenant))
+	r = r.WithContext(s3Ctx(ctx, f.tenant))
 	w := httptest.NewRecorder()
 	f.server.handleS3Request(w, r)
 	return w
@@ -349,7 +364,7 @@ func TestChunkStore_AClaimTakenOverWhileItsPutRanReferencesTheWinner(t *testing.
 	require.NoError(t, err)
 
 	// Act: this writer's PUT ends; its flip finds the claim gone.
-	_, done, err := a.readyChunk(ctx, scope, key, "fixed", since, entry)
+	_, done, err := a.readyChunk(ctx, scope, key, "fixed", since, entry, true)
 	require.NoError(t, err)
 	res, kind, _, err := a.claimChunk(ctx, scope, key, entry)
 

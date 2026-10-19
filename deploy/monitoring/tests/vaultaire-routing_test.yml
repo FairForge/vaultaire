@@ -1,0 +1,47 @@
+# promtool unit test of vaultaire-routing.yml (RP14-12, Stage 1a Prompt 14).
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-routing.yml deploy/monitoring/tests/vaultaire-routing_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-routing_test.yml'
+# The rule file path below is relative to this file's directory as copied.
+rule_files:
+  - vaultaire-routing.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Prod 2026-10-18: idrive holds 501 rows and the run reached no verdict
+  # (10 errors); lyve was checked with nothing missing; r2 holds no rows.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_routing_truth_last_run_rows{backend="idrive"}'
+        values: '501x10'
+      - series: 'vaultaire_routing_truth_last_run_verdicts{backend="idrive"}'
+        values: '0x10'
+      - series: 'vaultaire_routing_truth_last_run_missing_ratio{backend="idrive"}'
+        values: '0x10'
+      - series: 'vaultaire_routing_truth_last_run_rows{backend="lyve"}'
+        values: '50x10'
+      - series: 'vaultaire_routing_truth_last_run_verdicts{backend="lyve"}'
+        values: '50x10'
+      - series: 'vaultaire_routing_truth_last_run_missing_ratio{backend="lyve"}'
+        values: '0x10'
+      - series: 'vaultaire_routing_truth_last_run_rows{backend="r2"}'
+        values: '0x10'
+      - series: 'vaultaire_routing_truth_last_run_verdicts{backend="r2"}'
+        values: '0x10'
+      - series: 'vaultaire_routing_truth_last_run_missing_ratio{backend="r2"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: RoutingTruthNoVerdict
+        exp_alerts:
+          - exp_labels:
+              backend: idrive
+              severity: warning
+            exp_annotations:
+              summary: "The routing_truth job could not check idrive"
+              description: "idrive holds 501 head rows and the last routing_truth run reached a verdict on none of its sample (every check an error: the backend could not be asked). RoutingTruthMissing cannot see drift on it. journalctl -u 'vaultaire@*' | grep 'routing truth' has the error; the backend's probe rules say whether the key or the endpoint is dead."
+      # A 0 ratio with a verdict is nothing missing: no RoutingTruthMissing.
+      - eval_time: 5m
+        alertname: RoutingTruthMissing
+        exp_alerts: []

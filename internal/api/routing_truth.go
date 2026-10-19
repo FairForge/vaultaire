@@ -762,16 +762,17 @@ func summarizeRoutingTruth(res *RoutingTruthResult) string {
 
 // --- the collector: everything read from the table -------------------------------
 
-// routingLastRun is the last run as the collector exports it.
+// routingLastRun is the last run as the collector exports it: every
+// backend of the result, whether or not the job reached a verdict on it.
 type routingLastRun struct {
-	finishedAt   time.Time
-	missingRatio map[string]float64
+	finishedAt time.Time
+	backends   map[string]BackendTruth
 }
 
 // lastRunGauges reads the last run from job_runs.result. Nothing in memory:
 // a process that has just started reports the run of the process before it.
 func (c *RoutingTruthChecker) lastRunGauges(ctx context.Context) routingLastRun {
-	out := routingLastRun{missingRatio: map[string]float64{}}
+	out := routingLastRun{backends: map[string]BackendTruth{}}
 	var raw []byte
 	err := c.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, c.JobName).Scan(&raw)
 	if err != nil || len(raw) == 0 {
@@ -783,8 +784,8 @@ func (c *RoutingTruthChecker) lastRunGauges(ctx context.Context) routingLastRun 
 	}
 	out.finishedAt = res.FinishedAt
 	for b, bt := range res.Backends {
-		if bt.Sampled > 0 && bt.Present+bt.Missing > 0 {
-			out.missingRatio[b] = bt.MissingRatio
+		if bt != nil {
+			out.backends[b] = *bt
 		}
 	}
 	return out
@@ -797,14 +798,26 @@ const routingCollectorTTL = 5 * time.Minute
 // routingCollector exports the routing gauges from the TABLES, never from a
 // value set in this process:
 //
-//	vaultaire_routing_unknown_backend_rows{table,backend}   rows on a name no driver has ("" = NULL)
+//	vaultaire_routing_unknown_backend_rows{table,backend}   rows on a name no driver has ("" = NULL; the NULL
+//	                                                         count of object_head_cache and object_versions is a
+//	                                                         series at 0 when there is none)
 //	vaultaire_routing_shared_store_backends                   registered names that share a store with another
-//	vaultaire_routing_truth_last_run_missing_ratio{backend} the last run's missing ratio (job_runs.result)
+//	vaultaire_routing_truth_last_run_missing_ratio{backend} the last run's missing ratio (job_runs.result) —
+//	                                                         for EVERY backend of the run, 0 without a verdict
+//	vaultaire_routing_truth_last_run_rows{backend}            head rows on the backend at the run
+//	vaultaire_routing_truth_last_run_verdicts{backend}        present + missing: rows the run decided on
+//	vaultaire_routing_truth_last_run_errors{backend}          rows the backend could not be asked about
 //	vaultaire_routing_truth_last_run_timestamp_seconds        when the last run finished
+//
+// RP14-12: the ratio used to be emitted only for a backend with a verdict,
+// so on prod — one backend with rows, 10 errors, no verdict — no ratio
+// series existed and the rules on it alerted on nothing. The rows and
+// verdicts gauges say when a 0 ratio means "nothing missing" and when it
+// means "nothing checked" (RoutingTruthNoVerdict).
 type routingCollector struct {
 	c *RoutingTruthChecker
 
-	unknownDesc, sharedDesc, ratioDesc, lastDesc *prometheus.Desc
+	unknownDesc, sharedDesc, ratioDesc, rowsDesc, verdictsDesc, errorsDesc, lastDesc *prometheus.Desc
 
 	mu      sync.Mutex
 	readAt  time.Time
@@ -821,7 +834,13 @@ func newRoutingCollector(c *RoutingTruthChecker) *routingCollector {
 		sharedDesc: prometheus.NewDesc("vaultaire_routing_shared_store_backends",
 			"Registered backend names that share a store (same endpoint and bucket, or the same driver registered twice) with another name. Must be 0.", nil, nil),
 		ratioDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_missing_ratio",
-			"The routing_truth job's last run: rows whose bytes the recorded backend does not have, over rows with a verdict, per backend; read from job_runs.", []string{"backend"}, nil),
+			"The routing_truth job's last run: rows whose bytes the recorded backend does not have, over rows with a verdict, per backend of the run (0 when it reached no verdict — see _verdicts); read from job_runs.", []string{"backend"}, nil),
+		rowsDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_rows",
+			"The routing_truth job's last run: whole-object head rows naming the backend; read from job_runs.", []string{"backend"}, nil),
+		verdictsDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_verdicts",
+			"The routing_truth job's last run: sampled rows it reached a verdict on (present + missing), per backend; 0 with rows > 0 means the backend could not be checked; read from job_runs.", []string{"backend"}, nil),
+		errorsDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_errors",
+			"The routing_truth job's last run: sampled rows the backend could not be asked about (driver error, open breaker, deadline), per backend; read from job_runs.", []string{"backend"}, nil),
 		lastDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_timestamp_seconds",
 			"When the routing_truth job's last recorded run finished; read from job_runs.", nil, nil),
 	}
@@ -831,6 +850,9 @@ func (r *routingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- r.unknownDesc
 	ch <- r.sharedDesc
 	ch <- r.ratioDesc
+	ch <- r.rowsDesc
+	ch <- r.verdictsDesc
+	ch <- r.errorsDesc
 	ch <- r.lastDesc
 }
 
@@ -864,15 +886,30 @@ func (r *routingCollector) Collect(ch chan<- prometheus.Metric) {
 	if !ok {
 		return
 	}
+	nullSeen := map[string]bool{}
 	for _, u := range unknown {
+		if u.Backend == "" {
+			nullSeen[u.Table] = true
+		}
 		ch <- prometheus.MustNewConstMetric(r.unknownDesc, prometheus.GaugeValue, float64(u.Rows), u.Table, u.Backend)
+	}
+	// The NULL count of the two head tables is a series even at 0: the one
+	// "unknown backend" every deployment can have (rows written before
+	// backend_name existed), and the sign that the collector reads.
+	for _, table := range []string{"object_head_cache", "object_versions"} {
+		if !nullSeen[table] {
+			ch <- prometheus.MustNewConstMetric(r.unknownDesc, prometheus.GaugeValue, 0, table, "")
+		}
 	}
 	if last.finishedAt.IsZero() {
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(r.lastDesc, prometheus.GaugeValue, float64(last.finishedAt.Unix()))
-	for b, ratio := range last.missingRatio {
-		ch <- prometheus.MustNewConstMetric(r.ratioDesc, prometheus.GaugeValue, ratio, b)
+	for b, bt := range last.backends {
+		ch <- prometheus.MustNewConstMetric(r.ratioDesc, prometheus.GaugeValue, bt.MissingRatio, b)
+		ch <- prometheus.MustNewConstMetric(r.rowsDesc, prometheus.GaugeValue, float64(bt.Rows), b)
+		ch <- prometheus.MustNewConstMetric(r.verdictsDesc, prometheus.GaugeValue, float64(bt.Present+bt.Missing), b)
+		ch <- prometheus.MustNewConstMetric(r.errorsDesc, prometheus.GaugeValue, float64(bt.Errors), b)
 	}
 }
 
