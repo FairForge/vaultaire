@@ -174,7 +174,9 @@ func TestObjectIntegrity_ARangeAndAMultipartETagAreServedUnverifiedAndCounted(t 
 	body := randomBody(t, 64<<10)
 	f.putWhole(t, "r.bin", body, nil)
 	f.putWhole(t, "mp.bin", body, nil)
-	_, err := f.db.Exec(`UPDATE object_head_cache SET etag = $3 WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = $2`,
+	// A -N row with no body_md5: written before migration 094 (A.4), when
+	// Complete recorded no whole digest — served exactly as before.
+	_, err := f.db.Exec(`UPDATE object_head_cache SET etag = $3, body_md5 = NULL WHERE tenant_id = $1 AND bucket = 'test-bucket' AND object_key = $2`,
 		f.tenantID, "mp.bin", md5Hex([]byte("parts"))+"-2")
 	require.NoError(t, err)
 	// Both serve other bytes now: unverified means served as they are.

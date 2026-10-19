@@ -283,7 +283,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: backendName,
 			Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 		Upsert: func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, blob, size, etag, backendName, floor, attrs, enc)
+			return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, blob, size, etag, backendName, floor, attrs, enc, "")
 		}})
 	if dbErr != nil {
 		// The blob is an orphan no row names (queued for the collector); the

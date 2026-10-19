@@ -422,9 +422,9 @@ func TestPresignedURL_Integration(t *testing.T) {
 	mock.ExpectQuery(`SELECT content_type, size_bytes, etag`).
 		WillReturnRows(sqlmock.NewRows([]string{"content_type", "size_bytes", "etag", "updated_at", "metadata", "backend_name",
 			"encryption_algorithm", "tags", "content_disposition", "content_encoding", "content_language", "cache_control",
-			"http_expires", "website_redirect_location", "is_chunked", "floor", "storage_key"}).
+			"http_expires", "website_redirect_location", "is_chunked", "floor", "storage_key", "body_md5", "ssec_key_md5"}).
 			AddRow("text/plain", len(testContent), etagOf([]byte(testContent)), time.Now(), []byte("{}"), "local",
-				"", []byte("{}"), "", "", "", "", "", "", false, "standard", objectKey+"@"+zeroID))
+				"", []byte("{}"), "", "", "", "", "", "", false, "standard", objectKey+"@"+zeroID, "", ""))
 
 	// Async fire-and-forget: emitEvent inserts, notification/webhook dispatch queries.
 	// These may or may not execute before the test ends. Pre-register expectations

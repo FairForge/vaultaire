@@ -124,6 +124,9 @@ func loadHeadAttrs(ctx context.Context, db *sql.DB, tenantID, bucket, key string
 type objectEncryption struct {
 	Algorithm  string
 	KeyVersion *int
+	// SSECKeyMD5 is the base64 MD5 of the customer's SSE-C key (RP14-11,
+	// 094): a read with a key of another MD5 is refused from the row.
+	SSECKeyMD5 string
 }
 
 // upsertWholeObjectHeadRow writes the head row for a WHOLE, UNENCRYPTED
@@ -138,20 +141,24 @@ type objectEncryption struct {
 // manifest in the same transaction.
 func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
 	size int64, etag, backendName, floor string, attrs objectAttrs) error {
-	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, storageKey, size, etag, backendName, floor, attrs, objectEncryption{})
+	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, storageKey, size, etag, backendName, floor, attrs, objectEncryption{}, "")
 }
 
 // upsertWholeObjectHeadRowEnc is upsertWholeObjectHeadRow for a blob sealed
 // with enc (a generated object or a copy into an sse_enabled bucket, WP-R8-1
 // follow-up A1): size and etag are the PLAINTEXT's, as HandlePut records them.
+// bodyMD5 is the MD5 of the whole body when the ETag is not it (a Complete's
+// `-N`; A.4, 094), else "" — NULL on the row.
 func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
-	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption) error {
+	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption, bodyMD5 string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata,
 			 encryption_algorithm, content_disposition, content_encoding, content_language,
-			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NULLIF($19, ''), NOW())
+			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key,
+			 body_md5, ssec_key_md5, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NULLIF($19, ''),
+		        NULLIF($20, ''), NULLIF($21, ''), NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
@@ -170,10 +177,13 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 			is_chunked                = FALSE,
 			tags                      = EXCLUDED.tags,
 			storage_key               = EXCLUDED.storage_key, -- the writer's own address (WP-R2-1)
+			body_md5                  = EXCLUDED.body_md5,
+			ssec_key_md5              = EXCLUDED.ssec_key_md5,
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion, storageKey)
+		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion, storageKey,
+		bodyMD5, enc.SSECKeyMD5)
 	if err != nil {
 		return fmt.Errorf("upsert head row %s/%s: %w", bucket, key, err)
 	}
@@ -491,12 +501,14 @@ const versionAttrColumns = `COALESCE(metadata, '{}'), COALESCE(content_dispositi
 	COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, '')`
 
 // copyHeadAttrsToVersionSQL copies the head row's attributes onto one of
-// its key's version rows (R61-8).
+// its key's version rows (R61-8) — and, since 094, what the row knows about
+// its bytes: the whole-body digest and the SSE-C key MD5 (A.4, RP14-11).
 const copyHeadAttrsToVersionSQL = `
 	UPDATE object_versions v SET
 		metadata = h.metadata, content_disposition = h.content_disposition, content_encoding = h.content_encoding,
 		content_language = h.content_language, cache_control = h.cache_control, http_expires = h.http_expires,
-		website_redirect_location = h.website_redirect_location
+		website_redirect_location = h.website_redirect_location,
+		body_md5 = h.body_md5, ssec_key_md5 = h.ssec_key_md5
 	FROM object_head_cache h
 	WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4
 	  AND h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key`

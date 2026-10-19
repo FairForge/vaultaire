@@ -37,6 +37,7 @@ import (
 type mpChunkFixture struct {
 	*quotaAccountingFixture
 	fixed *fixedBucketDriver
+	keys  *crypto.TenantKeys // withKey: the tenant keys behind the SSE services (rotate them)
 }
 
 // mpMarker is the plaintext marker every test body carries: found in a
@@ -52,8 +53,9 @@ func setupMPChunkFixture(t *testing.T, withKey bool) *mpChunkFixture {
 	ce.SetPrimary("fixed")
 	f.server.gci = crypto.NewGlobalContentIndex(f.db)
 	f.server.chunkingThreshold = 1024
+	var keys *crypto.TenantKeys
 	if withKey {
-		keys := testTenantKeys(t, f.db, keyTestMasterA)
+		keys = testTenantKeys(t, f.db, keyTestMasterA)
 		f.server.sseService = crypto.NewSSEService(keys)
 		f.server.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 	}
@@ -68,7 +70,7 @@ func setupMPChunkFixture(t *testing.T, withKey bool) *mpChunkFixture {
 		_, _ = f.db.Exec(`DELETE FROM tenant_key_versions WHERE tenant_id = $1`, tid)
 		_, _ = f.db.Exec(`DELETE FROM buckets WHERE tenant_id = $1`, tid)
 	})
-	return &mpChunkFixture{quotaAccountingFixture: f, fixed: fixed}
+	return &mpChunkFixture{quotaAccountingFixture: f, fixed: fixed, keys: keys}
 }
 
 func (f *mpChunkFixture) bucketSet(t *testing.T, set string) {

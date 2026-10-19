@@ -303,10 +303,11 @@ func TestHeaders_AnSSECObjectWithoutItsKeyIs400WithNoObjectHeaders(t *testing.T)
 	assert.Equal(t, "AES256", head.Header().Get("x-amz-server-side-encryption-customer-algorithm"))
 	assert.Equal(t, objectHeaderSet(get.Header()), objectHeaderSet(head.Header()))
 
-	// A wrong key: GET 403 (it reads the blob); HEAD cannot tell without the
-	// blob (HEAD is cache-only) and answers 200 — the documented deviation.
+	// A wrong key: 403 on both, from the row's key MD5 (RP14-11, 094 — HEAD
+	// answered 200 until then: cache-only, and the key could only be checked
+	// against the blob; the deviation is closed for rows written since).
 	assert.Equal(t, http.StatusForbidden, f.do(t, "GET", "/test-bucket/ssec.bin", nil, ssecTestHeaders(wrong)).Code)
-	assert.Equal(t, http.StatusOK, f.do(t, "HEAD", "/test-bucket/ssec.bin", nil, ssecTestHeaders(wrong)).Code)
+	assert.Equal(t, http.StatusForbidden, f.do(t, "HEAD", "/test-bucket/ssec.bin", nil, ssecTestHeaders(wrong)).Code)
 }
 
 func TestHeaders_AnEmptySSECObjectIsStoredAndRead(t *testing.T) {

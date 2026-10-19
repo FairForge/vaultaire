@@ -246,9 +246,9 @@ Behaviour worth knowing before writing code against it:
 
   | Request | AWS | Stored | Why |
   |---|---|---|---|
-  | `HEAD` of an SSE-C object with a **wrong** key | 403 | 200 | HEAD answers from the metadata index and never reads the object (~1 ms); the key can only be checked against the stored bytes. A GET with that key answers 403 |
+  | `HEAD` of an SSE-C object with a **wrong** key, object written before 2026-10-19 | 403 | 200 | HEAD answers from the metadata index and never reads the object (~1 ms), and such rows keep no key digest. Objects written since 2026-10-19 keep the key's MD5 (as AWS does) and HEAD and GET with a wrong key both answer 403 from the row, before any read. A GET with a wrong key answers 403 either way |
   | `GET` of a restored archive object | `x-amz-restore` | not sent (HEAD sends it) | the restore state lives on the tape backend; HEAD asks it, a GET does not ask twice |
-  | a `-N` ETag or a `Range` | — | the body's size is checked, not its MD5 | only the whole body of a single-part object hashes to its ETag (a whole GET of one is checked as it streams and cut on a mismatch) |
+  | a `Range`, or a `-N` object written before 2026-10-19 | — | the body's size is checked, not its MD5 | only a whole body hashes to a digest the row holds: a single-part object's ETag, or the whole-body MD5 recorded since 2026-10-19 for a multipart object completed whole — a whole GET of either is checked as it streams and cut on a mismatch |
 
 - **Large uploads** (> 64 MiB, a single PUT or a multipart upload): stored as
   content-defined chunks, deduplicated and compressed, unless the bucket is

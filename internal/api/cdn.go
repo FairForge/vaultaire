@@ -91,12 +91,13 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	var isChunked bool
 	var encAlgo string
 	var storageKey string
+	var bodyMD5 string // a -N object's whole digest (A.4, 094)
 	err = s.db.QueryRowContext(ctx, `
 		SELECT size_bytes, etag, content_type, updated_at, COALESCE(content_disposition, ''), COALESCE(backend_name, ''), floor, last_accessed, is_chunked,
-		       COALESCE(encryption_algorithm, ''), COALESCE(storage_key, '')
+		       COALESCE(encryption_algorithm, ''), COALESCE(storage_key, ''), COALESCE(body_md5, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked, &encAlgo, &storageKey)
+		tenantID, bucket, key).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &contentDisposition, &backendName, &floor, &lastAccessed, &isChunked, &encAlgo, &storageKey, &bodyMD5)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -347,8 +348,9 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// verifies every chunk itself.
 	if !isChunked && sizeBytes > 0 {
 		var armed bool
-		if body, armed = newIntegrityReader(body, etag, sizeBytes); !armed {
-			objectIntegrityUnverified.WithLabelValues(integrityPathCDN, unverifiedReason(etag)).Inc()
+		digest := integrityDigest(bodyMD5, etag)
+		if body, armed = newIntegrityReader(body, digest, sizeBytes); !armed {
+			objectIntegrityUnverified.WithLabelValues(integrityPathCDN, unverifiedReason(digest)).Inc()
 		}
 	}
 	written, err := io.Copy(w, body)
