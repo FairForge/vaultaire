@@ -37,14 +37,24 @@ type gatedChunkDriver struct {
 	*fixedBucketDriver
 	gate     chan struct{}
 	inFlight atomic.Int32
-	puts     atomic.Int32
+	// maxInFlight is the most chunk PUTs that were ever in flight at once:
+	// the width of a write, read after it ended instead of sampled while it
+	// ran (a sample under a loaded runner saw fewer than were coming).
+	maxInFlight atomic.Int32
+	puts        atomic.Int32
 }
 
 func (d *gatedChunkDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	if container == chunkContainer {
 		d.puts.Add(1)
-		d.inFlight.Add(1)
+		cur := d.inFlight.Add(1)
 		defer d.inFlight.Add(-1)
+		for {
+			old := d.maxInFlight.Load()
+			if cur <= old || d.maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
 		select {
 		case <-d.gate:
 		case <-ctx.Done():
