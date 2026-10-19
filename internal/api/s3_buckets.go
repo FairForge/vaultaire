@@ -168,6 +168,19 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
+	// x-amz-bucket-object-lock-enabled (aws-cli --object-lock-enabled-for-bucket;
+	// RP16-4: it was ignored, the bucket made without lock).
+	var opts bucketCreateOptions
+	switch v := r.Header.Get("x-amz-bucket-object-lock-enabled"); {
+	case v == "" || strings.EqualFold(v, "false"):
+	case strings.EqualFold(v, "true"):
+		opts.objectLock = true
+	default:
+		WriteS3ErrorWithContext(w, ErrInvalidArgument, r.URL.Path, generateRequestID(),
+			WithMessage("x-amz-bucket-object-lock-enabled must be true or false."))
+		return
+	}
+
 	// Parse region: header takes precedence, then XML body, then default.
 	region := r.Header.Get("X-Stored-Region")
 	if region == "" {
@@ -190,7 +203,7 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	outcome, err := s.createBucketRegistry(ctx, tenantID, bucket, region)
+	outcome, err := s.createBucketRegistryWith(ctx, tenantID, bucket, region, opts)
 	if err != nil {
 		s.logger.Error("create bucket", zap.Error(err), zap.String("bucket", bucket))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -215,6 +228,10 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", regionRetryAfter)
 		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 			WithMessage(regionDownMessage(region)))
+		return
+	case bucketCreateLockMismatch:
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
+			WithMessage("You already own this bucket and it was created without Object Lock; enable it with PutObjectLockConfiguration."))
 		return
 	}
 	region = outcome.region

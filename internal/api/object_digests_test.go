@@ -127,7 +127,15 @@ func TestBodyDigest_AWholeGetOfAMultipartObjectIsVerified(t *testing.T) {
 	assert.Error(t, readErr, "the body is cut")
 	assert.Len(t, got, len(body)-1)
 	assert.Equal(t, fail0+1, integrityFailures(integrityPathPlain, "md5"))
-	assert.Equal(t, 1, logs.FilterMessage("object integrity: the body served does not match its row — the response is cut").Len())
+	lines := logs.FilterMessage("object integrity: the body served does not match its row — the response is cut").All()
+	require.Len(t, lines, 1)
+	// RP16-6: the line names the -N ETag and, apart, the whole-body digest
+	// the bytes were checked against (it used to call that digest
+	// recorded_etag).
+	fl := lines[0].ContextMap()
+	assert.Equal(t, md5Hex(body), fl["expected_md5"])
+	assert.Contains(t, fl["etag"], "-4", "the row's multipart ETag")
+	assert.NotContains(t, fl, "recorded_etag")
 }
 
 func TestBodyDigest_AVersionIdGetOfARetainedMultipartVersionVerifiesAgainstItsRow(t *testing.T) {

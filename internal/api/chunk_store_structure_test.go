@@ -27,7 +27,7 @@ func TestChunkBlobCalls_GoThroughTheChunkStore(t *testing.T) {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "node_modules", "vendor", "bin":
+			case ".git", ".claude", "node_modules", "vendor", "bin": // .claude: agent worktrees are whole checkouts
 				return filepath.SkipDir
 			}
 			return nil

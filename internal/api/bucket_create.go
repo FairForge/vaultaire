@@ -24,7 +24,16 @@ const (
 	bucketCreateInvalidRegion                              // not a region id we know
 	bucketCreateRegionUnavailable                          // known region, no driver on this deployment (WP-R7-1)
 	bucketCreateRegionDown                                 // enabled region, down by its probe or breaker (Prompt 10 Part A)
+	bucketCreateLockMismatch                               // re-create of an owned bucket without Object Lock, asking for it (RP16-4)
 )
+
+// bucketCreateOptions are what a CreateBucket asks for beyond the name and
+// region. objectLock = `x-amz-bucket-object-lock-enabled: true` (RP16-4):
+// the bucket is created with Object Lock on and versioning Enabled, as AWS
+// creates it.
+type bucketCreateOptions struct {
+	objectLock bool
+}
 
 // bucketCreateOutcome is what createBucketRegistry decided. Region is the
 // STORED region (an idempotent re-create reports the one the bucket has).
@@ -45,6 +54,12 @@ type bucketCreateOutcome struct {
 // region == "" means the deployment default. The caller has already run
 // validateBucketName. With no database (dev) only the marker dir is made.
 func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, region string) (bucketCreateOutcome, error) {
+	return s.createBucketRegistryWith(ctx, tenantID, bucket, region, bucketCreateOptions{})
+}
+
+// createBucketRegistryWith is createBucketRegistry with the S3 request's
+// options.
+func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket, region string, opts bucketCreateOptions) (bucketCreateOutcome, error) {
 	out := bucketCreateOutcome{}
 
 	if s.db != nil && tenantID != "default" {
@@ -100,10 +115,18 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 
 	if out.alreadyOwned {
 		// Idempotent re-create: nothing to write; report the stored region.
+		// Asking for Object Lock on an owned bucket that has none is
+		// refused, never a 200 that leaves it unlocked (RP16-4).
 		var stored string
-		if err := s.db.QueryRowContext(ctx, `SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`,
-			tenantID, bucket).Scan(&stored); err == nil && stored != "" {
-			out.region = stored
+		var locked bool
+		if err := s.db.QueryRowContext(ctx, `SELECT region, object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
+			tenantID, bucket).Scan(&stored, &locked); err == nil {
+			if stored != "" {
+				out.region = stored
+			}
+			if opts.objectLock && !locked {
+				out.state = bucketCreateLockMismatch
+			}
 		}
 		return out, nil
 	}
@@ -129,11 +152,18 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 	if drivers.IsEURegion(region) {
 		residency = "eu"
 	}
+	// An Object Lock bucket is created with versioning Enabled (AWS: lock
+	// implies versioning, and it cannot be suspended by the create).
+	versioning := "disabled"
+	if opts.objectLock {
+		versioning = "Enabled"
+	}
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency)
-		VALUES ($1, $2, 'private', $3, $4, $5)
+		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
+			object_lock_enabled, versioning_status)
+		VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, name) DO NOTHING
-	`, tenantID, bucket, sseDefault, region, residency); err != nil {
+	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning); err != nil {
 		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
 	}
 	auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
@@ -151,7 +181,8 @@ func (s *Server) createBucketRegistry(ctx context.Context, tenantID, bucket, reg
 		"region": out.region,
 	})
 	s.logger.Info("bucket created",
-		zap.String("bucket", bucket), zap.String("tenant", tenantID), zap.String("region", out.region))
+		zap.String("bucket", bucket), zap.String("tenant", tenantID), zap.String("region", out.region),
+		zap.Bool("object_lock", opts.objectLock))
 	return out, nil
 }
 
