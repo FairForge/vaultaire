@@ -53,6 +53,23 @@ const (
 	integrityPathCDN      = "cdn"
 )
 
+// Every series exists at 0 from boot. Prometheus's increase() and rate()
+// compare the samples of a series, so a counter CREATED by its first event is
+// born at 1 and shows no rise: ObjectIntegrityFailure (increase[1h] > 0) never
+// saw a path's first failure — proven with `promtool test rules` on the box
+// (WP-P13 post-merge review, RP14-9). The same pre-initialisation as
+// sseBlobsOpened's.
+func init() {
+	for _, p := range []string{integrityPathPlain, integrityPathParallel, integrityPathSealed, integrityPathParity, integrityPathCDN} {
+		for _, r := range []string{"md5", "size"} {
+			objectIntegrityFailures.WithLabelValues(p, r)
+		}
+		for _, r := range []string{"range", "multipart", "etag"} {
+			objectIntegrityUnverified.WithLabelValues(p, r)
+		}
+	}
+}
+
 var (
 	singlePartETag = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	multipartETag  = regexp.MustCompile(`^[0-9a-f]{32}-[0-9]+$`)

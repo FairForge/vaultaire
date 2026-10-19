@@ -384,3 +384,15 @@ func BenchmarkIntegrityReader_1GiB(b *testing.B) {
 type repeatReader struct{ b []byte }
 
 func (r repeatReader) Read(p []byte) (int, error) { return copy(p, r.b), nil }
+
+// Prometheus's increase() and rate() compare samples of a series: a counter
+// that is CREATED by its first event is born at 1 and shows no rise, so the
+// ObjectIntegrityFailure rule (increase[1h] > 0) never saw a path's first
+// failure — proven with `promtool test rules` on the box (WP-P13 post-merge
+// review, RP14-9). Every path × reason series exists at 0 from boot.
+func TestObjectIntegrity_EverySeriesExistsBeforeTheFirstFailure(t *testing.T) {
+	assert.Equal(t, 5*2, promtest.CollectAndCount(objectIntegrityFailures),
+		"failures: five paths × md5|size, all at 0 before any failure")
+	assert.Equal(t, 5*3, promtest.CollectAndCount(objectIntegrityUnverified),
+		"unverified: five paths × range|multipart|etag")
+}
