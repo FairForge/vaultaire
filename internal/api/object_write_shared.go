@@ -414,6 +414,7 @@ func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bu
 			content_encoding = COALESCE(v.content_encoding, ''), content_language = COALESCE(v.content_language, ''),
 			cache_control = COALESCE(v.cache_control, ''), http_expires = COALESCE(v.http_expires, ''),
 			website_redirect_location = COALESCE(v.website_redirect_location, ''),
+			body_md5 = v.body_md5, ssec_key_md5 = v.ssec_key_md5, -- what the row knows about ITS bytes (094, RP16-1)
 			updated_at = v.created_at
 		FROM object_versions v
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3

@@ -164,6 +164,11 @@ func TestHedge_AStalledHeadIsAnsweredOnAFreshConnection(t *testing.T) {
 func TestHedge_AQuickAnswerIsNotHedged(t *testing.T) {
 	f := &edgeS3{}
 	d := newHedgedFixedDriver(t, f)
+	// The fake answers at once, but a loaded CI runner can stretch the
+	// request past testHedgeAfter (150 ms) and fire a legitimate hedge
+	// (flaked on main 2026-10-19). "Quick" here means quicker than the
+	// hedge delay, so make the delay one no healthy runner reaches.
+	d.hedge.after = 30 * time.Second
 	sent0, _ := hedgesOf("wasabi", "head_object")
 
 	ok, err := d.Exists(tctx(), "c", "missing.bin")
