@@ -14,10 +14,17 @@
 #                                                              present | legacy (under the uploader's prefix — run the
 #                                                              chunk move) | missing | error | unknown_backend
 #   vaultaire_routing_truth_last_run_missing_ratio{backend}    the LAST RUN's missing / (present + missing) per backend,
-#                                                              READ FROM job_runs.result (right after a restart too)
+#                                                              READ FROM job_runs.result (right after a restart too) —
+#                                                              one series per backend of the run, 0 when the run reached
+#                                                              no verdict on it (RP14-12: it used to exist only with a
+#                                                              verdict, so prod — idrive 501 rows, 10 errors — had none)
+#   vaultaire_routing_truth_last_run_rows{backend}             head rows naming the backend at that run
+#   vaultaire_routing_truth_last_run_verdicts{backend}         sampled rows it decided on (present + missing)
+#   vaultaire_routing_truth_last_run_errors{backend}           sampled rows the backend could not be asked about
 #   vaultaire_routing_truth_last_run_timestamp_seconds         when that run finished (from job_runs)
 #   vaultaire_routing_unknown_backend_rows{table,backend}      rows whose backend no driver is registered under,
-#                                                              per table (backend="" = NULL); read from the database
+#                                                              per table (backend="" = NULL; the NULL count of the two
+#                                                              head tables is a series at 0); read from the database
 #   vaultaire_routing_shared_store_backends                    registered names that share a store with another name
 #                                                              (same endpoint + bucket, or one driver under two names)
 #   vaultaire_routing_unknown_backend_reads_total{op,backend}  requests (get, delete, delete_objects, copy_source,
@@ -59,6 +66,19 @@ groups:
         annotations:
           summary: "The share of {{ $labels.backend }} rows with no bytes on the backend jumped by {{ $value | humanizePercentage }} since yesterday"
           description: "The routing_truth job's sample of {{ $labels.backend }} rows lost {{ $value | humanizePercentage }} more of its bytes than yesterday's. That is a backend that lost data or an account/bucket that changed under us, not drift of single rows. Stop writes to it if it is the primary (POST /api/v1/admin/backends/primary), then follow docs/reviews/WP-R7-5.md."
+
+      # The job could not check a backend that holds rows: every sampled row
+      # was an error (a dead key, an open breaker, NoSuchBucket), so a 0
+      # missing ratio says nothing. Prod 2026-10-18: idrive, 501 rows, 10
+      # consecutive errors, no verdict — and no series at all until RP14-12.
+      - alert: RoutingTruthNoVerdict
+        expr: vaultaire_routing_truth_last_run_rows > 0 and vaultaire_routing_truth_last_run_verdicts == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The routing_truth job could not check {{ $labels.backend }}"
+          description: "{{ $labels.backend }} holds {{ $value | humanize }} head rows and the last routing_truth run reached a verdict on none of its sample (every check an error: the backend could not be asked). RoutingTruthMissing cannot see drift on it. journalctl -u 'vaultaire@*' | grep 'routing truth' has the error; the backend's probe rules say whether the key or the endpoint is dead."
 
       # Rows name a backend no driver answers to: their objects are served
       # only by the engine's fan-out (WP-R6-1 removes it), HEAD lies, the

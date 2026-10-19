@@ -25,7 +25,7 @@ it is **not** committed. It lives in `/etc/default/ntfy-bridge` on the server
 | `alertmanager.yml` | `/etc/prometheus/alertmanager.yml` | route → ntfy webhook receiver, send_resolved, critical-inhibits-warning |
 | `ntfy-bridge.py` | `/opt/vaultaire/monitoring/ntfy-bridge.py` | Alertmanager webhook → readable ntfy push (UTF-8-safe JSON publish) |
 | `ntfy-bridge.service` | `/etc/systemd/system/ntfy-bridge.service` | sandboxed systemd unit (DynamicUser) |
-| `vaultaire-routing.yml` | `/etc/prometheus/rules/` | routing truth (WP-R7-5): head rows whose bytes the recorded backend does not have (warn / page on a jump), rows on a backend no driver is registered under (info), two names on one store (page), reads of such rows (warn) |
+| `vaultaire-routing.yml` | `/etc/prometheus/rules/` | routing truth (WP-R7-5): head rows whose bytes the recorded backend does not have (warn / page on a jump), a backend with rows the run could not check at all (warn, `RoutingTruthNoVerdict`, Prompt 14 RP14-12), rows on a backend no driver is registered under (info), two names on one store (page), reads of such rows (warn). Held back on the box (below); `RoutingTruthNoVerdict` would fire on `idrive` as long as its key is dead |
 | `vaultaire-backup.yml` | `/etc/prometheus/rules/` | BackupStale / BackupOffboxStale (critical) and BackupRunIncomplete (warning, Prompt 2a.2) — > 26 h or series absent — on the three timestamps `deploy/scripts/pg-backup.sh` writes into its own directory `/opt/vaultaire/metrics/` (user1), which node_exporter reads through root-owned symlinks (see "Backup metrics" below). Installed 2026-10-08; the run timestamp + symlink layout are the 2a.2 change |
 | `vaultaire-longops.yml` | `/etc/prometheus/rules/` | LongOpFailingAfterCommit (warning: ≥ 3 `<Error>` documents inside a committed 200 in 15 min, per op) and LongOpsAbandonedAtShutdown (warning: a stopping slot cancelled a CompleteMultipartUpload / CopyObject / DeleteObjects / UploadPartCopy (since Prompt 12) still running 15 min after its start) on `vaultaire_s3_long_op_total{op,outcome}` / `vaultaire_s3_long_ops_abandoned_total{op}` (`internal/api/s3_long_op.go`, #635). Since Prompt 2a.2 G1 (#644) also LongOpsFailedDuringDrain (warning: `vaultaire_s3_long_ops_drain_errors_total{op}`). Both shutdown counters are exported by the ACTIVE slot from `s3_long_op_incidents` (migration 082), which the stopping slot writes before its DB closes — the stopping slot itself is never scraped, so the in-process counter of #635 could not fire. Installed on SLC 2026-10-09 (sha256 = repo) |
 | `vaultaire-multipart.yml` | `/etc/prometheus/rules/` | MultipartStagingRefusing (warning): an UploadPart was answered 503 SlowDown because the staging filesystem (prod: the 61 GiB tmpfs `/tmp`) would fall below `MULTIPART_STAGING_MIN_FREE` (`vaultaire_multipart_staging_refusals_total`, WP-R10-8 Part C). Parts are reserved against each tenant's quota since then; this guard bounds the sum across tenants. Installed on SLC 2026-10-14 (sha256 = repo; 48 rules load) |
@@ -336,12 +336,20 @@ a backend's missing share is a tenth higher than yesterday's run (`offset 25h`)
 account changed and 2,007 `idrive` rows pointed at the old one; a known backlog
 is the standing warning, not a daily page). Both read
 `vaultaire_routing_truth_last_run_missing_ratio{backend}`, which the app reads
-from `job_runs.result` on every scrape — right after a restart too. A backend
-that could not be asked (an open breaker, a NoSuchBucket, a timeout) is an
-`error`, never a miss. `RoutingUnknownBackendRows` (info, `for: 1h`) reads
-`vaultaire_routing_unknown_backend_rows{table,backend}` — rows whose backend no
-driver is registered under, per table, read from the database; `backend=""` is
-a row with none. `RoutingSharedStore` (critical): two registered names write
+from `job_runs.result` on every scrape — right after a restart too, and for
+EVERY backend of the run (RP14-12, Prompt 14: it was emitted only for a backend
+with a verdict, so on prod — `idrive` 501 rows, every sampled row an error — no
+series existed and neither rule could fire; 0 now means "nothing missing" or
+"nothing checked", and `_last_run_rows`, `_last_run_verdicts` (present +
+missing) and `_last_run_errors` say which). A backend that could not be asked
+(an open breaker, a NoSuchBucket, a timeout) is an `error`, never a miss, and
+`RoutingTruthNoVerdict` (warning) fires on a backend with rows and no verdict
+— prod's `idrive` since 2026-10-11 (`deploy/monitoring/tests/vaultaire-routing_test.yml`
+is its `promtool test rules` unit test). `RoutingUnknownBackendRows` (info,
+`for: 1h`) reads `vaultaire_routing_unknown_backend_rows{table,backend}` — rows
+whose backend no driver is registered under, per table, read from the
+database; `backend=""` is a row with none, and that count is a series at 0 for
+`object_head_cache` and `object_versions` even when there is none. `RoutingSharedStore` (critical): two registered names write
 into one store, which makes every stale-copy delete (WP-R13-2) a delete of a
 live object. `RoutingUnknownBackendReads` (warning): customers are reading rows
 that route to no driver. Triage: `GET /api/v1/admin/routing-truth` (admin JWT),

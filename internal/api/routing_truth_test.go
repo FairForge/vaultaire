@@ -422,8 +422,8 @@ func TestRoutingTruth_Job_WritesTheResultAndTheCollectorReadsItAfterARestart(t *
 	fresh.JobName = f.checker.JobName
 	fresh.scopeTenant = f.tenantID
 	gauges := fresh.lastRunGauges(context.Background())
-	require.Contains(t, gauges.missingRatio, f.hot)
-	assert.InDelta(t, 0.5, gauges.missingRatio[f.hot], 1e-9)
+	require.Contains(t, gauges.backends, f.hot)
+	assert.InDelta(t, 0.5, gauges.backends[f.hot].MissingRatio, 1e-9)
 	assert.False(t, gauges.finishedAt.IsZero())
 }
 

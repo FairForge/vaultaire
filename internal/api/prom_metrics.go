@@ -72,7 +72,7 @@ func (s *Server) initMetrics() {
 		// the chunk move — then the fallback can go), and driver calls
 		// refused because their context named no tenant (they used to land
 		// under t-default/). The second starts at 0 for every backend.
-		reg.MustRegister(chunkLegacyReads)
+		reg.MustRegister(chunkLegacyReads, chunkPutDetached, chunkPutsInFlightGauge)
 		// CopyObject sources whose bytes are not their head row's size
 		// (Prompt 2b.3 D2.1): drift, or a concurrent overwrite. 503s.
 		reg.MustRegister(copySourceSizeMismatch)

@@ -32,6 +32,8 @@ HEALTH='{"status":"ok","long_ops_in_flight":2}'
 expect "a slot that answers reports its count" 2 "$(long_ops_of 8001)"
 HEALTH='{"status":"ok","long_ops_in_flight":0}'
 expect "a slot with none reports 0" 0 "$(long_ops_of 8001)"
+HEALTH='{"status":"ok","long_ops_in_flight":1,"chunk_puts_in_flight":3}'
+expect "chunk PUTs that outlived their requests count too (Prompt 14)" 4 "$(long_ops_of 8001)"
 HEALTH=""; UNIT=active
 expect "a running slot that does not answer is unknown, not 0" "?" "$(long_ops_of 8001)"
 HEALTH='<html>busy</html>'
