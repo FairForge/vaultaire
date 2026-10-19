@@ -134,7 +134,8 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	// mfa_delete_enabled is a bucket column and the code is one header. A
 	// refusal keeps its 403 — it is decided before longOpBegin.
 	if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, bucket, r); err != nil {
-		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		s.logMFADeleteUnknown(err, bucket)
+		writeMFADeleteRefusal(w, r, err)
 		return
 	}
 

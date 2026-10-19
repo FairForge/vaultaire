@@ -875,7 +875,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		a.logger.Error("object integrity: the body served does not match its row — the response is cut",
 			zap.String("tenant_id", t.ID), zap.String("bucket", bucket), zap.String("key", artifact),
 			zap.String("backend", cachedBackendName), zap.String("storage_key", cachedStorageKey),
-			zap.String("recorded_etag", ie.recorded), zap.String("measured_md5", ie.measured),
+			zap.String("etag", cachedETag), zap.String("expected_md5", ie.recorded), zap.String("measured_md5", ie.measured),
 			zap.String("reason", ie.reason), zap.String("path", integrityPath), zap.Int64("bytes_sent", written))
 		abortResponse(r.Context())
 		return

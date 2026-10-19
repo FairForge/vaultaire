@@ -140,7 +140,17 @@ Behaviour worth knowing before writing code against it:
   such a bucket every delete needs the code — a single `DELETE` of any
   flavour and a `DeleteObjects` batch (one code for the whole batch; without
   it the batch is 403 `AccessDenied` and nothing is deleted). AWS gates only
-  versioned deletes; ours is the stricter rule.
+  versioned deletes; ours is the stricter rule. When the bucket's MFA
+  Delete setting cannot be read (a database outage), a delete and a
+  versioning suspend answer 503 `ServiceUnavailable` with `Retry-After` —
+  never "MFA Delete off".
+- **Object Lock at creation.** `CreateBucket` with
+  `x-amz-bucket-object-lock-enabled: true` (aws-cli
+  `--object-lock-enabled-for-bucket`) creates the bucket with Object Lock on
+  and versioning `Enabled`; a value other than `true`/`false` is 400
+  `InvalidArgument`. Re-creating a bucket you own that has no Object Lock,
+  with the header, is 409 `InvalidBucketState` (enable it with
+  `PutObjectLockConfiguration`).
 - **Versioning keeps every version's bytes** (since 2026-10-12, WP-R2-1):
   `GET` / `HEAD ?versionId=<old>` serve that version from its own row and
   blob, `DELETE ?versionId` removes it (deleting the current version makes

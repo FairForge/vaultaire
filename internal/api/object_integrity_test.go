@@ -133,7 +133,8 @@ func TestObjectIntegrity_APlainGetOfOtherBytesIsCutBeforeItsLastByte(t *testing.
 	assert.Equal(t, "test-bucket", fl["bucket"])
 	assert.Equal(t, "obj.bin", fl["key"])
 	assert.Equal(t, "fixed", fl["backend"])
-	assert.Equal(t, md5Hex(body), fl["recorded_etag"])
+	assert.Equal(t, md5Hex(body), fl["expected_md5"], "the digest the body was checked against")
+	assert.Equal(t, md5Hex(body), fl["etag"], "a single-part row: the ETag is that digest")
 	assert.Equal(t, md5Hex(other), fl["measured_md5"])
 	assert.Equal(t, "md5", fl["reason"])
 

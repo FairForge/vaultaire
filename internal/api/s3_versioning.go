@@ -158,15 +158,12 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 
 	if config.Status != "" {
 		if config.Status == "Suspended" {
-			var mfaDeleteOn bool
-			_ = s.db.QueryRowContext(r.Context(),
-				`SELECT mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				t.ID, req.Bucket).Scan(&mfaDeleteOn)
-			if mfaDeleteOn {
-				if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
-					WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-					return
-				}
+			// checkMFADelete reads the flag itself: its read failing is a
+			// 503, never "off" (RP16-5 — this pre-read discarded its error).
+			if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
+				s.logMFADeleteUnknown(err, req.Bucket)
+				writeMFADeleteRefusal(w, r, err)
+				return
 			}
 		}
 

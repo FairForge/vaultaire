@@ -360,7 +360,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("object integrity: the body served does not match its row — the response is cut",
 			zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key),
 			zap.String("backend", backendName), zap.String("storage_key", storageKey),
-			zap.String("recorded_etag", ie.recorded), zap.String("measured_md5", ie.measured),
+			zap.String("etag", etag), zap.String("expected_md5", ie.recorded), zap.String("measured_md5", ie.measured),
 			zap.String("reason", ie.reason), zap.String("path", integrityPathCDN), zap.Int64("bytes_sent", written))
 		abortResponse(ctx)
 		return

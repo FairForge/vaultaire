@@ -81,7 +81,7 @@ var errObjectIntegrity = errors.New("object integrity")
 // integrityError says how the body differed: reason md5 or size.
 type integrityError struct {
 	reason   string
-	recorded string // the row's ETag
+	recorded string // the digest the body was checked against: the ETag, or a -N row's body_md5
 	measured string // the MD5 of what was read (md5), or the byte count (size)
 }
 
