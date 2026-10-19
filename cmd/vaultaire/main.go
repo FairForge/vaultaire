@@ -396,6 +396,7 @@ func main() {
 		} else {
 			addDriver("permafrost", onedriveDriver)
 			logger.Info("Permafrost fleet driver added", zap.Int("tenants", onedriveDriver.TenantCount()))
+			checkPermafrostFleet(onedriveDriver)
 		}
 	}
 
@@ -510,6 +511,17 @@ func refusedPrimary(mode string, drv engine.Driver) error {
 		return fmt.Errorf("%q declares itself target-only: its bucket has Object Lock enabled or a default retention, so every object written there would be undeletable until the retention lapsed (WP-R7-7; R7-16) — remove the lock or choose another primary", mode)
 	}
 	return nil
+}
+
+// checkPermafrostFleet compares the fleet's order with the one its accounts'
+// markers recorded (WP-R7-4, R7-09; drivers/onedrive_fleet.go): a mismatch
+// is the driver's Error line and vaultaire_permafrost_fleet_mismatch 1,
+// PERMAFROST_FLEET_ACCEPT=<fingerprint> accepts a new order. Never a boot
+// failure: reads find a remapped object by the fleet walk.
+func checkPermafrostFleet(d *drivers.OneDriveDriver) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, _ = d.CheckFleetFingerprint(ctx, os.Getenv("PERMAFROST_FLEET_ACCEPT")) // logged by the driver
 }
 
 // checkLyveBucketLock reads the Lyve bucket's object-lock configuration at

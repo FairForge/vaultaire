@@ -448,8 +448,16 @@ func (s *tenantSweep) walk(ctx context.Context, backend string, walker engine.Te
 	return nil
 }
 
+// containerTreeRemover is a backend whose keys are a folder tree: after its
+// keys are deleted, the container's emptied folders are removed too
+// (drivers.OneDriveDriver).
+type containerTreeRemover interface {
+	RemoveContainerTree(ctx context.Context, container string) error
+}
+
 // containers sweeps a backend that cannot list a tenant: List of each of the
-// tenant's containers, Delete of each name it returned.
+// tenant's containers, Delete of each name it returned, then the container's
+// folder tree on a backend that has one.
 func (s *tenantSweep) containers(ctx context.Context, backend string, drv engine.Driver, buckets []string) error {
 	t := &tenant.Tenant{ID: s.d.TenantID}
 	tctx := common.WithTenantID(ctx, s.d.TenantID)
@@ -470,6 +478,7 @@ func (s *tenantSweep) containers(ctx context.Context, backend string, drv engine
 			// container with an empty listing.
 			return fmt.Errorf("list bucket %q: %w", bucket, err)
 		}
+		before := failures
 		for _, name := range names {
 			if err := s.tick(ctx); err != nil {
 				return err
@@ -482,6 +491,24 @@ func (s *tenantSweep) containers(ctx context.Context, backend string, drv engine
 			})
 			if err != nil {
 				return err
+			}
+		}
+		// A backend whose keys are a folder tree (permafrost) keeps the
+		// emptied folders — their names are the keys' prefixes — until the
+		// tree goes too (WP-R7-4: List returns keys since R7-06, no longer
+		// the top folder whose delete took its subtree).
+		if tr, ok := drv.(containerTreeRemover); ok && failures == before {
+			dctx, cancel := context.WithTimeout(tctx, s.r.SweepDeleteTimeout)
+			err := tr.RemoveContainerTree(dctx, container)
+			cancel()
+			if err != nil {
+				failures++
+				s.te.SweepFailures++
+				s.log.Error("account deletion sweep: the container's folders were left in place",
+					zap.String("backend", backend), zap.String("container", container), zap.Error(err))
+				if failures >= s.r.SweepMaxFailures {
+					return fmt.Errorf("%d deletes failed, the last: %w", failures, err)
+				}
 			}
 		}
 	}

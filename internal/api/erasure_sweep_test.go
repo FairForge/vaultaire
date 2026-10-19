@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -724,4 +725,65 @@ func TestErasureSweep_RefusesTheFallbackTenantID(t *testing.T) {
 	assert.Error(t, sweepErr)
 	assert.Zero(t, f.fixed.walks.Load(), "nothing may be listed under the shared fallback prefix")
 	assert.Zero(t, f.plain.lists.Load())
+}
+
+// treeDriver is a List + Delete backend whose keys are a folder tree
+// (permafrost): RemoveContainerTree takes the emptied folders.
+type treeDriver struct {
+	listOnlyDriver
+	mu      sync.Mutex
+	removed []string
+	failRm  atomic.Bool
+}
+
+func (d *treeDriver) Name() string { return "tree" }
+func (d *treeDriver) RemoveContainerTree(_ context.Context, container string) error {
+	if d.failRm.Load() {
+		return errors.New("tree: remove container: 503")
+	}
+	d.mu.Lock()
+	d.removed = append(d.removed, container)
+	d.mu.Unlock()
+	return nil
+}
+
+func (f *sweepFixture) addTree() (*treeDriver, string) {
+	dir := f.t.TempDir()
+	td := &treeDriver{listOnlyDriver: listOnlyDriver{inner: drivers.NewLocalDriver(dir, zap.NewNop())}}
+	f.eng.AddDriver("tree", td)
+	return td, dir
+}
+
+// WP-R7-4: on a backend whose keys are folders the sweep deletes every key
+// List returned (keys since R7-06, no longer the top folder whose delete
+// took its subtree), then the container's emptied folder tree — the folder
+// names are the keys' prefixes.
+func TestErasureSweep_AFolderTreeBackendLosesItsKeysThenItsFolders(t *testing.T) {
+	f := setupSweepFixture(t)
+	td, dir := f.addTree()
+	nested := f.onLocal(dir, f.tenantID, f.bucket, "photos/2024/a.jpg")
+
+	te := f.run()
+
+	assert.Equal(t, outcomeErased, te.Outcome, te.Error)
+	assertGone(t, "a nested key", nested)
+	td.mu.Lock()
+	defer td.mu.Unlock()
+	assert.Contains(t, td.removed, f.tenantID+"_"+f.bucket, "the container's folders are removed after its keys")
+}
+
+func TestErasureSweep_AFolderTreeThatCannotBeRemovedDefers(t *testing.T) {
+	f := setupSweepFixture(t)
+	td, dir := f.addTree()
+	f.onLocal(dir, f.tenantID, f.bucket, "photos/a.jpg")
+	td.failRm.Store(true)
+
+	te := f.run()
+
+	assert.Equal(t, outcomeDeferred, te.Outcome)
+	assert.Contains(t, te.Error, "tree: ")
+	assert.True(t, f.userExists(), "never erased while folders named after the keys remain")
+
+	td.failRm.Store(false)
+	assert.Equal(t, outcomeErased, f.run().Outcome)
 }
