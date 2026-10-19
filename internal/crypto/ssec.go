@@ -237,6 +237,14 @@ func ParseSSECHeaders(r *http.Request) ([]byte, error) {
 	return key, nil
 }
 
+// SSECKeyMD5 is the base64 MD5 of a customer key — what the
+// x-amz-server-side-encryption-customer-key-MD5 header carries and what the
+// row keeps (RP14-11, migration 094), never the key.
+func SSECKeyMD5(key []byte) string {
+	sum := md5.Sum(key) // #nosec G401 — S3's own key-identity digest
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
 func equal(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false

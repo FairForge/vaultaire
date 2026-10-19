@@ -312,14 +312,16 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		var vCreatedAt time.Time
 		var vAttrs objectAttrs
 		var vMeta []byte
+		var vBodyMD5, vKeyMD5 string
 		err := a.db.QueryRowContext(r.Context(), `
 			SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
-			       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), `+versionAttrColumns+`
+			       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), `+versionAttrColumns+`,
+			       COALESCE(body_md5, ''), COALESCE(ssec_key_md5, '')
 			FROM object_versions
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 			t.ID, bucket, artifact, reqVersionID).Scan(&isDeleteMarker, &isLatest, &vETag, &vContentType, &vSize, &vCreatedAt,
 			&vStorageKey, &vBackend, &vEncAlgo, &vMeta, &vAttrs.ContentDisposition, &vAttrs.ContentEncoding, &vAttrs.ContentLanguage,
-			&vAttrs.CacheControl, &vAttrs.Expires, &vAttrs.WebsiteRedirect)
+			&vAttrs.CacheControl, &vAttrs.Expires, &vAttrs.WebsiteRedirect, &vBodyMD5, &vKeyMD5)
 		switch {
 		case errors.Is(err, sql.ErrNoRows) && isUnanchoredNullVersion(r.Context(), a.db, t.ID, bucket, artifact, reqVersionID):
 			// The key has no version row: its current object is the null
@@ -336,7 +338,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 		if !isDeleteMarker && !isLatest && vStorageKey != "" {
 			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
-				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo, attrs: vAttrs, metadata: vMeta}
+				storageKey: vStorageKey, backend: vBackend, encAlgo: vEncAlgo, attrs: vAttrs, metadata: vMeta,
+				bodyMD5: vBodyMD5, ssecKeyMD5: vKeyMD5}
 		}
 		intact := false
 		if !isDeleteMarker && !isLatest && version == nil {
@@ -349,7 +352,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 			// a guess (Stage 1a Prompt 6 Part 0: it was read with no
 			// recorded backend, and a sealed one returned as ciphertext).
 			version = &versionBlob{etag: vETag, contentType: vContentType, size: vSize, createdAt: vCreatedAt,
-				backend: vBackend, encAlgo: vEncAlgo}
+				backend: vBackend, encAlgo: vEncAlgo, bodyMD5: vBodyMD5, ssecKeyMD5: vKeyMD5}
 		}
 		if !isDeleteMarker && !isLatest && version == nil {
 			// R2-03: a version written before WP-R2-1's writers (C1,
@@ -413,13 +416,16 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedIsChunked bool
 	var cachedFloor string
 	var cachedStorageKey string
+	var cachedBodyMD5, cachedSSECKeyMD5 string // what the row knows about its bytes (094)
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor, COALESCE(storage_key, '')
+			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor, COALESCE(storage_key, ''),
+			       COALESCE(body_md5, ''), COALESCE(ssec_key_md5, '')
 			FROM object_head_cache
 			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor, &cachedStorageKey)
+			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor, &cachedStorageKey,
+			&cachedBodyMD5, &cachedSSECKeyMD5)
 		switch {
 		case err == nil:
 			cacheHit = true
@@ -440,6 +446,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		cacheHit = true
 		cachedSize, cachedETag, cachedContentType, cachedUpdatedAt = version.size, version.etag, version.contentType, version.createdAt
 		cachedBackendName, cachedEncAlgo, cachedStorageKey = version.backend, version.encAlgo, version.storageKey
+		cachedBodyMD5, cachedSSECKeyMD5 = version.bodyMD5, version.ssecKeyMD5
 		cachedIsChunked = version.backend == chunkedBackendSentinel
 		cachedMetadata, cachedTags = version.metadata, []byte("{}")
 		if len(cachedMetadata) == 0 {
@@ -523,6 +530,14 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	if cacheHit && crypto.IsSSEC(cachedEncAlgo) && !crypto.HasSSECHeaders(r) {
 		w.Header().Del("x-amz-version-id")
 		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return
+	}
+	// A key of another MD5 than the row recorded (RP14-11, 094): AWS's 403,
+	// from the row, before any object header and any backend call. A row
+	// with no MD5 (written before 094) finds out at the blob, as before.
+	if cacheHit && crypto.IsSSEC(cachedEncAlgo) && ssecKeyMismatch(r, cachedSSECKeyMD5) {
+		w.Header().Del("x-amz-version-id")
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithMessage(sseCKeyRefusal))
 		return
 	}
 
@@ -844,8 +859,9 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// streams; its last byte waits for the match (object_integrity.go).
 	if cacheHit && cachedSize > 0 {
 		var armed bool
-		if dataReader, armed = newIntegrityReader(dataReader, cachedETag, cachedSize); !armed {
-			objectIntegrityUnverified.WithLabelValues(integrityPath, unverifiedReason(cachedETag)).Inc()
+		digest := integrityDigest(cachedBodyMD5, cachedETag) // a -N object's whole digest (A.4, 094)
+		if dataReader, armed = newIntegrityReader(dataReader, digest, cachedSize); !armed {
+			objectIntegrityUnverified.WithLabelValues(integrityPath, unverifiedReason(digest)).Inc()
 		}
 	}
 
@@ -937,6 +953,7 @@ type versionBlob struct {
 	encAlgo             string
 	attrs               objectAttrs // what the version row recorded (R61-8)
 	metadata            []byte      // its x-amz-meta-* as JSON
+	bodyMD5, ssecKeyMD5 string      // what the row knows about its bytes (094)
 }
 
 // detectContentType determines MIME type from extension
@@ -1084,6 +1101,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 
 	metadataSize := size
 	var encryptionAlgorithm string
+	var ssecKeyMD5 string         // the SSE-C key's base64 MD5 (RP14-11, 094)
 	var encryptionKeyVersion *int // SSE-S3: the tenant key version the blob is sealed under (WP-R8-1)
 
 	// Where the bytes go — chunked, whole and sealed, whole, or refused — is
@@ -1127,6 +1145,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		// long of its size fails the sealer's read (the client's 400), a
 		// Content-MD5 mismatch retires the written blob below — as on the
 		// plain path.
+		ssecKeyMD5 = crypto.SSECKeyMD5(ssecKey) // kept with the object (RP14-11); the key is not
 		sealed, encErr := crypto.SSECSeal(ssecKey, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, hashingBody, metadataSize)
 		clear(ssecKey)
 		if encErr != nil {
@@ -1323,12 +1342,13 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		flip, dbErr := commitBlobWrite(r.Context(), a.db, blobWrite{TenantID: t.ID, Bucket: bucket, Key: artifact,
 			Bill: a.bill,
 			Version: &versionWrite{Size: metadataSize, ETag: etag, ContentType: contentType, Backend: backendName,
-				Blob: versionBlobRef{StorageKey: blob, Enc: objectEncryption{Algorithm: encryptionAlgorithm, KeyVersion: encryptionKeyVersion}}},
+				Blob: versionBlobRef{StorageKey: blob, Enc: objectEncryption{Algorithm: encryptionAlgorithm, KeyVersion: encryptionKeyVersion, SSECKeyMD5: ssecKeyMD5}}},
 			Upsert: func(tx *sql.Tx) error {
+				// body_md5 stays NULL: a PUT's ETag is the body's MD5 (A.4).
 				_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, $19, NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, body_md5, ssec_key_md5, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, $19, NULL, NULLIF($20, ''), NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1347,8 +1367,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					is_chunked            = EXCLUDED.is_chunked,
 					tags                  = EXCLUDED.tags,
 					storage_key           = EXCLUDED.storage_key,
+					body_md5              = EXCLUDED.body_md5,
+					ssec_key_md5          = EXCLUDED.ssec_key_md5,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob)
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob, ssecKeyMD5)
 				return execErr
 			}})
 		versionID = flip.VersionID

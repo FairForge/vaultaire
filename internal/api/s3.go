@@ -796,12 +796,13 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var contentLanguage string
 	var echo putEchoHeaders
 	var storageKey string
+	var ssecKeyMD5 string
 
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor, COALESCE(storage_key, '')
+		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor, COALESCE(storage_key, ''), COALESCE(ssec_key_md5, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey)
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey, &ssecKeyMD5)
 
 	// R85-2: a HEAD of the current object of a versioned bucket names its
 	// version, as GET does — and a key whose latest version is a delete
@@ -837,6 +838,15 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	// any object header is set (R8-14; R2-22: size and ETag went out first).
 	if crypto.IsSSEC(encAlgo) && !crypto.HasSSECHeaders(r) {
 		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return
+	}
+	// A key of another MD5 than the row recorded: AWS's 403, cache-only
+	// (RP14-11, 094 — HEAD is still one row read; it answered 200 because
+	// the key could only be checked against the blob). A row with no MD5
+	// (written before 094) still answers 200.
+	if crypto.IsSSEC(encAlgo) && ssecKeyMismatch(r, ssecKeyMD5) {
+		w.Header().Del("x-amz-version-id")
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithMessage(sseCKeyRefusal))
 		return
 	}
 
@@ -962,15 +972,16 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	var createdAt time.Time
 	var attrs objectAttrs
 	var meta []byte
+	var ssecKeyMD5 string
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
 		       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(floor, ''),
-		       `+versionAttrColumns+`
+		       `+versionAttrColumns+`, COALESCE(ssec_key_md5, '')
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 		tenantID, req.Bucket, req.Object, vid).Scan(&marker, &latest, &etag, &contentType, &size, &createdAt,
 		&storageKey, &backend, &encAlgo, &floor, &meta, &attrs.ContentDisposition, &attrs.ContentEncoding, &attrs.ContentLanguage,
-		&attrs.CacheControl, &attrs.Expires, &attrs.WebsiteRedirect)
+		&attrs.CacheControl, &attrs.Expires, &attrs.WebsiteRedirect, &ssecKeyMD5)
 	if errors.Is(err, sql.ErrNoRows) {
 		if isUnanchoredNullVersion(r.Context(), s.db, tenantID, req.Bucket, req.Object, vid) {
 			return false // the current object is the null version (GET answers the same)
@@ -1001,6 +1012,12 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	if crypto.IsSSEC(encAlgo) && !crypto.HasSSECHeaders(r) {
 		w.Header().Del("x-amz-version-id")
 		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+		return true
+	}
+	if crypto.IsSSEC(encAlgo) && ssecKeyMismatch(r, ssecKeyMD5) {
+		// The version row's own key MD5 (RP14-11, 094).
+		w.Header().Del("x-amz-version-id")
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithMessage(sseCKeyRefusal))
 		return true
 	}
 	if floor == "" {

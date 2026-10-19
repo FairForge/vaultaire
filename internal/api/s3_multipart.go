@@ -957,7 +957,12 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		}
 		versionID, backendName = res.Flip.VersionID, chunkedBackendSentinel
 	} else {
-		var src io.Reader = body
+		// The whole body's MD5 (A.4, 094): the ETag stays the parts' -N, so
+		// the row records the digest a whole GET is verified against. The
+		// tee adds no read — it hashes what the sealer or the backend reads;
+		// the plaintext's, before the sealer.
+		bodyHash := md5.New() // #nosec G401 — the S3 content digest
+		src := io.TeeReader(body, bodyHash)
 		putLength := totalSize
 		var sealer *sseWriteSealer
 		if placement.Kind == placeWholeSealed {
@@ -966,7 +971,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			// The ETag stays the -N of the parts; size and ETag are the
 			// plaintext's, as a sealed PUT records them.
 			var sErr error
-			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, body, totalSize); sErr != nil {
+			if sealer, sErr = newSSEWriteSealer(r.Context(), s.sseService, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: object}, src, totalSize); sErr != nil {
 				s.writeCompleteStoreError(w, r, sErr, bucket, object, uploadID, tierClass)
 				return
 			}
@@ -1011,13 +1016,14 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// and the client's retry is not NoSuchUpload; the key's previous
 		// object is untouched until the commit (R3-15).
 		enc := sealer.encryption()
+		bodyMD5 := hex.EncodeToString(bodyHash.Sum(nil)) // every part was read to its end (staged.verified)
 		if s.db != nil {
 			flip, dbErr := commitBlobWrite(pctx, s.db, blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
 				Bill: bill,
 				Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
 					Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 				Upsert: func(tx *sql.Tx) error {
-					if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs, enc); err != nil {
+					if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs, enc, bodyMD5); err != nil {
 						return err
 					}
 					return markCompleted(pctx, tx)

@@ -91,6 +91,17 @@ func (e *integrityError) Error() string {
 
 func (e *integrityError) Unwrap() error { return errObjectIntegrity }
 
+// integrityDigest is what a whole 200 is verified against (A.4, 094): the
+// row's whole-body digest when it has one (a Complete's `-N` object), else
+// its ETag — a single-part MD5, or a `-N` of a row written before 094, which
+// stays unverified{multipart}.
+func integrityDigest(bodyMD5, etag string) string {
+	if bodyMD5 != "" {
+		return bodyMD5
+	}
+	return etag
+}
+
 // unverifiedReason is why a whole response with this ETag cannot be checked
 // ("" = it can: a single-part MD5).
 func unverifiedReason(etag string) string {

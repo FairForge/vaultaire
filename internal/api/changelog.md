@@ -5,6 +5,20 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-19: Multipart objects are checked whole; a wrong SSE-C key is refused up front
+
+- **A multipart upload's object is now verified on download like a single
+  upload's.** Its ETag is `<md5-of-part-md5s>-N`, which says nothing about
+  the whole body, so until now only the size was checked. The whole body's
+  MD5 is recorded when the upload completes and every whole download is
+  checked against it as it streams; a mismatch is cut before the last byte
+  (your client retries). Objects completed before today keep the
+  size-only check.
+- **A wrong SSE-C key answers `403` on `HEAD` as well as `GET`**, from the
+  object's own record (the key's MD5, as AWS keeps it — never the key),
+  before any byte is read. `HEAD` used to answer 200 for a wrong key.
+  Objects written before today keep the old answers.
+
 ## 2026-10-19: HEAD and ranged downloads tell the same story
 
 - **HEAD and a ranged GET now carry every header a whole GET does**: the

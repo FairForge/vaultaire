@@ -534,7 +534,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
 				Blob: versionBlobRef{StorageKey: destBlob, Enc: enc}},
 			Upsert: func(tx *sql.Tx) error {
-				return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, destBlob, counter.n, etag, backendName, floor, attrs, enc)
+				// body_md5 stays NULL: the copy's ETag is the MD5 of the bytes it
+				// wrote (as on AWS, a copy is a single-part object) — of a -N
+				// source too (A.4).
+				return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, destBlob, counter.n, etag, backendName, floor, attrs, enc, "")
 			}})
 		if dbErr != nil {
 			releaseReservation()

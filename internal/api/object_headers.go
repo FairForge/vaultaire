@@ -1,7 +1,10 @@
 package api
 
 import (
+	"crypto/subtle"
+
 	"fmt"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"net/http"
 	"strconv"
 	"time"
@@ -57,6 +60,27 @@ const (
 // defaultObjectCacheControl is what a response says for an object stored
 // without a Cache-Control.
 const defaultObjectCacheControl = "private, no-cache"
+
+// sseCKeyRefusal is AWS's answer to a GET or HEAD of an SSE-C object with a
+// key of another MD5 than the one the object was written under: 403, from
+// the row alone (RP14-11, 094), before any backend call.
+const sseCKeyRefusal = "The provided SSE-C key does not match the key the object was encrypted with."
+
+// ssecKeyMismatch reports whether r carries a complete SSE-C key whose MD5
+// differs from the one the row recorded. A row with none (written before
+// 094), or a request whose headers do not parse (the opener's 400), is
+// never a mismatch here.
+func ssecKeyMismatch(r *http.Request, recorded string) bool {
+	if recorded == "" {
+		return false
+	}
+	key, err := crypto.ParseSSECHeaders(r)
+	if err != nil || key == nil {
+		return false
+	}
+	defer clear(key)
+	return subtle.ConstantTimeCompare([]byte(crypto.SSECKeyMD5(key)), []byte(recorded)) != 1
+}
 
 // sseCRefusal is AWS's answer to a GET or HEAD of an SSE-C object that
 // does not carry the customer's key (R8-14).

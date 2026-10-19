@@ -53,7 +53,7 @@ subscription" that mimics it (two state machines, Stripe off still strands
 everyone); a credit balance drawn down daily (Mullvad-style — fine for one flat
 plan, wrong for a house with three lines and two periods; revisit for 43.5).
 
-### 1.2 Schema (migration 094, additive; the previous build keeps serving)
+### 1.2 Schema (migration 095, additive; the previous build keeps serving)
 
 ```sql
 -- One row per tenant: the house as bought, and until when.
@@ -201,7 +201,7 @@ fails and the date passes.
 
 ### 1.6 Upgrade path, two-slot safe
 
-1. **Migration 094** (WP-PAY-1) creates the tables. The old build ignores
+1. **Migration 095** (WP-PAY-1) creates the tables. The old build ignores
    them. Nothing is dropped or renamed.
 2. **Dual write** (WP-PAY-1): the webhook writes the entitlement AND the old
    columns. Backfill at the job's first run: every tenant with floor rows and
@@ -737,7 +737,7 @@ does not pay anyone loses the **house** (quota) after grace, never a byte.
 
 | | On prod now (no Stripe or BTCPay keys) | Only in a lab |
 |---|---|---|
-| Migration 094 applied, 0 rows; the lapse job runs `ok` with 0 candidates; the reminder job sends nothing; metrics present | yes | |
+| Migration 095 applied, 0 rows; the lapse job runs `ok` with 0 candidates; the reminder job sends nothing; metrics present | yes | |
 | The dashboard binary has no `stripe-go` import; the billing page renders the free-tier sentence | yes | |
 | Stripe webhook → entitlement; `past_due` keeps the house; `canceled` keeps it until the date; the lapse clears after grace | | Stripe test mode + `stripe listen`, or the signed fixtures of `webhook_signed_test.go` |
 | BTCPay: signature, redelivery dedup, each state transition, paid-late automation, the resize invoice | | BTCPay regtest in Docker (the WP-PAY-4 spike records real deliveries as fixtures) |
