@@ -109,6 +109,7 @@ var Deleted = []Rule{
 	{"buckets", `DELETE FROM buckets WHERE tenant_id = $1`, ByTenant},
 
 	// --- events and webhooks: deliveries before endpoints before events ---
+	{"webhook_outbox", `DELETE FROM webhook_outbox WHERE tenant_id = $1`, ByTenant},
 	{"webhook_deliveries", `DELETE FROM webhook_deliveries
 		WHERE webhook_id IN (SELECT id FROM webhook_endpoints WHERE tenant_id = $1)
 		   OR event_id IN (SELECT id FROM events WHERE tenant_id = $1)`, ByTenant},

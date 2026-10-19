@@ -293,9 +293,16 @@ func TestDeleteWebhook(t *testing.T) {
 	s, mock, cleanup := newWebhookTestServer(t)
 	defer cleanup()
 
+	// The endpoint's pending outbox rows are skipped in the delete's
+	// transaction (WP-R11-3).
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE webhook_outbox o SET state = 'skipped'`).
+		WithArgs("wh-123", "test-tenant", endpointSkipped, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DELETE FROM webhook_endpoints`).
 		WithArgs("wh-123", "test-tenant").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest("DELETE", "/api/v1/webhooks/wh-123", nil)
 	w := httptest.NewRecorder()
@@ -312,9 +319,13 @@ func TestDeleteWebhook_NotFound(t *testing.T) {
 	s, mock, cleanup := newWebhookTestServer(t)
 	defer cleanup()
 
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE webhook_outbox o SET state = 'skipped'`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`DELETE FROM webhook_endpoints`).
 		WithArgs("wh-missing", "test-tenant").
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
 
 	req := httptest.NewRequest("DELETE", "/api/v1/webhooks/wh-missing", nil)
 	w := httptest.NewRecorder()
@@ -363,11 +374,12 @@ func TestDeliveryHistory(t *testing.T) {
 		WithArgs("wh-123", "test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-	mock.ExpectQuery(`SELECT id, event_id, status, response_code, latency_ms, retry_count, created_at FROM webhook_deliveries`).
+	next := now.Add(25 * time.Second)
+	mock.ExpectQuery(`SELECT id, event_id, status, COALESCE\(response_code, 0\), COALESCE\(latency_ms, 0\), retry_count, next_retry_at, created_at FROM webhook_deliveries`).
 		WithArgs("wh-123", 21).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "event_id", "status", "response_code", "latency_ms", "retry_count", "created_at"}).
-			AddRow("del-1", "evt-1", "delivered", 200, 42, 0, now).
-			AddRow("del-2", "evt-2", "failed", 500, 150, 1, now.Add(-time.Minute)))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "event_id", "status", "response_code", "latency_ms", "retry_count", "next_retry_at", "created_at"}).
+			AddRow("del-1", "evt-1", "delivered", 200, 42, 2, nil, now).
+			AddRow("del-2", "evt-2", "failed", 500, 150, 1, next, now.Add(-time.Minute)))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("wh-123").
@@ -388,6 +400,11 @@ func TestDeliveryHistory(t *testing.T) {
 	assert.Equal(t, "webhook_delivery", first["object"])
 	assert.Equal(t, "delivered", first["status"])
 	assert.Equal(t, float64(200), first["response_code"])
+	assert.Equal(t, float64(2), first["retry_count"])
+	assert.Nil(t, first["next_retry_at"])
+	second := data[1].(map[string]interface{})
+	assert.Equal(t, next.Format(time.RFC3339), second["next_retry_at"])
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 func TestMatchesEventFilter(t *testing.T) {

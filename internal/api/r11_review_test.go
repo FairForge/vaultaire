@@ -327,9 +327,12 @@ func TestR11_WebhookDispatch_UsesGuardedClient(t *testing.T) {
 	mock.ExpectQuery(`SELECT id, url, event_filter, secret`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "url", "event_filter", "secret"}).
 			AddRow("wh-1", srv.URL+"/hook", "{*}", "whsec_x"))
-	mock.ExpectExec(`INSERT INTO webhook_deliveries`).
-		WithArgs(sqlmock.AnyArg(), "wh-1", "ev-1", "failed", 0, sqlmock.AnyArg(), sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(1, 1))
+	// The failed attempt: one statement moves its outbox row and writes
+	// the deliveries row (WP-R11-3).
+	mock.ExpectQuery(`UPDATE webhook_outbox SET(.|\n)*INSERT INTO webhook_deliveries`).
+		WithArgs(sqlmock.AnyArg(), "wh-1", "ev-1", "failed", 0, sqlmock.AnyArg(), sqlmock.AnyArg(),
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"attempts", "state"}).AddRow(nil, nil))
 
 	dispatchWebhooks(context.Background(), db, zap.NewNop(), "ev-1", "webhook.test", "t1", []byte(`{}`))
 

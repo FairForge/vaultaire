@@ -65,6 +65,9 @@ func (s *Server) initMetrics() {
 		// slot that stopped — what it gave up on.
 		reg.MustRegister(longOpsInFlight, longOpOutcomes, newLongOpIncidentsCollector(s.db, s.log()), deliveriesDropped, deliveriesPending,
 			completeReplayLockUndetermined)
+		// Webhook attempts with an outbox row (WP-R11-3): delivered on a
+		// retry, rescheduled, exhausted — every outcome at 0 from boot.
+		reg.MustRegister(webhookRetries)
 		// Writes destroyed by the delete of a stale copy (R13-06: detected,
 		// not preventable before WP-R2-1). Every source is there at 0.
 		reg.MustRegister(staleCopyLostWrites)

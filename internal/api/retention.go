@@ -79,6 +79,11 @@ func defaultRetentionPolicies() []retentionPolicy {
 		{Table: "stripe_events", Column: "processed_at", MaxAge: retentionStripeEvents},
 		{Table: "cdn_access_log", Column: "accessed_at", MaxAge: retentionCDNAccessLog},
 		{Table: "webhook_deliveries", Column: "created_at", MaxAge: retentionWebhookDeliv},
+		// The outbox (WP-R11-3): a row is terminal within ~3 minutes of its
+		// event (five attempts on the 1/5/25/125 s backoff), so only terminal
+		// rows are pruned; the privacy policy's "webhook delivery records,
+		// 30 days" covers both tables.
+		{Table: "webhook_outbox", Column: "created_at", MaxAge: retentionWebhookDeliv, Extra: "state <> 'pending'"},
 		{Table: "waitlist_signups", Column: "created_at", MaxAge: retentionWaitlistPII,
 			Action: retentionScrubColumns, ScrubColumns: []string{"ip_address", "user_agent"},
 			Extra: "(ip_address <> '' OR user_agent <> '')"},

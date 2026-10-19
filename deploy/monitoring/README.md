@@ -286,8 +286,9 @@ log line names tenant, bucket and key; the customer must upload again). The
 other four:
 `JobStale` (a daily job — `inventory`, `chunk_orphans`, `dedup_gc`, `retention`,
 `account_deletion`, `smart_demotion` — with no success in 36 h, `for: 30m`),
-`PeriodicJobStale` (an hourly job, or the 5-minute access-log delivery, with
-none in 3 h), `JobFailing` (three failed runs of one job in 6 h) and
+`PeriodicJobStale` (an interval job — hourly, the 5-minute access-log delivery,
+the 30-second `webhook_retry` of the webhook outbox (WP-R11-3) — with none in
+3 h; promtool test `tests/vaultaire-jobs_test.yml`), `JobFailing` (three failed runs of one job in 6 h) and
 `AccountDeletionDeferred` (the erasure runner could not finish a tenant whose
 grace period ended). The staleness rules read
 `vaultaire_job_last_success_timestamp_seconds{job_name}`, which the app reads from
