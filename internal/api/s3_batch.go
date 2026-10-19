@@ -171,6 +171,12 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 	aftermath := s.objectDeleteAftermath().forBatch(r.Context(), t.ID, bucket)
 	var wg sync.WaitGroup
 	for i, id := range unique {
+		// The dispatch gate never sees a batch key (it is in the body): an
+		// over-long one is its own error, the other keys are deleted.
+		if len(id.Key) > maxS3KeyBytes {
+			outcomes[i] = &DeleteError{Key: id.Key, Code: ErrKeyTooLong, Message: keyTooLongHint(id.Key)}
+			continue
+		}
 		sem <- struct{}{}
 		// A shutdown cut the batch: the keys not started yet are not
 		// attempted — an InternalError the client retries, never a guess.
