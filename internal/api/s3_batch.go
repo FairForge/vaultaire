@@ -129,6 +129,14 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		s.writeNoSuchBucket(w, r, t.ID, bucket)
 		return
 	}
+	// MFA Delete gates the batch as it gates the single DELETE (WP-R3-4,
+	// R4-17: the batch was the way around it). One check per batch:
+	// mfa_delete_enabled is a bucket column and the code is one header. A
+	// refusal keeps its 403 — it is decided before longOpBegin.
+	if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, bucket, r); err != nil {
+		WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+		return
+	}
 
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 

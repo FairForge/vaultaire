@@ -136,7 +136,11 @@ Behaviour worth knowing before writing code against it:
   `BypassGovernanceRetention` permission. An STS token bypasses only when its
   request named that permission and its parent could; a presigned URL carries
   its signer's scope, and the flag counts only where the signature covers it.
-  MFA Delete is available on lock-enabled buckets (`x-amz-mfa` TOTP).
+  MFA Delete is available on lock-enabled buckets (`x-amz-mfa` TOTP). On
+  such a bucket every delete needs the code — a single `DELETE` of any
+  flavour and a `DeleteObjects` batch (one code for the whole batch; without
+  it the batch is 403 `AccessDenied` and nothing is deleted). AWS gates only
+  versioned deletes; ours is the stricter rule.
 - **Versioning keeps every version's bytes** (since 2026-10-12, WP-R2-1):
   `GET` / `HEAD ?versionId=<old>` serve that version from its own row and
   blob, `DELETE ?versionId` removes it (deleting the current version makes
