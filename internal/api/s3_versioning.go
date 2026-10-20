@@ -94,6 +94,15 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// MfaDelete is validated like Status, and before the MFA check (RP19-9):
+	// `<MfaDelete>Garbage</MfaDelete>` passed the `!= ""` gate, consumed a
+	// valid code and wrote mfa_delete_enabled = false. AWS's two values
+	// (PutBucketVersioning API reference: Enabled | Disabled).
+	if config.MfaDelete != "Enabled" && config.MfaDelete != "Disabled" && config.MfaDelete != "" {
+		WriteS3Error(w, ErrMalformedXML, r.URL.Path, generateRequestID())
+		return
+	}
+
 	if config.Status == "" && config.MfaDelete == "" {
 		WriteS3Error(w, ErrMalformedXML, r.URL.Path, generateRequestID())
 		return
@@ -128,7 +137,10 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 	// while MFA Delete is on. A refusal is 403 before any state rule.
 	if config.MfaDelete != "" || (config.Status != "" && mfaDelete) {
 		if err := validateMFAHeader(r.Context(), s.auth, s.mfaService, t.ID, r); err != nil {
-			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
+			// A read of the user's MFA state that failed is 503 +
+			// Retry-After (RP19-10), the refusals 403.
+			s.logMFADeleteUnknown(err, req.Bucket)
+			writeMFADeleteRefusal(w, r, err)
 			return
 		}
 	}
