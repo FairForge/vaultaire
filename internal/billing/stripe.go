@@ -2,10 +2,13 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/stripe/stripe-go/v75"
 	portalsession "github.com/stripe/stripe-go/v75/billingportal/session"
@@ -61,13 +64,22 @@ var errNoCustomer = errors.New("no stripe customer")
 // window, so a retry after a failed record gets the same customer; a record
 // that fails is an error (a customer whose id we never kept would be
 // created again by the next checkout).
+// customerIdempotencyKey keys the customer creation on the tenant AND the
+// e-mail (RP22-7): Stripe keeps a key 24 h with the first request's
+// parameters, so a changed e-mail within the day used to be an
+// idempotency_error until the key expired.
+func customerIdempotencyKey(tenantID, email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return "customer-" + tenantID + "-" + hex.EncodeToString(sum[:4])
+}
+
 func (s *StripeService) createCustomer(ctx context.Context, email, tenantID string) (string, error) {
 	params := &stripe.CustomerParams{
 		Email:    stripe.String(email),
 		Metadata: map[string]string{"tenant_id": tenantID},
 	}
 	params.Context = ctx
-	params.SetIdempotencyKey("customer-" + tenantID)
+	params.SetIdempotencyKey(customerIdempotencyKey(tenantID, email))
 	c, err := customer.New(params)
 	if err != nil {
 		return "", fmt.Errorf("create stripe customer: %w", err)

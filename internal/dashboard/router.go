@@ -322,6 +322,11 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
 		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Flags, deps.BaseURL, deps.Logger))
 		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Payments.Provider(payments.ProviderStripe), deps.BaseURL, deps.Logger))
+		// WP-PAY-3: renew a prepaid or lapsed house by hand; the receipts
+		// (print-ready, from the ledger row, the session's tenant only).
+		dr.Post("/billing/renew", handlers.HandleRenewHouse(billingSvc, deps.DB, deps.BaseURL, deps.Logger))
+		receiptTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates, "templates/customer/receipt.html"))
+		dr.Get("/billing/receipts/{id}", handlers.HandleReceipt(receiptTmpl, deps.DB, deps.hostSet().Legal(), deps.Logger))
 
 		// Compliance dashboard.
 		complianceTmpl := template.Must(baseTmpl.Clone())
@@ -419,6 +424,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/tier", handlers.HandleChangeTier(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/bandwidth-limit", handlers.HandleUpdateBandwidthLimit(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/reset-mfa", handlers.HandleAdminResetMFA(deps.Auth, deps.Sessions, deps.Logger))
+		// The Billing panel (WP-PAY-3): the same operations as the admin API.
+		ar.Post("/tenants/{id}/billing/payment", handlers.HandleAdminManualPayment(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/billing/entitlement", handlers.HandleAdminAdjustEntitlement(deps.DB, deps.Logger))
+		ar.Post("/tenants/{id}/billing/refund", handlers.HandleAdminRefund(deps.DB, deps.Logger))
 		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
 		ar.Get("/audit", handlers.HandleAdminAudit(auditTmpl, deps.DB, deps.Logger))
 		ar.Get("/audit/export", handlers.HandleAdminAuditExport(deps.DB, deps.Logger))

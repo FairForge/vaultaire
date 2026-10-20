@@ -143,3 +143,17 @@ func TestHosts_SetGet(t *testing.T) {
 	require.Equal(t, h, Get())
 	assert.Equal(t, "https://stored.cloud/legal/aup", Get().URL("/legal/aup"))
 }
+
+// WP-PAY-3 (D-P20-A1): the issuer's legal data has one source.
+func TestLegal_OneSource(t *testing.T) {
+	l := Defaults(8000).Legal()
+	if l.Name != "FairForge LLC" {
+		t.Fatalf("name %q", l.Name)
+	}
+	if l.Email != "support@stored.cloud" {
+		t.Fatalf("a development origin still names the brand domain: %q", l.Email)
+	}
+	if len(l.AddressLines) == 0 || l.Jurisdiction == "" {
+		t.Fatal("the receipt needs lines under the name")
+	}
+}

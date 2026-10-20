@@ -154,7 +154,7 @@ func NewRegistry(db *sql.DB, fl FlagSource, grace time.Duration, logger *zap.Log
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Registry{db: db, flags: fl, grace: grace, logger: logger, ready: NewReadyLog(),
+	return &Registry{db: db, flags: fl, grace: grace, logger: logger, ready: NewReadyLogDB(db, logger),
 		providers: map[string]Provider{}}
 }
 
@@ -364,37 +364,6 @@ func (r *Registry) ManageURL(ctx context.Context, tenantID, returnURL string) (s
 
 // --- readiness ----------------------------------------------------------
 
-// ReadyLog remembers when each provider was last seen unready. In memory:
-// a restart forgets an outage older than the process (RP21-1).
-type ReadyLog struct {
-	mu          sync.Mutex
-	lastUnready map[string]time.Time
-}
-
-// NewReadyLog returns an empty log.
-func NewReadyLog() *ReadyLog { return &ReadyLog{lastUnready: map[string]time.Time{}} }
-
-// Record notes one observation: only Unready is an outage; Ready and
-// Pending (no verdict yet) leave the log alone.
-func (l *ReadyLog) Record(provider string, st Readiness, at time.Time) {
-	if st != Unready {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if at.After(l.lastUnready[provider]) {
-		l.lastUnready[provider] = at
-	}
-}
-
-// UnreadyWithin reports an unready observation in (now - window, now].
-func (l *ReadyLog) UnreadyWithin(_ context.Context, provider string, window time.Duration, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	t, ok := l.lastUnready[provider]
-	return ok && !t.Before(now.Add(-window))
-}
-
 // History is the registry's readiness log.
 func (r *Registry) History() *ReadyLog { return r.ready }
 
@@ -414,8 +383,8 @@ func (r *Registry) UnreadyWithin(ctx context.Context, provider string, window ti
 // observe asks the provider once, records the answer and exports the gauge
 // (1 for Ready; 0 for Unready and for Pending).
 func (r *Registry) observe(ctx context.Context, p Provider, now time.Time) Readiness {
-	st, _ := p.Ready(ctx)
-	r.ready.Record(p.Name(), st, now)
+	st, why := p.Ready(ctx)
+	r.ready.RecordReason(p.Name(), st, why, now)
 	v := 0.0
 	if st == Ready {
 		v = 1

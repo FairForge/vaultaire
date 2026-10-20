@@ -57,11 +57,25 @@ type WebhookHandler struct {
 	subs   subscriptionFetcher
 	// flags answers entitlement_lapse per tenant (nil = off).
 	flags payments.FlagSource
+	// receipts mails the receipt of a NEWLY settled invoice (nil = none).
+	receipts ReceiptSender
 }
 
 // SetFlags wires the flag source: with entitlement_lapse ON for a tenant a
 // terminal Stripe status stops the renewal and keeps the house — the date
 // and the lapse job decide (WP-PAY-2, docs/PAYMENTS.md § 1.3).
+// ReceiptSender mails the receipt of a newly settled ledger row
+// (payments.Mailer, WP-PAY-3). Best effort, after the commit.
+type ReceiptSender interface {
+	SendReceipt(ctx context.Context, tenantID, paymentID string) error
+}
+
+// SetReceiptSender attaches the receipt mailer.
+func (h *WebhookHandler) SetReceiptSender(r ReceiptSender) { h.receipts = r }
+
+// webhookActor is the audit actor of what the webhook writes.
+const webhookActor = "stripe-webhook"
+
 func (h *WebhookHandler) SetFlags(fl payments.FlagSource) { h.flags = fl }
 
 // dateDecides reports entitlement_lapse ON for the tenant.
@@ -98,6 +112,10 @@ func NewWebhookHandler(secret string, stripeSvc *StripeService, logger *zap.Logg
 
 // ServeHTTP handles POST /webhook/stripe.
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Every delivery is counted once by its outcome
+	// (vaultaire_payment_webhook_total, the PaymentWebhookFailing series).
+	outcome := payments.WebhookError
+	defer func() { payments.CountWebhook(payments.ProviderStripe, outcome) }()
 	if h.endpointSecret == "" {
 		h.logger.Error("stripe webhook refused: no endpoint secret configured")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -110,10 +128,12 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			h.logger.Warn("stripe webhook body over the cap", zap.Int64("limit", tooBig.Limit))
+			outcome = payments.WebhookRejected
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
 		h.logger.Error("read webhook body", zap.Error(err))
+		outcome = payments.WebhookRejected
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -123,6 +143,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	event, err := webhook.ConstructEvent(body, r.Header.Get("Stripe-Signature"), h.endpointSecret)
 	if err != nil {
 		h.logger.Warn("webhook signature verification failed", zap.Error(err))
+		outcome = payments.WebhookRejected
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -145,6 +166,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if duplicate {
 			h.logger.Debug("duplicate webhook event, skipping", zap.String("id", event.ID))
+			outcome = payments.WebhookDuplicate
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -182,6 +204,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	outcome = payments.WebhookOK
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -641,11 +664,14 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		if sub.CancelAtPeriodEnd {
 			renewal = payments.RenewalPrepaid // nobody will extend it
 		}
+		var granted payments.Granted
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			if err := payments.Grant(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal); err != nil {
+			g, err := payments.GrantRecorded(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+			if err != nil {
 				return err
 			}
-			_, err := tx.ExecContext(ctx,
+			granted = g
+			_, err = tx.ExecContext(ctx,
 				`UPDATE tenants
 				    SET stripe_subscription_id = $1, subscription_status = $2, plan = 'house', house_period = $3
 				  WHERE id = $4`,
@@ -657,6 +683,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		} else if err != nil {
 			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}
+		h.auditGrant(ctx, tenantID, granted, sub.ID)
 		h.logger.Info("house granted",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID),
 			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot),
@@ -674,15 +701,20 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			return true, nil
 		}
 		if h.dateDecides(tenantID) {
+			var stopped bool
 			if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-				if err := payments.StopRenewal(ctx, tx, tenantID); err != nil {
+				var err error
+				if stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID); err != nil {
 					return err
 				}
-				_, err := tx.ExecContext(ctx,
+				_, err = tx.ExecContext(ctx,
 					`UPDATE tenants SET subscription_status = $1 WHERE id = $2`, string(sub.Status), tenantID)
 				return err
 			}); err != nil {
 				return true, fmt.Errorf("stop renewal for tenant %s: %w", tenantID, err)
+			}
+			if stopped {
+				payments.AuditRenewal(ctx, h.stripe.db, tenantID, payments.RenewalPrepaid, webhookActor, payments.ProviderStripe, sub.ID)
 			}
 			h.logger.Warn("renewal stopped — the house runs to paid_through + grace (entitlement_lapse)",
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
@@ -703,6 +735,16 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 	}
 	return true, nil
+}
+
+// auditGrant writes billing.house_granted for a grant that changed the
+// row and billing.renewal_stopped / _resumed when the grant flipped the
+// renewal of an existing row (cancel_at_period_end seen by the webhook).
+func (h *WebhookHandler) auditGrant(ctx context.Context, tenantID string, g payments.Granted, subID string) {
+	payments.AuditGranted(ctx, h.stripe.db, tenantID, g, webhookActor)
+	if g.Changed && g.Previous != nil && g.Previous.Renewal != g.Renewal {
+		payments.AuditRenewal(ctx, h.stripe.db, tenantID, g.Renewal, webhookActor, payments.ProviderStripe, subID)
+	}
 }
 
 // houseInvalid acknowledges a subscription whose items are no valid house
@@ -821,15 +863,20 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 	// downgrade below, flag or no flag (RP22-2).
 	_, isHouse := h.stripe.HouseFromSubscription(&sub)
 	if isHouse && h.dateDecides(tenantID) && h.stripe.db != nil {
+		var stopped bool
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			if err := payments.StopRenewal(ctx, tx, tenantID); err != nil {
+			var err error
+			if stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID); err != nil {
 				return err
 			}
-			_, err := tx.ExecContext(ctx,
+			_, err = tx.ExecContext(ctx,
 				`UPDATE tenants SET subscription_status = 'canceled', stripe_subscription_id = NULL WHERE id = $1`, tenantID)
 			return err
 		}); err != nil {
 			return tenantID, fmt.Errorf("stop renewal on delete for tenant %s: %w", tenantID, err)
+		}
+		if stopped {
+			payments.AuditRenewal(ctx, h.stripe.db, tenantID, payments.RenewalPrepaid, webhookActor, payments.ProviderStripe, sub.ID)
 		}
 		h.logger.Info("subscription deleted — renewal stopped, the house runs to paid_through + grace",
 			zap.String("tenant", tenantID))

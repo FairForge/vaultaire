@@ -1,0 +1,70 @@
+{{define "receipt"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Receipt {{.InvoiceNumber}}, {{.Brand}}</title>
+<style>
+:root { --ink: #18181b; --dim: #71717a; --line: #e4e4e7; --bg: #ffffff; }
+body { margin: 0; background: #f4f4f5; color: var(--ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.sheet { max-width: 720px; margin: 32px auto; background: var(--bg); padding: 40px 48px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; border-bottom: 2px solid var(--ink); padding-bottom: 16px; margin-bottom: 24px; }
+.brand { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+.issuer { font-size: 13px; color: var(--dim); line-height: 1.5; text-align: right; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.meta { font-size: 14px; color: var(--dim); margin: 0 0 24px; line-height: 1.6; }
+table { width: 100%; border-collapse: collapse; margin: 16px 0 8px; font-size: 14px; }
+th, td { text-align: left; padding: 8px 0; border-bottom: 1px solid var(--line); }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); font-weight: 600; }
+td.num, th.num { text-align: right; }
+.total td { font-weight: 700; border-bottom: none; font-size: 16px; padding-top: 12px; }
+.paid { display: inline-block; padding: 2px 10px; border: 2px solid #15803d; color: #15803d; border-radius: 4px; font-weight: 700; font-size: 12px; letter-spacing: .08em; }
+.refund { border-color: #b45309; color: #b45309; }
+.foot { margin-top: 32px; font-size: 12px; color: var(--dim); line-height: 1.6; }
+.actions { margin: 24px auto; max-width: 720px; display: flex; gap: 12px; font-size: 14px; }
+.actions a { color: #2563eb; text-decoration: none; }
+@media print {
+  body { background: #fff; }
+  .sheet { margin: 0; box-shadow: none; border-radius: 0; padding: 0; max-width: none; }
+  .actions { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="actions"><a href="/dashboard/billing">&larr; Billing</a><span>&middot; Use your browser's Print to save this receipt as PDF.</span></div>
+<div class="sheet">
+  <header>
+    <div>
+      <div class="brand">{{.Brand}}</div>
+      <div style="font-size:13px;color:var(--dim)">object storage, sold by the TB</div>
+    </div>
+    <div class="issuer">
+      <strong>{{.Legal.Name}}</strong><br>
+      {{range .Legal.AddressLines}}{{.}}<br>{{end}}
+      {{.Legal.Email}}
+    </div>
+  </header>
+  <h1>{{if .IsRefund}}Credit note{{else}}Receipt{{end}} {{.InvoiceNumber}} <span class="paid{{if .IsRefund}} refund{{end}}">{{if .IsRefund}}REFUNDED{{else}}PAID{{end}}</span></h1>
+  <p class="meta">
+    {{if .IsRefund}}Refunded{{else}}Paid{{end}} on <strong>{{.PaidAt}}</strong><br>
+    Billed to <strong>{{.Email}}</strong>{{if .House}}<br>House: {{.House}}{{end}}{{if .Period}}<br>Period: {{.Period}}{{end}}
+  </p>
+  <table>
+    <thead><tr><th>Line</th><th class="num">Size</th><th class="num">{{if .House}}Per month{{else}}Amount{{end}}</th></tr></thead>
+    <tbody>
+    {{range .Lines}}<tr><td>{{.Label}}{{if .Detail}} <span style="color:var(--dim)">({{.Detail}})</span>{{end}}</td><td class="num">{{if .TB}}{{.TB}} TB{{end}}</td><td class="num">{{.Money}}</td></tr>{{end}}
+    <tr class="total"><td>{{if .IsRefund}}Refunded{{else}}Total paid{{end}}</td><td></td><td class="num">{{.Amount}}</td></tr>
+    </tbody>
+  </table>
+  <p class="meta">
+    Paid via {{.Via}}{{if .IsCrypto}} &middot; {{.CryptoAmount}} {{.CryptoCurrency}} at {{.Rate}} USD{{end}}{{if .ProviderID}} &middot; reference {{.ProviderID}}{{end}}.
+    Egress is never billed. USD; no sales tax collected.
+  </p>
+  <p class="foot">
+    Issued by {{.Legal.Name}}, {{.Legal.Jurisdiction}}. Questions: {{.Legal.Email}}. This receipt is generated from our payment ledger; its number is unique and sequential within the year.
+  </p>
+</div>
+</body>
+</html>
+{{end}}

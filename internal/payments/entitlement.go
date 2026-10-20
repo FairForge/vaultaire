@@ -17,8 +17,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
 
@@ -67,6 +69,30 @@ type Order struct {
 
 // House is the order in bytes, as the quota tables hold it.
 func (o Order) House() usage.House { return usage.HouseFromTB(o.Std, o.Vault, o.PinHot) }
+
+// Words says the house the way the site does: "5 TB downstairs, 2 TB in
+// the attic, 1 TB pinned hot".
+func (o Order) Words() string {
+	var parts []string
+	if o.Std > 0 {
+		parts = append(parts, fmt.Sprintf("%d TB downstairs", o.Std))
+	}
+	if o.Vault > 0 {
+		parts = append(parts, fmt.Sprintf("%d TB in the attic", o.Vault))
+	}
+	if o.PinHot > 0 {
+		parts = append(parts, fmt.Sprintf("%d TB pinned hot", o.PinHot))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// PeriodWord is "yearly" or "monthly".
+func (p Period) Word() string {
+	if p == PeriodMonthly {
+		return "monthly"
+	}
+	return "yearly"
+}
 
 // ErrInvalidOrder is a house no grant may record: an unknown period, a
 // negative line, or more pin-hot than Standard (migration 097's CHECK
@@ -124,13 +150,44 @@ func Lock(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // row is granted again (lapsed_at cleared) at the given date.
 func Grant(ctx context.Context, tx *sql.Tx, tenantID string, o Order, paidThrough time.Time,
 	provider, providerRef string, renewal Renewal) error {
+	_, err := GrantRecorded(ctx, tx, tenantID, o, paidThrough, provider, providerRef, renewal)
+	return err
+}
+
+// Granted is what a grant did (WP-PAY-3 item 5): Changed is false for a
+// replay that touched no row — the caller writes billing.house_granted
+// only when it is true (AuditGranted). Previous is the row before the
+// grant (nil when there was none), so a caller can tell a renewal change.
+type Granted struct {
+	Changed     bool
+	PaidThrough time.Time
+	Order       Order
+	Provider    string
+	ProviderRef string
+	Renewal     Renewal
+	Previous    *Entitlement
+}
+
+// GrantRecorded is Grant reporting whether the row changed (the upsert's
+// RETURNING: its WHERE excludes a replay, so a replay returns no row).
+func GrantRecorded(ctx context.Context, tx *sql.Tx, tenantID string, o Order, paidThrough time.Time,
+	provider, providerRef string, renewal Renewal) (Granted, error) {
+	g := Granted{Order: o, Provider: provider, ProviderRef: providerRef, Renewal: renewal, PaidThrough: paidThrough.UTC()}
 	if err := o.Validate(); err != nil {
-		return fmt.Errorf("grant tenant %s: %w", tenantID, err)
+		return g, fmt.Errorf("grant tenant %s: %w", tenantID, err)
 	}
 	if err := Lock(ctx, tx, tenantID); err != nil {
-		return err
+		return g, err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	prev, err := Get(ctx, tx, tenantID)
+	switch {
+	case errors.Is(err, ErrNoEntitlement):
+	case err != nil:
+		return g, err
+	default:
+		g.Previous = &prev
+	}
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO entitlements (tenant_id, std_tb, vault_tb, pin_hot_tb, period, paid_through, renewal, provider, provider_ref)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))
 		ON CONFLICT (tenant_id) DO UPDATE
@@ -146,11 +203,46 @@ func Grant(ctx context.Context, tx *sql.Tx, tenantID string, o Order, paidThroug
 		        AND entitlements.renewal = EXCLUDED.renewal AND entitlements.provider = EXCLUDED.provider
 		        AND entitlements.provider_ref IS NOT DISTINCT FROM EXCLUDED.provider_ref
 		        AND entitlements.lapsed_at IS NULL
-		        AND entitlements.paid_through >= EXCLUDED.paid_through)`,
-		tenantID, o.Std, o.Vault, o.PinHot, string(o.Period), paidThrough.UTC(), string(renewal), provider, providerRef); err != nil {
-		return fmt.Errorf("grant tenant %s: %w", tenantID, err)
+		        AND entitlements.paid_through >= EXCLUDED.paid_through)
+		RETURNING paid_through`,
+		tenantID, o.Std, o.Vault, o.PinHot, string(o.Period), paidThrough.UTC(), string(renewal), provider, providerRef).Scan(&g.PaidThrough)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		g.Changed = false
+		if g.Previous != nil {
+			g.PaidThrough = g.Previous.PaidThrough
+		}
+	case err != nil:
+		return g, fmt.Errorf("grant tenant %s: %w", tenantID, err)
+	default:
+		g.Changed = true
 	}
-	return usage.SetHouseTx(ctx, tx, tenantID, o.House())
+	if err := usage.SetHouseTx(ctx, tx, tenantID, o.House()); err != nil {
+		return g, err
+	}
+	return g, nil
+}
+
+// AuditGranted writes billing.house_granted for a grant that changed the
+// row (nothing for a replay). Called AFTER the caller's commit; actor is
+// who granted ("stripe-webhook", an admin's user id).
+func AuditGranted(ctx context.Context, db *sql.DB, tenantID string, g Granted, actor string) {
+	if !g.Changed {
+		return
+	}
+	// performed_by is a users.id (audit.nullUUID): a named actor such as
+	// the webhook lives in the metadata, an admin's id in both.
+	meta := map[string]any{"tenant": tenantID, "actor": actor, "provider": g.Provider, "renewal": string(g.Renewal),
+		"paid_through": g.PaidThrough.UTC().Format(time.RFC3339), "std": g.Order.Std, "vault": g.Order.Vault,
+		"pin_hot": g.Order.PinHot, "period": string(g.Order.Period)}
+	if g.ProviderRef != "" {
+		meta["provider_ref"] = g.ProviderRef
+	}
+	if g.Previous != nil {
+		meta["previous_paid_through"] = g.Previous.PaidThrough.UTC().Format(time.RFC3339)
+	}
+	audit.Record(ctx, db, audit.Entry{Actor: actor, TenantID: tenantID, EventType: "billing", Action: "billing.house_granted",
+		Resource: "tenant:" + tenantID, Metadata: meta})
 }
 
 // Extend adds one period to the tenant's date: from paid_through when the
@@ -189,15 +281,35 @@ func Extend(ctx context.Context, tx *sql.Tx, tenantID string, by Period) (time.T
 // StopRenewal records that nobody will extend the date any more (a
 // cancelled subscription): the house runs to paid_through + grace.
 func StopRenewal(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	_, err := StopRenewalChanged(ctx, tx, tenantID)
+	return err
+}
+
+// StopRenewalChanged is StopRenewal reporting whether a row changed (the
+// caller writes billing.renewal_stopped only then).
+func StopRenewalChanged(ctx context.Context, tx *sql.Tx, tenantID string) (bool, error) {
 	if err := Lock(ctx, tx, tenantID); err != nil {
-		return err
+		return false, err
 	}
-	if _, err := tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`UPDATE entitlements SET renewal = 'prepaid', updated_at = NOW() WHERE tenant_id = $1 AND renewal <> 'prepaid'`,
-		tenantID); err != nil {
-		return fmt.Errorf("stop renewal of tenant %s: %w", tenantID, err)
+		tenantID)
+	if err != nil {
+		return false, fmt.Errorf("stop renewal of tenant %s: %w", tenantID, err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// AuditRenewal writes billing.renewal_stopped / billing.renewal_resumed
+// (actor: "stripe-webhook", the customer, an admin).
+func AuditRenewal(ctx context.Context, db *sql.DB, tenantID string, renewal Renewal, actor, provider, ref string) {
+	action := "billing.renewal_resumed"
+	if renewal == RenewalPrepaid {
+		action = "billing.renewal_stopped"
+	}
+	audit.Record(ctx, db, audit.Entry{Actor: actor, TenantID: tenantID, EventType: "billing", Action: action,
+		Resource: "tenant:" + tenantID, Metadata: map[string]any{"tenant": tenantID, "actor": actor, "provider": provider, "provider_ref": ref, "renewal": string(renewal)}})
 }
 
 // Revoke clears the house (usage.ClearHouseTx: free-tier limits, used

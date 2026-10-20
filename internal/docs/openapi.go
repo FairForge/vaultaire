@@ -1374,6 +1374,86 @@ func generateAdminPaths() map[string]*PathItem {
 				}),
 				queryParam("dry_run", "`smart_demotion` only: report, move nothing", &Schema{Type: "boolean", Default: false}))),
 		},
+		"/api/v1/admin/tenants/{tenant_id}/payments": {
+			Parameters: []Parameter{pathParam("tenant_id", "Tenant id")},
+			Get: admin(jsonOp("Admin", "A tenant's entitlement and payment ledger", "AdminTenantPayments",
+				"The entitlement record (what the tenant bought, paid through which date, which provider renews it; `null` for the free tier), its read model "+
+					"(`granted`, `in_grace`, `grace_ends`) and every row of the payment ledger, newest first (WP-PAY-3).",
+				map[string]Response{
+					"200": jsonResp("The tenant's money", objectPtr("", map[string]*Schema{
+						"object":      strEnum("", "tenant_payments"),
+						"tenant_id":   str(""),
+						"entitlement": ref("Entitlement"),
+						"status": objectPtr("The read model", map[string]*Schema{
+							"found": {Type: "boolean"}, "granted": {Type: "boolean"}, "in_grace": {Type: "boolean"},
+							"grace_ends": dateTime("paid_through + ENTITLEMENT_GRACE"),
+						}),
+						"payments": arrayOf(ref("LedgerRow")),
+					}, "object", "tenant_id", "status", "payments")),
+					"500": textResp("`could not read the entitlement` / `could not read the ledger`"),
+				})),
+			Post: admin(withBody(jsonOp("Admin", "Record a manual payment", "AdminManualPayment",
+				"A payment made outside any provider (a wire, a support credit): a settled, numbered `manual` ledger row and the house granted — a tenant with no "+
+					"entitlement row must be given one (`order`: TB per floor; 400 without) — or extended by one `period` (WP-PAY-3). `reason` is required. "+
+					"Audited `billing.payment_recorded_manual` and `billing.house_granted` with the admin as actor.",
+				map[string]Response{
+					"201": jsonResp("Recorded", objectPtr("", map[string]*Schema{
+						"payment_id": str("The ledger row (the receipt page's id)"), "invoice_number": str("Our gapless receipt number `ST-<year>-<n>`"),
+						"paid_through": dateTime("The date after the payment"), "granted": {Type: "boolean", Description: "The tenant had no row and got one"},
+					}, "payment_id", "invoice_number", "paid_through", "granted")),
+					"400": textResp("`reason is required`, the order missing or invalid, an unknown period"),
+				}),
+				jsonBody("The payment", objectPtr("", map[string]*Schema{
+					"amount_cents": {Type: "integer", Description: "USD cents received"},
+					"period":       strEnum("What the money buys on the date", "annual", "monthly"),
+					"purpose":      strEnum("", "manual"),
+					"note":         str("Free text (a wire reference); dropped at erasure"),
+					"reason":       str("Required: why the operator records it (audited)"),
+					"order":        ref("HouseOrder"),
+				}, "amount_cents", "period", "reason")))),
+		},
+		"/api/v1/admin/tenants/{tenant_id}/entitlement": {
+			Parameters: []Parameter{pathParam("tenant_id", "Tenant id")},
+			Post: admin(withBody(jsonOp("Admin", "Set paid_through and/or the house by hand", "AdminAdjustEntitlement",
+				"**The one writer that may shorten a date**: every grant takes the later of two dates and a refund shortens only through `/refunds`; here the "+
+					"operator sets `paid_through` as given and/or the house's lines (floors written in the same transaction; a lapsed row given a future date is granted again). "+
+					"`reason` is required. Audited `billing.paid_through_adjusted`.",
+				map[string]Response{
+					"200": jsonResp("The entitlement after the change", objectPtr("", map[string]*Schema{"entitlement": ref("Entitlement")}, "entitlement")),
+					"400": textResp("`reason is required`, nothing to change, an invalid house"),
+					"404": textResp("The tenant has no entitlement row"),
+				}),
+				jsonBody("The change", objectPtr("", map[string]*Schema{
+					"paid_through": dateTime("The new date (may be earlier than today's)"),
+					"order":        ref("HouseOrder"),
+					"reason":       str("Required (audited)"),
+				}, "reason")))),
+		},
+		"/api/v1/admin/tenants/{tenant_id}/refunds": {
+			Parameters: []Parameter{pathParam("tenant_id", "Tenant id")},
+			Post: admin(withBody(jsonOp("Admin", "Record a refund made outside", "AdminRecordRefund",
+				"A refund made in the Stripe dashboard or by wire: a settled `refund` ledger row (a credit-note number from the same counter) linked to the charge, "+
+					"the charge marked `refunded` once its refunds reach its amount; `shorten_paid_through` takes the refunded share of the period the charge bought off "+
+					"the date (the charge must record a period). `reason` is required. Audited `billing.refund_recorded`.",
+				map[string]Response{
+					"201": jsonResp("Recorded", objectPtr("", map[string]*Schema{
+						"payment_id": str("The refund row"), "invoice_number": str("Its credit-note number"),
+						"fully_refunded": {Type: "boolean"}, "shortened_by": str("A Go duration (`0s` when not asked)"),
+						"paid_through": dateTime("Present when the date was shortened"),
+					}, "payment_id", "invoice_number", "fully_refunded", "shortened_by")),
+					"400": textResp("`reason is required`, a non-positive amount, or a shortening asked of a charge with no period"),
+					"404": textResp("No settled charge of that id for the tenant"),
+					"409": textResp("The refunds of the charge would exceed what was paid"),
+				}),
+				jsonBody("The refund", objectPtr("", map[string]*Schema{
+					"payment_id":           str("The charge's ledger id"),
+					"amount_cents":         {Type: "integer", Description: "USD cents given back"},
+					"provider_ref":         str("The provider's own id of the refund (`re_…`), optional"),
+					"shorten_paid_through": {Type: "boolean", Description: "Take the refunded share of the period off the date"},
+					"note":                 str("Free text; dropped at erasure"),
+					"reason":               str("Required (audited)"),
+				}, "payment_id", "amount_cents", "reason")))),
+		},
 		"/api/v1/admin/dedup-gc": {
 			Post: admin(jsonOp("Admin", "Start one dedup GC run", "AdminDedupGC",
 				"The same call as `POST /api/v1/admin/jobs/dedup_gc/run`: reconciles chunk reference counts and sweeps unreferenced chunks past their 7-day grace. "+
@@ -2169,6 +2249,27 @@ func generateJSONSchemas() map[string]Schema {
 				"error":   str("Omitted unless the verdict is `error`"),
 			})),
 		}, "dry_run", "rows", "resolved", "nowhere", "ambiguous", "errors", "remaining", "by_backend", "details"),
+		"HouseOrder": object("A house: whole TB per floor", map[string]*Schema{
+			"std_tb":     {Type: "integer", Description: "Downstairs (Standard) TB"},
+			"vault_tb":   {Type: "integer", Description: "Attic (Vault) TB"},
+			"pin_hot_tb": {Type: "integer", Description: "TB pinned hot (at most std_tb)"},
+			"period":     strEnum("Optional; the payment's period when absent", "annual", "monthly"),
+		}),
+		"Entitlement": object("The entitlement record (WP-PAY-1): what the tenant bought and until when", map[string]*Schema{
+			"tenant_id": str(""), "std_tb": {Type: "integer"}, "vault_tb": {Type: "integer"}, "pin_hot_tb": {Type: "integer"},
+			"period": strEnum("", "annual", "monthly"), "paid_through": dateTime("Grace is added at read time"),
+			"renewal":  strEnum("auto = a provider extends it; prepaid = nobody will", "auto", "prepaid"),
+			"provider": strEnum("", "stripe", "btcpay", "manual"), "provider_ref": str("The provider's subscription or last invoice"),
+			"lapsed_at": dateTime("Set when the house was cleared; absent while granted"),
+		}, "tenant_id", "std_tb", "vault_tb", "pin_hot_tb", "period", "paid_through", "renewal", "provider"),
+		"LedgerRow": object("One row of the payment ledger", map[string]*Schema{
+			"id": str(""), "invoice_number": str("Our receipt / credit-note number, once settled"),
+			"kind": strEnum("", "charge", "refund", "credit", "adjustment"), "purpose": strEnum("", "new", "renew", "resize", "switch", "manual"),
+			"status":   strEnum("", "pending", "processing", "settled", "failed", "expired", "expired_partial", "invalid", "refunded"),
+			"provider": str(""), "provider_id": str("The provider's own id"), "amount_cents": {Type: "integer"},
+			"period_start": dateTime(""), "period_end": dateTime(""), "settled_at": dateTime(""),
+			"refund_of": str("The charge a refund row refunds"), "house": str("The house snapshot, in words"),
+		}, "id", "kind", "purpose", "status", "provider", "provider_id", "amount_cents"),
 		"JobStarted": object("A job run was started and continues on the server", map[string]*Schema{
 			"job":        str("Job name"),
 			"status":     strEnum("", "started"),

@@ -7,7 +7,7 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 - **email.go** — `Sender` interface, `NewSender` factory (reads `EMAIL_PROVIDER`), `LogSender`, per-recipient rate limiter (10/min sliding window)
 - **resend.go** — `ResendSender`: raw `net/http` POST to Resend API (no SDK dependency)
 - **smtp.go** — `SMTPSender`: stdlib `net/smtp` with STARTTLS (port 587) and implicit TLS (port 465), multipart/alternative MIME
-- **templates.go** — `//go:embed` HTML templates, `RenderVerification`, `RenderPasswordReset` (html/template — contextual escaping; the text alternative is the HTML with tags stripped)
+- **templates.go** — `//go:embed` HTML templates, `RenderVerification`, `RenderPasswordReset`, and (WP-PAY-3) `RenderPaymentReceipt(ReceiptMail)`, `RenderRenewalReminder(ReminderMail)`, `RenderHouseLapsed(LapsedMail)` — typed data, nothing here reads a table (html/template — contextual escaping; the text alternative is the HTML with tags stripped)
 - **templates/*.html** — Branded email templates with inline CSS (no external resources)
 
 ## Environment Variables
@@ -22,7 +22,7 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 | `SMTP_USER` | No | SMTP auth username |
 | `SMTP_PASSWORD` | No | SMTP auth password |
 
-**Production runs `smtp`** since 2026-10-12: `EMAIL_PROVIDER=smtp`, `SMTP_HOST=smtp.mx.cloudflare.net` (the Cloudflare Email Service on `stored.cloud`, `docs/CLOUDFLARE.md` item 7; verified on the prod env 2026-10-18). Before that (checked 2026-09-30, Review R14) prod ran the `LogSender`. Payment reminders and receipts (WP-PAY-3, `docs/PAYMENTS.md` § 3.8) will send through this sender.
+**Production runs `smtp`** since 2026-10-12: `EMAIL_PROVIDER=smtp`, `SMTP_HOST=smtp.mx.cloudflare.net` (the Cloudflare Email Service on `stored.cloud`, `docs/CLOUDFLARE.md` item 7; verified on the prod env 2026-10-18). Before that (checked 2026-09-30, Review R14) prod ran the `LogSender`. Payment reminders, receipts and the house-lapsed notice (WP-PAY-3, `docs/PAYMENTS.md` § 3.8) send through this sender via `payments.Mailer`.
 
 ## Which flows send mail
 
@@ -34,6 +34,10 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 | Password reset (JSON API) | `api/server.go` `handlePasswordReset` | `password_reset.html` | logged; always `{"message": "If that email is registered…"}` (deliberate) |
 | Verify e-mail (manual *Resend* button) | `dashboard/handlers/email_verify.go` | `verification.html` | logged, **user is still told "sent"** (WP-R14-3) |
 | Bandwidth alert (admin-set `bandwidth_limit_bytes`, 80/95 %) | `api/bandwidth_alerts.go` | plain text (same body as html and text) | logged at Warn |
+
+| Payment receipt (WP-PAY-3) | `payments.Mailer.SendReceipt` ← the Stripe webhook on a NEWLY settled invoice | `payment_receipt.html` | one Warn, never a 500 (a replay sends nothing) |
+| Renewal reminders (WP-PAY-3) | `payments.Mailer.SendReminder` ← the `payment_reminders` job (hourly) | `renewal_reminder.html` (step-aware copy: 14 d before, 3 d before, in grace, last day) | counted `failed`, noted on the run, the step retried next hour |
+| House lapsed (WP-PAY-3) | `payments.Mailer.SendHouseLapsed` ← the `entitlement_lapse` job after its Revoke | `house_lapsed.html` | one Warn |
 
 Nothing else sends mail: **registration sends no verification or welcome e-mail** (the welcome template was dead code and was removed in R14), account deletion, billing `past_due`, and abuse reports send nothing (R10-35 / WP-R10-3).
 

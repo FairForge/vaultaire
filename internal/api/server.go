@@ -79,11 +79,12 @@ type Server struct {
 	// payments is the provider registry (WP-PAY-2): the dashboard's and the
 	// deletion runner's one door to money; Stripe is always registered
 	// (never Ready without STRIPE_SECRET_KEY).
-	payments       *payments.Registry
-	webhookHandler *billing.WebhookHandler
-	requestCount   int64
-	siteStats      *sitestats.Collector // cookieless public-site counts (site_stats.go)
-	testMode       bool
+	payments         *payments.Registry
+	paymentReminders *PaymentRemindersRunner // the payment_reminders job (WP-PAY-3)
+	webhookHandler   *billing.WebhookHandler
+	requestCount     int64
+	siteStats        *sitestats.Collector // cookieless public-site counts (site_stats.go)
+	testMode         bool
 	// longOpThreshold / longOpInterval: the keep-alive of slow
 	// CompleteMultipartUpload / DeleteObjects (s3_long_op.go); 0 = 10 s / 10 s.
 	longOpThreshold    time.Duration
@@ -611,6 +612,21 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	baseURL := s.hosts.BaseURL
 	s.baseURL = baseURL
 	s.emailSender = email.NewSender(logger)
+
+	// The payment mails (WP-PAY-3, docs/PAYMENTS.md § 3.8): receipts from the
+	// webhook's newly settled rows, the renewal reminders (payment_reminders,
+	// hourly) and the house-lapsed notice of the lapse job — all through the
+	// one sender, all best effort.
+	if s.db != nil {
+		mailer := payments.NewMailer(s.db, s.emailSender, s.baseURL, s.hosts.Legal(), logger)
+		if s.webhookHandler != nil {
+			s.webhookHandler.SetReceiptSender(mailer)
+		}
+		if s.entitlementLapse != nil {
+			s.entitlementLapse.Mailer = mailer
+		}
+		s.paymentReminders = NewPaymentRemindersRunner(s.db, logger, grace, mailer)
+	}
 	s.bandwidthAlerter.SetEmailSender(s.emailSender)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
 		s.googleOAuth = &oauth2.Config{
@@ -1074,6 +1090,11 @@ func (s *Server) registerComplianceRoutes() {
 
 		// Operator audit trail (Review R11-09, pre-launch checklist item 1).
 		r.Get("/audit", s.requireAdmin(s.handleAdminAuditList))
+
+		// The money (WP-PAY-3): a tenant's entitlement + ledger, a manual
+		// payment, a paid_through / house adjustment, a refund — every
+		// call audited with the actor and a required reason.
+		s.registerAdminPaymentRoutes(r)
 	})
 }
 

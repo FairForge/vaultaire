@@ -80,6 +80,9 @@ type EntitlementLapseRunner struct {
 	Ready payments.ReadyHistory
 	// Stripe: nil when Stripe is not configured.
 	Stripe subscriptionPeriodEnds
+	// Mailer sends house_lapsed.html after a Revoke committed (WP-PAY-3;
+	// nil = no mail).
+	Mailer *payments.Mailer
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName    string
 	MaxRunTime time.Duration
@@ -302,7 +305,7 @@ func (r *EntitlementLapseRunner) lapse(ctx context.Context, res *EntitlementLaps
 			res.WouldClear++
 			continue
 		}
-		cleared, err := r.clear(ctx, c, cutoff)
+		cleared, e, err := r.clear(ctx, c, cutoff)
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("lapse %s: %v", c.tenantID, err))
 			r.logger.Warn("entitlement lapse: house not cleared", zap.String("tenant", c.tenantID), zap.Error(err))
@@ -318,32 +321,97 @@ func (r *EntitlementLapseRunner) lapse(ctx context.Context, res *EntitlementLaps
 				"provider": c.provider, "grace": r.Grace.String()}})
 		r.logger.Warn("house lapsed — back to the free tier, data untouched",
 			zap.String("tenant", c.tenantID), zap.String("provider", c.provider), zap.Time("paid_through", c.paidThrough))
+		// The customer is told after the commit, best effort (RP20-A2).
+		if r.Mailer != nil {
+			mctx, cancel := payments.Detached(ctx)
+			if err := r.Mailer.SendHouseLapsed(mctx, c.tenantID, e); err != nil {
+				r.logger.Warn("entitlement lapse: house_lapsed mail not sent", zap.String("tenant", c.tenantID), zap.Error(err))
+			}
+			cancel()
+		}
 	}
 	return nil
 }
 
 // clear revokes one candidate under its entitlement lock, after reading the
 // row again: a payment that extended it meanwhile wins.
-func (r *EntitlementLapseRunner) clear(ctx context.Context, c lapseCandidate, cutoff time.Time) (bool, error) {
+func (r *EntitlementLapseRunner) clear(ctx context.Context, c lapseCandidate, cutoff time.Time) (bool, payments.Entitlement, error) {
 	var cleared bool
+	var e payments.Entitlement
 	err := payments.InTx(ctx, r.db, func(tx *sql.Tx) error {
 		if err := payments.Lock(ctx, tx, c.tenantID); err != nil {
 			return err
 		}
-		var still bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS (SELECT 1 FROM entitlements
-			                WHERE tenant_id = $1 AND lapsed_at IS NULL AND paid_through < $2)`,
-			c.tenantID, cutoff.UTC()).Scan(&still); err != nil {
-			return err
-		}
-		if !still {
+		row, err := payments.Get(ctx, tx, c.tenantID)
+		if errors.Is(err, payments.ErrNoEntitlement) {
 			return nil
 		}
-		cleared = true
+		if err != nil {
+			return err
+		}
+		if row.LapsedAt != nil || !row.PaidThrough.Before(cutoff) {
+			return nil // paid or cleared meanwhile
+		}
+		cleared, e = true, row
 		return payments.Revoke(ctx, tx, c.tenantID)
 	})
-	return cleared, err
+	return cleared, e, err
+}
+
+// --- the skipped-unready gauge ---------------------------------------------
+
+// lapseSkippedCollector reads vaultaire_entitlement_lapse_skipped_unready —
+// the last entitlement_lapse run's skipped_unready — from job_runs.result
+// on scrape (15 s cache; no series until a run has written one). The rule
+// EntitlementLapseSkippedUnready reads two days of it.
+type lapseSkippedCollector struct {
+	db      *sql.DB
+	jobName string
+	logger  *zap.Logger
+	desc    *prometheus.Desc
+
+	mu  sync.Mutex
+	at  time.Time
+	val float64
+	ok  bool
+}
+
+func newLapseSkippedCollector(db *sql.DB, jobName string, logger *zap.Logger) *lapseSkippedCollector {
+	return &lapseSkippedCollector{db: db, jobName: jobName, logger: logger,
+		desc: prometheus.NewDesc("vaultaire_entitlement_lapse_skipped_unready",
+			"Houses the last entitlement_lapse run kept because their provider was unready in the last 24 h (skipped_unready). Read from job_runs.result; no series before the first run.", nil, nil)}
+}
+
+func (c *lapseSkippedCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+
+func (c *lapseSkippedCollector) Collect(ch chan<- prometheus.Metric) {
+	if v, ok := c.read(); ok {
+		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, v)
+	}
+}
+
+func (c *lapseSkippedCollector) read() (float64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db == nil || (!c.at.IsZero() && time.Since(c.at) < 15*time.Second) {
+		return c.val, c.ok
+	}
+	c.at = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var v sql.NullFloat64
+	err := c.db.QueryRowContext(ctx, `SELECT (result->>'skipped_unready')::float FROM job_runs WHERE job = $1`, c.jobName).Scan(&v)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		c.ok = false
+	case err != nil:
+		if c.logger != nil {
+			c.logger.Warn("entitlement lapse metrics: could not read job_runs", zap.Error(err))
+		}
+	default:
+		c.val, c.ok = v.Float64, v.Valid
+	}
+	return c.val, c.ok
 }
 
 // --- (c) reconcile --------------------------------------------------------

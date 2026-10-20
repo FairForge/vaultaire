@@ -579,6 +579,43 @@ because our processor was down.
   record too; BTCPay can archive but not delete invoices. The privacy policy
   says so.
 
+### 3.9 Policy sentences (WP-PAY-3 item 8 — drafted for the owner's approval, NOT wired into the pages)
+
+The privacy policy and the terms state the retention periods
+(`internal/api/retention.go` and the policy change together); these are the
+sentences the money adds. They are a draft in this document until the owner
+approves them (F-28 refund policy) and a docs PR puts them into
+`internal/dashboard/templates/legal/{privacy,terms}.html`.
+
+**Terms — Payments and refunds (F-28):**
+
+> A house is prepaid for its period. A payment is refundable in full within
+> 14 days of the day it was made if nothing was added to the house in that
+> time; after 14 days a prepaid period is not refundable, but you may stop
+> the renewal at any time and the house runs to the end of what you paid for,
+> then a 14-day grace period. Refunds are made in the coin you paid in: a card
+> payment to the card, a bitcoin payment to an address you give us, at the
+> rate recorded on the receipt. A refund of less than one US dollar is kept.
+> Bitcoin payments are final once confirmed: there is no chargeback on a
+> crypto payment, and a double-spent or unconfirmed payment buys nothing.
+
+**Privacy policy — Payment records:**
+
+> We keep a record of every payment — its amount, what it bought, the date,
+> our receipt number and the payment provider's own reference — for seven
+> years, as accounting law requires. When your account is erased these
+> records stay but are de-linked from you: the link to your account, any
+> note, any cryptocurrency address or transaction id, and the payment
+> provider's customer id for you are removed from them. Event bodies our
+> payment providers send us (webhooks) are kept 90 days. Stripe, Inc. keeps
+> its own records of your card and invoices under its own policy; a bitcoin
+> payment's invoice (address, transaction id and our opaque account id)
+> stays in our BTCPay Server as an accounting record, which cannot be deleted
+> but is never linked back to you after erasure.
+
+The customer-id stripping the second paragraph promises is implemented in
+`account.EraseRows` since WP-PAY-3 (`metadata #- '{ids,customer}'`; RP20-6).
+
 ## 4. Switching a customer between providers (Part D)
 
 ### 4.1 Stripe → crypto, per tenant

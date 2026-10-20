@@ -140,6 +140,9 @@ func (s *Server) registerJobs() {
 	if s.webhookRetry != nil {
 		s.jobs.Register(s.webhookRetry.spec())
 	}
+	if s.paymentReminders != nil {
+		s.jobs.Register(s.paymentReminders.spec())
+	}
 	if s.vaultParity != nil {
 		// Needs a free leg to write to; without one (a local build, a
 		// deployment with neither permafrost nor lyve) it is not a job of

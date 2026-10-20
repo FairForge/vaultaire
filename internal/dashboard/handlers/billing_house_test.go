@@ -55,6 +55,7 @@ type fakeHouseBilling struct {
 	liveAsked  int
 	checkout   string
 	gotOrder   payments.Order
+	gotPurpose string
 	gotSuccess string
 	gotCancel  string
 	resizeErr  error
@@ -90,7 +91,7 @@ func (f *fakeHouseBilling) StartCheckout(_ context.Context, c payments.Checkout)
 	if f.live {
 		return "", payments.ErrLiveSubscription
 	}
-	f.gotOrder, f.gotSuccess, f.gotCancel = c.Order, c.ReturnURL, c.CancelURL
+	f.gotOrder, f.gotPurpose, f.gotSuccess, f.gotCancel = c.Order, c.Purpose, c.ReturnURL, c.CancelURL
 	return f.checkout, nil
 }
 func (f *fakeHouseBilling) Resize(_ context.Context, _ string, o payments.Order) (payments.ResizeOutcome, error) {

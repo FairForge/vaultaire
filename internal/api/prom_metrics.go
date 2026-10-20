@@ -108,6 +108,18 @@ func (s *Server) initMetrics() {
 		// The entitlement record (WP-PAY-1): ledger writes, houses the lapse
 		// job cleared, and — from the table — houses by when they expire.
 		reg.MustRegister(payments.Collectors()...)
+		// WP-PAY-3: the provider flags on scrape (PaymentProviderDown ANDs
+		// readiness with it) and the lapse job's skipped_unready from
+		// job_runs.result (EntitlementLapseSkippedUnready).
+		if s.payments != nil {
+			pr := s.payments
+			reg.MustRegister(payments.NewEnabledCollector(pr.Names, func(provider string) bool {
+				return s.flags != nil && s.flags.Enabled(payments.FlagPrefix+provider, "")
+			}))
+		}
+		if s.entitlementLapse != nil && s.db != nil {
+			reg.MustRegister(newLapseSkippedCollector(s.db, s.entitlementLapse.JobName, s.logger))
+		}
 		// Invalid houses from Stripe, acknowledged not retried (RP20-4).
 		reg.MustRegister(billing.Collectors()...)
 		reg.MustRegister(entitlementsLapsed)

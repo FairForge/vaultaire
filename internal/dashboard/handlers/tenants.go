@@ -13,8 +13,11 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
+	"os"
+	"time"
 )
 
 // tierLimits maps plan names to storage limits in bytes.
@@ -258,6 +261,9 @@ func loadTenantDetail(ctx context.Context, db *sql.DB, eg usage.EgressStatusRead
 	data["StoragePercent"] = pct
 	data["StorageBarClass"] = usageBarClass(pct)
 	data["Tier"] = tier
+
+	// The Billing panel (WP-PAY-3): the entitlement sentence and the ledger.
+	populateAdminBilling(ctx, db, data, tenantID, logger)
 
 	// Bandwidth: current month totals + 30-day chart.
 	ingress, egress, requests, _ := QueryMonthBandwidth(ctx, db, tenantID)
@@ -593,4 +599,42 @@ func HandleChangeTier(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		_, _ = fmt.Fprintf(w, `<div class="alert alert-success">Tier changed to %s (%s limit).</div>`,
 			template.HTMLEscapeString(newTier), formatBytes(limitBytes))
 	}
+}
+
+// AdminLedgerRow is one ledger row as the admin tenant page lists it.
+type AdminLedgerRow struct {
+	ID, InvoiceNumber, Date, Kind, Status, Provider, Amount, House, RefundOf string
+}
+
+// populateAdminBilling fills BillingSentence, BillingEntitlement and
+// BillingPayments (the grace from ENTITLEMENT_GRACE, as the customer page).
+func populateAdminBilling(ctx context.Context, db *sql.DB, data map[string]any, tenantID string, logger *zap.Logger) {
+	st, err := payments.StatusOf(ctx, db, tenantID, payments.GraceFromEnv(os.Getenv, nil), time.Now())
+	if err != nil {
+		logger.Debug("admin: tenant entitlement", zap.Error(err))
+	} else {
+		data["BillingSentence"] = houseSentence(st)
+		if st.Found {
+			data["BillingEntitlement"] = st.Entitlement
+			data["BillingPeriod"] = string(st.Entitlement.Order.Period)
+		}
+	}
+	rows, err := payments.ListLedger(ctx, db, tenantID, 50)
+	if err != nil {
+		logger.Debug("admin: tenant ledger", zap.Error(err))
+		return
+	}
+	out := make([]AdminLedgerRow, 0, len(rows))
+	for _, r := range rows {
+		row := AdminLedgerRow{ID: r.ID, InvoiceNumber: r.InvoiceNumber, Kind: r.Kind, Status: r.Status, Provider: r.Provider,
+			Amount: r.Amount(), RefundOf: r.RefundOf}
+		if !r.PaidAt.IsZero() {
+			row.Date = r.PaidAt.UTC().Format("2 Jan 2006")
+		}
+		if r.Order != nil {
+			row.House = r.Order.Words()
+		}
+		out = append(out, row)
+	}
+	data["BillingPayments"] = out
 }

@@ -30,6 +30,7 @@
 
 {{if .Upgraded}}<div class="alert alert-success">Your house is paid for. The floors open as soon as Stripe confirms, usually within a minute.</div>{{end}}
 {{if .Resized}}<div class="alert alert-success">Your house was resized. The difference is prorated on your next invoice.</div>{{end}}
+{{if .Renewed}}<div class="alert alert-success">Your renewal is paid for. The date moves as soon as the payment is confirmed, usually within a minute.</div>{{end}}
 {{if eq .SubscriptionStatus "past_due"}}<div class="alert alert-error"><strong>Your last payment did not go through.</strong> Stripe will retry the card over the next days; your storage stays exactly as it is meanwhile. Update the card under <em>Manage Payment</em> to keep the house when the retries end.</div>{{end}}
 {{if and .HouseIntent (not .House.Enabled)}}<div class="alert alert-info"><strong>Your house from the site:</strong> {{.HouseIntent.StdTB}} TB downstairs (Standard) and {{.HouseIntent.VaultTB}} TB in the attic (Vault) &middot; <strong>{{.HouseIntent.Monthly}}/mo</strong> billed yearly. Whole-TB checkout is on its way; until then <a href="mailto:{{host "support"}}">ask us</a> and we will set it up by hand.{{if .HouseIntent.RoomURL}} <a href="{{.HouseIntent.RoomURL}}">Reopen your house</a>.{{end}}</div>{{end}}
 
@@ -43,6 +44,14 @@
             <span class="badge badge-{{.StatusClass}}">{{.StatusLabel}}</span>
         </div>
         {{if .HouseSentence}}<p class="card-detail text-muted">{{.HouseSentence}}</p>{{end}}
+        {{if .House.CanRenew}}
+        <form method="POST" action="/dashboard/billing/renew" style="margin-top:0.75rem">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="provider" value="{{.House.RenewProvider}}">
+            <button type="submit" class="btn btn-primary">{{.House.RenewLabel}}</button>
+            <span class="card-detail text-muted">the same house, one more {{if eq .House.Period "monthly"}}month{{else}}year{{end}} on the date</span>
+        </form>
+        {{end}}
     </div>
     <div class="card">
         <div class="card-title">Storage Used</div>
@@ -58,6 +67,21 @@
 <div class="card">
     <div class="card-title">Build your house</div>
     <p class="text-muted">Stored sells whole TB per floor at a flat rate: downstairs (Standard) opens instantly, the attic (Vault) is back in minutes. Checkout opens here soon; to order today, <a href="mailto:{{host "support"}}">email {{host "support"}}</a> and we will set it up by hand.</p>
+</div>
+{{end}}
+
+{{if .Receipts}}
+<div class="card" id="receipts">
+    <div class="card-title">Receipts</div>
+    <table class="comparison-table">
+        <thead><tr><th>Number</th><th style="text-align:left">Date</th><th style="text-align:left">For</th><th>Amount</th><th></th></tr></thead>
+        <tbody>
+        {{range .Receipts}}
+        <tr><td>{{.InvoiceNumber}}</td><td style="text-align:left">{{.Date}}</td><td style="text-align:left">{{if eq .Kind "refund"}}Refund{{else}}{{.House}}{{end}}</td><td>{{.Amount}}</td><td><a href="/dashboard/billing/receipts/{{.ID}}">View / print</a></td></tr>
+        {{end}}
+        </tbody>
+    </table>
+    <div class="comparison-footnote">Receipts are rendered from our payment ledger and kept seven years.</div>
 </div>
 {{end}}
 

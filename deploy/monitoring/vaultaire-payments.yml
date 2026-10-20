@@ -1,0 +1,87 @@
+# Payments — install to /etc/prometheus/rules/ (see README § Installing a rules file).
+# WP-PAY-3 (Stage 1a Prompt 20), docs/PAYMENTS.md § 7.
+#
+# Series come from the app's /metrics:
+#   vaultaire_payment_provider_ready{provider}            1 while the provider can take a payment (configured ∧ verified);
+#                                                          0 while unready AND while pending (configured, verification not
+#                                                          completed — the minute after a boot; Part 0 of Prompt 20)
+#   vaultaire_payment_provider_enabled{provider}          1 while flag pay_<provider> is on globally (its global row or default)
+#   vaultaire_payment_webhook_total{provider,outcome}     webhook deliveries: ok / duplicate / rejected / error (500 = retried)
+#   vaultaire_entitlement_lapse_skipped_unready           the last entitlement_lapse run's skipped_unready, READ FROM job_runs.result
+#   vaultaire_stripe_house_invalid_total                  Stripe subscriptions that describe no valid house (RP20-4; unlabelled, 0 from boot)
+#   vaultaire_payment_reminders_total{step,outcome}       renewal reminder mails: sent / failed per step (every pair at 0 from boot)
+#   vaultaire_payments_total{provider,kind,outcome}       ledger writes (documented, no rule: a failed charge is Stripe's dunning)
+#   vaultaire_entitlements_expiring{window}               7d / 30d / in_grace (the code's windows; the design wrote 14d/3d/grace)
+#
+# Prod today: no Stripe key (ready 0) and pay_stripe off (enabled 0) → PaymentProviderDown is silent; it fires only once
+# a key is set, the flag is on and the prices do not verify for 15 min (or Stripe's verification is never reached).
+#
+# Triage:
+#   curl -s https://stored.ge/metrics | grep -E 'vaultaire_payment_|vaultaire_entitlement|vaultaire_stripe_house'
+#   journalctl -u 'vaultaire@*' | grep -E 'house prices|stripe webhook|payment reminder|entitlement lapse'
+#   GET /api/v1/admin/jobs → entitlement_lapse.result, payment_reminders.result
+groups:
+  - name: vaultaire-payments
+    rules:
+      # A provider customers may use (flag on) that cannot take a payment:
+      # checkout is closed and the lapse job keeps every house of that
+      # provider — nothing is lost, but nothing is sold.
+      - alert: PaymentProviderDown
+        expr: (vaultaire_payment_provider_ready == 0) and on (provider) (vaultaire_payment_provider_enabled == 1)
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Payment provider {{ $labels.provider }} is not ready while its flag is on"
+          description: "vaultaire_payment_provider_ready{provider=\"{{ $labels.provider }}\"} has been 0 for 15 minutes with pay_{{ $labels.provider }} on: no checkout can start and the entitlement_lapse job skips its houses. Stripe: the key is missing or revoked, or a price no longer matches prices.json — journalctl -u 'vaultaire@*' | grep 'house prices' names the price; fix it in the Stripe dashboard, never in code."
+
+      # Webhook deliveries answered 500 (left for the provider to retry):
+      # three or more in 15 minutes and at least one in five.
+      - alert: PaymentWebhookFailing
+        expr: |
+          sum by (provider) (increase(vaultaire_payment_webhook_total{outcome="error"}[15m])) >= 3
+          and
+          sum by (provider) (increase(vaultaire_payment_webhook_total{outcome="error"}[15m]))
+            / clamp_min(sum by (provider) (increase(vaultaire_payment_webhook_total{outcome=~"ok|duplicate|error"}[15m])), 1) > 0.2
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.provider }} webhooks are failing ({{ $value | humanizePercentage }} of deliveries in 15 min)"
+          description: "Deliveries from {{ $labels.provider }} are answered 500 and retried by the provider; houses bought meanwhile are not applied until a delivery succeeds. journalctl -u 'vaultaire@*' | grep 'stripe webhook' gives the event id and the error (a claim lock timeout, a database error, a fetch of the subscription that failed)."
+
+      # The lapse job skipped rows on two consecutive daily runs because
+      # their provider was unready in the last 24 h (a standing outage, or
+      # a readiness that never settles).
+      - alert: EntitlementLapseSkippedUnready
+        expr: min_over_time(vaultaire_entitlement_lapse_skipped_unready[30h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "entitlement_lapse skipped {{ $value }} house(s) as provider_unready on two runs running"
+          description: "A house past paid_through + grace is kept while its provider was unready in the last 24 h (by design — a house is never lost because our processor was down), but two days running means the provider is not coming back by itself. GET /api/v1/admin/jobs → entitlement_lapse.result.errors names the tenants and the provider; see PaymentProviderDown."
+
+      # RP22-8: a subscription edited at Stripe into no valid house (pin-hot
+      # with no Standard under it). The event is acknowledged and the house
+      # left as it was; the operator fixes the items at Stripe.
+      - alert: StripeHouseInvalid
+        expr: increase(vaultaire_stripe_house_invalid_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Stripe subscription describes no valid house"
+          description: "journalctl -u 'vaultaire@*' | grep 'no valid house' names the tenant, the subscription and the items; the audit row is billing.house_invalid. Fix the subscription's items in the Stripe dashboard — the next event re-grants the house."
+
+      # A renewal reminder could not be sent (the mail provider refused, a
+      # template failed): the step is retried next hour, so one failure is
+      # a blip; it warns so a dead mail provider is seen before the lapse.
+      - alert: PaymentRemindersFailing
+        expr: sum(increase(vaultaire_payment_reminders_total{outcome="failed"}[2h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanize }} renewal reminder(s) failed to send in 2 hours"
+          description: "The payment_reminders job (hourly) could not send a reminder; it retries the step every hour until it is sent or the period changes. journalctl -u 'vaultaire@*' | grep 'payment reminder' gives the tenant, the step and the mail error (EMAIL_PROVIDER, SMTP_*)."
