@@ -54,7 +54,10 @@ func TestMultiWebDAV_AKeyLockWaitHonoursTheCallersDeadline(t *testing.T) {
 	assert.Less(t, time.Since(start), time.Second, "the delete gave up at its deadline")
 	assert.ErrorIs(t, err, engine.ErrPartiallyUnavailable, "the key is busy: a retryable 503, never a backend failure")
 	release()
-	<-putDone
+	// The stalled PUT's own outcome is not under test; wait so it cannot outlive the test.
+	if err := <-putDone; err != nil {
+		t.Logf("the stalled PUT ended: %v", err)
+	}
 }
 
 // An overwrite that finds an unreadable manifest whose generation it can
