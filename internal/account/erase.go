@@ -158,7 +158,10 @@ var Deleted = []Rule{
 	// its ON DELETE SET NULL would leave no tenant_id for a Kept scrub to
 	// match. payment_events (90-day retention) lose their tenant the same way.
 	{"entitlements", `DELETE FROM entitlements WHERE tenant_id = $1`, ByTenant},
-	{"payments", `UPDATE payments SET tenant_id = NULL, metadata = metadata - 'addresses' - 'txids', note = NULL WHERE tenant_id = $1`, ByTenant},
+	// The provider's customer id (metadata.ids.customer, a Stripe cus_…) is
+	// stripped like an address: it names the person at the processor
+	// (RP20-6, WP-PAY-3); the invoice / subscription ids stay.
+	{"payments", `UPDATE payments SET tenant_id = NULL, metadata = (metadata - 'addresses' - 'txids') #- '{ids,customer}', note = NULL WHERE tenant_id = $1`, ByTenant},
 	{"payment_events", `UPDATE payment_events SET tenant_id = NULL WHERE tenant_id = $1`, ByTenant},
 
 	// --- tenant configuration and credentials ---

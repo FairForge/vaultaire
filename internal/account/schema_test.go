@@ -57,6 +57,10 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 	assert.Empty(t, missing, "tables keyed by tenant/user that no erase rule names — add them to Deleted or Kept in erase.go")
 	assert.Greater(t, len(seen), 50, "the walk saw the schema")
 
+	// Tables with no tenant/user column are not in the walk and need no
+	// rule: payment_provider_readiness (098) is infrastructure — when a
+	// payment provider was last up or down — not tenant data.
+
 	// Every rule names a table that exists (a typo would silently skip).
 	exists := map[string]bool{}
 	for _, s := range seen {

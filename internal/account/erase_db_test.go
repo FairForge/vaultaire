@@ -398,3 +398,22 @@ func TestEraseRows_PaymentsAnonymisedNotDeleted(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT tenant_id FROM payment_events WHERE event_id = $1`, "dlv_"+f.suffix).Scan(&evTenant))
 	assert.False(t, evTenant.Valid)
 }
+
+// RP20-6 / WP-PAY-3: the processor's customer id is stripped at erasure
+// like an address; the invoice and subscription ids stay.
+func TestEraseRows_StripsStripeCustomerID(t *testing.T) {
+	f := setupEraseFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	pid := "in_cus_" + f.suffix
+	f.exec(`INSERT INTO payments (tenant_id, provider, provider_id, kind, purpose, status, amount_cents, invoice_number, metadata)
+	        VALUES ($1, 'stripe', $2, 'charge', 'renew', 'settled', 499, $3,
+	                '{"ids": {"invoice": "in_1", "subscription": "sub_1", "customer": "cus_person"}}')`, f.tenantID, pid, "ST-1998-"+f.suffix[:6])
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM payments WHERE provider_id = $1`, pid) })
+
+	_, err := f.svc.EraseRows(context.Background(), f.userID, f.tenantID, f.email, time.Now())
+	require.NoError(t, err)
+
+	var meta []byte
+	require.NoError(t, f.db.QueryRow(`SELECT metadata FROM payments WHERE provider_id = $1`, pid).Scan(&meta))
+	assert.JSONEq(t, `{"ids": {"invoice": "in_1", "subscription": "sub_1"}}`, string(meta))
+}

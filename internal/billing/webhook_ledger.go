@@ -95,6 +95,7 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	var grant func(*sql.Tx) error
 	var invalid error
 	var invalidSub *stripe.Subscription
+	var granted payments.Granted
 	if subID := invoiceSubscriptionID(inv); subID != "" && h.quotas != nil {
 		sub, err := h.fetchSubscription(ctx, subID)
 		switch {
@@ -114,12 +115,13 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 						renewal = payments.RenewalPrepaid
 					}
 					grant = func(tx *sql.Tx) error {
-						err := payments.Grant(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+						g, err := payments.GrantRecorded(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
 						if errors.Is(err, payments.ErrInvalidOrder) {
 							// Refused before any statement: the transaction is intact.
 							invalid, invalidSub = err, sub
 							return nil
 						}
+						granted = g
 						return err
 					}
 				}
@@ -146,12 +148,24 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	}
 	if invalid != nil {
 		h.houseInvalid(ctx, tenantID, invalidSub, *p.Order, invalid)
+	} else if grant != nil {
+		h.auditGrant(ctx, tenantID, granted, invoiceSubscriptionID(inv))
 	}
 	outcome := payments.OutcomeSettled
 	if !settled.Newly {
 		outcome = payments.OutcomeReplayed
 	}
 	payments.CountPayment(payments.ProviderStripe, payments.KindCharge, outcome)
+	// The receipt of a NEWLY settled row (a replay sends nothing): after
+	// the commit, best effort — a mail that fails is one Warn, never a 500.
+	if settled.Newly && h.receipts != nil {
+		mctx, cancel := payments.Detached(ctx)
+		if err := h.receipts.SendReceipt(mctx, tenantID, settled.ID); err != nil {
+			h.logger.Warn("stripe webhook: receipt not sent", zap.String("tenant", tenantID),
+				zap.String("invoice_number", settled.InvoiceNumber), zap.Error(err))
+		}
+		cancel()
+	}
 	h.logger.Info("payment recorded",
 		zap.String("tenant", tenantID), zap.String("invoice", inv.ID),
 		zap.String("invoice_number", settled.InvoiceNumber), zap.Bool("replay", !settled.Newly),

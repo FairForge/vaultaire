@@ -63,7 +63,7 @@ no longer matches. The classification is by row shape, never by `users.role`.
 Rules bind through `ruleArgs`: `ByUser`, `ByTenant`, `ByEmail`, or `ByAccount`
 (`$1` user, `$2` tenant — `''` when there is none —, `$3` e-mail).
 
-The entitlement record (WP-PAY-1, 097) is in `Deleted`, before `tenants`: `entitlements` deleted; `payments` **scrubbed, not deleted** — `tenant_id` and `note` nulled, `metadata.addresses` / `metadata.txids` dropped, amounts, period, house, receipt number and `metadata.ids` kept (an accounting record; `TestEraseRows_PaymentsAnonymisedNotDeleted`); `payment_events.tenant_id` nulled. They cannot be `Kept` scrubs: `Kept` runs after the `tenants` DELETE, whose `ON DELETE SET NULL` on `payments` would leave nothing to match.
+The entitlement record (WP-PAY-1, 097) is in `Deleted`, before `tenants`: `entitlements` deleted; `payments` **scrubbed, not deleted** — `tenant_id` and `note` nulled, `metadata.addresses` / `metadata.txids` and (WP-PAY-3, RP20-6) `metadata.ids.customer` — the processor's customer id, which names the person — dropped (`TestEraseRows_StripsStripeCustomerID`), amounts, period, house, receipt number and `metadata.ids` kept (an accounting record; `TestEraseRows_PaymentsAnonymisedNotDeleted`); `payment_events.tenant_id` nulled. They cannot be `Kept` scrubs: `Kept` runs after the `tenants` DELETE, whose `ON DELETE SET NULL` on `payments` would leave nothing to match.
 
 `Kept`: `stripe_events` (ledger; `tenant_id` nulled), `audit_logs` /
 `audit_logs_archive` rows keyed by the tenant only (operator actions; `ip` and
@@ -85,3 +85,5 @@ operator half (five kept shapes, three own entries gone, a neighbour untouched).
 The runner (Stripe cancel, engine walk, multipart abort, sessions, audit,
 scheduling) is `internal/api/deletion_runner.go` — it needs the engine, the GCI
 and the quota manager. Export (`R10-27`) is still `internal/api/account_export.go`.
+
+`payment_provider_readiness` (098) has no tenant column: infrastructure (when a payment provider was last up or down), never erased, never exported — the schema walk never sees it (`schema_test.go` says so).

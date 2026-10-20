@@ -257,6 +257,25 @@ func (h Hosts) Domain() string {
 // SupportEmail is support@<Domain>.
 func (h Hosts) SupportEmail() string { return "support@" + h.Domain() }
 
+// LegalEntity is the issuer every receipt, invoice and legal page names
+// (WP-PAY-3, D-P20-A1: ONE source — the legal templates may keep their
+// own copy this prompt). AddressLines is what the receipt prints under
+// the name; the repository holds no street address, so it is the
+// jurisdiction until the owner adds one here.
+type LegalEntity struct {
+	Name         string
+	AddressLines []string
+	Jurisdiction string
+	Email        string
+}
+
+// Legal is the issuer: FairForge LLC, State of Utah, billing questions to
+// the support address.
+func (h Hosts) Legal() LegalEntity {
+	return LegalEntity{Name: "FairForge LLC", AddressLines: []string{"State of Utah, United States"},
+		Jurisdiction: "State of Utah, United States", Email: h.SupportEmail()}
+}
+
 // SecurityEmail is security@<Domain> (security.txt's Contact).
 func (h Hosts) SecurityEmail() string { return "security@" + h.Domain() }
 
