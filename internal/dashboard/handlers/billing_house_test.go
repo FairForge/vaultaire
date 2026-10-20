@@ -73,7 +73,7 @@ func (f *fakeHouseBilling) GetCustomerID(_ context.Context, tenantID string) (st
 func (f *fakeHouseBilling) CreateCustomer(_ context.Context, _, tenantID string) (string, error) {
 	return "cus_" + tenantID, nil
 }
-func (f *fakeHouseBilling) CreateHouseCheckout(_ context.Context, _, _ string, o billing.HouseOrder, successURL, cancelURL string) (string, error) {
+func (f *fakeHouseBilling) CreateHouseCheckout(_ context.Context, _, _ string, o billing.HouseOrder, _, successURL, cancelURL string) (string, error) {
 	f.gotOrder, f.gotSuccess, f.gotCancel = o, successURL, cancelURL
 	return f.checkout, nil
 }

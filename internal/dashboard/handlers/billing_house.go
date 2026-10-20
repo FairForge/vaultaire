@@ -33,7 +33,7 @@ type HouseBilling interface {
 	HouseCheckoutReady() (bool, string)
 	GetCustomerID(ctx context.Context, tenantID string) (string, error)
 	CreateCustomer(ctx context.Context, email, tenantID string) (string, error)
-	CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o billing.HouseOrder, successURL, cancelURL string) (string, error)
+	CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o billing.HouseOrder, purpose, successURL, cancelURL string) (string, error)
 	HasLiveSubscription(ctx context.Context, customerID string) (bool, error)
 	UpdateHouseSubscription(ctx context.Context, subID string, o billing.HouseOrder) (*stripe.Subscription, error)
 	HouseFromSubscription(sub *stripe.Subscription) (billing.HouseOrder, bool)
@@ -337,7 +337,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 		base := strings.TrimRight(baseURL, "/")
-		checkoutURL, err := svc.CreateHouseCheckout(r.Context(), customerID, sd.TenantID, order,
+		checkoutURL, err := svc.CreateHouseCheckout(r.Context(), customerID, sd.TenantID, order, "new",
 			base+"/dashboard/billing?upgraded=1", base+"/dashboard/billing")
 		if err != nil {
 			logger.Error("create house checkout", zap.Error(err), zap.String("tenant", sd.TenantID))

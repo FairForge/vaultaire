@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
@@ -41,17 +40,19 @@ import (
 //	STRIPE_PRICE_PINHOT_ANNUAL     recurring yearly,  per unit, USD 36.00  (= 3.00 × 12)
 //	STRIPE_PRICE_PINHOT_MONTHLY    recurring monthly, per unit, USD  3.00
 
-// Line identifies a subscription line; Period its billing interval (the
-// provider-neutral one of internal/payments, WP-PAY-1).
+// Line identifies a subscription line; Period its billing interval — the
+// provider-neutral ones of internal/payments (WP-PAY-1; the pricing moved
+// there in WP-PAY-2 so the dashboard prices a house without importing the
+// Stripe SDK).
 type (
-	Line   string
+	Line   = payments.Line
 	Period = payments.Period
 )
 
 const (
-	LineStandard Line = "standard"
-	LineVault    Line = "vault"
-	LinePinHot   Line = "pin_hot"
+	LineStandard = payments.LineStandard
+	LineVault    = payments.LineVault
+	LinePinHot   = payments.LinePinHot
 
 	PeriodAnnual  = payments.PeriodAnnual
 	PeriodMonthly = payments.PeriodMonthly
@@ -124,117 +125,20 @@ func (p HousePriceIDs) Lookup(priceID string) (Line, Period, bool) {
 // — payments.Order, the shape the entitlement record holds (WP-PAY-1).
 type HouseOrder = payments.Order
 
-// ValidateHouseOrder applies the product rules: at least one floor, the
-// builder's bound per floor, pin-hot only on (and within) downstairs, a
-// known period. Attic-only houses are sold (decision 2026-09-27).
-func ValidateHouseOrder(o HouseOrder) error {
-	if o.Period != PeriodAnnual && o.Period != PeriodMonthly {
-		return fmt.Errorf("unknown billing period %q", o.Period)
-	}
-	if o.Std < 0 || o.Vault < 0 || o.PinHot < 0 {
-		return errors.New("a floor cannot be negative")
-	}
-	if o.Std > landing.MaxIntentTB || o.Vault > landing.MaxIntentTB {
-		return fmt.Errorf("a floor holds at most %d TB", landing.MaxIntentTB)
-	}
-	if o.Std == 0 && o.Vault == 0 {
-		return errors.New("the house is empty: add at least one box")
-	}
-	if o.PinHot > o.Std {
-		return errors.New("pin-hot covers downstairs only, so it cannot exceed the downstairs TB")
-	}
-	return nil
-}
+// ValidateHouseOrder, Quote and QuoteHouse are payments' (pricing.go).
+var (
+	ValidateHouseOrder = payments.ValidateHouseOrder
+	QuoteHouse         = payments.QuoteHouse
+)
 
-// --- Quote (what the page prints; what Stripe charges) ---
+type (
+	Quote     = payments.Quote
+	QuoteLine = payments.QuoteLine
+)
 
-// QuoteLine is one receipt line.
-type QuoteLine struct {
-	Label  string // "Downstairs", "Attic", "Pin-hot"
-	TB     int
-	Cents  int64 // per month
-	Detail string
-}
+func cents(usd float64) int64 { return payments.Cents(usd) }
 
-// Quote is a house priced from prices.json.
-type Quote struct {
-	Lines        []QuoteLine
-	MonthlyCents int64 // per month, what the site's receipt shows
-	ChargeCents  int64 // per billing period (×12 when annual)
-	Period       Period
-}
-
-func money(cents int64) string { return fmt.Sprintf("$%d.%02d", cents/100, cents%100) }
-
-// Money formats the line's per-month amount ("$26.94").
-func (l QuoteLine) Money() string { return money(l.Cents) }
-
-// Monthly formats the per-month total.
-func (q Quote) Monthly() string { return money(q.MonthlyCents) }
-
-// Charge formats the per-period charge.
-func (q Quote) Charge() string { return money(q.ChargeCents) }
-
-func cents(usd float64) int64 { return int64(math.Round(usd * 100)) }
-
-// unitCents returns the per-TB-per-month unit for a line/period in whole
-// cents, as Stripe stores it — so the sum of lines is exactly the invoice.
-func unitCents(line Line, period Period) int64 {
-	p := landing.Get()
-	switch line {
-	case LineStandard:
-		if period == PeriodMonthly {
-			return cents(p.Standard.Monthly)
-		}
-		return cents(p.Standard.Annual)
-	case LineVault:
-		if period == PeriodMonthly {
-			return cents(p.Vault.Monthly)
-		}
-		return cents(p.Vault.Annual)
-	case LinePinHot:
-		return cents(p.PinHot)
-	}
-	return 0
-}
-
-// vaultMonthlyCents applies the site's "$4.99 monthly minimum" to the
-// attic line: it is a volume-tiered price in Stripe (1 TB = the minimum
-// flat, 2+ TB = per unit), so the maths here mirrors that shape.
-func vaultMonthlyCents(tb int) int64 {
-	if tb <= 0 {
-		return 0
-	}
-	if tb == 1 {
-		return cents(landing.Get().Vault.MonthlyMinimum)
-	}
-	return int64(tb) * unitCents(LineVault, PeriodMonthly)
-}
-
-// QuoteHouse prices an order. Annual rates are per TB per month billed
-// yearly (ChargeCents = 12 × monthly); monthly is charged as shown.
-func QuoteHouse(std, vault, pinHot int, period Period) Quote {
-	q := Quote{Period: period}
-	add := func(label string, tb int, c int64, detail string) {
-		if tb <= 0 {
-			return
-		}
-		q.Lines = append(q.Lines, QuoteLine{Label: label, TB: tb, Cents: c, Detail: detail})
-		q.MonthlyCents += c
-	}
-	add("Downstairs", std, int64(std)*unitCents(LineStandard, period), "Standard")
-	if period == PeriodMonthly {
-		add("Attic", vault, vaultMonthlyCents(vault), "Vault, back in minutes")
-	} else {
-		add("Attic", vault, int64(vault)*unitCents(LineVault, period), "Vault, back in minutes")
-	}
-	add("Pin-hot", pinHot, int64(pinHot)*unitCents(LinePinHot, period), "never moves to tape")
-	q.ChargeCents = q.MonthlyCents
-	if period == PeriodAnnual {
-		q.ChargeCents = q.MonthlyCents * 12
-	}
-	return q
-}
+func unitCents(line Line, period Period) int64 { return payments.UnitCents(line, period) }
 
 // --- Verification against prices.json ---
 
@@ -422,8 +326,11 @@ func (s *StripeService) houseLineItems(ids HousePriceIDs, o HouseOrder) []*strip
 	return items
 }
 
-func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o HouseOrder, successURL, cancelURL string) *stripe.CheckoutSessionParams {
+func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o HouseOrder, purpose, successURL, cancelURL string) *stripe.CheckoutSessionParams {
 	meta := map[string]string{"tenant_id": tenantID, "house": "1"}
+	if purpose != "" {
+		meta["purpose"] = purpose // the ledger's purpose (WP-PAY-2)
+	}
 	params := &stripe.CheckoutSessionParams{
 		Customer:            stripe.String(customerID),
 		Mode:                stripe.String(string(stripe.CheckoutSessionModeSubscription)),
@@ -473,14 +380,14 @@ func (s *StripeService) HasLiveSubscription(ctx context.Context, customerID stri
 
 // CreateHouseCheckout starts a Stripe Checkout for a house and returns the
 // hosted page URL. URLs must be absolute (Stripe rejects relative ones).
-func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o HouseOrder, successURL, cancelURL string) (string, error) {
+func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o HouseOrder, purpose, successURL, cancelURL string) (string, error) {
 	if ready, why := s.HouseCheckoutReady(); !ready {
 		return "", fmt.Errorf("house checkout unavailable: %s", why)
 	}
 	if err := ValidateHouseOrder(o); err != nil {
 		return "", fmt.Errorf("house order: %w", err)
 	}
-	params := s.houseCheckoutParams(customerID, tenantID, o, successURL, cancelURL)
+	params := s.houseCheckoutParams(customerID, tenantID, o, purpose, successURL, cancelURL)
 	params.Context = ctx
 	params.SetIdempotencyKey(houseCheckoutIdempotencyKey(tenantID, o, time.Now()))
 	sess, err := checkoutsession.New(params)

@@ -47,7 +47,7 @@ func TestStripeService_CreateCustomer_Integration(t *testing.T) {
 	}
 
 	svc := NewStripeService(os.Getenv("STRIPE_TEST_KEY"), nil, zap.NewNop())
-	customerID, err := svc.CreateCustomer(t.Context(), "test@stored.ge", "tenant-test-123")
+	customerID, err := svc.createCustomer(t.Context(), "test@stored.ge", "tenant-test-123")
 	require.NoError(t, err)
 	assert.NotEmpty(t, customerID)
 	assert.Contains(t, customerID, "cus_")
