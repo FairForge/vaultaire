@@ -464,7 +464,8 @@ func (s *Server) drainDeliveries(stopStarted time.Time, longBound time.Duration)
 // webhook CRUD has moved it since, the job re-reads its endpoints' rows at
 // start (Prompt 2a.3 H2: a deleted, disabled or re-pointed webhook got POSTs
 // with its old URL and secret for as long as the job waited in the queue).
-func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, gen uint64, eventID, eventType, tenantID string, payload []byte) deliveryJob {
+func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, gen uint64, ev recordedEvent) deliveryJob {
+	eventID, eventType, tenantID := ev.id, ev.eventType, ev.tenantID
 	return deliveryJob{
 		tenant: tenantID,
 		kind:   deliveryKindWebhook,
@@ -476,7 +477,7 @@ func webhookJob(db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, gen
 			if webhookGeneration(tenantID) != gen {
 				eps = revalidateEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID)
 			}
-			deliverToEndpoints(ctx, db, logger, eps, eventID, eventType, tenantID, payload)
+			deliverToEndpoints(ctx, db, logger, eps, ev)
 		},
 		owed: func(context.Context) []droppedDelivery { return owedRows(endpoints, eventID, eventType) },
 	}

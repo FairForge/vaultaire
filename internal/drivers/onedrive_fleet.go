@@ -93,12 +93,74 @@ func fleetDigest(ids []string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// fleetRecheckEvery is how often the probe re-reads the markers after a
+// verdict; an unknown verdict is re-checked at the next probe (RP18-1).
+const fleetRecheckEvery = time.Hour
+
+// fleetRecheckBudget bounds one re-check inside the probe (the probe itself
+// has 15 s; a marker is two Graph calls per account).
+const fleetRecheckBudget = 10 * time.Second
+
+// FleetState is the last verdict of CheckFleetFingerprint ("" before any).
+func (d *OneDriveDriver) FleetState() FleetState {
+	d.fleetMu.Lock()
+	defer d.fleetMu.Unlock()
+	return d.fleetState
+}
+
+// recheckFleet runs the fingerprint check from the probe path when it is
+// due: at the next probe after an unknown verdict (a marker unreadable in
+// the boot budget — Graph down at deploy time — left the gauge at 0 and
+// nothing re-checked for the slot's lifetime, RP18-1), then every
+// fleetRecheckEvery. The accept value is the one boot gave; one check at a
+// time; its outcome is the driver's log line, never the probe's verdict.
+func (d *OneDriveDriver) recheckFleet(ctx context.Context) {
+	d.fleetMu.Lock()
+	due := d.fleetState != "" && !d.fleetChecking &&
+		(d.fleetState == FleetUnknown || time.Since(d.fleetCheckedAt) >= fleetRecheckEvery)
+	accept := d.fleetAccept
+	if due {
+		d.fleetChecking = true
+	}
+	d.fleetMu.Unlock()
+	if !due {
+		return
+	}
+	defer func() {
+		d.fleetMu.Lock()
+		d.fleetChecking = false
+		d.fleetMu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(ctx, fleetRecheckBudget)
+	defer cancel()
+	_, _ = d.CheckFleetFingerprint(ctx, accept) // logged by the check, on a change of verdict
+}
+
 // CheckFleetFingerprint reads every account's marker and compares it with the
-// fleet as built (cmd/vaultaire calls it once at boot, bounded). accept is
+// fleet as built (cmd/vaultaire calls it once at boot, bounded; the probe
+// re-runs it after an unknown verdict and hourly — recheckFleet). accept is
 // PERMAFROST_FLEET_ACCEPT: equal to the current digest, a mismatch is
 // accepted and the markers rewritten. An error is returned with
 // FleetUnknown (a marker unreadable) or with the state whose writes failed.
+// The verdict is logged once per CHANGE of verdict (the first always): an
+// hourly re-check that finds the same state writes nothing.
 func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept string) (FleetFingerprint, error) {
+	out, err := d.checkFleetFingerprint(ctx, accept)
+	d.fleetMu.Lock()
+	d.fleetState, d.fleetAccept, d.fleetCheckedAt = out.State, accept, time.Now()
+	d.fleetMu.Unlock()
+	return out, err
+}
+
+// fleetVerdictChanged reports whether state differs from the last verdict
+// (true before any).
+func (d *OneDriveDriver) fleetVerdictChanged(state FleetState) bool {
+	d.fleetMu.Lock()
+	defer d.fleetMu.Unlock()
+	return d.fleetState != state
+}
+
+func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept string) (FleetFingerprint, error) {
 	ids := d.fleetIdentities()
 	out := FleetFingerprint{Digest: fleetDigest(ids)}
 
@@ -107,8 +169,10 @@ func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept strin
 		m, err := t.readFleetMarker(ctx)
 		if err != nil {
 			out.State = FleetUnknown
-			d.logger.Warn("permafrost fleet fingerprint: a marker could not be read — no verdict this boot",
-				zap.String("account", t.name), zap.Error(err))
+			if d.fleetVerdictChanged(out.State) {
+				d.logger.Warn("permafrost fleet fingerprint: a marker could not be read — no verdict; re-checked at the next probe",
+					zap.String("account", t.name), zap.Error(err))
+			}
 			return out, fmt.Errorf("permafrost fleet fingerprint: read %s: %w", t.name, err)
 		}
 		markers[i] = m
@@ -155,9 +219,11 @@ func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept strin
 	default:
 		out.State = FleetMismatch
 		permafrostFleetMismatch.Set(1)
-		d.logger.Error("permafrost fleet fingerprint mismatch: the fleet's order is not the one its accounts recorded — every object whose home moved (hash % fleet size) is read through the fleet walk. Restore the TENANT_N order, or rebalance and set PERMAFROST_FLEET_ACCEPT to this fingerprint (onedrive_README.md § Fleet fingerprint)",
-			zap.Strings("diffs", out.Diffs), zap.String("fingerprint", out.Digest),
-			zap.Int("accounts", len(ids)), zap.Int("markers", present))
+		if d.fleetVerdictChanged(out.State) {
+			d.logger.Error("permafrost fleet fingerprint mismatch: the fleet's order is not the one its accounts recorded — every object whose home moved (hash % fleet size) is read through the fleet walk. Restore the TENANT_N order, or rebalance and set PERMAFROST_FLEET_ACCEPT to this fingerprint (onedrive_README.md § Fleet fingerprint)",
+				zap.Strings("diffs", out.Diffs), zap.String("fingerprint", out.Digest),
+				zap.Int("accounts", len(ids)), zap.Int("markers", present))
+		}
 		return out, nil
 	}
 	permafrostFleetMismatch.Set(0)
@@ -176,7 +242,7 @@ func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept strin
 		return out, fmt.Errorf("permafrost fleet fingerprint: write: %s", strings.Join(failed, "; "))
 	case out.State == FleetAccepted:
 		d.logger.Warn("permafrost fleet fingerprint: a new fleet order accepted (PERMAFROST_FLEET_ACCEPT) — markers rewritten", fields...)
-	default:
+	case d.fleetVerdictChanged(out.State):
 		d.logger.Info("permafrost fleet fingerprint", fields...)
 	}
 	return out, nil

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,7 @@ type markerStore struct {
 	name    string
 	files   map[string]string
 	puts    int
+	gets    int
 	failGet bool
 }
 
@@ -43,6 +45,7 @@ func (m *markerStore) RoundTrip(req *http.Request) (*http.Response, error) {
 	const meta = "/items/root:/" + odRootFolder + "/"
 	switch {
 	case req.Method == http.MethodGet && strings.Contains(u, meta):
+		m.gets++
 		if m.failGet {
 			return odResp(req, 500, "", nil), nil
 		}
@@ -72,6 +75,12 @@ func (m *markerStore) marker(t *testing.T) fleetMarker {
 	var fm fleetMarker
 	require.NoError(t, json.Unmarshal([]byte(m.files[fleetMarkerPath]), &fm))
 	return fm
+}
+
+func (m *markerStore) getCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.gets
 }
 
 func (m *markerStore) putCount() int {
@@ -232,4 +241,62 @@ func TestFleetFingerprint_TheMismatchGaugeExistsAtZero(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "on drivers.Collectors(): exported at 0 from registration")
+}
+
+// RP18-1 (Stage 1a Prompt 17 Part 0): the fingerprint is re-checked from the
+// probe path after an `unknown` verdict (a marker unreadable in the boot
+// budget — Graph down at deploy time) and hourly while the slot runs; one
+// Error/Info line per CHANGE of verdict, the gauge following. It was checked
+// once in main and never again.
+func TestFleetFingerprint_AnUnknownBootVerdictIsRecheckedFromTheProbe(t *testing.T) {
+	// Arrange: markers recorded for (a, b); the slot boots as (b, a) with
+	// account a's Graph answering 500 — no verdict.
+	acc := newAccounts("a", "b")
+	_, err := markerFleet(zap.NewNop(), acc...).CheckFleetFingerprint(context.Background(), "")
+	require.NoError(t, err)
+	acc[0].failGet = true
+	core, logs := observer.New(zap.InfoLevel)
+	d := markerFleet(zap.New(core), acc[1], acc[0])
+	got, err := d.CheckFleetFingerprint(context.Background(), "")
+	require.Error(t, err)
+	require.Equal(t, FleetUnknown, got.State)
+	require.Equal(t, 0.0, testutil.ToFloat64(permafrostFleetMismatch))
+
+	// Act: Graph recovers; the next probe re-checks.
+	acc[0].failGet = false
+	_ = d.HealthCheck(context.Background())
+
+	// Assert: the mismatch is found, the gauge 1, one Error line; a second
+	// probe inside the hour neither re-reads nor logs again.
+	assert.Equal(t, FleetMismatch, d.FleetState())
+	assert.Equal(t, 1.0, testutil.ToFloat64(permafrostFleetMismatch))
+	assert.Len(t, logs.FilterLevelExact(zapcore.ErrorLevel).All(), 1)
+	gets := acc[0].getCount()
+	_ = d.HealthCheck(context.Background())
+	assert.Equal(t, gets, acc[0].getCount(), "no marker read inside the hour")
+	assert.Len(t, logs.FilterLevelExact(zapcore.ErrorLevel).All(), 1, "no second line for the same verdict")
+	permafrostFleetMismatch.Set(0)
+}
+
+func TestFleetFingerprint_TheHourlyRecheckLogsOnlyAChangeOfVerdict(t *testing.T) {
+	// Arrange: markers recorded; a slot boots on the same fleet (match).
+	acc := newAccounts("a", "b")
+	_, err := markerFleet(zap.NewNop(), acc...).CheckFleetFingerprint(context.Background(), "")
+	require.NoError(t, err)
+	core, logs := observer.New(zap.InfoLevel)
+	d := markerFleet(zap.New(core), acc...)
+	_, err = d.CheckFleetFingerprint(context.Background(), "")
+	require.NoError(t, err)
+	verdicts := func() int { return len(logs.FilterMessage("permafrost fleet fingerprint").All()) }
+	require.Equal(t, 1, verdicts(), "the boot verdict is logged")
+	gets := acc[0].getCount()
+
+	// Act: an hour passes; the probe re-checks and finds the same verdict.
+	d.fleetCheckedAt = time.Now().Add(-2 * time.Hour)
+	_ = d.HealthCheck(context.Background())
+
+	// Assert: re-read, nothing logged.
+	assert.Equal(t, FleetMatch, d.FleetState())
+	assert.Greater(t, acc[0].getCount(), gets, "the markers were re-read")
+	assert.Equal(t, 1, verdicts(), "the same verdict again is no line")
 }

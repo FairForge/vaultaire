@@ -137,7 +137,7 @@ func TestEventDelivery_ALookupFailedEventDroppedByAFullPoolIsCountedOnce(t *test
 	}
 	l0, o0 := lookup(), overload()
 
-	submitEventDelivery(context.Background(), f.db, zap.NewNop(), eventID, "object.deleted", f.tenantID, []byte(`{}`))
+	submitEventDelivery(context.Background(), f.db, zap.NewNop(), recordedEvent{id: eventID, eventType: "object.deleted", tenantID: f.tenantID, data: []byte(`{}`), createdAt: time.Now()})
 
 	assert.Equal(t, l0+1, lookup())
 	assert.Equal(t, o0, overload(), "the same event is not counted twice")
