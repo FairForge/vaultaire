@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stripe/stripe-go/v75"
@@ -636,7 +637,10 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 				  WHERE id = $4`,
 				sub.ID, string(sub.Status), string(order.Period), tenantID)
 			return err
-		}); err != nil {
+		}); errors.Is(err, payments.ErrInvalidOrder) {
+			h.houseInvalid(ctx, tenantID, sub, order, err)
+			return true, nil
+		} else if err != nil {
 			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}
 		h.logger.Info("house granted",
@@ -670,6 +674,25 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 	}
 	return true, nil
+}
+
+// houseInvalid acknowledges a subscription whose items are no valid house
+// (payments.ErrInvalidOrder: an operator deleted the Standard item at Stripe
+// and kept pin-hot, say). Retrying cannot change the items, and a 500 would
+// be retried for three days until Stripe disables the endpoint (RP20-4), so
+// the event is handled: the house and the entitlement are left exactly as
+// they were, and the operator is told — one Error line, an audit row and
+// vaultaire_stripe_house_invalid_total.
+func (h *WebhookHandler) houseInvalid(ctx context.Context, tenantID string, sub *stripe.Subscription, o HouseOrder, err error) {
+	houseInvalidTotal.Inc()
+	h.logger.Error("stripe webhook: the subscription is no valid house — acknowledged, the house left as it was",
+		zap.String("tenant", tenantID), zap.String("subscription", sub.ID),
+		zap.Int("std_tb", o.Std), zap.Int("vault_tb", o.Vault), zap.Int("pin_hot_tb", o.PinHot),
+		zap.String("period", string(o.Period)), zap.Error(err))
+	audit.Record(ctx, h.stripe.db, audit.Entry{TenantID: tenantID, Action: "billing.house_invalid",
+		Resource: sub.ID, Severity: "error", Metadata: map[string]any{
+			"tenant": tenantID, "subscription": sub.ID, "std": o.Std, "vault": o.Vault, "pin_hot": o.PinHot,
+			"period": string(o.Period)}})
 }
 
 // clearHouseTx is the clearing branch's write: the floors cleared and the

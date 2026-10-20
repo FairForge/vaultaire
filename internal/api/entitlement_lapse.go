@@ -25,7 +25,9 @@ import (
 //	               granted before migration 097) gets one: provider stripe
 //	               when tenants.stripe_subscription_id is set — paid through
 //	               the subscription's current_period_end fetched from Stripe
-//	               when Stripe is configured, else now + grace with a Warn —
+//	               when Stripe is configured (renewal prepaid when its
+//	               cancel_at_period_end is set, RP20-5), else now + grace
+//	               with a Warn —
 //	               else provider manual, renewal prepaid, now + grace with a
 //	               Warn. The floors are not touched.
 //	(b) lapse      rows with lapsed_at NULL and paid_through + grace in the
@@ -61,9 +63,10 @@ var entitlementsLapsed = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Houses the entitlement_lapse job cleared (paid_through + grace passed, flag entitlement_lapse on for the tenant).",
 })
 
-// subscriptionPeriodEnds is the Stripe read the backfill needs.
+// subscriptionPeriodEnds is the Stripe read the backfill needs: the
+// current period's end and whether the renewal was stopped there.
 type subscriptionPeriodEnds interface {
-	SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error)
+	SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (end time.Time, cancelAtPeriodEnd bool, err error)
 }
 
 // EntitlementLapseRunner is the job.
@@ -225,11 +228,14 @@ func (r *EntitlementLapseRunner) backfillOne(ctx context.Context, b backfillRow)
 		provider, renewal, ref = payments.ProviderStripe, payments.RenewalAuto, b.subscriptionID
 		why = "Stripe is not configured on this process"
 		if r.Stripe != nil {
-			end, err := r.Stripe.SubscriptionPeriodEnd(ctx, b.subscriptionID)
+			end, stopped, err := r.Stripe.SubscriptionPeriodEnd(ctx, b.subscriptionID)
 			if err != nil {
 				return fmt.Errorf("fetch subscription %s: %w", b.subscriptionID, err)
 			}
 			paidThrough, why = end, ""
+			if stopped {
+				renewal = payments.RenewalPrepaid // nobody will extend it (RP20-5)
+			}
 		}
 	}
 	if why != "" {

@@ -372,3 +372,18 @@ func TestLedger_ExpireInvalidateCredit(t *testing.T) {
 	assert.Equal(t, StatusSettled, status)
 	assert.False(t, number.Valid, "a credit is not a receipt")
 }
+
+// RP20-4: an invalid order is a typed error a webhook can tell from a
+// transient one; Grant refuses it before it touches the transaction.
+func TestOrderValidate_ErrInvalidOrder(t *testing.T) {
+	for _, o := range []Order{
+		{Vault: 1, PinHot: 1, Period: PeriodMonthly},
+		{Std: -1, Period: PeriodAnnual},
+		{Std: 1, Period: "weekly"},
+	} {
+		assert.ErrorIs(t, o.Validate(), ErrInvalidOrder, "%+v", o)
+		err := Grant(context.Background(), nil, "t", o, time.Now(), ProviderStripe, "sub", RenewalAuto)
+		assert.ErrorIs(t, err, ErrInvalidOrder, "%+v", o)
+	}
+	assert.NoError(t, Order{Std: 1, PinHot: 1, Period: PeriodMonthly}.Validate())
+}

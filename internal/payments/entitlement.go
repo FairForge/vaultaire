@@ -68,12 +68,19 @@ type Order struct {
 // House is the order in bytes, as the quota tables hold it.
 func (o Order) House() usage.House { return usage.HouseFromTB(o.Std, o.Vault, o.PinHot) }
 
-func (o Order) validate() error {
+// ErrInvalidOrder is a house no grant may record: an unknown period, a
+// negative line, or more pin-hot than Standard (migration 097's CHECK
+// pin_hot_tb <= std_tb is the same rule). It is the order's fault, never a
+// transient one — a webhook answers it as handled, not as a retry (RP20-4).
+var ErrInvalidOrder = errors.New("invalid house order")
+
+// Validate reports an order no grant may record (ErrInvalidOrder).
+func (o Order) Validate() error {
 	if !o.Period.Valid() {
-		return fmt.Errorf("unknown billing period %q", o.Period)
+		return fmt.Errorf("%w: unknown billing period %q", ErrInvalidOrder, o.Period)
 	}
 	if o.Std < 0 || o.Vault < 0 || o.PinHot < 0 || o.PinHot > o.Std {
-		return fmt.Errorf("invalid house %d/%d/%d TB", o.Std, o.Vault, o.PinHot)
+		return fmt.Errorf("%w: %d/%d/%d TB (std/vault/pin-hot)", ErrInvalidOrder, o.Std, o.Vault, o.PinHot)
 	}
 	return nil
 }
@@ -117,7 +124,7 @@ func Lock(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // row is granted again (lapsed_at cleared) at the given date.
 func Grant(ctx context.Context, tx *sql.Tx, tenantID string, o Order, paidThrough time.Time,
 	provider, providerRef string, renewal Renewal) error {
-	if err := o.validate(); err != nil {
+	if err := o.Validate(); err != nil {
 		return fmt.Errorf("grant tenant %s: %w", tenantID, err)
 	}
 	if err := Lock(ctx, tx, tenantID); err != nil {

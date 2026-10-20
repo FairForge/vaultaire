@@ -58,7 +58,7 @@ make test-integration     # = make test-db + DATABASE_URL=… go test -race ./..
 make test-load            # tests/load (env-gated SigV4 load gate, needs VAULTAIRE_LOAD_*)
 
 # Lint + security (configs: .golangci.yml, .github/workflows/security.yml)
-make lint                 # golangci-lint run ./...  (errcheck, rowserrcheck, noctx, errorlint, revive ctx-first, …)
+make lint                 # CI's golangci-lint (v2.14.0 via `go run`, pinned in the Makefile = ci.yml; never the one on PATH) run ./...  (errcheck, rowserrcheck, noctx, errorlint, revive ctx-first, …)
 make gosec                # the Security workflow's gosec command, verbatim (must stay at 0 issues)
 make deadcode             # unreachable functions in cmd/vaultaire (x/tools deadcode)
 make clean                # bin/, coverage files and every tool binary that used to pile up in the repo root
@@ -144,7 +144,7 @@ Migrations are in `internal/database/migrations/`.
 
 - **TDD is mandatory**: Red -> Green -> Refactor. Write failing test first.
 - Tests follow Arrange/Act/Assert pattern with testify (`require` for fatal, `assert` for non-fatal).
-- Pre-commit hooks run `go fmt` and `golangci-lint run` on commit; `go test ./... -short` runs on **push** (`pre-commit install && pre-commit install --hook-type pre-push`).
+- Pre-commit hooks run `go fmt` and `make lint` (CI's pinned golangci-lint through `go run` — first run ~40 s to build it on a cold cache, then ~3 s; RP20-3) on commit; `go test ./... -short` runs on **push** (`pre-commit install && pre-commit install --hook-type pre-push`).
 
 ## Git Workflow
 

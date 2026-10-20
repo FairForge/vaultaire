@@ -27,9 +27,11 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      # CI's version through `go run` (Makefile GOLANGCI_LINT_VERSION), never
+      # the golangci-lint on PATH (RP20-3).
       - id: golangci-lint
         name: golangci-lint
-        entry: golangci-lint run
+        entry: make lint
         language: system
         types: [go]
         pass_filenames: false

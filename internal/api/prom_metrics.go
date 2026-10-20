@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -107,6 +108,8 @@ func (s *Server) initMetrics() {
 		// The entitlement record (WP-PAY-1): ledger writes, houses the lapse
 		// job cleared, and — from the table — houses by when they expire.
 		reg.MustRegister(payments.Collectors()...)
+		// Invalid houses from Stripe, acknowledged not retried (RP20-4).
+		reg.MustRegister(billing.Collectors()...)
 		reg.MustRegister(entitlementsLapsed)
 		if s.db != nil {
 			reg.MustRegister(newEntitlementsExpiringCollector(s.db, s.log()))
