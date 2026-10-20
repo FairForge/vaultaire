@@ -145,13 +145,13 @@ Architecture notes
 
 ---
 
-## Prompt WP-PAY-1 — the entitlement record (migration 096)
+## Prompt WP-PAY-1 — the entitlement record (migration 097)
 
 ```
 Stage 1a, WP-PAY-1: the entitlement record — paid_through in our DB, a payments ledger, the lapse job.
 
 Continue from WP-PAY-0 (merged as #NNN) — if it has not merged, build on main anyway; nothing
-here depends on it. Lane: Developer surface. Migration: 096 (095 went to WP-R11-3, Stage 1a Prompt 16; confirm with
+here depends on it. Lane: Developer surface. Migration: 097 (095 went to WP-R11-3, Stage 1a Prompt 16; 096 to WP-SSEC-1, Stage 1a Prompt 17; confirm with
 ls internal/database/migrations | tail -1 and gh pr list --state open — another PR may have
 claimed it; take the next free number and say so). One PR, two commits (migration + package;
 webhook + job).
@@ -176,7 +176,7 @@ Part 0 — verify, cite file:line
    0 and 0 (2026-10-18: 0/0), so the backfill is a no-op.
 
 What to build
-1. Migration 096_payments.sql exactly as docs/PAYMENTS.md § 1.2 (entitlements, payments,
+1. Migration 097_payments.sql exactly as docs/PAYMENTS.md § 1.2 (entitlements, payments,
    payment_events, invoice_counters; CHECKs; the partial index on paid_through). Additive.
 2. Package internal/payments:
    - Entitlement, Order (= billing.HouseOrder's shape; billing may alias it), Renewal.
@@ -273,7 +273,7 @@ ultrathink
 ```
 Stage 1a, WP-PAY-2: payments.Provider — Stripe becomes one provider; the dashboard stops importing stripe-go; pay_stripe / pay_btcpay flags; provider-off semantics.
 
-Continue from WP-PAY-1 (merged as #NNN, migration 096 deployed, entitlement_lapse flag OFF).
+Continue from WP-PAY-1 (merged as #NNN, migration 097 deployed, entitlement_lapse flag OFF).
 Lane: Developer surface. No migration. One PR (two commits: interface + Stripe adapter;
 dashboard + runner + flags).
 
