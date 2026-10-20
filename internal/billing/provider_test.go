@@ -122,8 +122,8 @@ func TestStripeProvider_StopRenewal_SetsCancelAtPeriodEnd(t *testing.T) {
 // deletion runner can name it) and is never ready; every call says why.
 func TestStripeProvider_Unconfigured(t *testing.T) {
 	svc := NewUnconfiguredStripe(nil)
-	ok, why := svc.Ready(context.Background())
-	assert.False(t, ok)
+	st, why := svc.Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
 	assert.True(t, strings.Contains(why, "STRIPE_SECRET_KEY"))
 	for _, err := range []error{
 		svc.Cancel(context.Background(), "t"),
@@ -134,4 +134,77 @@ func TestStripeProvider_Unconfigured(t *testing.T) {
 	}
 	assert.Equal(t, "stripe", svc.Name())
 	assert.Equal(t, payments.RenewalAuto, svc.Renewal())
+}
+
+// --- readiness (Part 0 of Prompt 20: RP22-1, RP22-5) ---
+
+// failingPrices is a price source Stripe cannot be reached through.
+type failingPrices struct{ err error }
+
+func (f failingPrices) Get(context.Context, string) (*stripe.Price, error) { return nil, f.err }
+
+// Pending while a key is set and no verification has completed; a verify
+// that could not reach Stripe keeps the previous verdict (ready stays
+// ready, pending stays pending) and never makes the provider unready.
+func TestReadiness_TransientVerifyKeepsVerdict(t *testing.T) {
+	// Arrange: a configured provider, never verified.
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	svc.ConfigureHouse(testIDs, goodPrices())
+	st, why := svc.Ready(context.Background())
+	assert.Equal(t, payments.Pending, st, why)
+
+	// Act 1: Stripe unreachable before any verdict → still pending.
+	svc.setPriceSource(failingPrices{err: errors.New("dial tcp: connection refused")})
+	err := svc.VerifyHousePrices(context.Background())
+	require.ErrorIs(t, err, ErrPricesUnreachable)
+	st, _ = svc.Ready(context.Background())
+	assert.Equal(t, payments.Pending, st, "no verdict yet: pending, not unready")
+
+	// Act 2: verified, then a Stripe 503 → the verdict stays ready.
+	svc.setPriceSource(goodPrices())
+	require.NoError(t, svc.VerifyHousePrices(context.Background()))
+	st, _ = svc.Ready(context.Background())
+	require.Equal(t, payments.Ready, st)
+	svc.setPriceSource(failingPrices{err: &stripe.Error{HTTPStatusCode: 503, Msg: "upstream"}})
+	err = svc.VerifyHousePrices(context.Background())
+	assert.ErrorIs(t, err, ErrPricesUnreachable)
+	st, _ = svc.Ready(context.Background())
+	assert.Equal(t, payments.Ready, st, "a transient failure keeps the previous verdict (RP22-5)")
+	ok, _ := svc.HouseCheckoutReady()
+	assert.True(t, ok, "checkout stays open on the kept verdict")
+}
+
+// A mismatch, a missing price id or a Stripe 4xx (no such price, bad key)
+// is a verdict: unready, checkout closed.
+func TestReadiness_MismatchIsUnready(t *testing.T) {
+	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
+	svc.ConfigureHouse(testIDs, goodPrices())
+	require.NoError(t, svc.VerifyHousePrices(context.Background()))
+
+	bad := goodPrices()
+	bad["price_std_m"] = perUnit(498, "month")
+	svc.setPriceSource(bad)
+	err := svc.VerifyHousePrices(context.Background())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrPricesUnreachable)
+	st, why := svc.Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
+	assert.Contains(t, why, "price_std_m")
+
+	// A Stripe 4xx is a verdict too (a wrong id, a revoked key).
+	svc.setPriceSource(goodPrices())
+	require.NoError(t, svc.VerifyHousePrices(context.Background()))
+	svc.setPriceSource(failingPrices{err: &stripe.Error{HTTPStatusCode: 404, Msg: "No such price"}})
+	err = svc.VerifyHousePrices(context.Background())
+	assert.NotErrorIs(t, err, ErrPricesUnreachable)
+	st, _ = svc.Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
+
+	// No key at all: unready (unchanged).
+	st, why = NewUnconfiguredStripe(nil).Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
+	assert.Contains(t, why, "STRIPE_SECRET_KEY")
+	// A key but no price ids: unready (nothing to verify).
+	st, _ = NewStripeService("sk_test_fake", nil, zap.NewNop()).Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
 }

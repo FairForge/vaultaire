@@ -100,3 +100,29 @@ func TestIsCurrentSubscription_ReadsTheEntitlementFirst(t *testing.T) {
 
 	assert.False(t, f.hasHouse(t), "the entitlement's subscription was cancelled: cleared")
 }
+
+// RP22-2: with the flag ON, the deletion of a NON-house subscription (a
+// legacy pack) keeps today's downgrade — plan 'starter', nothing to stop
+// renewing; the flag branch is for a house only.
+func TestSubscriptionDeleted_PackUnderFlag_DowngradesToStarter(t *testing.T) {
+	// Arrange: a tenant on a pack, flag on.
+	f := setupHouseFixture(t)
+	f.handler.SetFlags(lapseFlag{f.tenantID: true})
+	pack := subWith("sub_"+f.tenantID, "canceled", item("si_pack", "price_vault3_legacy", 1))
+	pack.Customer.ID = "cus_" + f.tenantID
+	_, err := f.db.Exec(`UPDATE tenants SET plan = 'vault3', stripe_subscription_id = $2, subscription_status = 'active' WHERE id = $1`,
+		f.tenantID, pack.ID)
+	require.NoError(t, err)
+
+	// Act
+	f.post(t, "pack-deleted", "customer.subscription.deleted", pack)
+
+	// Assert
+	plan, status, subID, period := f.tenantRow(t)
+	assert.Equal(t, "starter", plan, "a pack is downgraded, flag or no flag")
+	assert.Equal(t, "canceled", status)
+	assert.Empty(t, subID)
+	assert.Empty(t, period)
+	_, err = payments.Get(context.Background(), f.db, f.tenantID)
+	assert.ErrorIs(t, err, payments.ErrNoEntitlement, "no entitlement was ever written for a pack")
+}

@@ -74,9 +74,14 @@ func (f *fakeHouseBilling) registry(db *sql.DB, payStripe bool) *payments.Regist
 	return reg
 }
 
-func (f *fakeHouseBilling) Name() string                         { return payments.ProviderStripe }
-func (f *fakeHouseBilling) Renewal() payments.Renewal            { return payments.RenewalAuto }
-func (f *fakeHouseBilling) Ready(context.Context) (bool, string) { return f.ready, f.why }
+func (f *fakeHouseBilling) Name() string              { return payments.ProviderStripe }
+func (f *fakeHouseBilling) Renewal() payments.Renewal { return payments.RenewalAuto }
+func (f *fakeHouseBilling) Ready(context.Context) (payments.Readiness, string) {
+	if f.ready {
+		return payments.Ready, ""
+	}
+	return payments.Unready, f.why
+}
 func (f *fakeHouseBilling) StartCheckout(_ context.Context, c payments.Checkout) (string, error) {
 	f.liveAsked++
 	if f.liveErr != nil {

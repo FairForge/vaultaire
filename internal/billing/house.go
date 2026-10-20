@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -205,9 +206,26 @@ func checkPrice(p *stripe.Price, id string, want expected) error {
 	return nil
 }
 
+// ErrPricesUnreachable: a verification that could not REACH Stripe (a
+// network error, a timeout, a 5xx, a 429) — no verdict on the prices, the
+// previous one is kept (RP22-5). A Stripe 4xx (no such price, a revoked
+// key) is a verdict: unready.
+var ErrPricesUnreachable = errors.New("stripe not reachable")
+
+// transientPriceError says whether a price fetch failure is Stripe not
+// reached (kept verdict) rather than Stripe's answer (a verdict).
+func transientPriceError(err error) bool {
+	var se *stripe.Error
+	if errors.As(err, &se) {
+		return se.HTTPStatusCode == 0 || se.HTTPStatusCode >= 500 || se.HTTPStatusCode == http.StatusTooManyRequests
+	}
+	return true // a dial error, a timeout, a cancelled context
+}
+
 // VerifyHousePrices fetches every configured price and asserts it matches
 // prices.json. The first mismatch is returned, naming the price id and the
 // expected value so the fix is a Stripe dashboard edit, never a code change.
+// A fetch that could not reach Stripe wraps ErrPricesUnreachable.
 func VerifyHousePrices(ctx context.Context, fetch priceFetcher, ids HousePriceIDs) error {
 	if !ids.Complete() {
 		return errors.New("house prices: not every STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY} is set")
@@ -215,6 +233,9 @@ func VerifyHousePrices(ctx context.Context, fetch priceFetcher, ids HousePriceID
 	for _, r := range ids.all() {
 		p, err := fetch.Get(ctx, r.id)
 		if err != nil {
+			if transientPriceError(err) {
+				return fmt.Errorf("house prices: fetch %s (%s %s): %w: %w", r.id, r.line, r.period, ErrPricesUnreachable, err)
+			}
 			return fmt.Errorf("house prices: fetch %s (%s %s): %w", r.id, r.line, r.period, err)
 		}
 		if err := checkPrice(p, r.id, expectedShape(r.line, r.period)); err != nil {
@@ -227,9 +248,13 @@ func VerifyHousePrices(ctx context.Context, fetch priceFetcher, ids HousePriceID
 // --- StripeService: house state ---
 
 type houseState struct {
-	mu       sync.RWMutex
-	ids      HousePriceIDs
-	prices   priceFetcher
+	mu     sync.RWMutex
+	ids    HousePriceIDs
+	prices priceFetcher
+	// decided: a verification has completed with a verdict (verified or
+	// not); until then the provider is Pending (RP22-1). A verification
+	// that could not reach Stripe decides nothing (RP22-5).
+	decided  bool
 	verified bool
 	err      string
 }
@@ -244,8 +269,15 @@ func (s *StripeService) ConfigureHouse(ids HousePriceIDs, prices priceFetcher) {
 	defer s.house.mu.Unlock()
 	s.house.ids = ids
 	s.house.prices = prices
-	s.house.verified = false
+	s.house.decided, s.house.verified = false, false
 	s.house.err = "house prices not verified yet"
+}
+
+// setPriceSource swaps the price source (tests: a source that fails).
+func (s *StripeService) setPriceSource(prices priceFetcher) {
+	s.house.mu.Lock()
+	defer s.house.mu.Unlock()
+	s.house.prices = prices
 }
 
 // HousePriceIDs returns the configured ids.
@@ -256,7 +288,11 @@ func (s *StripeService) HousePriceIDs() HousePriceIDs {
 }
 
 // VerifyHousePrices runs the check against the configured source and
-// records the outcome for HouseCheckoutReady.
+// records the verdict for HouseCheckoutReady / HouseReadiness. A check
+// that could not reach Stripe (ErrPricesUnreachable) keeps the previous
+// verdict — ready stays ready, pending stays pending — and is logged at
+// Warn (RP22-5); only a mismatch, a missing price id or a Stripe 4xx makes
+// the provider unready.
 func (s *StripeService) VerifyHousePrices(ctx context.Context) error {
 	s.house.mu.RLock()
 	ids, prices := s.house.ids, s.house.prices
@@ -267,27 +303,38 @@ func (s *StripeService) VerifyHousePrices(ctx context.Context) error {
 	err := VerifyHousePrices(ctx, prices, ids)
 	s.house.mu.Lock()
 	defer s.house.mu.Unlock()
-	if err != nil {
-		s.house.verified, s.house.err = false, err.Error()
-		return err
+	switch {
+	case err == nil:
+		s.house.decided, s.house.verified, s.house.err = true, true, ""
+	case errors.Is(err, ErrPricesUnreachable):
+		s.logger.Warn("house prices: Stripe could not be reached — the previous verdict is kept",
+			zap.Bool("verified", s.house.verified), zap.Bool("decided", s.house.decided), zap.Error(err))
+		if !s.house.decided {
+			s.house.err = "house prices not verified yet: " + err.Error()
+		}
+	default:
+		s.house.decided, s.house.verified, s.house.err = true, false, err.Error()
 	}
-	s.house.verified, s.house.err = true, ""
-	return nil
+	return err
 }
 
 // StartHouseVerification verifies at boot and, until it passes, retries
 // every 5 minutes (a Stripe blip at boot must not keep checkout closed for
 // the whole process lifetime); once verified it re-checks hourly so a
 // price edited in the Stripe dashboard closes checkout within the hour.
+// Stripe not reached is retried in 5 minutes too, on the kept verdict.
 func (s *StripeService) StartHouseVerification(ctx context.Context) {
 	go func() {
 		for {
 			err := s.VerifyHousePrices(ctx)
 			wait := time.Hour
-			if err != nil {
+			switch {
+			case errors.Is(err, ErrPricesUnreachable):
+				wait = 5 * time.Minute // logged at Warn by VerifyHousePrices
+			case err != nil:
 				s.logger.Error("house checkout DISABLED: Stripe prices do not match prices.json", zap.Error(err))
 				wait = 5 * time.Minute
-			} else {
+			default:
 				s.logger.Info("house prices verified against prices.json; quota checkout ready")
 			}
 			select {
@@ -300,14 +347,28 @@ func (s *StripeService) StartHouseVerification(ctx context.Context) {
 }
 
 // HouseCheckoutReady reports whether whole-TB checkout may be offered, and
-// why not when it may not.
+// why not when it may not (pending is "not yet", with its reason).
 func (s *StripeService) HouseCheckoutReady() (bool, string) {
+	st, why := s.HouseReadiness()
+	return st == payments.Ready, why
+}
+
+// HouseReadiness is the three-state answer (D-P20-1): Unready with no
+// price ids, after a mismatch or a missing price; Pending until a
+// verification has completed; Ready once the prices matched.
+func (s *StripeService) HouseReadiness() (payments.Readiness, string) {
 	s.house.mu.RLock()
 	defer s.house.mu.RUnlock()
-	if s.house.prices == nil {
-		return false, "house prices not configured (STRIPE_PRICE_*_ANNUAL/_MONTHLY)"
+	switch {
+	case s.house.prices == nil:
+		return payments.Unready, "house prices not configured (STRIPE_PRICE_*_ANNUAL/_MONTHLY)"
+	case !s.house.decided:
+		return payments.Pending, s.house.err
+	case s.house.verified:
+		return payments.Ready, ""
+	default:
+		return payments.Unready, s.house.err
 	}
-	return s.house.verified, s.house.err
 }
 
 // --- Checkout ---

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -42,6 +43,36 @@ type ResizeOutcome struct {
 	RedirectURL string
 }
 
+// Readiness is a provider's answer to "can you take a payment now?"
+// (D-P20-1, RP22-1): Unready = no (no key, a price mismatch, a missing
+// price id — a verdict); Ready = yes; Pending = configured, but no
+// verification has completed yet (the minute after a boot, Stripe not yet
+// reached). Pending is never recorded as an outage and never counts as
+// unready for the lapse job; it is not Ready for new business either. The
+// zero value is Unready, as a provider with no key.
+type Readiness int
+
+const (
+	// Unready: a verdict — the provider cannot take a payment.
+	Unready Readiness = iota
+	// Ready: configured and verified.
+	Ready
+	// Pending: configured, verification not completed yet.
+	Pending
+)
+
+// String names the state for logs and the admin page.
+func (r Readiness) String() string {
+	switch r {
+	case Ready:
+		return "ready"
+	case Pending:
+		return "pending"
+	default:
+		return "unready"
+	}
+}
+
 // Provider is one way of taking money (docs/PAYMENTS.md § 2.2). Customer
 // creation is not on it: it is an implementation detail of StartCheckout
 // (no third party knows a tenant until it buys — 43.2).
@@ -49,8 +80,10 @@ type Provider interface {
 	Name() string
 	// Renewal is what this provider's payments imply (Stripe: auto).
 	Renewal() Renewal
-	// Ready: configured AND verified (Stripe: key set, prices match).
-	Ready(ctx context.Context) (bool, string)
+	// Ready: Ready when configured AND verified (Stripe: key set, prices
+	// match), Pending while a verification has not completed, else
+	// Unready and why.
+	Ready(ctx context.Context) (Readiness, string)
 	StartCheckout(ctx context.Context, c Checkout) (redirectURL string, err error)
 	Resize(ctx context.Context, tenantID string, o Order) (ResizeOutcome, error)
 	// StopRenewal / ResumeRenewal: Stripe cancel_at_period_end true/false.
@@ -170,8 +203,8 @@ func (r *Registry) For(ctx context.Context, tenantID, name string) (Provider, er
 	if r.flags == nil || !r.flags.Enabled(FlagPrefix+name, tenantID) {
 		return nil, fmt.Errorf("%s for tenant %s: %w", name, tenantID, ErrProviderDisabled)
 	}
-	if ok, why := p.Ready(ctx); !ok {
-		return nil, fmt.Errorf("%s: %w: %s", name, ErrProviderUnavailable, why)
+	if st, why := p.Ready(ctx); st != Ready {
+		return nil, fmt.Errorf("%s: %w (%s): %s", name, ErrProviderUnavailable, st, why)
 	}
 	return p, nil
 }
@@ -211,13 +244,28 @@ func (r *Registry) StartCheckout(ctx context.Context, provider string, c Checkou
 	return StartCheckout(ctx, r, c.TenantID, provider, c)
 }
 
+// checkoutLockTimeout bounds the guard's wait for the entitlement lock
+// (RP22-4): the lock is held across up to three Stripe round trips, so a
+// webhook of the same tenant, or a pool exhausted by waiters, must turn
+// into a clean "try again in a minute" (ErrProviderUnavailable), never a
+// hang. A var for the test that proves it.
+var checkoutLockTimeout = 10 * time.Second
+
+// lockTimedOut reports Postgres's lock_not_available (55P03), what a
+// `SET LOCAL lock_timeout` turns a wait into.
+func lockTimedOut(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "55P03"
+}
+
 // StartCheckout is the double-billing guard (docs/PAYMENTS.md § 2.5): under
 // the tenant's entitlement lock — the lock every grant takes, so a webhook
 // and a checkout cannot pass each other — it refuses ErrOtherProviderLive
 // when the tenant's granted house is renewed (renewal 'auto') by another
 // provider, then runs the provider's own StartCheckout (Stripe's
 // HasLiveSubscription is the second guard, for a second Stripe
-// subscription). The lock is held across the provider call.
+// subscription). The lock is held across the provider call, and waited
+// for at most checkoutLockTimeout (RP22-4).
 func StartCheckout(ctx context.Context, r *Registry, tenantID, provider string, c Checkout) (string, error) {
 	p, err := r.For(ctx, tenantID, provider)
 	if err != nil {
@@ -229,7 +277,13 @@ func StartCheckout(ctx context.Context, r *Registry, tenantID, provider string, 
 	}
 	var url string
 	err = InTx(ctx, r.db, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", checkoutLockTimeout.Milliseconds())); err != nil {
+			return fmt.Errorf("set lock_timeout: %w", err)
+		}
 		if err := Lock(ctx, tx, tenantID); err != nil {
+			if lockTimedOut(err) {
+				return fmt.Errorf("tenant %s: the entitlement lock was not free within %s: %w", tenantID, checkoutLockTimeout, ErrProviderUnavailable)
+			}
 			return err
 		}
 		var other, renewal string
@@ -320,9 +374,10 @@ type ReadyLog struct {
 // NewReadyLog returns an empty log.
 func NewReadyLog() *ReadyLog { return &ReadyLog{lastUnready: map[string]time.Time{}} }
 
-// Record notes one observation.
-func (l *ReadyLog) Record(provider string, ready bool, at time.Time) {
-	if ready {
+// Record notes one observation: only Unready is an outage; Ready and
+// Pending (no verdict yet) leave the log alone.
+func (l *ReadyLog) Record(provider string, st Readiness, at time.Time) {
+	if st != Unready {
 		return
 	}
 	l.mu.Lock()
@@ -344,26 +399,29 @@ func (l *ReadyLog) UnreadyWithin(_ context.Context, provider string, window time
 func (r *Registry) History() *ReadyLog { return r.ready }
 
 // UnreadyWithin makes the registry the lapse job's ReadyHistory: a provider
-// unready NOW counts (and is recorded), else the log answers. A provider
-// that is not registered (manual) is never unready.
+// unready NOW counts (and is recorded); one pending now is not unready
+// (RP22-1) — the log answers for it as for a ready one. A provider that is
+// not registered (manual) is never unready.
 func (r *Registry) UnreadyWithin(ctx context.Context, provider string, window time.Duration, now time.Time) bool {
 	if p := r.Provider(provider); p != nil {
-		if !r.observe(ctx, p, now) {
+		if r.observe(ctx, p, now) == Unready {
 			return true
 		}
 	}
 	return r.ready.UnreadyWithin(ctx, provider, window, now)
 }
 
-func (r *Registry) observe(ctx context.Context, p Provider, now time.Time) bool {
-	ok, _ := p.Ready(ctx)
-	r.ready.Record(p.Name(), ok, now)
+// observe asks the provider once, records the answer and exports the gauge
+// (1 for Ready; 0 for Unready and for Pending).
+func (r *Registry) observe(ctx context.Context, p Provider, now time.Time) Readiness {
+	st, _ := p.Ready(ctx)
+	r.ready.Record(p.Name(), st, now)
 	v := 0.0
-	if ok {
+	if st == Ready {
 		v = 1
 	}
 	providerReady.WithLabelValues(p.Name()).Set(v)
-	return ok
+	return st
 }
 
 // RecordReadiness observes every registered provider once.

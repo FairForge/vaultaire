@@ -19,7 +19,7 @@ var paymentsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 // Register, so every registered provider's series exists from boot.
 var providerReady = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "vaultaire_payment_provider_ready",
-	Help: "1 while the payment provider can take a payment (configured and verified — Stripe: key set and the house prices match prices.json), else 0.",
+	Help: "1 while the payment provider can take a payment (configured and verified — Stripe: key set and the house prices match prices.json), else 0 — also 0 while the provider is pending (configured, its verification not completed yet; a pending minute after a boot is not an outage).",
 }, []string{"provider"})
 
 func init() {

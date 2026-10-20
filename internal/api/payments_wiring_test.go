@@ -112,8 +112,8 @@ func TestPaymentProviders_RegisteredWithFlagsAndGauge(t *testing.T) {
 	srv := NewServer(&config.Config{Server: config.ServerConfig{Port: 0}}, zap.NewNop(),
 		engine.NewEngine(nil, zap.NewNop(), &engine.Config{DefaultBackend: "local"}), nil, nil)
 	require.NotNil(t, srv.payments.Provider(payments.ProviderStripe))
-	ok, why := srv.payments.Provider(payments.ProviderStripe).Ready(context.Background())
-	assert.False(t, ok)
+	st, why := srv.payments.Provider(payments.ProviderStripe).Ready(context.Background())
+	assert.Equal(t, payments.Unready, st)
 	assert.Contains(t, why, "STRIPE_SECRET_KEY")
 	assert.False(t, srv.flags.Enabled(flagPayStripe, ""), "pay_stripe defaults to a key being set")
 	assert.False(t, srv.flags.Enabled(flagPayBTCPay, ""))

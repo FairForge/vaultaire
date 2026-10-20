@@ -583,3 +583,19 @@ func TestDeletionRunner_ConfiguredProvider_CancelsTheRowsProvider(t *testing.T) 
 	assert.Equal(t, int32(1), f.stripe.calls.Load(), "a configured provider is asked to cancel even a prepaid row")
 	assert.True(t, res.Tenants[0].StripeCancelled)
 }
+
+// RP22-3: a subscription the webhook acknowledged as an invalid house sits
+// on tenants.stripe_subscription_id with no entitlement row; the runner
+// treats it as Stripe's, renewed by itself, and cancels it once per run.
+func TestCancelSubscription_RecordedInvalidHouse_CancelsOnce(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.exec(`UPDATE tenants SET stripe_subscription_id = 'sub_invalid_house', subscription_status = 'active' WHERE id = $1`, f.tenantID)
+	f.exec(`DELETE FROM entitlements WHERE tenant_id = $1`, f.tenantID)
+
+	var te TenantErasure
+	require.NoError(t, f.runner.cancelSubscription(context.Background(), f.tenantID, &te))
+
+	assert.Equal(t, int32(1), f.stripe.calls.Load())
+	assert.True(t, te.StripeCancelled)
+}
