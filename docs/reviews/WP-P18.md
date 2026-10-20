@@ -108,3 +108,75 @@ Deploys: #801 → `a8d5034` (deploy 13:51 UTC, success), #802 → `0a121b6` (13:
 - **RP20-A5** `DriverHedgesWinning{driver="idrive-us-midwest-1"}` is firing on prod since 13:33 UTC (13 alerts, not the expected 12): the region's probe hedge "wins" 100% because the dead iDrive key's region answers nothing in 2 s. Same root cause as the eleven `BackendProbeFailing{idrive*}` (the iDrive account, owner row); not touched here.
 - **RP20-A6** `internal/dashboard/handlers/r9_schema_test.go` leaves a head row (`test-r9-dash-…`, NULL backend) in its database; on a shared DB it makes the routing gauge test read 1 instead of 0. A cleanup in that test.
 - Carried unchanged: RP19-3..8, RP19-11..13, RP16-7/8/9, RP17-3/4/5/8, RP15-6 (owner rows).
+
+## Post-merge review (2026-10-20, meta)
+
+Adversarial pass over #801 and #802 against `docs/PAYMENTS.md`, the Stripe
+webhook contract (`internal/billing/CLAUDE.md`) and the code at `d825f39`.
+**Every claim above holds; no P0/P1. One P2 (RP20-4, proven with a throwaway
+test) and one P3 go to Prompt 19 Part 0.** CI, Security, CodeQL and Deploy
+green on every merge commit; the docs PR #803 merged; #804 (a lint-only test
+change) deployed after it, prod `/version` = `d825f39a5ff7`. #793 (the WP-P16
+post-merge PR) was found OPEN with auto-merge cleared a FOURTH time — updated
+and re-queued during this review.
+
+Verified in depth (beyond the session's own gates):
+
+- **One writer of a house (#802):** every `SetHouse`/`ClearHouse` caller is now
+  `payments.*` or the lapse job's heal; the dashboard's resize goes through
+  `payments.HouseWriter` (`server.go` `houseQuotas`); the dashboard's admin
+  quota and tier edits already refuse a house tenant (`tenants.go` `hasHouse`,
+  409), and no admin API writes `tenant_quotas` — so the nightly reconcile
+  cannot fight an operator's edit. `usage.QuotaManager.UpdateQuota` has no
+  caller at all (RP20-8).
+- **Lock order:** entitlement lock → `entitlements` row → `tenant_quotas` →
+  `tenant_floor_quotas`, the write path's order from `tenant_quotas` on; the
+  webhook holds the per-customer claim lock on one connection and takes the
+  entitlement lock on another — no cycle with any key/head/upload lock.
+- **Out-of-order Stripe events:** a late `invoice.payment_succeeded` after
+  `customer.subscription.deleted` fetches the subscription (`canceled`) and
+  writes the ledger only — no re-grant; the deleted handler keeps the
+  current-subscription guard before `Revoke`; `Grant` never shortens a date
+  (`GREATEST`) and a lapsed row takes the given date — both as the design says.
+- **Gapless numbering:** the counter row is updated inside the settle
+  transaction (`INSERT … ON CONFLICT DO UPDATE … RETURNING`): a waiter
+  re-evaluates against the committed row after a rollback, so numbers never
+  skip; the session's ten-concurrent test covers it.
+- **Erasure:** the three new rules sit in `Deleted` before the `tenants` DELETE
+  (the `ON DELETE SET NULL` would otherwise empty the `Kept` predicate);
+  `metadata - 'addresses' - 'txids'` is NULL-safe.
+- **Part 0 (#801):** the `MfaDelete` value check precedes `validateMFAHeader`
+  (nothing consumed); the MFA read error is `*mfaDeleteUnknownError` on both
+  reads and only a successful read's `!enabled` is the 403; the signature is
+  `t=,v1=` and nothing else; the lazy 0x05 chain reads span N's header in
+  `next()` and zeroes its key copy at the last span and on `Close`; the
+  parity job's `unknown_length` is pre-created at 0 and the candidate query
+  excludes `-mp` rows before any slot is taken.
+- **Prod (read-only, this review):** `entitlements` / `payments` /
+  `tenant_floor_quotas` / `webhook_endpoints` all 0 rows; every daily and
+  interval job's last outcome `ok` (`entitlement_lapse` 13:58 with the result
+  above); the 12 rule files sha256-equal to `main`; 12 alerts firing = the 11
+  `BackendProbeFailing{idrive*}` + `RoutingTruthNoVerdict{idrive}` (the
+  `DriverHedgesWinning` of RP20-A5 cleared with the deploy); 0 `"level":"error"`
+  lines since 13:50 UTC.
+
+New residuals:
+
+| # | Sev | Item | Where it goes |
+|---|---|---|---|
+| RP20-4 | **P2** | **An invalid house from Stripe is a three-day 500 storm.** `HouseFromSubscription` (`house.go:497`) sums item quantities and validates nothing; `payments.Grant` now refuses `pin_hot > std` (and migration 097's CHECK would too). A subscription an operator edits at Stripe into that shape (delete the Standard item, keep pin-hot) makes `applyHouse` return the error → 500, the claim rolls back, every retry fails the same way — **proven**: three deliveries of one `customer.subscription.created` with `vault_m 1 + pin_m 1` answered `[500 500 500]` and left no `stripe_events` row — until Stripe disables the endpoint after three days (the R10-45 class; before #802 `SetHouse` stored the bad house silently). Fix: a typed `payments.ErrInvalidOrder`; `applyHouse` answers it with 200 + one Error line + audit `billing.house_invalid` (+ a counter), never a retry; the house is left as it was. | Prompt 19 Part 0 |
+| RP20-5 | P3 | **The backfill ignores `cancel_at_period_end`**: `StripeService.SubscriptionPeriodEnd` returns the date only, so a pre-097 Stripe house whose renewal was stopped is backfilled `renewal = auto`; WP-PAY-3's reminders read `renewal`. Return the flag with the date. Prod has 0 floor rows. | Prompt 19 Part 0 |
+| RP20-6 | note | `payments.metadata.ids.customer` (the Stripe customer id) survives erasure — a stable key into Stripe's own record of the person; the privacy policy says the ledger is "de-linked". The invoice and subscription ids suffice for accounting; decide whether `ids.customer` joins `addresses`/`txids` at erasure. | WP-PAY-3 (the policy sentences) |
+| RP20-7 | note | Dunning vs grace: with `entitlement_lapse` ON a `past_due` house lapses 14 d after `current_period_start` while Stripe may still be retrying; a later `invoice.payment_succeeded` re-grants it (floors back, data untouched). Click-list item 5 — cancel after retries **within 14 d** — keeps the two aligned. | owner row |
+| RP20-8 | note | `usage.QuotaManager.UpdateQuota` (`quota_manager.go:194`) has no caller. Delete with WP-PAY-0. | WP-PAY-0 |
+| RP20-9 | note | One prod tenant is on a pack plan id: `Bench2` (`tenant-f4294518dc0a7a8f`), `tenants.plan = tenant_quotas.tier = 'vault100'`, 1 TiB limit, 2 MB used, no Stripe — set by the dashboard's tier handler. WP-PAY-0's Part 0 said "expected 0"; the tier label stays valid, only the pack checkout goes. | WP-PAY-0 Part 0 |
+| RP20-10 | note | 1,590 `backend health check failed` Warn lines in the 2 h after the deploy, all from the 11 dead iDrive drivers (the owner row): one Warn per probe per driver. One per state change would do. | — |
+
+Re-confirmed: RP20-A1 (a `manual` backfill lapses 2 × grace once the flag is
+on) is real but moot on prod (0 floor rows); RP20-A6 (the r9 dashboard test's
+leaked head row) is a one-line cleanup for Prompt 19 Part 0; RP20-3 (the
+Homebrew golangci-lint 2.4.0 that refuses the go1.26 module) is worth pinning
+in `.pre-commit-config.yaml` to CI's v2.14.0 so no worker commits `--no-verify`
+again. WP-PAY-0 (= WP-R10-4) has **not** run — `HandleUpgrade`,
+`registerStripePlans` and `metered.go` are still on `main` — and the drafted
+WP-PAY-2 assumes it; Prompt 19 runs WP-PAY-0 first.
