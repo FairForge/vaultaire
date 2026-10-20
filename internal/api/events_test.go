@@ -449,15 +449,14 @@ func TestGenerateWebhookSecret(t *testing.T) {
 	assert.NotEqual(t, secret, secret2)
 }
 
-func TestGenerateWebhookSignature(t *testing.T) {
+func TestWebhookSignature_Deterministic(t *testing.T) {
 	payload := []byte(`{"type":"object.created"}`)
-	sig := generateWebhookSignature(payload, "test-secret")
-	assert.True(t, len(sig) > 7)
-	assert.Equal(t, "sha256=", sig[:7])
+	at := time.Unix(1_800_000_000, 0)
+	sig := webhookSignature(payload, "test-secret", at)
 
-	sig2 := generateWebhookSignature(payload, "test-secret")
+	sig2 := webhookSignature(payload, "test-secret", at)
 	assert.Equal(t, sig, sig2, "same input must produce same signature")
 
-	sig3 := generateWebhookSignature(payload, "different-secret")
+	sig3 := webhookSignature(payload, "different-secret", at)
 	assert.NotEqual(t, sig, sig3, "different secret must produce different signature")
 }
