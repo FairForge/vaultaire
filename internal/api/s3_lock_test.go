@@ -166,6 +166,10 @@ func TestObjectLock_PutGetBucketConfig(t *testing.T) {
 	assert.Empty(t, resp.ObjectLockEnabled)
 	assert.Nil(t, resp.Rule)
 
+	// Object Lock goes on only with versioning Enabled (WP-R4-2 A.2).
+	_, err := f.db.Exec(`UPDATE buckets SET versioning_status = 'Enabled' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
+	require.NoError(t, err)
+
 	// PUT to enable with default GOVERNANCE retention of 30 days
 	body := `<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
 		<ObjectLockEnabled>Enabled</ObjectLockEnabled>

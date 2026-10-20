@@ -104,89 +104,74 @@ func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if config.MfaDelete == "Enabled" {
-		var objectLockEnabled bool
-		err := s.db.QueryRowContext(r.Context(),
-			`SELECT object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
-			t.ID, req.Bucket).Scan(&objectLockEnabled)
-		if errors.Is(err, sql.ErrNoRows) {
-			WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, generateRequestID())
-			return
-		}
-		if err != nil {
-			s.logger.Error("query object lock status", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		if !objectLockEnabled {
-			WriteS3Error(w, ErrInvalidBucketState, r.URL.Path, generateRequestID())
-			return
-		}
+	// The bucket's state (WP-R4-2, R4-10). A read that fails is a 503 +
+	// Retry-After, never a guess (RP16-5): whether the request needs a code
+	// depends on it.
+	var lockEnabled, mfaDelete bool
+	var versioning string
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT object_lock_enabled, mfa_delete_enabled, versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		t.ID, req.Bucket).Scan(&lockEnabled, &mfaDelete, &versioning)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.writeNoSuchBucket(w, r, t.ID, req.Bucket)
+		return
+	}
+	if err != nil {
+		unknown := &mfaDeleteUnknownError{err: fmt.Errorf("read bucket state of %s: %w", req.Bucket, err)}
+		s.logMFADeleteUnknown(unknown, req.Bucket)
+		writeMFADeleteRefusal(w, r, unknown)
+		return
+	}
 
+	// The second factor first: enabling or disabling MFA Delete carries
+	// x-amz-mfa (AWS: both), and so does a change of the versioning state
+	// while MFA Delete is on. A refusal is 403 before any state rule.
+	if config.MfaDelete != "" || (config.Status != "" && mfaDelete) {
 		if err := validateMFAHeader(r.Context(), s.auth, s.mfaService, t.ID, r); err != nil {
 			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
 			return
 		}
-
-		_, err = s.db.ExecContext(r.Context(),
-			`UPDATE buckets SET mfa_delete_enabled = TRUE, updated_at = NOW()
-			 WHERE tenant_id = $1 AND name = $2`,
-			t.ID, req.Bucket)
-		if err != nil {
-			s.logger.Error("enable mfa delete", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
 	}
 
-	if config.MfaDelete == "Disabled" {
-		if err := validateMFAHeader(r.Context(), s.auth, s.mfaService, t.ID, r); err != nil {
-			WriteS3Error(w, ErrAccessDenied, r.URL.Path, generateRequestID())
-			return
-		}
-
-		_, err := s.db.ExecContext(r.Context(),
-			`UPDATE buckets SET mfa_delete_enabled = FALSE, updated_at = NOW()
-			 WHERE tenant_id = $1 AND name = $2`,
-			t.ID, req.Bucket)
-		if err != nil {
-			s.logger.Error("disable mfa delete", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
+	// Then the state rules, each AWS's 409 InvalidBucketState:
+	//   - versioning cannot be suspended on a bucket with Object Lock;
+	//   - MFA Delete is gated on versioning Enabled — the request's Status
+	//     when it carries one ("you must include Status whenever you use
+	//     MfaDelete"), else the bucket's — never on the lock (R4-10: it was
+	//     gated on object_lock_enabled).
+	if config.Status == "Suspended" && lockEnabled {
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(), WithMessage(lockSuspendRefusal))
+		return
 	}
-
+	effective := versioning
 	if config.Status != "" {
-		if config.Status == "Suspended" {
-			// checkMFADelete reads the flag itself: its read failing is a
-			// 503, never "off" (RP16-5 — this pre-read discarded its error).
-			if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, t.ID, req.Bucket, r); err != nil {
-				s.logMFADeleteUnknown(err, req.Bucket)
-				writeMFADeleteRefusal(w, r, err)
-				return
-			}
-		}
+		effective = config.Status
+	}
+	if config.MfaDelete == "Enabled" && effective != "Enabled" {
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(), WithMessage(mfaDeleteNeedsVersioningRefusal))
+		return
+	}
 
-		result, err := s.db.ExecContext(r.Context(),
-			`UPDATE buckets SET versioning_status = $1, updated_at = NOW()
-			 WHERE tenant_id = $2 AND name = $3`,
-			config.Status, t.ID, req.Bucket)
-		if err != nil {
-			s.logger.Error("update versioning status", zap.Error(err))
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
-			return
-		}
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			reqID := generateRequestID()
-			if suggestion := bucketSuggestion(r.Context(), s.db, t.ID, req.Bucket); suggestion != "" {
-				WriteS3ErrorWithContext(w, ErrNoSuchBucket, r.URL.Path, reqID, WithSuggestion(suggestion))
-			} else {
-				WriteS3Error(w, ErrNoSuchBucket, r.URL.Path, reqID)
-			}
-			return
-		}
-
+	// One write for both elements.
+	var newMFA sql.NullBool
+	if config.MfaDelete != "" {
+		newMFA = sql.NullBool{Bool: config.MfaDelete == "Enabled", Valid: true}
+	}
+	var newStatus sql.NullString
+	if config.Status != "" {
+		newStatus = sql.NullString{String: config.Status, Valid: true}
+	}
+	_, err = s.db.ExecContext(r.Context(),
+		`UPDATE buckets SET mfa_delete_enabled = COALESCE($1, mfa_delete_enabled),
+		        versioning_status = COALESCE($2, versioning_status), updated_at = NOW()
+		 WHERE tenant_id = $3 AND name = $4`,
+		newMFA, newStatus, t.ID, req.Bucket)
+	if err != nil {
+		s.logger.Error("update versioning configuration", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if config.Status != "" {
 		s.logger.Info("versioning status updated",
 			zap.String("tenant_id", t.ID),
 			zap.String("bucket", req.Bucket),

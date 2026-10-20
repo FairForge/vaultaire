@@ -136,14 +136,29 @@ Behaviour worth knowing before writing code against it:
   `BypassGovernanceRetention` permission. An STS token bypasses only when its
   request named that permission and its parent could; a presigned URL carries
   its signer's scope, and the flag counts only where the signature covers it.
-  MFA Delete is available on lock-enabled buckets (`x-amz-mfa` TOTP). On
-  such a bucket every delete needs the code — a single `DELETE` of any
-  flavour and a `DeleteObjects` batch (one code for the whole batch; without
-  it the batch is 403 `AccessDenied` and nothing is deleted). AWS gates only
-  versioned deletes; ours is the stricter rule. When the bucket's MFA
+  MFA Delete (`x-amz-mfa` = `<serial> <TOTP code>` of the account's second
+  factor) is enabled and disabled through `PutBucketVersioning`, as on AWS:
+  `MfaDelete=Enabled` needs versioning `Enabled` (in the same request's
+  `Status` or already on the bucket; 409 `InvalidBucketState` otherwise)
+  and the header; `MfaDelete=Disabled` needs the header too. On an MFA
+  Delete bucket every delete needs the code — a single `DELETE` of any
+  flavour, a `DeleteObjects` batch (one code for the whole batch; without
+  it the batch is 403 `AccessDenied` and nothing is deleted) and a change
+  of the versioning state. AWS gates only versioned deletes; ours is the
+  stricter rule. A code is accepted once: the same `x-amz-mfa` on a second
+  request inside the validator's window is 403. When the bucket's MFA
   Delete setting cannot be read (a database outage), a delete and a
-  versioning suspend answer 503 `ServiceUnavailable` with `Retry-After` —
+  versioning change answer 503 `ServiceUnavailable` with `Retry-After` —
   never "MFA Delete off".
+- **The bucket state machine** (as AWS's API): Object Lock goes on through
+  `PutObjectLockConfiguration` only on a bucket whose versioning is
+  `Enabled` (409 `InvalidBucketState` "Versioning must be 'Enabled' on the
+  bucket to apply a Object Lock configuration" otherwise — turn versioning
+  on first, as the AWS console does for you) and never off again; on a
+  bucket with Object Lock, `PutBucketVersioning Suspended` is 409
+  `InvalidBucketState` ("An Object Lock configuration is present on this
+  bucket, so the versioning state cannot be changed."). Object-level
+  retention and legal holds are enforced whatever the bucket's flags say.
 - **Object Lock at creation.** `CreateBucket` with
   `x-amz-bucket-object-lock-enabled: true` (aws-cli
   `--object-lock-enabled-for-bucket`) creates the bucket with Object Lock on

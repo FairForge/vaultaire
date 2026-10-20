@@ -80,9 +80,34 @@ func validateMFAHeader(ctx context.Context, authSvc *auth.AuthService,
 	if !mfaSvc.ValidateCode(secret, code) {
 		return errMFARequired
 	}
+	// A code is accepted once (RFC 6238 §5.2; WP-R4-2 A.4): the dashboard's
+	// guard, shared — keyed by the tenant's user, every code accepted inside
+	// the validator's window remembered (R12-38: a guard that kept only the
+	// latest let an adjacent step's code be replayed).
+	if !authSvc.ConsumeTOTPCode(userID, code) {
+		return errMFARequired
+	}
 
 	return nil
 }
+
+// The bucket state machine's refusals (WP-R4-2, R4-10), each 409
+// InvalidBucketState with the sentence AWS answers:
+const (
+	// lockSuspendRefusal: PutBucketVersioning Suspended on a bucket with
+	// Object Lock ("After you enable Object Lock on a bucket, you can't
+	// disable Object Lock or suspend versioning for that bucket" —
+	// Configuring Object Lock, the user guide).
+	lockSuspendRefusal = "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed."
+	// lockNeedsVersioningRefusal: PutObjectLockConfiguration
+	// ObjectLockEnabled=Enabled on a bucket whose versioning is not Enabled
+	// ("Object Lock works only with versioned buckets").
+	lockNeedsVersioningRefusal = "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration"
+	// mfaDeleteNeedsVersioningRefusal: MfaDelete=Enabled without versioning
+	// Enabled — the request's Status or the bucket's (MFA delete lives in
+	// the versioning subresource; Configuring MFA delete, the user guide).
+	mfaDeleteNeedsVersioningRefusal = "MFA Delete requires versioning to be Enabled on the bucket."
+)
 
 // mfaDeleteRetryAfter is the Retry-After of a 503 for an MFA Delete flag
 // that could not be read.
