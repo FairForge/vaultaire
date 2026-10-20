@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stripe/stripe-go/v75"
 	"github.com/stripe/stripe-go/v75/webhook"
@@ -419,6 +420,11 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "active"); err != nil {
 		return tenantID, err
 	}
+	// The ledger row, and the house extended to the subscription's period
+	// end (WP-PAY-1).
+	if err := h.recordInvoicePaid(ctx, event, tenantID, &inv); err != nil {
+		return tenantID, err
+	}
 
 	h.logger.Info("payment succeeded",
 		zap.String("tenant", tenantID),
@@ -452,6 +458,9 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 	// for past_due) while Stripe's Smart Retries run; the dashboard's
 	// "after retries" setting then delivers canceled/unpaid, which clears it.
 	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "past_due"); err != nil {
+		return tenantID, err
+	}
+	if err := h.recordInvoiceFailed(ctx, tenantID, &inv); err != nil {
 		return tenantID, err
 	}
 
@@ -574,21 +583,37 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 	return tenantID, err
 }
 
-// applyHouse turns a house subscription into floor quotas. handled is false
-// when the subscription is not a house (legacy pack) or nothing is wired;
-// a non-nil error means the event must be retried.
+// applyHouse turns a house subscription into floor quotas and, in the same
+// transaction, the entitlement record (WP-PAY-1, docs/PAYMENTS.md § 1.4):
+// what the tenant bought, paid through which date. handled is false when the
+// subscription is not a house (legacy pack) or nothing is wired; a non-nil
+// error means the event must be retried.
 //
-//	active / trialing / past_due     → the house is granted (past_due = grace)
+//	active / trialing                → granted, paid_through = current_period_end
+//	                                   (a trial is paid through its end)
+//	past_due                         → granted (grace), paid_through = current_period_START:
+//	                                   Stripe moved the period on when it raised the
+//	                                   renewal invoice, and nothing was paid for it
 //	canceled / unpaid / expired /
-//	paused                           → the house is cleared, data untouched
+//	paused                           → the house is cleared, data untouched; the
+//	                                   entitlement is marked lapsed and its renewal
+//	                                   'prepaid' (this branch moves behind the
+//	                                   entitlement_lapse flag in WP-PAY-2)
 //	incomplete                       → no change (first payment pending)
 //
-// paused (WP-R10-2): a trial that ended without a payment method — Stripe
-// creates no invoice while it lasts, so nothing is being paid; it is
-// resumable, like unpaid, which is why HasLiveSubscription counts both.
+// A grant never shortens a date (payments.Grant), so a stale event cannot
+// take paid time away. paused (WP-R10-2): a trial that ended without a
+// payment method — Stripe creates no invoice while it lasts, so nothing is
+// being paid; it is resumable, like unpaid, which is why HasLiveSubscription
+// counts both.
 //
 // A clearing status is honoured only for the tenant's current subscription
 // so a stale, older subscription's events cannot take a paid house away.
+//
+// The writes run in a transaction of their own beside the held claim (a
+// second pooled connection, as the handlers' other queries): the claim's
+// per-customer lock already serialises the customer's events, and the
+// entitlement lock (payments.Lock) the tenant's grants.
 func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *stripe.Subscription) (bool, error) {
 	order, ok := h.stripe.HouseFromSubscription(sub)
 	if !ok || h.quotas == nil || h.stripe.db == nil {
@@ -596,20 +621,29 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 	}
 	switch sub.Status {
 	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue:
-		if err := h.quotas.SetHouse(ctx, tenantID, usage.HouseFromTB(order.Std, order.Vault, order.PinHot)); err != nil {
-			return true, fmt.Errorf("set house quotas for tenant %s: %w", tenantID, err)
+		paidThrough := h.paidThrough(sub)
+		renewal := payments.RenewalAuto
+		if sub.CancelAtPeriodEnd {
+			renewal = payments.RenewalPrepaid // nobody will extend it
 		}
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants
-			    SET stripe_subscription_id = $1, subscription_status = $2, plan = 'house', house_period = $3
-			  WHERE id = $4`,
-			sub.ID, string(sub.Status), string(order.Period), tenantID); err != nil {
-			return true, fmt.Errorf("save house subscription for tenant %s: %w", tenantID, err)
+		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+			if err := payments.Grant(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx,
+				`UPDATE tenants
+				    SET stripe_subscription_id = $1, subscription_status = $2, plan = 'house', house_period = $3
+				  WHERE id = $4`,
+				sub.ID, string(sub.Status), string(order.Period), tenantID)
+			return err
+		}); err != nil {
+			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}
 		h.logger.Info("house granted",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID),
 			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot),
-			zap.String("period", string(order.Period)), zap.String("status", string(sub.Status)))
+			zap.String("period", string(order.Period)), zap.String("status", string(sub.Status)),
+			zap.Time("paid_through", paidThrough), zap.String("renewal", string(renewal)))
 	case stripe.SubscriptionStatusCanceled, stripe.SubscriptionStatusUnpaid, stripe.SubscriptionStatusIncompleteExpired,
 		stripe.SubscriptionStatusPaused:
 		current, err := h.isCurrentSubscription(ctx, tenantID, sub.ID)
@@ -621,18 +655,47 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
 			return true, nil
 		}
-		if err := h.quotas.ClearHouse(ctx, tenantID); err != nil {
-			return true, fmt.Errorf("clear house quotas for tenant %s: %w", tenantID, err)
-		}
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants SET subscription_status = $1, house_period = '' WHERE id = $2`,
-			string(sub.Status), tenantID); err != nil {
-			return true, fmt.Errorf("save cleared house for tenant %s: %w", tenantID, err)
+		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+			if err := clearHouseTx(ctx, tx, tenantID); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx,
+				`UPDATE tenants SET subscription_status = $1, house_period = '' WHERE id = $2`,
+				string(sub.Status), tenantID)
+			return err
+		}); err != nil {
+			return true, fmt.Errorf("clear house for tenant %s: %w", tenantID, err)
 		}
 		h.logger.Warn("house cleared — back to the free tier, data untouched",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 	}
 	return true, nil
+}
+
+// clearHouseTx is the clearing branch's write: the floors cleared and the
+// entitlement marked lapsed (payments.Revoke), renewal stopped.
+func clearHouseTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	if err := payments.Revoke(ctx, tx, tenantID); err != nil {
+		return err
+	}
+	return payments.StopRenewal(ctx, tx, tenantID)
+}
+
+// paidThrough is the date a granting status pays the house through: the end
+// of Stripe's current period, or its start while past_due (the period
+// Stripe moved on to is unpaid). A subscription with no period on record
+// (never seen from Stripe) is paid through now — grace starts at once.
+func (h *WebhookHandler) paidThrough(sub *stripe.Subscription) time.Time {
+	at := sub.CurrentPeriodEnd
+	if sub.Status == stripe.SubscriptionStatusPastDue {
+		at = sub.CurrentPeriodStart
+	}
+	if at <= 0 {
+		h.logger.Warn("stripe subscription carries no period — paid through now",
+			zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
+		return time.Now().UTC()
+	}
+	return time.Unix(at, 0).UTC()
 }
 
 // isCurrentSubscription reports whether subID is the tenant's recorded
@@ -688,9 +751,10 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 		}
 	}
 
-	// A house: floor quotas go, data stays.
-	if _, isHouse := h.stripe.HouseFromSubscription(&sub); isHouse && h.quotas != nil {
-		if err := h.quotas.ClearHouse(ctx, tenantID); err != nil {
+	// A house: floor quotas go, data stays; the entitlement is marked lapsed
+	// and nobody renews it (WP-PAY-1).
+	if _, isHouse := h.stripe.HouseFromSubscription(&sub); isHouse && h.quotas != nil && h.stripe.db != nil {
+		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error { return clearHouseTx(ctx, tx, tenantID) }); err != nil {
 			return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
 		}
 	}

@@ -360,3 +360,41 @@ func TestEraseRows_OperatorErasureKeepsTheOperatorTrail(t *testing.T) {
 	assert.True(t, nb.ip.Valid, "another operator's row keeps its IP")
 	assert.NotContains(t, nb.metadata, "actor_erased")
 }
+
+// WP-PAY-1: the payments ledger is an accounting record — the rows stay with
+// their amounts, period and receipt number, the link to the account, the
+// crypto addresses and transaction ids and the note go; the provider's own
+// ids stay. The entitlement goes; payment_events lose their tenant.
+func TestEraseRows_PaymentsAnonymisedNotDeleted(t *testing.T) {
+	f := setupEraseFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	pid := "in_erase_" + f.suffix
+	f.exec(`INSERT INTO entitlements (tenant_id, std_tb, period, paid_through, renewal, provider) VALUES ($1, 1, 'monthly', NOW(), 'auto', 'stripe')`, f.tenantID)
+	f.exec(`INSERT INTO payments (tenant_id, provider, provider_id, kind, purpose, status, amount_cents, invoice_number, note, metadata)
+	        VALUES ($1, 'btcpay', $2, 'charge', 'new', 'settled', 499, $3, 'paid from the cold wallet',
+	                '{"ids": {"invoice": "inv_1"}, "addresses": ["bc1qexample"], "txids": ["abc123"]}')`, f.tenantID, pid, "ST-1999-"+f.suffix[:6])
+	f.exec(`INSERT INTO payment_events (provider, event_id, event_type, tenant_id, data) VALUES ('btcpay', $1, 'InvoiceSettled', $2, '{}')`, "dlv_"+f.suffix, f.tenantID)
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM payments WHERE provider_id = $1`, pid)
+		_, _ = f.db.Exec(`DELETE FROM payment_events WHERE event_id = $1`, "dlv_"+f.suffix)
+	})
+
+	_, err := f.svc.EraseRows(context.Background(), f.userID, f.tenantID, f.email, time.Now())
+	require.NoError(t, err)
+
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM entitlements WHERE tenant_id = $1`, f.tenantID))
+	var tenant, note sql.NullString
+	var meta []byte
+	var amount int64
+	var number string
+	require.NoError(t, f.db.QueryRow(`SELECT tenant_id, note, metadata, amount_cents, invoice_number FROM payments WHERE provider_id = $1`, pid).
+		Scan(&tenant, &note, &meta, &amount, &number))
+	assert.False(t, tenant.Valid, "no link to the erased account")
+	assert.False(t, note.Valid, "the note is dropped")
+	assert.JSONEq(t, `{"ids": {"invoice": "inv_1"}}`, string(meta), "addresses and txids dropped, provider ids kept")
+	assert.Equal(t, int64(499), amount, "the accounting record stays")
+	assert.Equal(t, "ST-1999-"+f.suffix[:6], number)
+	var evTenant sql.NullString
+	require.NoError(t, f.db.QueryRow(`SELECT tenant_id FROM payment_events WHERE event_id = $1`, "dlv_"+f.suffix).Scan(&evTenant))
+	assert.False(t, evTenant.Valid)
+}

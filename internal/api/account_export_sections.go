@@ -74,6 +74,7 @@ var exportExcludedTables = map[string]string{
 	"cdn_access_log":    "public-link visitor log (2-day retention): the visitors' data, not the customer's",
 	"cdn_stats_daily":   "aggregate of public-link visitors, not the customer's personal data",
 	"stripe_events":     "payment-provider event bodies (90-day retention), the processor's records",
+	"payment_events":    "payment-provider event bodies (90-day retention), the processor's records (WP-PAY-1); what was paid is in `payments`",
 	"idempotency_cache": "24-hour request cache",
 	// credentials and key material
 	"sts_tokens":             "temporary credentials (secret_key); expire within hours",
@@ -377,7 +378,23 @@ const (
 		  FROM tenant_quotas WHERE tenant_id = $1`
 	sqlExportQuotaFloors = `SELECT floor, storage_limit_bytes, storage_used_bytes, updated_at FROM tenant_floor_quotas WHERE tenant_id = $1 ORDER BY floor`
 	sqlExportHouse       = `SELECT intent_std_tb AS standard_tb, intent_vault_tb AS vault_tb, intent_room AS room, house_period AS period FROM tenants WHERE id = $1`
-	sqlExportBuckets     = `
+	// The entitlement record (WP-PAY-1): what the tenant bought and until
+	// when, and every money event of the ledger (the operator's actor column
+	// is not the customer's).
+	sqlExportEntitlement = `
+		SELECT std_tb AS standard_tb, vault_tb, pin_hot_tb, period, paid_through, renewal, provider,
+		       next_std_tb AS next_standard_tb, next_vault_tb, next_pin_hot_tb, next_period, lapsed_at, created_at, updated_at
+		  FROM entitlements WHERE tenant_id = $1`
+	sqlExportPayments = `
+		SELECT id::text AS id, provider, provider_id, kind, purpose, status, amount_cents, credit_cents,
+		       crypto_amount, crypto_currency, rate, period_start, period_end,
+		       std_tb AS standard_tb, vault_tb, pin_hot_tb, period, invoice_number, refund_of::text AS refund_of,
+		       note, metadata, created_at, settled_at
+		  FROM payments
+		 WHERE tenant_id = $1 AND ($2::timestamptz IS NULL OR (created_at, id::text) > ($2::timestamptz, $3::text))
+		 ORDER BY created_at, id::text
+		 LIMIT $4`
+	sqlExportBuckets = `
 		SELECT name, visibility, region, data_residency, versioning_status AS versioning, object_lock_enabled,
 		       default_retention_mode, default_retention_days, mfa_delete_enabled, sse_enabled,
 		       cors_origins, cors_rules, cache_max_age_secs, bandwidth_budget_bytes, cdn_force_download, tier_preference,
@@ -514,6 +531,22 @@ var exportSections = []exportSection{
 			}
 			j.field("quota", map[string]any{"totals": totals, "floors": floors, "house": house})
 			return nil
+		}},
+	{Name: "entitlement", Tables: []string{"entitlements"}, SQL: []string{sqlExportEntitlement},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
+			row, err := oneRow(ctx, db, sqlExportEntitlement, sub.TenantID)
+			if err != nil {
+				return err
+			}
+			j.field("entitlement", row)
+			return nil
+		}},
+	{Name: "payments", Tables: []string{"payments"}, SQL: []string{sqlExportPayments},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, pageSize int) error {
+			return j.array("payments", func(emit func(any)) error {
+				return streamPaged(ctx, db, emit, nil, sqlExportPayments, []any{sub.TenantID}, []any{nil, nil}, pageSize,
+					func(r map[string]any) []any { return []any{r["created_at"], r["id"]} })
+			})
 		}},
 	{Name: "buckets", Tables: []string{"buckets"}, SQL: []string{sqlExportBuckets},
 		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {

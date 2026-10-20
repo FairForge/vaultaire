@@ -34,6 +34,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/sitestats"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -132,6 +133,9 @@ type Server struct {
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
 	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
 	synthetic          *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
+	// entitlementLapse is the entitlement_lapse job (WP-PAY-1,
+	// entitlement_lapse.go); nil without a database.
+	entitlementLapse *EntitlementLapseRunner
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -394,6 +398,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.routingTruth.initSeries()
 	}
 
+	// The entitlement record's daily job (WP-PAY-1): backfill, lapse (flag
+	// entitlement_lapse, default OFF = count only), reconcile. Grace:
+	// ENTITLEMENT_GRACE (14 d). The Stripe read of the backfill is wired
+	// with the Stripe service below.
+	s.entitlementLapse = NewEntitlementLapseRunner(s.db, s.flags, logger, payments.GraceFromEnv(os.Getenv, logger))
+
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
 	// quota on the hot backend, flag-gated per tenant (smart_demotion,
 	// default OFF). Env knobs override the defaults for the whole runner.
@@ -562,8 +572,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		} else {
 			logger.Info("house checkout dormant (STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY} not all set)")
 		}
-		if hq, ok := s.quotaManager.(billing.HouseQuotas); ok && s.webhookHandler != nil {
+		if hq := houseQuotas(s.quotaManager, s.db); hq != nil && s.webhookHandler != nil {
 			s.webhookHandler.SetHouseQuotas(hq)
+		}
+		if s.entitlementLapse != nil {
+			s.entitlementLapse.Stripe = s.stripe
 		}
 
 		logger.Info("stripe billing service initialized")
@@ -890,7 +903,7 @@ func (s *Server) setupRoutes() {
 		Engine:          s.engine,
 		HealthChecker:   &healthCheckerAdapter{s.healthChecker},
 		Flags:           s.flags,
-		Quotas:          houseQuotas(s.quotaManager),
+		Quotas:          houseQuotas(s.quotaManager, s.db),
 		Account:         s.accountSvc,
 		Exports:         dashboardExports(s.accountExports),
 		Egress:          s.egress,
@@ -1108,13 +1121,15 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		zap.String("tenant_id", tenant.ID))
 }
 
-// houseQuotas returns the quota manager as the dashboard's house-quota
-// writer, or a nil interface when it cannot (nil manager, no database).
-func houseQuotas(qm QuotaManager) billing.HouseQuotas {
-	if hq, ok := qm.(billing.HouseQuotas); ok {
-		return hq
+// houseQuotas returns the house writer of the webhook and the dashboard's
+// resize, or a nil interface when there is none (no quota manager, no
+// database). Since WP-PAY-1 it is payments.HouseWriter: the floors and the
+// entitlement record are written in one transaction on every path.
+func houseQuotas(qm QuotaManager, db *sql.DB) billing.HouseQuotas {
+	if _, ok := qm.(billing.HouseQuotas); !ok || db == nil {
+		return nil
 	}
-	return nil
+	return payments.NewHouseWriter(db)
 }
 
 // registerStripePlans loads plan definitions from environment variables.

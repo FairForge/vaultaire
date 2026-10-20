@@ -235,6 +235,9 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		// The outbox is a webhook delivery record too (WP-R11-3): the
 		// policy's "webhook delivery records, 30 days".
 		"webhook_outbox": 30 * 24 * time.Hour,
+		// The other providers' webhook bodies (WP-PAY-1): "payment-provider
+		// event records, 90 days".
+		"payment_events": 90 * 24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {
@@ -246,6 +249,7 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 			assert.Equal(t, retentionDelete, p.Action, p.Table)
 		}
 		assert.NotEqual(t, "audit_logs", p.Table)
+		assert.NotEqual(t, "payments", p.Table, "the ledger is an accounting record: never pruned")
 	}
 	assert.Equal(t, want, got)
 }

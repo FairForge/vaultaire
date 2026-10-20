@@ -301,6 +301,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"retention":           "daily 03:30 UTC",
 		"routing_truth":       "daily 05:30 UTC",
 		"smart_demotion":      "daily 06:30 UTC",
+		"entitlement_lapse":   "daily 07:30 UTC",
 		"multipart_reaper":    "every 1h0m0s",
 		"cdn_rollup":          "every 1h0m0s",
 		"idempotency_cleanup": "every 1h0m0s",

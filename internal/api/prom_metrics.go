@@ -5,6 +5,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/packstore"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"net/http"
 	"sort"
 	"sync/atomic"
@@ -103,6 +104,13 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(clientBodyErrors)
 		// Bucket creations refused for their region (Prompt 10 Part A).
 		reg.MustRegister(regionCreateRefused)
+		// The entitlement record (WP-PAY-1): ledger writes, houses the lapse
+		// job cleared, and — from the table — houses by when they expire.
+		reg.MustRegister(payments.Collectors()...)
+		reg.MustRegister(entitlementsLapsed)
+		if s.db != nil {
+			reg.MustRegister(newEntitlementsExpiringCollector(s.db, s.log()))
+		}
 		if b := s.largeGet.budget; b != nil {
 			reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "vaultaire_large_get_budget_bytes_in_use",

@@ -72,6 +72,12 @@ const (
 	// never depend on it: a chunked version written while it was on reads
 	// after it goes off. Checked in decidePlacement.
 	flagVersionedChunking = "versioned_chunking"
+
+	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
+	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
+	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
+	// also moves the Stripe webhook's clearing branch behind it.
+	flagEntitlementLapse = "entitlement_lapse"
 )
 
 // registerFlags registers every flag with its in-code default.
@@ -86,6 +92,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagSyncBackend, false)
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagParallelGet, false)
+	fl.Register(flagEntitlementLapse, false)
 }
 
 // syncPlacementGate is resolvePutStorageClass's `sync_backend` check; nil

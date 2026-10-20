@@ -77,6 +77,10 @@ func defaultRetentionPolicies() []retentionPolicy {
 		{Table: "events", Column: "created_at", MaxAge: retentionEvents},
 		{Table: "quota_usage_events", Column: `"timestamp"`, MaxAge: retentionQuotaEvents},
 		{Table: "stripe_events", Column: "processed_at", MaxAge: retentionStripeEvents},
+		// Every other provider's webhook bodies (WP-PAY-1): the privacy
+		// policy's "payment-provider event records, 90 days". The payments
+		// ledger itself is an accounting record and is never pruned.
+		{Table: "payment_events", Column: "received_at", MaxAge: retentionStripeEvents},
 		{Table: "cdn_access_log", Column: "accessed_at", MaxAge: retentionCDNAccessLog},
 		{Table: "webhook_deliveries", Column: "created_at", MaxAge: retentionWebhookDeliv},
 		// The outbox (WP-R11-3): a row is terminal within ~3 minutes of its
