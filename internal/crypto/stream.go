@@ -21,6 +21,7 @@ package crypto
 //	segment_i = AES-256-GCM(DEK, nonce_i, aad, plaintext_i)  (ct ‖ tag 16)
 //	aad      = 0x04: header ‖ "vaultaire-sse-identity-v4" ‖ len‖tenant ‖ len‖bucket ‖ len‖key (len u32 BE)
 //	           0x03: header
+//	(a part sealed at UploadPart, WP-SSEC-1: the 0x04 AAD ‖ "vaultaire-sse-part-v5" ‖ part u32 BE — ssec_multipart.go)
 //	nonce_i  = nonce_prefix(7) ‖ i (u32 BE) ‖ last (0x01 on the final segment, else 0x00)
 //
 // The two formats differ only in their first byte and their AAD: a 0x04
@@ -127,6 +128,9 @@ const (
 	// streamIdentityLabel separates the header from the identity in a 0x04
 	// AAD.
 	streamIdentityLabel = "vaultaire-sse-identity-v4"
+	// streamPartLabel precedes the part number in the AAD of a part's
+	// stream (WP-SSEC-1 B.1).
+	streamPartLabel = "vaultaire-sse-part-v5"
 )
 
 // IsStreamFormat reports whether b is the first byte of a streaming blob
@@ -138,6 +142,10 @@ func IsStreamFormat(b byte) bool { return b == StreamFormat || b == StreamFormat
 // re-addressed or re-encrypted blob of the key keeps its identity).
 type StreamIdentity struct {
 	Tenant, Bucket, Key string
+	// Part is the part number (1-based) a stream sealed at UploadPart is
+	// bound to (WP-SSEC-1 B.1): part 3's stream cannot be presented as
+	// part 2. 0 = the whole object; its AAD is unchanged.
+	Part int
 }
 
 // ErrStreamIdentity is a seal, or an open of a 0x04 blob, without a whole
@@ -157,11 +165,17 @@ func streamAAD(header []byte, id StreamIdentity) []byte {
 	if len(header) == 0 || header[0] != StreamFormat {
 		return header
 	}
-	aad := make([]byte, 0, len(header)+len(streamIdentityLabel)+12+len(id.Tenant)+len(id.Bucket)+len(id.Key))
+	aad := make([]byte, 0, len(header)+len(streamIdentityLabel)+12+len(id.Tenant)+len(id.Bucket)+len(id.Key)+len(streamPartLabel)+4)
 	aad = append(append(aad, header...), streamIdentityLabel...)
 	for _, f := range []string{id.Tenant, id.Bucket, id.Key} {
 		aad = binary.BigEndian.AppendUint32(aad, uint32(len(f))) // #nosec G115 -- names are far below 4 GiB
 		aad = append(aad, f...)
+	}
+	if id.Part > 0 {
+		// A part's stream: the part number after the identity (B.1). A
+		// whole object's AAD is exactly what it was.
+		aad = append(aad, streamPartLabel...)
+		aad = binary.BigEndian.AppendUint32(aad, uint32(id.Part)) // #nosec G115 -- parts are ≤ 10,000
 	}
 	return aad
 }
