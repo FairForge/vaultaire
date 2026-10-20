@@ -65,7 +65,14 @@ retirement (WP-R2-1 Part C) working as designed, not a leak.
    **478 MB/s** (28 GB — the cell was skipped for the other regions, see §6).
 6. **Prod under the load**: 0 error lines, 0 client-body errors, 20/20 healthy, no breaker
    moved. The ingest cells ran against the live primary with the bench tenant alone.
-7. **Tool gotchas, fixed in the run log (§6) and worth a small PR**: `bench-compare`
+7. **Open question for the next prompt:** after the run every `vaultaire_large_get_streams_total`
+   and `_fallbacks_total` series on the active slot read 0 — including `path="chunked"`,
+   though the chunked 256 MiB reads certainly happened — so whether the parallel reader
+   took the Paris and Frankfurt multipart reads cannot be told from the counters. Either
+   the counters are not wired to these paths or the flag row was not seen; a lab check
+   with the flag on and the counter watched is the first step before blaming the backend
+   alone for the 3 MB/s.
+8. **Tool gotchas, fixed in the run log (§6) and worth a small PR**: `bench-compare`
    treats iDrive as a fixed-bucket endpoint and prints "✓ bucket" without a HeadBucket, so
    a bucket that does not exist gives a run of NoSuchBucket errors with no obvious cause;
    `ingestbench` caps a run at 1 GiB by default (`-max-mb`), which ends a 32-worker run in
