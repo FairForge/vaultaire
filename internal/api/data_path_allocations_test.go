@@ -49,6 +49,11 @@ var allocationSites = map[string]string{
 	"drivers/webdav.go:replayableBody":       "per PUT ≤ 8 MiB: the Sync bridge's retryable bodies (webdav_resilience.go)",
 	"drivers/onedrive.go:newODChunkBuffer":   "per upload in flight: one 60 MiB Graph upload fragment (permafrost, the fleet's chunk size), pooled (odChunkPool) — no process budget: permafrost is written only by the vault parity job (one protect at a time; WP-R7-4)",
 	"drivers/onedrive.go:fetchRange":         "per GET ≤ odAdaptiveStreams × 8 MiB (64 MiB): permafrost's ordered ranges through parfetch's window (WP-R7-4, R7-07: every range was read whole before)",
+	// The unknown-length spool of Geyser, the fixed-bucket S3 driver and
+	// permafrost (RP17-2): rare on the data path — every S3 PUT carries its
+	// length; the Vault writes pass it (WP-R7-2).
+	"drivers/geyser.go:materializeSpool": "per unknown-length PUT: one 64 MiB spool, allocated once (it was a bytes.Buffer grown to ~256 MiB), then the temp file; a body under 1 MiB never takes it",
+	"drivers/geyser.go:materialize":      "per unknown-length PUT: the 1 MiB probe (materializeProbe)",
 	// The S3 uploader (idrive, lyve, wasabi, r2, s3compat): bounded per
 	// request, unbounded in number — the WP-R2-6 residual named in WP-P14.
 	"drivers/s3upload.go:putSinglePartIfSmall": "per PUT ≤ 16 MiB (a body of one part), and the manager's 8 × 16 MiB parts above it: no process budget — residual (WP-P14)",

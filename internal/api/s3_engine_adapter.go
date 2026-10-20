@@ -420,15 +420,20 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	var cachedFloor string
 	var cachedStorageKey string
 	var cachedBodyMD5, cachedSSECKeyMD5 string // what the row knows about its bytes (094)
+	var lockMode string                        // the key's lock row (RP17-1), joined
+	var lockUntil sql.NullTime
+	var legalHold sql.NullBool
 	var cacheHit bool
 	if a.db != nil {
 		err := a.db.QueryRowContext(r.Context(), `
-			SELECT content_type, size_bytes, etag, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), is_chunked, floor, COALESCE(storage_key, ''),
-			       COALESCE(body_md5, ''), COALESCE(ssec_key_md5, '')
-			FROM object_head_cache
-			WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+			SELECT h.content_type, h.size_bytes, h.etag, h.updated_at, COALESCE(h.metadata, '{}'), COALESCE(h.backend_name, ''), COALESCE(h.encryption_algorithm, ''), COALESCE(h.tags, '{}'), COALESCE(h.content_disposition, ''), COALESCE(h.content_encoding, ''), COALESCE(h.content_language, ''), COALESCE(h.cache_control, ''), COALESCE(h.http_expires, ''), COALESCE(h.website_redirect_location, ''), h.is_chunked, h.floor, COALESCE(h.storage_key, ''),
+			       COALESCE(h.body_md5, ''), COALESCE(h.ssec_key_md5, ''),
+			       `+objectLockColumns+`
+			FROM object_head_cache h
+			LEFT JOIN object_locks l ON l.tenant_id = h.tenant_id AND l.bucket = h.bucket AND l.object_key = h.object_key
+			WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
 			t.ID, bucket, artifact).Scan(&cachedContentType, &cachedSize, &cachedETag, &cachedUpdatedAt, &cachedMetadata, &cachedBackendName, &cachedEncAlgo, &cachedTags, &cachedContentDisposition, &cachedContentEncoding, &cachedContentLanguage, &cachedEcho.CacheControl, &cachedEcho.Expires, &cachedEcho.WebsiteRedirect, &cachedIsChunked, &cachedFloor, &cachedStorageKey,
-			&cachedBodyMD5, &cachedSSECKeyMD5)
+			&cachedBodyMD5, &cachedSSECKeyMD5, &lockMode, &lockUntil, &legalHold)
 		switch {
 		case err == nil:
 			cacheHit = true
@@ -525,6 +530,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		TagCount: tagCount(cachedTags), Disposition: disposition, Encoding: cachedContentEncoding, Language: cachedContentLanguage,
 		CacheControl: cachedEcho.CacheControl, Expires: cachedEcho.Expires, WebsiteRedirect: cachedEcho.WebsiteRedirect,
 		SSE: sseOf(cachedEncAlgo, crypto.IsSSEC(cachedEncAlgo))}
+	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	if oh.VersionID == "" && (vStatus == "Enabled" || vStatus == "Suspended") {
 		oh.VersionID = "null"
 	}

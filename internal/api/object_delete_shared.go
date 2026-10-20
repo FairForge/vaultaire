@@ -68,9 +68,9 @@ type deleteFanout struct {
 // pendingDelivery is one key's notification + webhook, its events row
 // already written (eventID empty when it was not).
 type pendingDelivery struct {
-	key      string
-	eventID  string
-	dataJSON []byte
+	key     string
+	eventID string
+	event   recordedEvent
 }
 
 // enqueue remembers a settled key's delivery.
@@ -111,7 +111,7 @@ func (f *deleteFanout) deliverInOrder(d objectDeleteAftermath, tenantID, bucket 
 		}
 		if owed := owedRows(f.endpoints, p.eventID, eventType); len(owed) > 0 {
 			intents = append(intents, owed...)
-			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, f.webhookGen, p.eventID, eventType, tenantID, p.dataJSON))
+			jobs = append(jobs, webhookJob(d.db, d.logger, f.endpoints, f.webhookGen, p.event))
 		}
 	}
 	// The batch's outbox rows in one statement before its jobs (WP-R11-3).
@@ -261,8 +261,8 @@ func (d objectDeleteAftermath) announce(ctx context.Context, tenantID, bucket, k
 		// from the batch's worker set once every key is settled.
 		p := pendingDelivery{key: key}
 		if d.db != nil {
-			if eventID, dataJSON, ok := recordEvent(ctx, d.db, d.logger, "object.deleted", tenantID, data); ok {
-				p.eventID, p.dataJSON = eventID, dataJSON
+			if ev, ok := recordEvent(ctx, d.db, d.logger, "object.deleted", tenantID, data); ok {
+				p.eventID, p.event = ev.id, ev
 			}
 		}
 		d.fanout.enqueue(p)

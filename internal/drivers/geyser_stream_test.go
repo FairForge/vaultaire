@@ -12,6 +12,7 @@ package drivers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -208,3 +209,43 @@ func TestGeyserPut_AMaterializedBodyWasRetriedBefore_AStreamedOneIsNot(t *testin
 }
 
 var _ = context.Background
+
+// RP17-2 (Stage 1a Prompt 17 Part 0): materialize spools an unknown-length
+// body into ONE fixed buffer — a small body costs at most its first 1 MiB,
+// a body past the 64 MiB spill threshold the 64 MiB spool once — then the
+// temp file. It grew a bytes.Buffer by doubling: ~256 MiB allocated (512
+// under -race) to hold 64 MiB, on every unknown-length PUT of Geyser, the
+// fixed-bucket S3 driver and permafrost.
+func TestMaterialize_SpoolsInOneFixedBufferThenSpills(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes a 400 MiB temp file")
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+
+	// A small body: no 64 MiB spool.
+	before := totalAlloc()
+	body, n, cleanup, err := materialize(&odPatternReader{0, 100 << 10, nil})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	assert.Equal(t, int64(100<<10), n)
+	assert.Less(t, totalAlloc()-before, uint64(4<<20), "a 100 KiB body allocates well under the spool")
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	assert.Equal(t, 100<<10, len(got))
+
+	// A body past the threshold: the spool once, then the file.
+	before = totalAlloc()
+	body, n, cleanup, err = materialize(&odPatternReader{0, 400 << 20, nil})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	assert.Equal(t, int64(400<<20), n)
+	assert.Less(t, totalAlloc()-before, uint64(70<<20), "one 64 MiB spool, never a doubling buffer")
+	_, isFile := body.(*os.File)
+	assert.True(t, isFile, "spilled to the temp file")
+	h := sha256.New()
+	_, err = io.Copy(h, body)
+	require.NoError(t, err)
+	want := sha256.New()
+	_, _ = io.Copy(want, &odPatternReader{0, 400 << 20, nil})
+	assert.Equal(t, want.Sum(nil), h.Sum(nil), "byte-equal through the spool and the file")
+}

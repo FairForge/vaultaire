@@ -504,9 +504,18 @@ index in the fleet and the ordered fleet — one 16-hex hash per account of its
 | every marker records this fleet | `match`, nothing written |
 | the markers present match, some accounts have none | `repaired`: the missing ones written |
 | a marker records another order or size | `mismatch`: **one Error line** `permafrost fleet fingerprint mismatch` with `diffs` (`size 3 → 2`, `index 1: was <hash>, now <hash>`, `account tenant-3 (<hash>) is index 1, recorded index 2`) and `fingerprint` (the current digest); `vaultaire_permafrost_fleet_mismatch` 1, rule `PermafrostFleetMismatch` (warning); nothing rewritten |
-| a marker cannot be read | `unknown`: a Warn, no verdict, nothing written, the gauge stays 0 |
+| a marker cannot be read | `unknown`: a Warn, no verdict, nothing written, the gauge stays 0 — **re-checked at the next probe** (below) |
 
 Boot is never blocked: reads find a remapped object by the fleet walk.
+
+The check does not end with the boot (RP18-1, Prompt 17 Part 0): the
+driver's probe (every 30 s) re-runs it at its next run after an `unknown`
+verdict — Graph down at deploy time used to leave the gauge at 0 for the
+slot's lifetime — and then every hour, 10 s inside the probe, with the
+`PERMAFROST_FLEET_ACCEPT` value the boot read. A verdict is logged once per
+change (the same `match` every hour is no line); the gauge follows every
+check. The journal line to look for after a deploy during a Graph outage is
+the same `permafrost fleet fingerprint` / `… mismatch` line, a probe later.
 
 **Procedure when the order must change** (an account lost for good, a new
 account added):

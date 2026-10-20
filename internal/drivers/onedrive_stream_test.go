@@ -226,18 +226,10 @@ func TestOneDrivePut_AnUnknownLengthUploadsFromTheSpooledBodyWithoutASecondCopy(
 	const size = 400 << 20
 	sink := &uploadSink{}
 	d := uploadFleet(sink)
-	// materialize's own spool cost for this body (its buffer grows to 64 MiB:
-	// ~256 MiB allocated, ~512 under -race — the shared helper, not this
-	// driver).
-	spool0 := totalAlloc()
-	_, _, cleanup, err := materialize(&odPatternReader{0, size, nil})
-	require.NoError(t, err)
-	cleanup()
-	spool := totalAlloc() - spool0
 	before := totalAlloc()
 
 	// Act
-	err = d.Put(ctx, "bkt", "big.bin", io.MultiReader(&odPatternReader{0, size, nil}))
+	err := d.Put(ctx, "bkt", "big.bin", io.MultiReader(&odPatternReader{0, size, nil}))
 
 	// Assert: every byte arrived, in 60 MiB fragments, and the driver never
 	// held the body in memory (it used to io.ReadAll the spool file: 400 MiB
@@ -247,9 +239,11 @@ func TestOneDrivePut_AnUnknownLengthUploadsFromTheSpooledBodyWithoutASecondCopy(
 	assert.Equal(t, int64(size), sink.received)
 	assert.Len(t, sink.fragments, 7, "6 × 60 MiB + 40 MiB")
 	assert.Equal(t, fmt.Sprintf("bytes 0-%d/%d", odChunkSize-1, size), sink.fragments[0])
-	// What the driver allocated beyond the spool: one 60 MiB fragment buffer
-	// (pooled), never the body (a whole-body copy alone is >= size).
-	assert.Less(t, totalAlloc()-before-spool, uint64(128<<20), "no whole-body buffer")
+	// What the whole Put allocated: materialize's one 64 MiB spool (RP17-2:
+	// it grew a bytes.Buffer to ~256 MiB, ~512 under -race, to hold 64 MiB)
+	// plus one 60 MiB fragment buffer (pooled), never the body (a
+	// whole-body copy alone is >= size).
+	assert.Less(t, totalAlloc()-before, uint64(140<<20), "the spool and one fragment, no whole-body buffer")
 }
 
 func TestOneDrivePut_AKnownLengthStreamsToo(t *testing.T) {

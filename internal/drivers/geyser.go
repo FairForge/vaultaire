@@ -348,18 +348,41 @@ func (d *GeyserDriver) putStreamed(ctx context.Context, tenantID, key string, da
 }
 
 // materialize reads the entire body to determine its length (required by
-// Geyser/Spectra Vail) when the caller passed none. Small objects (<=64 MB) are buffered in RAM;
-// larger objects are spilled to a temp file to avoid OOM.
+// Geyser/Spectra Vail, the fixed-bucket S3 driver and permafrost) when the
+// caller passed none. Small objects (<= 64 MiB) are held in RAM; larger ones
+// are spilled to a temp file. Two fixed buffers, never a growing one
+// (RP17-2: a bytes.Buffer doubled its way to ~256 MiB — 512 under -race —
+// to hold the 64 MiB): a 1 MiB probe first, so a small body costs at most
+// that, then the one 64 MiB spool (materializeSpool) for a body past it.
 func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func(), err error) {
-	buf := &bytes.Buffer{}
-	n, err := io.CopyN(buf, data, spillThreshold+1)
-	if err != nil && !errors.Is(err, io.EOF) {
+	probe := make([]byte, materializeProbe)
+	n, err := io.ReadFull(data, probe)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil, 0, func() {}, fmt.Errorf("reading body: %w", err)
 	}
+	if n < materializeProbe {
+		return bytes.NewReader(probe[:n]), int64(n), func() {}, nil
+	}
+	return materializeSpool(probe, data)
+}
 
-	if n <= spillThreshold {
+// materializeProbe is the first read of materialize: a body that ends
+// inside it is held as is.
+const materializeProbe = 1 << 20
+
+// materializeSpool holds a body of at least len(head) bytes in one fixed
+// 64 MiB + 1 spool and spills it to a temp file past the threshold.
+func materializeSpool(head []byte, data io.Reader) (body io.ReadSeeker, size int64, cleanup func(), err error) {
+	spool := make([]byte, spillThreshold+1) // the one allocation of the spool (data_path_allocations_test.go)
+	n := copy(spool, head)
+	m, err := io.ReadFull(data, spool[n:])
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, 0, func() {}, fmt.Errorf("reading body: %w", err)
+	}
+	n += m
+	if int64(n) <= spillThreshold {
 		// Fits in memory.
-		return bytes.NewReader(buf.Bytes()), n, func() {}, nil
+		return bytes.NewReader(spool[:n]), int64(n), func() {}, nil
 	}
 
 	// Large object — spill to temp file.
@@ -373,7 +396,7 @@ func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func()
 	}
 
 	// Write what we already buffered, then stream the rest.
-	if _, err := f.Write(buf.Bytes()); err != nil {
+	if _, err := f.Write(spool[:n]); err != nil {
 		cleanupFn()
 		return nil, 0, func() {}, fmt.Errorf("write temp: %w", err)
 	}
@@ -382,7 +405,7 @@ func materialize(data io.Reader) (body io.ReadSeeker, size int64, cleanup func()
 		cleanupFn()
 		return nil, 0, func() {}, fmt.Errorf("spill to disk: %w", err)
 	}
-	total := n + written
+	total := int64(n) + written
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		cleanupFn()
