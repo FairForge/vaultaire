@@ -421,6 +421,13 @@ func (p *SmartPromoter) promote(ctx context.Context, tenantID, bucket, key, etag
 		}
 		return "changed", nil
 	}
+	// The copy-back is sized by the stored length, which a 0x05 SSE-C
+	// multipart blob does not have as a function of its size (RP19-1). The
+	// demotion never selects one (smart_demotion.go), so no ledger row
+	// should name one; if one does, refuse rather than write it at 0.
+	if !storedBlobKnown(rt.encAlgo) {
+		return "", fmt.Errorf("copy-back of %s/%s refused: an SSE-C multipart object's stored length is unknown", bucket, key)
+	}
 
 	rc, err := cold.Get(tctx, container, blob)
 	if err != nil {
