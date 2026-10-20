@@ -285,6 +285,7 @@ func setupHouseFixture(t *testing.T) *houseFixture {
 	require.NoError(t, qm.CreateTenant(context.Background(), tenantID, "free", usage.FreeTierLimits.StorageBytes))
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM stripe_events WHERE event_id LIKE $1`, "evt_"+tenantID+"%")
+		_, _ = db.Exec(`DELETE FROM payments WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
 	})

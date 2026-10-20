@@ -63,6 +63,8 @@ no longer matches. The classification is by row shape, never by `users.role`.
 Rules bind through `ruleArgs`: `ByUser`, `ByTenant`, `ByEmail`, or `ByAccount`
 (`$1` user, `$2` tenant — `''` when there is none —, `$3` e-mail).
 
+The entitlement record (WP-PAY-1, 097) is in `Deleted`, before `tenants`: `entitlements` deleted; `payments` **scrubbed, not deleted** — `tenant_id` and `note` nulled, `metadata.addresses` / `metadata.txids` dropped, amounts, period, house, receipt number and `metadata.ids` kept (an accounting record; `TestEraseRows_PaymentsAnonymisedNotDeleted`); `payment_events.tenant_id` nulled. They cannot be `Kept` scrubs: `Kept` runs after the `tenants` DELETE, whose `ON DELETE SET NULL` on `payments` would leave nothing to match.
+
 `Kept`: `stripe_events` (ledger; `tenant_id` nulled), `audit_logs` /
 `audit_logs_archive` rows keyed by the tenant only (operator actions; `ip` and
 `user_agent` nulled), `billing_charges`, `metered_usage_reports`,
