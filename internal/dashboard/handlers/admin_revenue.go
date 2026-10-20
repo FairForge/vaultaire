@@ -5,39 +5,14 @@ import (
 	"database/sql"
 	"fmt"
 	"html/template"
-	"math"
 	"net/http"
-	"time"
+	"sort"
 
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
-
-// planMonthlyCents returns the monthly price in cents for a fixed-price Vault
-// plan. Metered tiers (standard, performance) return 0 — their revenue is
-// calculated from live storage usage. Prices from VAULT_SERIES_ECONOMICS.md.
-func planMonthlyCents(plan string) int64 {
-	switch plan {
-	case "vault1":
-		return 499
-	case "vault3":
-		return 799
-	case "vault5":
-		return 999
-	case "vault10":
-		return 1299
-	case "vault18":
-		return 1799
-	case "vault50":
-		return 4499
-	case "vault100":
-		return 8499
-	default:
-		return 0
-	}
-}
 
 func formatCents(cents int64) string {
 	return fmt.Sprintf("$%.2f", float64(cents)/100)
@@ -101,13 +76,15 @@ func HandleAdminRevenue(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 	}
 }
 
+// populateRevenue prices houses only (WP-PAY-0, one product): every live
+// house at billing.QuoteHouse for its period — the sheet the customer saw.
+// The legacy pack prices and the metered estimate are gone; a tenant on a
+// pack label without a house (Bench2) earns nothing. The month trend read
+// the subscriptions table, which nothing writes (R10-14): it is gone until
+// the payments ledger feeds one (WP-PAY-3).
 func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger) {
-	fixedCents := queryFixedMRR(ctx, db, logger)
-	meteredCents := queryMeteredMRR(ctx, db, logger)
-	houseCents, houseLines := queryHouseMRR(ctx, db, logger)
-	totalMRR := fixedCents + meteredCents + houseCents
-
-	data["MRRFmt"] = formatCents(totalMRR)
+	houses := queryHouses(ctx, db, logger)
+	data["MRRFmt"] = formatCents(housesMRR(houses))
 
 	var activeSubs int
 	if err := db.QueryRowContext(ctx,
@@ -132,82 +109,52 @@ func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logge
 		data["ChurnRateFmt"] = fmt.Sprintf("%.1f%%", rate)
 	}
 
-	data["ByTier"] = append(queryRevenueByTier(ctx, db, logger), houseLines...)
-	data["TopCustomers"] = queryTopCustomers(ctx, db, logger)
-
-	bars := queryMRRTrend(ctx, db, logger)
-	data["TrendBars"] = bars
-	if len(bars) > 0 {
-		var maxCents int64
-		for _, b := range bars {
-			if b.Cents > maxCents {
-				maxCents = b.Cents
-			}
-		}
-		data["TrendMaxFmt"] = formatCents(maxCents)
-	}
+	data["ByTier"] = houseRevenueLines(houses)
+	data["TopCustomers"] = topHouseCustomers(houses, 10)
 }
 
-func queryFixedMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 {
-	rows, err := db.QueryContext(ctx,
-		`SELECT COALESCE(plan, '') FROM tenants WHERE subscription_status = 'active'`)
-	if err != nil {
-		logger.Debug("revenue: query fixed plans", zap.Error(err))
-		return 0
-	}
-	defer func() { _ = rows.Close() }()
-
-	var total int64
-	for rows.Next() {
-		var plan string
-		if err := rows.Scan(&plan); err != nil {
-			continue
-		}
-		total += planMonthlyCents(plan)
-	}
-	if err := rows.Err(); err != nil {
-		return 0
-	}
-	return total
+// houseRevenue is one live house, priced.
+type houseRevenue struct {
+	tenantID, email string
+	std, vault, pin int
+	period          billing.Period
+	usedBytes       int64
+	quote           billing.Quote
 }
 
-// queryHouseMRR prices every live house (dashboard plan Phase 4): the floor
-// quotas and pin-hot are the Stripe items' quantities, so the per-line MRR is
-// billing.QuoteHouse at the tenant's period — the same sheet the customer
-// saw. Returns the total and one revenue line per floor/add-on.
-func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, []tierRevenue) {
+// queryHouses reads every live house (dashboard plan Phase 4): the floor
+// quotas and pin-hot are the Stripe items' quantities, so the MRR is
+// billing.QuoteHouse at the tenant's period.
+func queryHouses(ctx context.Context, db *sql.DB, logger *zap.Logger) []houseRevenue {
 	rows, err := db.QueryContext(ctx, `
-		SELECT t.id, t.house_period, f.floor, f.storage_limit_bytes, COALESCE(q.pin_hot_bytes, 0)
+		SELECT t.id, t.email, t.house_period, f.floor, f.storage_limit_bytes,
+		       COALESCE(q.pin_hot_bytes, 0), COALESCE(q.storage_used_bytes, 0)
 		FROM tenants t
 		JOIN tenant_floor_quotas f ON f.tenant_id = t.id
 		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
 		WHERE t.plan = 'house' AND t.subscription_status IN ('active', 'past_due', 'trialing')
 		ORDER BY t.id`)
 	if err != nil {
-		logger.Debug("revenue: house mrr", zap.Error(err))
-		return 0, nil
+		logger.Debug("revenue: houses", zap.Error(err))
+		return nil
 	}
 	defer func() { _ = rows.Close() }()
 
-	type house struct {
-		std, vault, pin int
-		period          billing.Period
-	}
-	houses := map[string]*house{}
+	byID := map[string]*houseRevenue{}
 	var order []string
 	for rows.Next() {
-		var id, period, floor string
-		var limit, pin int64
-		if err := rows.Scan(&id, &period, &floor, &limit, &pin); err != nil {
+		var id, email, period, floor string
+		var limit, pin, used int64
+		if err := rows.Scan(&id, &email, &period, &floor, &limit, &pin, &used); err != nil {
 			continue
 		}
-		h, ok := houses[id]
+		h, ok := byID[id]
 		if !ok {
-			h = &house{period: billing.Period(period), pin: int(pin / usage.TB)}
+			h = &houseRevenue{tenantID: id, email: email, period: billing.Period(period), pin: int(pin / usage.TB), usedBytes: used}
 			if h.period != billing.PeriodMonthly {
 				h.period = billing.PeriodAnnual
 			}
-			houses[id] = h
+			byID[id] = h
 			order = append(order, id)
 		}
 		switch floor {
@@ -218,16 +165,42 @@ func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, 
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, nil
+		return nil
 	}
-
-	var total, stdCents, vaultCents, pinCents int64
-	var stdN, vaultN, pinN int
+	out := make([]houseRevenue, 0, len(order))
 	for _, id := range order {
-		h := houses[id]
-		q := billing.QuoteHouse(h.std, h.vault, h.pin, h.period)
-		total += q.MonthlyCents
-		for _, l := range q.Lines {
+		h := byID[id]
+		h.quote = billing.QuoteHouse(h.std, h.vault, h.pin, h.period)
+		out = append(out, *h)
+	}
+	return out
+}
+
+// housesMRR is the houses' monthly total in cents.
+func housesMRR(houses []houseRevenue) int64 {
+	var total int64
+	for _, h := range houses {
+		total += h.quote.MonthlyCents
+	}
+	return total
+}
+
+// houseQuoteByTenant is each house's monthly cents by tenant id (the costs
+// page's revenue side).
+func houseQuoteByTenant(houses []houseRevenue) map[string]int64 {
+	m := make(map[string]int64, len(houses))
+	for _, h := range houses {
+		m[h.tenantID] = h.quote.MonthlyCents
+	}
+	return m
+}
+
+// houseRevenueLines is one revenue line per floor/add-on.
+func houseRevenueLines(houses []houseRevenue) []tierRevenue {
+	var stdCents, vaultCents, pinCents int64
+	var stdN, vaultN, pinN int
+	for _, h := range houses {
+		for _, l := range h.quote.Lines {
 			switch l.Label {
 			case "Downstairs":
 				stdCents += l.Cents
@@ -241,7 +214,7 @@ func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, 
 			}
 		}
 	}
-	var lines []tierRevenue
+	lines := []tierRevenue{}
 	if stdN > 0 {
 		lines = append(lines, tierRevenue{Tier: "downstairs (Standard)", Count: stdN, MRRCents: stdCents, MRRFmt: formatCents(stdCents)})
 	}
@@ -251,39 +224,25 @@ func queryHouseMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) (int64, 
 	if pinN > 0 {
 		lines = append(lines, tierRevenue{Tier: "pin-hot", Count: pinN, MRRCents: pinCents, MRRFmt: formatCents(pinCents)})
 	}
-	return total, lines
+	return lines
 }
 
-func queryMeteredMRR(ctx context.Context, db *sql.DB, logger *zap.Logger) int64 {
-	rows, err := db.QueryContext(ctx, `
-		SELECT tq.tier, tq.storage_used_bytes, COALESCE(bw.egress, 0)
-		FROM tenant_quotas tq
-		LEFT JOIN (
-			SELECT tenant_id, SUM(egress_bytes) AS egress
-			FROM bandwidth_usage_daily
-			WHERE date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date
-			GROUP BY tenant_id
-		) bw ON bw.tenant_id = tq.tenant_id
-		WHERE tq.tier IN ('standard', 'performance')`)
-	if err != nil {
-		logger.Debug("revenue: query metered tenants", zap.Error(err))
-		return 0
+// topHouseCustomers is the n houses with the highest MRR.
+func topHouseCustomers(houses []houseRevenue, n int) []custRevenue {
+	sorted := append([]houseRevenue(nil), houses...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].quote.MonthlyCents > sorted[j].quote.MonthlyCents })
+	if len(sorted) > n {
+		sorted = sorted[:n]
 	}
-	defer func() { _ = rows.Close() }()
-
-	var total int64
-	for rows.Next() {
-		var tier string
-		var storageBytes, egressBytes int64
-		if err := rows.Scan(&tier, &storageBytes, &egressBytes); err != nil {
-			continue
-		}
-		total += billing.AccruedCents(tier, storageBytes, egressBytes)
+	out := []custRevenue{}
+	for _, h := range sorted {
+		out = append(out, custRevenue{
+			Email: h.email, Plan: "house (" + string(h.period) + ")",
+			MRRCents: h.quote.MonthlyCents, MRRFmt: formatCents(h.quote.MonthlyCents),
+			StorageFmt: formatBytes(h.usedBytes),
+		})
 	}
-	if err := rows.Err(); err != nil {
-		return 0
-	}
-	return total
+	return out
 }
 
 func queryCountSince(ctx context.Context, db *sql.DB, logger *zap.Logger, query string) int {
@@ -292,200 +251,4 @@ func queryCountSince(ctx context.Context, db *sql.DB, logger *zap.Logger, query 
 		logger.Debug("revenue: count query", zap.Error(err))
 	}
 	return count
-}
-
-func queryRevenueByTier(ctx context.Context, db *sql.DB, logger *zap.Logger) []tierRevenue {
-	// Fixed-plan tiers from tenants.
-	fixedRows, err := db.QueryContext(ctx, `
-		SELECT COALESCE(plan, 'free'), COUNT(*)
-		FROM tenants
-		WHERE subscription_status = 'active'
-		GROUP BY plan
-		ORDER BY COUNT(*) DESC`)
-	if err != nil {
-		logger.Debug("revenue: by tier fixed", zap.Error(err))
-		return nil
-	}
-	defer func() { _ = fixedRows.Close() }()
-
-	var tiers []tierRevenue
-	for fixedRows.Next() {
-		var plan string
-		var count int
-		if err := fixedRows.Scan(&plan, &count); err != nil {
-			continue
-		}
-		if plan == "house" {
-			continue // priced per floor by queryHouseMRR
-		}
-		cents := planMonthlyCents(plan) * int64(count)
-		if plan == "" {
-			plan = "free"
-		}
-		tiers = append(tiers, tierRevenue{
-			Tier:     plan,
-			Count:    count,
-			MRRCents: cents,
-			MRRFmt:   formatCents(cents),
-		})
-	}
-	if err := fixedRows.Err(); err != nil {
-		return nil
-	}
-
-	// Metered tiers from tenant_quotas.
-	meteredRows, err := db.QueryContext(ctx, `
-		SELECT tq.tier, COUNT(*), COALESCE(SUM(tq.storage_used_bytes), 0)
-		FROM tenant_quotas tq
-		WHERE tq.tier IN ('standard', 'performance')
-		GROUP BY tq.tier
-		ORDER BY tq.tier`)
-	if err != nil {
-		logger.Debug("revenue: by tier metered", zap.Error(err))
-		return tiers
-	}
-	defer func() { _ = meteredRows.Close() }()
-
-	for meteredRows.Next() {
-		var tier string
-		var count int
-		var totalStorage int64
-		if err := meteredRows.Scan(&tier, &count, &totalStorage); err != nil {
-			continue
-		}
-		cents := billing.AccruedCents(tier, totalStorage, 0)
-		tiers = append(tiers, tierRevenue{
-			Tier:     tier,
-			Count:    count,
-			MRRCents: cents,
-			MRRFmt:   formatCents(cents),
-		})
-	}
-	if err := meteredRows.Err(); err != nil {
-		return nil
-	}
-	return tiers
-}
-
-func queryTopCustomers(ctx context.Context, db *sql.DB, logger *zap.Logger) []custRevenue {
-	rows, err := db.QueryContext(ctx, `
-		SELECT t.email, COALESCE(t.plan, 'free'),
-			   COALESCE(tq.tier, ''), COALESCE(tq.storage_used_bytes, 0)
-		FROM tenants t
-		LEFT JOIN tenant_quotas tq ON tq.tenant_id = t.id
-		WHERE t.subscription_status = 'active'
-		ORDER BY tq.storage_used_bytes DESC NULLS LAST
-		LIMIT 10`)
-	if err != nil {
-		logger.Debug("revenue: top customers", zap.Error(err))
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-
-	var customers []custRevenue
-	for rows.Next() {
-		var email, plan, tier string
-		var storageBytes int64
-		if err := rows.Scan(&email, &plan, &tier, &storageBytes); err != nil {
-			continue
-		}
-		var cents int64
-		if tier == "standard" || tier == "performance" {
-			cents = billing.AccruedCents(tier, storageBytes, 0)
-		} else {
-			cents = planMonthlyCents(plan)
-		}
-		displayPlan := plan
-		if tier == "standard" || tier == "performance" {
-			displayPlan = tier
-		}
-		customers = append(customers, custRevenue{
-			Email:      email,
-			Plan:       displayPlan,
-			MRRCents:   cents,
-			MRRFmt:     formatCents(cents),
-			StorageFmt: formatBytes(storageBytes),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-	return customers
-}
-
-func queryMRRTrend(ctx context.Context, db *sql.DB, logger *zap.Logger) []trendBar {
-	rows, err := db.QueryContext(ctx, `
-		SELECT date_trunc('month', created_at) AS month, plan, COUNT(*)
-		FROM subscriptions
-		WHERE created_at >= date_trunc('month', CURRENT_DATE) - INTERVAL '11 months'
-		GROUP BY month, plan
-		ORDER BY month`)
-	if err != nil {
-		logger.Debug("revenue: mrr trend", zap.Error(err))
-		return nil
-	}
-	defer func() { _ = rows.Close() }()
-
-	// Accumulate per-month MRR.
-	type monthMRR struct {
-		month time.Time
-		cents int64
-	}
-	monthMap := make(map[string]*monthMRR)
-	var orderedKeys []string
-	for rows.Next() {
-		var month time.Time
-		var plan string
-		var count int
-		if err := rows.Scan(&month, &plan, &count); err != nil {
-			continue
-		}
-		key := month.Format("2006-01")
-		if _, ok := monthMap[key]; !ok {
-			monthMap[key] = &monthMRR{month: month}
-			orderedKeys = append(orderedKeys, key)
-		}
-		monthMap[key].cents += planMonthlyCents(plan) * int64(count)
-	}
-	if err := rows.Err(); err != nil {
-		return nil
-	}
-
-	if len(orderedKeys) == 0 {
-		return nil
-	}
-
-	var maxCents int64
-	for _, k := range orderedKeys {
-		if monthMap[k].cents > maxCents {
-			maxCents = monthMap[k].cents
-		}
-	}
-
-	const chartW, chartH = 600.0, 160.0
-	n := float64(len(orderedKeys))
-	barW := chartW / n * 0.75
-	gap := chartW / n * 0.25
-
-	bars := make([]trendBar, 0, len(orderedKeys))
-	for i, key := range orderedKeys {
-		m := monthMap[key]
-		h := 0.0
-		if maxCents > 0 {
-			h = float64(m.cents) / float64(maxCents) * chartH
-		}
-		if m.cents > 0 && h < 3 {
-			h = 3
-		}
-		bars = append(bars, trendBar{
-			Label: m.month.Format("Jan"),
-			Cents: m.cents,
-			Fmt:   formatCents(m.cents),
-			X:     math.Round(float64(i)*(barW+gap)*100) / 100,
-			Y:     math.Round((chartH-h)*100) / 100,
-			W:     math.Round(barW*100) / 100,
-			H:     math.Round(h*100) / 100,
-		})
-	}
-	return bars
 }

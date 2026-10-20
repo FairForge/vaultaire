@@ -7,21 +7,11 @@ import (
 
 	"github.com/stripe/stripe-go/v75"
 	portalsession "github.com/stripe/stripe-go/v75/billingportal/session"
-	checkoutsession "github.com/stripe/stripe-go/v75/checkout/session"
 	"github.com/stripe/stripe-go/v75/customer"
 	"github.com/stripe/stripe-go/v75/invoice"
 	"github.com/stripe/stripe-go/v75/subscription"
 	"go.uber.org/zap"
 )
-
-// Plan holds a Stripe Price ID and display metadata for a product tier.
-type Plan struct {
-	ID        string // internal name (e.g. "vault3")
-	PriceID   string // Stripe Price ID (e.g. "price_xxx")
-	Name      string // display name
-	PriceFmt  string // e.g. "$2.99/mo"
-	StorageTB int64  // storage limit in TB
-}
 
 // InvoiceRow is a single invoice for dashboard display.
 type InvoiceRow struct {
@@ -37,7 +27,6 @@ type InvoiceRow struct {
 type StripeService struct {
 	db     *sql.DB
 	logger *zap.Logger
-	plans  map[string]Plan
 
 	// house is the whole-TB checkout state (house.go); subFetcher is the
 	// subscription source, replaced in tests.
@@ -52,29 +41,7 @@ func NewStripeService(apiKey string, db *sql.DB, logger *zap.Logger) *StripeServ
 	return &StripeService{
 		db:     db,
 		logger: logger,
-		plans:  make(map[string]Plan),
 	}
-}
-
-// RegisterPlan adds a plan that can be used in checkout sessions.
-// Call this at startup with Price IDs from your Stripe Dashboard.
-func (s *StripeService) RegisterPlan(p Plan) {
-	s.plans[p.ID] = p
-}
-
-// GetPlan returns a registered plan by ID.
-func (s *StripeService) GetPlan(id string) (Plan, bool) {
-	p, ok := s.plans[id]
-	return p, ok
-}
-
-// Plans returns all registered plans.
-func (s *StripeService) Plans() []Plan {
-	out := make([]Plan, 0, len(s.plans))
-	for _, p := range s.plans {
-		out = append(out, p)
-	}
-	return out
 }
 
 // --- Customer ---
@@ -122,36 +89,6 @@ func (s *StripeService) GetCustomerID(ctx context.Context, tenantID string) (str
 		return "", fmt.Errorf("no stripe customer for tenant %s", tenantID)
 	}
 	return cid.String, nil
-}
-
-// --- Checkout ---
-
-// CreateCheckoutSession creates a Stripe Checkout session for a plan.
-func (s *StripeService) CreateCheckoutSession(customerID, planID, successURL, cancelURL string) (string, error) {
-	plan, ok := s.plans[planID]
-	if !ok {
-		return "", fmt.Errorf("unknown plan: %s", planID)
-	}
-
-	params := &stripe.CheckoutSessionParams{
-		Customer: stripe.String(customerID),
-		Mode:     stripe.String(string(stripe.CheckoutSessionModeSubscription)),
-		LineItems: []*stripe.CheckoutSessionLineItemParams{
-			{
-				Price:    stripe.String(plan.PriceID),
-				Quantity: stripe.Int64(1),
-			},
-		},
-		SuccessURL: stripe.String(successURL),
-		CancelURL:  stripe.String(cancelURL),
-	}
-
-	sess, err := checkoutsession.New(params)
-	if err != nil {
-		return "", fmt.Errorf("create checkout session: %w", err)
-	}
-
-	return sess.URL, nil
 }
 
 // --- Subscriptions ---

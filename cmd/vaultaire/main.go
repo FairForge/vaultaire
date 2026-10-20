@@ -87,10 +87,6 @@ func (n *nilQuotaManager) CreateTenant(ctx context.Context, tenantID, plan strin
 	return nil
 }
 
-func (n *nilQuotaManager) UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error {
-	return nil
-}
-
 func (n *nilQuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{}, nil
 }

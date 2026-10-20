@@ -77,18 +77,6 @@ func TestHandleBilling_UpgradedParam(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "upgraded")
 }
 
-func TestHandleUpgrade_NoStripe(t *testing.T) {
-	handler := HandleUpgrade(nil, nil, "https://stored.ge", zap.NewNop())
-
-	req := httptest.NewRequest("POST", "/dashboard/billing/upgrade", nil)
-	req = req.WithContext(usageSessionCtx(t))
-
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
 func TestHandleManageBilling_NoStripe(t *testing.T) {
 	handler := HandleManageBilling(nil, "https://stored.ge", zap.NewNop())
 

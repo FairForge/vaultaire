@@ -77,7 +77,6 @@ type Server struct {
 	auth             *auth.AuthService
 	stripe           *billing.StripeService
 	webhookHandler   *billing.WebhookHandler
-	meteredReporter  *billing.MeteredReporter
 	requestCount     int64
 	siteStats        *sitestats.Collector // cookieless public-site counts (site_stats.go)
 	testMode         bool
@@ -188,7 +187,6 @@ type QuotaManager interface {
 	// that are already durably stored.
 	ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error
 	CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error
-	UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error
 	ListQuotas(ctx context.Context) ([]map[string]interface{}, error)
 	DeleteQuota(ctx context.Context, tenantID string) error
 	GetTier(ctx context.Context, tenantID string) (string, error)
@@ -560,10 +558,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Error("STRIPE_SECRET_KEY is set but STRIPE_WEBHOOK_SECRET is not — /webhook/stripe is NOT mounted; paid houses cannot be applied until both are set")
 		}
 
-		// Register plans. Price IDs come from environment (set in Stripe Dashboard).
-		// If not set, plans won't appear on the billing page but nothing breaks.
-		registerStripePlans(s.stripe)
-
 		// Whole-TB house checkout (dashboard plan Phase 1): six price ids
 		// from env, verified against prices.json in Start (checkout stays
 		// closed until they match). The webhook applies floor quotas.
@@ -579,19 +573,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			s.entitlementLapse.Stripe = s.stripe
 		}
 
+		// One product (WP-PAY-0, F-29): the house. The legacy pack plans
+		// and the metered reporter are gone.
 		logger.Info("stripe billing service initialized")
-
-		// Metered usage reporter (Phase 2.7). Dormant unless both meter event-name
-		// envs are set — these are the Stripe Billing Meter names configured in the
-		// dashboard. Without them, no-op (correct: nothing is reported).
-		storageMeter := os.Getenv("STRIPE_METER_STORAGE")
-		egressMeter := os.Getenv("STRIPE_METER_EGRESS")
-		if storageMeter != "" && egressMeter != "" {
-			s.meteredReporter = billing.NewMeteredReporter(s.stripe, s.db, logger, storageMeter, egressMeter)
-			logger.Info("metered billing reporter initialized")
-		} else {
-			logger.Info("metered billing dormant (STRIPE_METER_STORAGE/STRIPE_METER_EGRESS not set)")
-		}
 	}
 
 	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
@@ -604,9 +588,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	baseURL := s.hosts.BaseURL
 	s.baseURL = baseURL
 	s.emailSender = email.NewSender(logger)
-	if s.meteredReporter != nil {
-		s.meteredReporter.SetEmailSender(s.emailSender)
-	}
 	s.bandwidthAlerter.SetEmailSender(s.emailSender)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {
 		s.googleOAuth = &oauth2.Config{
@@ -1132,35 +1113,6 @@ func houseQuotas(qm QuotaManager, db *sql.DB) billing.HouseQuotas {
 	return payments.NewHouseWriter(db)
 }
 
-// registerStripePlans loads plan definitions from environment variables.
-// Each plan needs a STRIPE_PRICE_<ID> env var with the Stripe Price ID.
-// If the env var is empty, the plan is skipped (won't appear on billing page).
-func registerStripePlans(s *billing.StripeService) {
-	plans := []struct {
-		id, envVar, name, priceFmt string
-		storageTB                  int64
-	}{
-		{"vault3", "STRIPE_PRICE_VAULT3", "Vault 3TB", "$2.99/mo", 3},
-		{"vault9", "STRIPE_PRICE_VAULT9", "Vault 9TB", "$9/mo", 9},
-		{"vault18", "STRIPE_PRICE_VAULT18", "Vault 18TB", "$18/mo", 18},
-		{"vault36", "STRIPE_PRICE_VAULT36", "Vault 36TB", "$36/mo", 36},
-		{"standard", "STRIPE_PRICE_STANDARD", "Standard", "$3.99/TB/mo", 0},
-	}
-	for _, p := range plans {
-		priceID := os.Getenv(p.envVar)
-		if priceID == "" {
-			continue
-		}
-		s.RegisterPlan(billing.Plan{
-			ID:        p.id,
-			PriceID:   priceID,
-			Name:      p.name,
-			PriceFmt:  p.priceFmt,
-			StorageTB: p.storageTB,
-		})
-	}
-}
-
 // getPublicEndpoint returns the public S3 endpoint from the VAULTAIRE_ENDPOINT
 // environment variable. This is set in /opt/vaultaire/configs/.env on the
 // production server. Falls back to localhost for local development.
@@ -1486,11 +1438,6 @@ func (s *Server) Start() error {
 	s.httpServer.RegisterOnShutdown(cancel)
 
 	go s.startHealthChecks(ctx)
-
-	// Report metered usage to Stripe daily + check spending caps hourly.
-	if s.meteredReporter != nil {
-		s.meteredReporter.StartMeteredReporting(ctx)
-	}
 
 	// Verify the house prices against prices.json (retrying until they
 	// match; re-checked hourly). Only when every price id is configured.

@@ -34,7 +34,6 @@ Email service abstraction for Vaultaire. Provides a `Sender` interface with thre
 | Password reset (JSON API) | `api/server.go` `handlePasswordReset` | `password_reset.html` | logged; always `{"message": "If that email is registered…"}` (deliberate) |
 | Verify e-mail (manual *Resend* button) | `dashboard/handlers/email_verify.go` | `verification.html` | logged, **user is still told "sent"** (WP-R14-3) |
 | Bandwidth alert (admin-set `bandwidth_limit_bytes`, 80/95 %) | `api/bandwidth_alerts.go` | plain text (same body as html and text) | logged at Warn |
-| Spending-cap alert (metered billing — dormant, no `STRIPE_METER_*` in prod) | `billing/metered.go` | plain text | logged at Warn |
 
 Nothing else sends mail: **registration sends no verification or welcome e-mail** (the welcome template was dead code and was removed in R14), account deletion, billing `past_due`, and abuse reports send nothing (R10-35 / WP-R10-3).
 

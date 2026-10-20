@@ -24,7 +24,6 @@ The webhook writes the house's floors AND the entitlement row in one transaction
 
 - **StripeService** — manages Stripe customers, checkout sessions, subscriptions, invoices, and billing portal. Holds `*sql.DB` for persisting Stripe IDs to the `tenants` table.
 - **WebhookHandler** — `http.Handler` for `POST /webhook/stripe`. Verifies signatures, processes events, updates DB.
-- **Plan** — maps an internal plan ID to a Stripe Price ID with display metadata.
 - **InvoiceRow** — formatted invoice data for dashboard templates.
 - **OverageService** — tracks grace periods for tenants exceeding quotas.
 
@@ -34,14 +33,12 @@ The webhook writes the house's floors AND the entitlement row in one transaction
 |--------|---------|
 | `CreateCustomer(ctx, email, tenantID)` | Create Stripe customer, persist `stripe_customer_id` |
 | `GetCustomerID(ctx, tenantID)` | Look up Stripe customer ID from DB |
-| `CreateCheckoutSession(customerID, planID, successURL, cancelURL)` | Create checkout for a registered plan |
 | `GetSubscription(ctx, tenantID)` | Fetch subscription from Stripe |
 | `CancelSubscription(ctx, tenantID)` | Cancels **immediately** (`subscription.Cancel`). Called by the account-deletion runner (WP-R10-3, stage a); idempotent — the subscription is fetched first and an already-`canceled` one is success, so a crash between Stripe's answer and the runner's stamp cannot defer the tenant forever (`TestCancelSubscription_AlreadyCancelledIsSuccess`) |
 | `GetInvoices(ctx, tenantID, limit)` | List recent invoices from Stripe |
 | `CreateBillingPortalSession(ctx, tenantID, returnURL)` | Self-service billing portal |
 | `SaveSubscription(ctx, tenantID, subID, status, plan)` | Persist subscription state (called by webhook) |
 | `LookupTenantByCustomer(ctx, customerID)` | Reverse lookup tenant from Stripe customer ID |
-| `RegisterPlan(plan)` | Register a plan with Stripe Price ID at startup |
 
 ## Webhook Events Handled
 
@@ -60,14 +57,22 @@ The webhook writes the house's floors AND the entitlement row in one transaction
   to exist**: `server.go` mounts `/webhook/stripe` only when both are set, and
   `NewWebhookHandler("")` answers 503 to everything (Review R10-01 — an empty
   secret used to mean "skip verification").
-- `STRIPE_PRICE_VAULT3`, `STRIPE_PRICE_VAULT9`, `STRIPE_PRICE_VAULT18`,
-  `STRIPE_PRICE_VAULT36`, `STRIPE_PRICE_STANDARD` — the five legacy pack
-  plans (`registerStripePlans` → `RegisterPlan`).
 - `STRIPE_PRICE_{STANDARD,VAULT,PINHOT}_{ANNUAL,MONTHLY}` — the six house
   prices, read by `HousePriceIDsFromEnv` (`house.go`); all six or the house
   checkout stays closed.
-- `STRIPE_METER_STORAGE`, `STRIPE_METER_EGRESS` — Billing Meter event names;
-  both or the metered reporter stays dormant.
+
+**One product (WP-PAY-0 = WP-R10-4, decision F-29, Stage 1a Prompt 19):** the
+house is the only thing sold. Deleted: the legacy pack plans
+(`STRIPE_PRICE_VAULT3/9/18/36`, `STRIPE_PRICE_STANDARD`, `registerStripePlans`,
+`Plan`, `RegisterPlan`/`GetPlan`/`Plans`, the pack `CreateCheckoutSession`, the
+dashboard's `HandleUpgrade` + `/dashboard/billing/upgrade`) and the metered
+reporter (`metered.go`: `MeteredReporter`, `STRIPE_METER_*`, `AccruedCents`,
+`MeteredRatePerTB`, the spending-cap alert). Old variables left in an `.env`
+are ignored. `tenants.plan` / `tenant_quotas.tier` values such as `vault100`
+stay valid **quota labels** (the admin tier picker); a tenant carrying one is
+told on the billing page to ask support (`legacyPlan`, dashboard handlers).
+`tenant_quotas.spending_cap_cents` and `metered_usage_reports` stay in the
+schema, unread, until WP-PAY-7 (D-12).
 
 ## Webhook delivery contract (Review R10)
 
@@ -223,59 +228,10 @@ Stripe subscription per tenant, one item per line, `quantity` = TB.**
   honoured only for the tenant's current `stripe_subscription_id`, so a stale
   subscription's events cannot take a paid house away. Idempotent; replays
   are no-ops (`stripe_events` dedup on top).
-- **Never metered:** `ReportDaily` and the dashboard's accrued estimate skip any
-  tenant with floor rows (quota-sold), even when `tier='standard'`.
 - Tests: `house_test.go` — quote maths vs the price file, verification
   mismatches, checkout/update params, and DB-backed webhook → floor quotas.
-
-## Metered Usage Reporting (Phase 2.7)
-
-`metered.go` — **MeteredReporter** reports daily usage for metered tiers
-(`standard`, `performance`) to Stripe Billing Meters. Fixed-price Vault packs and
-the free tier are never metered.
-
-- `NewMeteredReporter(stripe, db, logger, storageMeter, egressMeter)` — meter args
-  are the Stripe Billing Meter **event-name** strings.
-- `ReportDaily(ctx, date)` — for each metered tenant with a `stripe_customer_id`:
-  sends a storage event (gauge = `tenant_quotas.storage_used_bytes`) and an egress
-  event (sum of `bandwidth_usage_daily.egress_bytes` for `date`). Records each in
-  `metered_usage_reports`.
-- `StartMeteredReporting(ctx)` — hourly goroutine; runs `ReportDaily` for the
-  **previous** UTC day at hour 0 (and once on startup as catch-up), checks spending
-  caps hourly. Nil-safe on stripe/db.
-- `SetEmailSender(email.Sender)` — optional; wires the spending-cap alert email.
-- `AccruedCents(tier, storageBytes, egressBytes)` / `MeteredRatePerTB(tier)` —
-  exported pricing helpers (Standard $3.99/TB, Performance $6.00/TB; egress $0).
-  Used by the dashboard billing handler for the "≈ $X.XX this month" estimate.
-  **Stale vs prices.json (4.99/4.49, 6.99) and dormant at launch** — the
-  2026-09-21 decision sells quota, not meters; no launch tenant is metered
-  (house tenants have floor rows and are excluded). Deletion = WP-R10-4.
-
-**Idempotency / no double-billing**: `metered_usage_reports` has
-`UNIQUE(tenant_id, meter, period_date)`. `reportMeter` skips the Stripe call if a
-row already exists, and the Stripe meter event `identifier`
-(`{tenant}-{meter}-{date}`) is a second dedup layer, so a crash between send and
-record cannot double-count. A failed send writes **no** row → the next run retries.
-
-**Stripe SDK note**: stripe-go **v75 has no Billing Meter Events API**, so events are
-POSTed raw to the stable `/v1/billing/meter_events` REST endpoint
-(`httpMeterSender`, auth via the SDK-global API key). The `meterSender` interface
-lets tests substitute a fake.
-
-**Spending caps**: `tenant_quotas.spending_cap_cents` (0 = none). `checkSpendingCaps`
-alerts at 80%/95% of cap, each threshold once per month (guarded by synthetic
-`alert:80`/`alert:95` rows in `metered_usage_reports` keyed by first-of-month).
-Each alert records a `billing.spending_cap_alert` event (inserted directly — billing
-cannot import `api.emitEvent` without a cycle) and emails the tenant.
-
-**Operator setup (config, not code)**: in the Stripe dashboard create two Billing
-Meters — storage with **"last value"** aggregation (it's a gauge), egress with
-**"sum"** (daily counter) — attach them to the Standard/Performance metered prices,
-and set `STRIPE_METER_STORAGE` / `STRIPE_METER_EGRESS` to their event-name strings.
-Without both envs the reporter stays dormant (no-op).
 
 ## Testing
 
 - Unit tests: `go test ./internal/billing/... -short` (no Stripe key needed)
-- `metered_test.go` uses a `fakeMeterSender` + sqlmock (no real Stripe/DB).
 - Integration tests: set `STRIPE_TEST_KEY` env var + `stripe listen --forward-to localhost:8000/webhook/stripe`

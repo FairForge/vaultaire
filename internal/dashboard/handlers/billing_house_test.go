@@ -67,7 +67,6 @@ func newFakeHouseBilling() *fakeHouseBilling {
 	return &fakeHouseBilling{ready: true, checkout: "https://checkout.stripe.test/cs_1", svc: svc}
 }
 func (f *fakeHouseBilling) HouseCheckoutReady() (bool, string) { return f.ready, f.why }
-func (f *fakeHouseBilling) Plans() []billing.Plan              { return nil }
 func (f *fakeHouseBilling) GetCustomerID(_ context.Context, tenantID string) (string, error) {
 	return "cus_" + tenantID, nil
 }
@@ -282,8 +281,19 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	assert.Equal(t, asked, fb.liveAsked, "refused from the local row")
 	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
 
-	// 4. That old subscription is over (canceled): a new house may be bought.
+	// 4. That old subscription is over (canceled) but the row still says
+	//    vault18: one product (WP-PAY-0) — support moves it, no checkout.
 	_, err = db.Exec(`UPDATE tenants SET subscription_status = 'canceled' WHERE id = $1`, id)
+	require.NoError(t, err)
+	w = postHouse(t, h, id, order)
+	cat, msg = flashOf(t, w)
+	assert.Equal(t, "error", cat)
+	assert.Contains(t, msg, "legacy plan")
+	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+
+	// 5. Downgraded to starter (what customer.subscription.deleted writes):
+	//    a new house may be bought.
+	_, err = db.Exec(`UPDATE tenants SET plan = 'starter' WHERE id = $1`, id)
 	require.NoError(t, err)
 	w = postHouse(t, h, id, order)
 	require.Equal(t, http.StatusSeeOther, w.Code)

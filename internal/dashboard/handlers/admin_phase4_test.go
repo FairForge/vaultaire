@@ -80,7 +80,8 @@ func TestRevenue_HouseMRRByFloor(t *testing.T) {
 	_, err = db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'canceled', house_period = 'annual' WHERE id = $1`, gone)
 	require.NoError(t, err)
 
-	total, lines := queryHouseMRR(context.Background(), db, zap.NewNop())
+	houses := queryHouses(context.Background(), db, zap.NewNop())
+	total, lines := housesMRR(houses), houseRevenueLines(houses)
 	// Other test tenants may hold houses too; check ours are counted correctly
 	// by lower bounds and by the per-line shape.
 	assert.GreaterOrEqual(t, total, int64(2894+510), "6×4.49+1×2.00 annual + 2×2.55 monthly")

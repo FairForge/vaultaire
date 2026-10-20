@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"go.uber.org/zap"
 )
@@ -212,6 +211,9 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	if len(tenants) == 0 {
 		return
 	}
+	// Revenue is the tenant's house at billing.QuoteHouse (WP-PAY-0: one
+	// product); anything else earns nothing.
+	houseCents := houseQuoteByTenant(queryHouses(ctx, db, logger))
 
 	// Per-backend aggregation.
 	type backendAgg struct {
@@ -237,12 +239,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 
 		costCents := storageCostCents + egressCostCents
 
-		var revenueCents int64
-		if t.tier == "standard" || t.tier == "performance" {
-			revenueCents = billing.AccruedCents(t.tier, t.storageBytes, t.egressBytes)
-		} else {
-			revenueCents = planMonthlyCents(t.plan)
-		}
+		revenueCents := houseCents[t.id]
 
 		marginCents := revenueCents - costCents
 		isNeg := marginCents < 0
@@ -349,6 +346,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 }
 
 type tenantCostData struct {
+	id           string
 	email        string
 	plan         string
 	tier         string
@@ -358,7 +356,7 @@ type tenantCostData struct {
 
 func queryTenantCostData(ctx context.Context, db *sql.DB, logger *zap.Logger) []tenantCostData {
 	rows, err := db.QueryContext(ctx, `
-		SELECT t.email, COALESCE(t.plan, ''),
+		SELECT t.id, t.email, COALESCE(t.plan, ''),
 		       COALESCE(tq.tier, ''), COALESCE(tq.storage_used_bytes, 0),
 		       COALESCE(bw.egress, 0)
 		FROM tenants t
@@ -380,7 +378,7 @@ func queryTenantCostData(ctx context.Context, db *sql.DB, logger *zap.Logger) []
 	var result []tenantCostData
 	for rows.Next() {
 		var td tenantCostData
-		if err := rows.Scan(&td.email, &td.plan, &td.tier, &td.storageBytes, &td.egressBytes); err != nil {
+		if err := rows.Scan(&td.id, &td.email, &td.plan, &td.tier, &td.storageBytes, &td.egressBytes); err != nil {
 			logger.Debug("costs: scan tenant", zap.Error(err))
 			continue
 		}

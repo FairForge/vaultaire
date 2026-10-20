@@ -136,17 +136,21 @@ Shared `queryComplianceData(r, db, tenantID)` helper queries buckets table + `ob
 
 ## Billing (`billing.go`)
 
-`HandleBilling`, `HandleUpgrade` (Stripe Checkout), `HandleManageBilling` (Stripe
-Billing Portal). Renders plan, subscription status, value stack, and cost
-comparison.
+`HandleBilling`, `HandleManageBilling` (Stripe Billing Portal). Renders plan,
+subscription status, value stack, cost comparison, and (flag `quota_checkout`)
+the house checkout.
 
-**Accrued charges (Phase 2.7)**: `populateAccruedCharges(ctx, db, data, tenantID)`
-shows "≈ $X.XX this month" for metered-tier tenants (`standard`/`performance`
-only). Storage is the live `tenant_quotas.storage_used_bytes` gauge; egress is the
-current month's sum from `bandwidth_usage_daily`. Charge math reuses
-`billing.AccruedCents(tier, storageBytes, egressBytes)`. Sets `IsMetered=false`
-for fixed-price (Vault/free) tenants, so the card is hidden. Template card gated on
-`{{if .IsMetered}}` in `billing.html`.
+**One product (WP-PAY-0 = WP-R10-4, Stage 1a Prompt 19):** the legacy pack
+grid, `HandleUpgrade` + `POST /dashboard/billing/upgrade` and the metered
+"≈ $X this month" card (`populateAccruedCharges`, `billing.AccruedCents`) are
+gone. A tenant whose `tenants.plan` is a legacy pack label (`legacyPlan`:
+anything but `''`/`starter`/`free`/`house` — Bench2's `vault100` on prod, set
+by the admin tier picker, whose labels stay valid quota labels) sees "This
+account is on a legacy plan (…) — email support" instead of the checkout
+(`data["LegacyPlan"]`), and `HandleHouseCheckout` refuses it before any
+Stripe call (`tenantHouse.legacy`; a pack subscription Stripe still bills
+keeps the "would bill you twice" message). Tests:
+`billing_one_product_test.go` (real `billing.html`).
 
 ## Admin Waitlist (`waitlist.go`)
 
@@ -176,20 +180,18 @@ no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixt
 
 ## Admin Revenue Dashboard (`admin_revenue.go`)
 
-`HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: real MRR from three
-sources (`populateRevenue`): fixed-price Vault plans (`queryFixedMRR` → `planMonthlyCents`,
-prices from VAULT_SERIES_ECONOMICS.md) + metered tiers (`queryMeteredMRR`, standard/performance
-via `billing.AccruedCents`) + houses per floor (`queryHouseMRR` → `billing.QuoteHouse`). Cards: MRR, Active Subs, New This Month, Churn
-(count + rate from `subscriptions` table). Revenue-by-tier table groups fixed plans
-and metered tiers separately. Top 10 customers by storage, ordered DESC. Optional
-SVG bar chart of new MRR added per month (last 12 months, derived from
-`subscriptions.created_at` — no historical MRR snapshot table exists).
-
-Also fixes `admin.go:queryAdminStats` which previously used the non-existent
-`used_bytes` column — corrected to `storage_used_bytes`.
-
-Helper: `planMonthlyCents(plan)` covers vault1/3/5/10/18/50/100; free/starter/metered
-return 0. `formatCents(cents)` → "$X.XX".
+`HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: **houses only**
+(WP-PAY-0): `queryHouses` reads every live house (`plan = 'house'`, status
+active/past_due/trialing, its `tenant_floor_quotas` and pin-hot) and prices it
+with `billing.QuoteHouse` at the tenant's `house_period` — the sheet the
+customer saw. MRR = `housesMRR`; the by-tier table is one line per floor/add-on
+(`houseRevenueLines`); top customers = the 10 houses with the highest MRR
+(`topHouseCustomers`). A tenant on a legacy pack label without a house earns
+$0. Cards: MRR, Active Subs, New This Month, Churn (count + rate from the
+`subscriptions` table, which nothing writes — R10-14). The month trend
+(`subscriptions.created_at` × the pack prices) is gone until the payments
+ledger feeds one (WP-PAY-3); `TrendBars` renders empty. `admin.go`'s overview
+revenue is `housesMRR` too. `formatCents(cents)` → "$X.XX".
 
 Template: `templates/admin/revenue.html`. Nil-DB and empty-state both render 200
 with "$0.00 MRR" zero-state.
@@ -211,8 +213,8 @@ per-backend egress from `backend_bandwidth_daily` (migration 060, attributed
 engine→BackendNote→RecordWithBackend), and the header reports modelled total,
 invoiced total, and the subsidy delta.
 
-Revenue side reuses `planMonthlyCents` (fixed plans) and `billing.AccruedCents`
-(metered tiers) from admin_revenue.go. Margin = revenue − cost per tenant.
+Revenue side = the tenant's house at `billing.QuoteHouse` (`houseQuoteByTenant(queryHouses(…))`,
+WP-PAY-0); anything else earns $0. Margin = revenue − cost per tenant.
 
 Cards: Est. Monthly Spend (sum + fixed floors), Blended COGS/TB, Gross Margin %,
 Negative-Margin Tenants. Tables: cost-by-backend (storage, variable, fixed, total)
