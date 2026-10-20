@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -403,16 +404,25 @@ func TestWebhookOutbox_RetentionPrunesTerminalRowsAfter30DaysOnly(t *testing.T) 
 
 // verifyWebhookSignature is what a receiver does (docs/API.md): parse
 // t and v1, recompute HMAC-SHA256(secret, t + "." + body), refuse a t more
-// than tolerance from its clock.
+// than tolerance from its clock. It is also the reference of what we SEND:
+// exactly `t=<unix>,v1=<hex>` — an element it does not know (the legacy
+// `sha256=`, dropped in Prompt 18 Part 0, RP17-6) or a repeated one fails
+// it, so every delivery the outbox tests read is checked for the shape.
 func verifyWebhookSignature(header string, body []byte, secret string, now time.Time, tolerance time.Duration) error {
 	var ts, v1 string
-	for _, part := range strings.Split(header, ",") {
+	parts := strings.Split(header, ",")
+	if len(parts) != 2 {
+		return fmt.Errorf("signature header has %d elements, want t and v1: %q", len(parts), header)
+	}
+	for _, part := range parts {
 		k, v, _ := strings.Cut(part, "=")
 		switch k {
 		case "t":
 			ts = v
 		case "v1":
 			v1 = v
+		default:
+			return fmt.Errorf("unknown signature element %q", k)
 		}
 	}
 	sec, err := strconv.ParseInt(ts, 10, 64)
@@ -432,7 +442,7 @@ func verifyWebhookSignature(header string, body []byte, secret string, now time.
 	return nil
 }
 
-func TestWebhookSignature_IsTimestampedAndKeepsTheLegacyElement(t *testing.T) {
+func TestWebhookSignature_IsTimestampedAndV1Only(t *testing.T) {
 	// Arrange
 	body := []byte(`{"id":"ev","type":"object.created"}`)
 	at := time.Unix(1_800_000_000, 0)
@@ -440,9 +450,11 @@ func TestWebhookSignature_IsTimestampedAndKeepsTheLegacyElement(t *testing.T) {
 	// Act
 	sig := webhookSignature(body, "whsec_x", at)
 
-	// Assert
-	assert.True(t, strings.HasPrefix(sig, "t=1800000000,v1="), sig)
-	assert.True(t, strings.HasSuffix(sig, ","+generateWebhookSignature(body, "whsec_x")), "the legacy body-only HMAC rides along")
+	// Assert: `t=<unix>,v1=<64 hex>` and nothing else — the legacy
+	// body-only `sha256=` element rode along "for one release after #791"
+	// and is gone (RP17-6).
+	assert.Regexp(t, `^t=1800000000,v1=[0-9a-f]{64}$`, sig)
+	assert.NotContains(t, sig, "sha256=")
 	assert.NoError(t, verifyWebhookSignature(sig, body, "whsec_x", at.Add(4*time.Minute), 5*time.Minute))
 	assert.Error(t, verifyWebhookSignature(sig, body, "whsec_x", at.Add(6*time.Minute), 5*time.Minute), "a 6-minute-old t is a replay")
 	assert.Error(t, verifyWebhookSignature(sig, append(body, ' '), "whsec_x", at, 5*time.Minute), "the body is covered")

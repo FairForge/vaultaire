@@ -148,6 +148,19 @@ var Deleted = []Rule{
 	{"tenant_quotas", `DELETE FROM tenant_quotas WHERE tenant_id = $1`, ByTenant},
 	{"subscriptions", `DELETE FROM subscriptions WHERE tenant_id = $1`, ByTenant}, // no writer (R10-14)
 
+	// --- the entitlement record (WP-PAY-1, 097) ---
+	// What the tenant bought goes with it. The payments ledger is an
+	// accounting record and STAYS — amounts, period, house, our receipt
+	// number, the provider's own ids (metadata.ids) — with everything that
+	// links it to the person removed: the tenant, crypto addresses and
+	// transaction ids (metadata.addresses / .txids), the note. These are
+	// scrubs, not deletes, and they run here, before the tenants row goes:
+	// its ON DELETE SET NULL would leave no tenant_id for a Kept scrub to
+	// match. payment_events (90-day retention) lose their tenant the same way.
+	{"entitlements", `DELETE FROM entitlements WHERE tenant_id = $1`, ByTenant},
+	{"payments", `UPDATE payments SET tenant_id = NULL, metadata = metadata - 'addresses' - 'txids', note = NULL WHERE tenant_id = $1`, ByTenant},
+	{"payment_events", `UPDATE payment_events SET tenant_id = NULL WHERE tenant_id = $1`, ByTenant},
+
 	// --- tenant configuration and credentials ---
 	{"tiering_policies", `DELETE FROM tiering_policies WHERE tenant_id = $1`, ByTenant},
 	{"retention_policies", `DELETE FROM retention_policies WHERE tenant_id = $1`, ByTenant},

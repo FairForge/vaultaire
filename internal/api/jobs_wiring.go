@@ -29,6 +29,7 @@ import (
 //	account_deletion  04:30  +2 m   6 h      a tenant was deferred (Stripe, a backend)
 //	routing_truth     05:30  +6 m   1 h      the head table cannot be read (a backend that cannot be asked is a note)
 //	smart_demotion    06:30  +5 m   6 h      the tenant list cannot be read
+//	entitlement_lapse 07:30  +5 m   10 m     a list (backfill, candidates, drift) cannot be read (WP-PAY-1)
 //
 // A single report, chunk, object or tenant that fails inside inventory,
 // dedup_gc or smart_demotion is a note on an "ok" run, not a failure: it is
@@ -74,6 +75,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.routingTruth != nil {
 		s.jobs.Register(s.routingTruth.spec())
+	}
+	if s.entitlementLapse != nil {
+		s.jobs.Register(s.entitlementLapse.spec())
 	}
 	if s.smartDemotion != nil {
 		// The job needs both backends. Without them (a local or CI build, a

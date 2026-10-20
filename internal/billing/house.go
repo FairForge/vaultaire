@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stripe/stripe-go/v75"
 	checkoutsession "github.com/stripe/stripe-go/v75/checkout/session"
 	"github.com/stripe/stripe-go/v75/price"
@@ -40,10 +41,11 @@ import (
 //	STRIPE_PRICE_PINHOT_ANNUAL     recurring yearly,  per unit, USD 36.00  (= 3.00 × 12)
 //	STRIPE_PRICE_PINHOT_MONTHLY    recurring monthly, per unit, USD  3.00
 
-// Line identifies a subscription line; Period its billing interval.
+// Line identifies a subscription line; Period its billing interval (the
+// provider-neutral one of internal/payments, WP-PAY-1).
 type (
 	Line   string
-	Period string
+	Period = payments.Period
 )
 
 const (
@@ -51,8 +53,8 @@ const (
 	LineVault    Line = "vault"
 	LinePinHot   Line = "pin_hot"
 
-	PeriodAnnual  Period = "annual"
-	PeriodMonthly Period = "monthly"
+	PeriodAnnual  = payments.PeriodAnnual
+	PeriodMonthly = payments.PeriodMonthly
 )
 
 // HousePriceIDs holds the six Stripe price ids.
@@ -118,11 +120,9 @@ func (p HousePriceIDs) Lookup(priceID string) (Line, Period, bool) {
 	return "", "", false
 }
 
-// HouseOrder is what the customer asked for: whole TB per line and a period.
-type HouseOrder struct {
-	Std, Vault, PinHot int
-	Period             Period
-}
+// HouseOrder is what the customer asked for: whole TB per line and a period
+// — payments.Order, the shape the entitlement record holds (WP-PAY-1).
+type HouseOrder = payments.Order
 
 // ValidateHouseOrder applies the product rules: at least one floor, the
 // builder's bound per floor, pin-hot only on (and within) downstairs, a
@@ -608,4 +608,18 @@ func (s *StripeService) subs() subscriptionFetcher {
 		return s.subFetcher
 	}
 	return stripeSubscriptions{}
+}
+
+// SubscriptionPeriodEnd is the end of a subscription's current period as
+// Stripe has it now — the paid_through the entitlement backfill records for
+// a house granted before migration 097 (WP-PAY-1).
+func (s *StripeService) SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error) {
+	sub, err := s.subs().Get(ctx, subscriptionID)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("fetch subscription %s: %w", subscriptionID, err)
+	}
+	if sub.CurrentPeriodEnd <= 0 {
+		return time.Time{}, fmt.Errorf("subscription %s carries no period", subscriptionID)
+	}
+	return time.Unix(sub.CurrentPeriodEnd, 0).UTC(), nil
 }

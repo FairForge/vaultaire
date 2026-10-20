@@ -2,7 +2,21 @@
 
 Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 
-> **Planned (2026-10-18, WP-PAY): this package becomes the Stripe provider behind a provider-neutral entitlement record (`paid_through` in our DB, a `payments` ledger, BTCPay as a second provider). Design of record: `docs/PAYMENTS.md`; plan § WP-PAY; prompts `docs/reviews/WP-PAY-PROMPTS.md`.**
+> **WP-PAY (design of record `docs/PAYMENTS.md`): this package is becoming the Stripe provider behind a provider-neutral entitlement record. WP-PAY-1 (2026-10-20, migration 097) is in: the webhook dual-writes `internal/payments` — see "The entitlement record" below. `HouseOrder` / `Period` are aliases of `payments.Order` / `payments.Period`.**
+
+## The entitlement record (WP-PAY-1)
+
+The webhook writes the house's floors AND the entitlement row in one transaction (`payments.Grant` / `payments.Revoke`, a second pooled connection beside the held claim — the claim's per-customer lock serialises the customer, `payments.Lock` the tenant), and the `tenants` columns (`stripe_subscription_id`, `subscription_status`, `plan`, `house_period`) in the same transaction, as before (readers move off them in WP-PAY-7):
+
+| Event (fetched status) | Entitlement |
+|---|---|
+| `checkout.session.completed`, `customer.subscription.{created,updated}` — `active` / `trialing` | `Grant`, `paid_through = current_period_end` (a trial is paid through its end), `renewal = auto` (`prepaid` when `cancel_at_period_end`), `provider_ref` = the subscription |
+| … `past_due` | `Grant` with `paid_through = current_period_START`: Stripe moved the period on when it raised the renewal invoice and nothing was paid for it. A grant never shortens a date, so the row keeps the last paid date and the grace runs (the floors stay, as before) |
+| … `canceled` / `unpaid` / `incomplete_expired` / `paused`, and `customer.subscription.deleted` | **still cleared now** (current-subscription guard as before) — `payments.Revoke` (floors cleared, `lapsed_at` set so the lapse job's reconcile never grants it back) + `StopRenewal` (`renewal = prepaid`). WP-PAY-2 moves this branch behind the `entitlement_lapse` flag |
+| `invoice.payment_succeeded` (`webhook_ledger.go`) | the `payments` row keyed by the invoice id is SETTLED (`AmountPaid`, the lines' period, purpose from `billing_reason`, our receipt number `ST-<year>-<n>`); the subscription is FETCHED and, for an active/trialing house, `Grant` to its `current_period_end` in the same transaction — idempotent with the `updated` event of the same renewal. A redelivery is a replay (`vaultaire_payments_total{outcome="replayed"}`, no second row). Amounts come from the signed payload: a paid invoice is final at Stripe (departure from § 1.4's "fetch the invoice") |
+| `invoice.payment_failed` | ledger row `failed` (`AmountDue`); no entitlement change |
+
+`SubscriptionPeriodEnd(ctx, id)` is the read the lapse job's backfill uses. Tests: `webhook_entitlement_test.go` (signed fixtures + the fetched subscription with its period).
 
 ## Key Types
 
@@ -32,8 +46,8 @@ Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 | Event | Action |
 |-------|--------|
 | `checkout.session.completed` | Activate subscription, save to DB |
-| `invoice.payment_succeeded` | Mark subscription active |
-| `invoice.payment_failed` | Mark subscription past_due |
+| `invoice.payment_succeeded` | Mark subscription active; ledger row settled + house granted to the period end (WP-PAY-1) |
+| `invoice.payment_failed` | Mark subscription past_due; ledger row failed (WP-PAY-1) |
 | `customer.subscription.created` / `.updated` | Sync status and plan; house subscriptions → floor quotas (`applyHouse`) |
 | `customer.subscription.deleted` | Downgrade to starter, clear subscription (and the house's floor quotas); ignored for a stale subscription id |
 

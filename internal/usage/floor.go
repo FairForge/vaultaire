@@ -95,7 +95,16 @@ func (m *QuotaManager) SetHouse(ctx context.Context, tenantID string, h House) e
 		return fmt.Errorf("set house for tenant %s: begin: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := SetHouseTx(ctx, tx, tenantID, h); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+// SetHouseTx is SetHouse inside the caller's transaction (WP-PAY-1:
+// payments.Grant writes the entitlement and the floors in one). The total
+// is locked before the floors, as every writer takes them (ledger_tx.go).
+func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error {
 	res, err := tx.ExecContext(ctx,
 		`UPDATE tenant_quotas
 		    SET storage_limit_bytes = $1, tier = $2, pin_hot_bytes = $3, updated_at = NOW()
@@ -121,7 +130,7 @@ func (m *QuotaManager) SetHouse(ctx context.Context, tenantID string, h House) e
 			return fmt.Errorf("set house for tenant %s: floor %s: %w", tenantID, f.floor, err)
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // ClearHouse removes the floor rows and returns the tenant to the free tier
@@ -134,7 +143,16 @@ func (m *QuotaManager) ClearHouse(ctx context.Context, tenantID string) error {
 		return fmt.Errorf("clear house for tenant %s: begin: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := ClearHouseTx(ctx, tx, tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+// ClearHouseTx is ClearHouse inside the caller's transaction (WP-PAY-1: the
+// lapse job and the webhook's clearing branch mark the entitlement in the
+// same one).
+func ClearHouseTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	// The total first, as every writer takes it (ledger_tx.go): deleting the
 	// floor rows first deadlocked against a write committing meanwhile — it
 	// held the total and waited for the floor this held (Stage 1a Prompt 7,
@@ -154,7 +172,7 @@ func (m *QuotaManager) ClearHouse(ctx context.Context, tenantID string) error {
 		FreeTierLimits.StorageBytes, tenantID); err != nil {
 		return fmt.Errorf("clear house for tenant %s: total: %w", tenantID, err)
 	}
-	return tx.Commit()
+	return nil
 }
 
 // GetFloors returns the tenant's floor rows, standard first; empty when the

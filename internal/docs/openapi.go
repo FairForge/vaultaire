@@ -1157,9 +1157,8 @@ func generateWebhookPaths() map[string]*PathItem {
 	return map[string]*PathItem{
 		"/api/v1/webhooks": {
 			Post: mut(withBody(jsonOp("Webhooks", "Create a webhook endpoint", "CreateWebhook",
-				"Registers a URL the server POSTs matching events to. Each POST carries `X-Webhook-Signature: t=<unix>,v1=<hex>,sha256=<hex>`: "+
-					"`v1` is HMAC-SHA256 with the returned secret over `<t>.<body>` — verify it and refuse a `t` more than 5 minutes from your clock (a replay); "+
-					"`sha256` is the legacy HMAC of the body alone, sent for one release while receivers move to `v1`. "+
+				"Registers a URL the server POSTs matching events to. Each POST carries `X-Webhook-Signature: t=<unix>,v1=<hex>`: "+
+					"`v1` is HMAC-SHA256 with the returned secret over `<t>.<body>` — verify it and refuse a `t` more than 5 minutes from your clock (a replay). "+
 					"A delivery that does not get a 2xx is retried: up to 5 attempts, 1 s, 5 s, 25 s and 125 s apart (jittered ±20 %, picked up within 30 s); "+
 					"deduplicate on `X-Event-ID`, an attempt may arrive twice. "+
 					"Target policy (Review R11-04): `http` or `https` only, no credentials in the URL, not `localhost`, and not a literal loopback, private, "+

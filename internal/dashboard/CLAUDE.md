@@ -56,7 +56,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/register` | GET | none | Registration page (redirects to `/` when signups closed) |
 | `/register` | POST | none | Create user+tenant, create session, then render the minted S3 credentials ONCE (B2 — access key, secret, endpoint, copy buttons; secret never shown again) with a continue link to /dashboard. Gated by the `signups` flag; 10/min per IP (R12 — it was unlimited). Hidden `referrer`/`utm_*` fields (filled from the landing link's `utm_*` + `ref` by GET /register, `landing.ParseAttribution`) land on `users.signup_*` (migration 070, checklist item 7) |
 | `/logout` | GET | none | Delete session, clear cookie, redirect to /login |
-| `/legal/privacy` | GET | none | Privacy Policy (GDPR-compliant) |
+| `/legal/privacy` | GET | none | Privacy Policy (GDPR-compliant; since WP-PAY-1 the "Billing records" item names the payment ledger: not purged, de-linked and stripped of crypto addresses / txids / notes at erasure — the DPA's Monitoring item says the same) |
 | `/legal/terms` | GET | none | Terms of Service |
 | `/legal/dpa` | GET | none | Data Processing Agreement (Article 28) |
 | `/legal/cookies` | GET | none | Cookie Policy |

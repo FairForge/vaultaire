@@ -21,6 +21,7 @@ package api
 // compatibility opener and the range sliced from it.
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -202,10 +203,13 @@ type multipartRanger interface {
 // lead (the part count), the part table, then — per part the range spans —
 // that part's 29-byte stream header and the segments the range covers,
 // opened under the part's identity (crypto.PlanMultipartRange,
-// crypto.PlanStreamRange). The first span's first segment is verified before
-// it returns; the next span is opened as the previous ends. The key is
-// needed for every span: the openers of every span are derived up front,
-// before the caller clears it.
+// crypto.PlanStreamRange). The first span — its header, its key, its first
+// segment — is opened and verified before it returns (a wrong key is a 403
+// before the status line); every later span's header is read only as the
+// previous span ends (RP19-2: all N headers were read up front, N small
+// ranged reads before the first byte). The later spans need the customer's
+// key after the caller has cleared its own: the chain holds a copy, zeroed
+// when the stream closes (or when the last span has been opened).
 func (o sseCOpener) openMultipartRange(_ context.Context, src sealedSource, req sealedRead) (io.ReadCloser, error) {
 	if !o.multipart {
 		return nil, errSealedLegacy
@@ -236,30 +240,12 @@ func (o sseCOpener) openMultipartRange(_ context.Context, src sealedSource, req 
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
 	}
-	chain := &spanChain{src: src}
+	chain := &spanChain{src: src, id: o.id, key: bytes.Clone(o.key)}
 	for _, sp := range spans {
-		hb, err := readSealedBytes(src, sp.StreamOffset, int64(crypto.StreamHeaderSSEC))
-		if err != nil {
-			return nil, err
-		}
-		ph, err := crypto.ParseStreamHeader(hb)
-		if err != nil {
-			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
-		}
-		pid := o.id
-		pid.Part = sp.Part
-		opener, err := crypto.SSECRangeOpener(o.key, pid, ph)
-		if err != nil {
-			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
-		}
-		plan, err := crypto.PlanStreamRange(ph, h.Parts[sp.Part-1].Plain, sp.Offset, sp.Length)
-		if err != nil {
-			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
-		}
-		chain.spans = append(chain.spans, chainSpan{opener: opener, plain: h.Parts[sp.Part-1].Plain, plan: plan,
-			off: sp.StreamOffset + plan.CipherOffset})
+		chain.spans = append(chain.spans, chainSpan{span: sp, plain: h.Parts[sp.Part-1].Plain})
 	}
 	if err := chain.next(); err != nil {
+		_ = chain.Close()
 		return nil, err
 	}
 	return &readCloser{Reader: &plaintextSized{r: chain, want: req.N}, Closer: chain}, nil
@@ -281,19 +267,22 @@ func readSealedBytes(src sealedSource, off, n int64) ([]byte, error) {
 	return buf[:k], nil
 }
 
-// chainSpan is one part's range of a 0x05 read, opened when its turn comes.
+// chainSpan is one part's range of a 0x05 read, opened when its turn comes:
+// its header read, its key derived, its segments planned and read.
 type chainSpan struct {
-	opener *crypto.StreamRangeOpener
-	plain  int64
-	plan   crypto.StreamRange
-	off    int64
+	span  crypto.MultipartRangeSpan
+	plain int64 // the part's plaintext length
 }
 
 // spanChain reads the spans of a 0x05 range in order, one stored read open
-// at a time. A span's first segment is verified as the span is opened; a
-// failure after the first span is the reader's error (a cut), never short.
+// at a time. A span's header is read and its first segment verified as the
+// span is opened; a failure after the first span is the reader's error (a
+// cut), never short. key is the chain's own copy of the customer's key,
+// zeroed once the last span is open or the chain closes.
 type spanChain struct {
 	src   sealedSource
+	id    crypto.StreamIdentity
+	key   []byte
 	spans []chainSpan
 	i     int
 	cur   io.Reader
@@ -301,7 +290,9 @@ type spanChain struct {
 	err   error
 }
 
-// next opens span i (closing the previous span's read).
+// next opens span i (closing the previous span's read): the part's 29-byte
+// stream header, its range opener under the part's identity, then the
+// stored bytes of the segments the span covers.
 func (c *spanChain) next() error {
 	if c.rc != nil {
 		_ = c.rc.Close()
@@ -311,17 +302,38 @@ func (c *spanChain) next() error {
 		return io.EOF
 	}
 	sp := c.spans[c.i]
-	rc, err := c.src.ranged(sp.off, sp.plan.CipherLength)
+	hb, err := readSealedBytes(c.src, sp.span.StreamOffset, int64(crypto.StreamHeaderSSEC))
 	if err != nil {
 		return err
 	}
-	pt, err := sp.opener.OpenRange(sp.plain, sp.plan, io.LimitReader(rc, sp.plan.CipherLength))
+	ph, err := crypto.ParseStreamHeader(hb)
+	if err != nil {
+		return fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.span.Part, err)
+	}
+	pid := c.id
+	pid.Part = sp.span.Part
+	opener, err := crypto.SSECRangeOpener(c.key, pid, ph)
+	if err != nil {
+		return fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.span.Part, err)
+	}
+	plan, err := crypto.PlanStreamRange(ph, sp.plain, sp.span.Offset, sp.span.Length)
+	if err != nil {
+		return fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.span.Part, err)
+	}
+	rc, err := c.src.ranged(sp.span.StreamOffset+plan.CipherOffset, plan.CipherLength)
+	if err != nil {
+		return err
+	}
+	pt, err := opener.OpenRange(sp.plain, plan, io.LimitReader(rc, plan.CipherLength))
 	if err != nil {
 		_ = rc.Close()
 		return fmt.Errorf("%w: %w", errSealedUnreadable, err)
 	}
 	c.rc, c.cur = rc, pt
 	c.i++
+	if c.i == len(c.spans) {
+		clear(c.key) // every span's key is derived
+	}
 	return nil
 }
 
@@ -353,6 +365,7 @@ func (c *spanChain) Read(p []byte) (int, error) {
 }
 
 func (c *spanChain) Close() error {
+	clear(c.key)
 	if c.rc != nil {
 		err := c.rc.Close()
 		c.rc, c.cur = nil, nil

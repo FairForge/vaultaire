@@ -154,3 +154,55 @@ Local server on the private DB (, `MULTIPART_STAGING_MIN_FREE=off` — the Mac's
 - **Part 0 (#794):** golangci-lint v2.14.0 0; `go test -race` on api, drivers, cmd/vaultaire, crypto, engine against the private migrated `vaultaire_p17` (three sqlmock tests updated for the `RETURNING created_at` insert and the joined GET query); every new test red first (the table); `make deadcode` no longer names `dispatchWebhooks` (the 221 class-B functions of R15 stay); CI green, merge group green, deploy green, prod proof above.
 - **Part A (#795):** lint 0; `go test -race` on the lock / versioning / MFA / batch tests + the SQL literal audit; every new test red against `origin/main` with the message constants stubbed; CI green; prod proof above.
 - **Part B (#796, #797, #798):** lint 0 on every PR; the migration applied twice to the private DB; `go test -race` on api, crypto, dashboard (all three packages), docs, database — green (one leaked-row failure of `TestRoutingRuleFile_MatchesTheExportedSeries` on the private DB was RP17-8's `test-r9-dash-*` rows, removed); the OpenAPI drift guard and the export schema walk pass with the new column; #796's first CI run failed on two sqlmock expectations (the bucket read, the GET bucket) fixed in two follow-up commits; #797 rebuilt on main after #794's allocation rows conflicted; CI green on all three, merge group green, three deploys green; the lab and the prod proof above.
+
+## Post-merge review (2026-10-20, meta)
+
+Adversarial pass over #794, #795, #796, #797, #798 against the AWS API references
+and the code at `4cc5680`. **Every claim above holds; no P0/P1/P2.** CI, Security,
+CodeQL and Deploy green on every merge commit; the docs PR #799 merged; #793 (the
+WP-P16 post-merge PR) was found OPEN with auto-merge cleared — the RP16-10 shape
+a third time — updated and re-queued during this review.
+
+Verified in depth (beyond the session's own gates):
+
+- **Lock headers (RP17-1):** `lockHeadersOf` keys on the LEFT JOIN's `legal_hold`
+  NULL, a retention-only row sends mode+date, a hold-only row the hold alone
+  (D-P17-2 as coded); the 304 mode returns before the lock headers
+  (`object_headers.go:138`), so "never on a 304" is true in code.
+- **State machine (#795):** the header parse takes the LAST whitespace token, so
+  AWS's `<SerialNumber> <TokenCode>` shape and a bare code both validate; MFA
+  precedes every 409; one UPDATE writes both elements — no partial write on any
+  refusal; Enabled→Enabled on a lock bucket still 200; the lock check reads
+  `object_lock_enabled`, not config presence.
+- **`ssec_required` (#796/#798):** the three `decidePlacement` callers are the
+  complete set of placement writers; Create, CopyObject destination, generated
+  objects and the log/inventory target gates close the rest; D-P17-19 is real in
+  code (Complete reads the upload row's key state, staged parts never committed);
+  every flag read fails CLOSED (500/refusal, never "not flagged"); public+required
+  is unrepresentable through every path that writes visibility; the refusal reason
+  is pre-created at 0 on the existing counter (the RP14-9 lesson).
+- **0x05 (#797/#798):** version rows carry `AES256-SSE-C-v3-mp` + `ssec_key_md5`
+  (`copyHeadAttrsToVersionSQL`) and GET/copy `?versionId` open from the version
+  row; a part re-upload is rename-into-place with the row upserted, and a
+  re-upload racing Complete fails the Complete on `sealed_md5` — never silent
+  corruption; an empty part round-trips; quota reserves and settles PLAINTEXT
+  sizes (logical-bytes billing) and egress counts plaintext; `PlanMultipartRange`
+  boundary math checked (suffix ranges resolved against the row size first);
+  the part AAD binds tenant/bucket/key/part number.
+
+New residuals:
+
+| # | Sev | Item | Where it goes |
+|---|---|---|---|
+| RP19-9 | P3 | **`MfaDelete` element value is never validated** (`s3_versioning.go`: `!= ""` gates, `== "Enabled"` writes): `<MfaDelete>Garbage</MfaDelete>` passes the gate, consumes a valid MFA code, then silently writes `mfa_delete_enabled = false`. AWS answers `MalformedXML`. Mirror the Status validation. | Prompt 18 Part 0 |
+| RP19-10 | note | An `IsMFAEnabled` / `GetMFASecret` **DB error** inside `validateMFAHeader` maps to `mfaNotConfiguredError` → 403, not the RP16-5 503 (fails closed, but a DB outage reads as "MFA not configured"). | with RP19-9 |
+| RP19-11 | note | The TOTP replay guard is **in-memory per process**: a code consumed on the stopping slot replays on the new one during a two-slot switch; a restart clears the window. Single-active-slot prod makes this seconds wide. | — |
+| RP19-12 | note | `stagingWouldOverfill` checks the **plaintext** declared size while an SSE-C part stages its sealed length (+29 B + 16 B/MiB ≈ 0.0016 %). | — |
+| RP19-13 | note | The upload id is **not in the part AAD**: two uploads of the same object+part under one key produce mutually valid streams. Complete re-hashes against the own upload's `sealed_md5`, so exploiting it needs disk AND DB write access. | — |
+
+Re-rated: **RP19-1's vault-parity half belongs in Prompt 18 Part 0** — the
+`vault_parity` flag is ON globally on prod, so the first vault-floor SSE-C
+multipart object would be "protected" at 0 bytes (the rebuild fallback fails
+safe: `plaintextSized` refuses, never wrong bytes); the Smart-demotion half
+stays flag-dark. **RP17-6 is due**: the legacy `sha256=` signature element
+(`events.go:279`) was "one release after #791" — several releases have shipped.
