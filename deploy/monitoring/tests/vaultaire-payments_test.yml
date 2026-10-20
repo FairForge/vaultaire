@@ -1,0 +1,97 @@
+# promtool unit test of vaultaire-payments.yml (WP-PAY-3, Stage 1a Prompt 20).
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-payments.yml deploy/monitoring/tests/vaultaire-payments_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-payments_test.yml'
+# The rule file path below is relative to this file's directory as copied.
+rule_files:
+  - vaultaire-payments.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Prod today: ready 0, flag off → silent. Flag on + ready 0 for 15 m → critical.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_provider_ready{provider="stripe"}'
+        values: '0x60'
+      - series: 'vaultaire_payment_provider_enabled{provider="stripe"}'
+        values: '0x20 1x40'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: PaymentProviderDown
+        exp_alerts: []
+      - eval_time: 36m
+        alertname: PaymentProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: stripe
+            exp_annotations:
+              summary: "Payment provider stripe is not ready while its flag is on"
+              description: "vaultaire_payment_provider_ready{provider=\"stripe\"} has been 0 for 15 minutes with pay_stripe on: no checkout can start and the entitlement_lapse job skips its houses. Stripe: the key is missing or revoked, or a price no longer matches prices.json — journalctl -u 'vaultaire@*' | grep 'house prices' names the price; fix it in the Stripe dashboard, never in code."
+
+  # A ready provider never fires, flag or no flag.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_provider_ready{provider="stripe"}'
+        values: '1x60'
+      - series: 'vaultaire_payment_provider_enabled{provider="stripe"}'
+        values: '1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: PaymentProviderDown
+        exp_alerts: []
+
+  # One invalid house in the hour warns; a counter that stays flat does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_stripe_house_invalid_total'
+        values: '0x30 1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: StripeHouseInvalid
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: StripeHouseInvalid
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "A Stripe subscription describes no valid house"
+              description: "journalctl -u 'vaultaire@*' | grep 'no valid house' names the tenant, the subscription and the items; the audit row is billing.house_invalid. Fix the subscription's items in the Stripe dashboard — the next event re-grants the house."
+
+  # Webhooks: 3 errors out of 4 deliveries in 15 min fire; 1 of 10 does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_webhook_total{provider="stripe",outcome="error"}'
+        values: '0x5 3x20'
+      - series: 'vaultaire_payment_webhook_total{provider="stripe",outcome="ok"}'
+        values: '0x5 1x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PaymentWebhookFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: stripe
+            exp_annotations:
+              summary: "stripe webhooks are failing (75% of deliveries in 15 min)"
+              description: "Deliveries from stripe are answered 500 and retried by the provider; houses bought meanwhile are not applied until a delivery succeeds. journalctl -u 'vaultaire@*' | grep 'stripe webhook' gives the event id and the error (a claim lock timeout, a database error, a fetch of the subscription that failed)."
+
+  # Skipped-unready on two runs running: the gauge held > 0 for 30 h.
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_entitlement_lapse_skipped_unready'
+        values: '0x24 2x24 2x24'
+    alert_rule_test:
+      - eval_time: 40h
+        alertname: EntitlementLapseSkippedUnready
+        exp_alerts: []
+      - eval_time: 60h
+        alertname: EntitlementLapseSkippedUnready
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "entitlement_lapse skipped 2 house(s) as provider_unready on two runs running"
+              description: "A house past paid_through + grace is kept while its provider was unready in the last 24 h (by design — a house is never lost because our processor was down), but two days running means the provider is not coming back by itself. GET /api/v1/admin/jobs → entitlement_lapse.result.errors names the tenants and the provider; see PaymentProviderDown."

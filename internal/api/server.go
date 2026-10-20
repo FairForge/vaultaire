@@ -1090,6 +1090,11 @@ func (s *Server) registerComplianceRoutes() {
 
 		// Operator audit trail (Review R11-09, pre-launch checklist item 1).
 		r.Get("/audit", s.requireAdmin(s.handleAdminAuditList))
+
+		// The money (WP-PAY-3): a tenant's entitlement + ledger, a manual
+		// payment, a paid_through / house adjustment, a refund — every
+		// call audited with the actor and a required reason.
+		s.registerAdminPaymentRoutes(r)
 	})
 }
 

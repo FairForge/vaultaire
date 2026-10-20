@@ -146,6 +146,65 @@
     <div class="card-detail" style="margin-top:0.5rem">To exempt a tenant from the throttle, add an <code>egress_throttle</code> row for it on <a href="/admin/flags">Flags</a> with the flag off.</div>
 </div>
 
+<div class="card" id="billing-section">
+    <div class="card-title">Billing</div>
+    <p class="card-detail">{{if .BillingSentence}}{{.BillingSentence}}{{else}}No house: the free tier.{{end}}</p>
+    {{if .BillingPayments}}
+    <table class="comparison-table" style="margin-bottom:1rem">
+        <thead><tr><th>Number</th><th>Date</th><th>Kind</th><th>Status</th><th>Provider</th><th>Amount</th><th>For</th><th>Id</th></tr></thead>
+        <tbody>
+        {{range .BillingPayments}}
+        <tr><td>{{.InvoiceNumber}}</td><td>{{.Date}}</td><td>{{.Kind}}</td><td>{{.Status}}</td><td>{{.Provider}}</td><td>{{.Amount}}</td><td>{{.House}}{{if .RefundOf}} (refund of {{.RefundOf}}){{end}}</td><td><code style="font-size:0.7rem">{{.ID}}</code></td></tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}<p class="card-detail" style="color:var(--dim)">No payments on record.</p>{{end}}
+
+    <div id="billing-payment-feedback"></div>
+    <form hx-post="/admin/tenants/{{.TenantID}}/billing/payment" hx-target="#billing-payment-feedback" hx-swap="innerHTML" style="margin-top:1rem">
+        <div class="card-detail"><strong>Record a manual payment</strong> (a wire, a support credit): settles a numbered ledger row and grants or extends the house by one period. A tenant with no house must be given one (TB per floor).</div>
+        <div class="form-row">
+            <label>Amount (USD)</label><input type="text" name="amount" value="" placeholder="53.88" class="form-input-sm" required>
+            <label>Period</label>
+            <select name="period" class="form-input-sm"><option value="annual">annual</option><option value="monthly">monthly</option></select>
+            <label>Std TB</label><input type="number" name="std_tb" min="0" value="{{if .BillingEntitlement}}{{.BillingEntitlement.Order.Std}}{{else}}0{{end}}" class="form-input-sm">
+            <label>Vault TB</label><input type="number" name="vault_tb" min="0" value="{{if .BillingEntitlement}}{{.BillingEntitlement.Order.Vault}}{{else}}0{{end}}" class="form-input-sm">
+            <label>Pin-hot TB</label><input type="number" name="pin_hot_tb" min="0" value="{{if .BillingEntitlement}}{{.BillingEntitlement.Order.PinHot}}{{else}}0{{end}}" class="form-input-sm">
+        </div>
+        <div class="form-row">
+            <label>Note</label><input type="text" name="note" placeholder="wire ref" class="form-input-sm">
+            <label>Reason (required)</label><input type="text" name="reason" class="form-input-sm" required>
+            <button type="submit" class="btn btn-sm btn-primary" hx-confirm="Record this payment and extend the house?">Record payment</button>
+        </div>
+    </form>
+
+    <div id="billing-entitlement-feedback"></div>
+    <form hx-post="/admin/tenants/{{.TenantID}}/billing/entitlement" hx-target="#billing-entitlement-feedback" hx-swap="innerHTML" style="margin-top:1rem">
+        <div class="card-detail"><strong>Adjust the entitlement</strong>: set paid-through and/or the house by hand. This is the one writer that may shorten a date.</div>
+        <div class="form-row">
+            <label>Paid through (UTC)</label><input type="date" name="paid_through" class="form-input-sm">
+            <label>Std TB</label><input type="number" name="std_tb" min="0" value="0" class="form-input-sm">
+            <label>Vault TB</label><input type="number" name="vault_tb" min="0" value="0" class="form-input-sm">
+            <label>Pin-hot TB</label><input type="number" name="pin_hot_tb" min="0" value="0" class="form-input-sm">
+            <label>Reason (required)</label><input type="text" name="reason" class="form-input-sm" required>
+            <button type="submit" class="btn btn-sm btn-danger" hx-confirm="Adjust the entitlement as given?">Adjust</button>
+        </div>
+    </form>
+
+    <div id="billing-refund-feedback"></div>
+    <form hx-post="/admin/tenants/{{.TenantID}}/billing/refund" hx-target="#billing-refund-feedback" hx-swap="innerHTML" style="margin-top:1rem">
+        <div class="card-detail"><strong>Record a refund</strong> made outside (Stripe dashboard, a wire back): a credit-note row linked to the charge; optionally shorten paid-through by the refunded share of what the charge bought.</div>
+        <div class="form-row">
+            <label>Charge id</label><input type="text" name="payment_id" placeholder="the Id column" class="form-input-sm" required>
+            <label>Amount (USD)</label><input type="text" name="amount" placeholder="53.88" class="form-input-sm" required>
+            <label>Provider ref</label><input type="text" name="provider_ref" placeholder="re_…" class="form-input-sm">
+            <label><input type="checkbox" name="shorten" value="on"> shorten paid-through</label>
+            <label>Reason (required)</label><input type="text" name="reason" class="form-input-sm" required>
+            <button type="submit" class="btn btn-sm btn-danger" hx-confirm="Record this refund?">Record refund</button>
+        </div>
+    </form>
+</div>
+
 <div class="card" id="mfa-section">
     <div class="card-title">Two-Factor Authentication</div>
     <div id="mfa-feedback"></div>
