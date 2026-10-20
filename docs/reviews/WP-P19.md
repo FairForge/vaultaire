@@ -110,3 +110,67 @@ After #808 (`374e582`, 18:29 UTC): `/version` `374e5826fb30`, 0 error lines sinc
 | RP21-5 | note | `/dashboard/billing` and `/admin/revenue` on prod were checked as mounted (303 to `/login`, no 5xx) — rendering them needs a dashboard session; the rendering is proven locally with the real templates. | — |
 
 Carried forward unchanged: **RP20-6** (`payments.metadata.ids.customer` survives erasure — WP-PAY-3, the policy sentences) and **RP20-7** (dunning must fit inside the 14-day grace — the owner row, click-list item 5).
+
+## Post-merge review (2026-10-20, meta)
+
+Adversarial pass over #806, #807 and #808 against `docs/PAYMENTS.md` § 2,
+`internal/billing/CLAUDE.md` and the code at `e462e77`. **Every claim above
+holds; no P0/P1. One P2 (RP22-1, proven with a throwaway test) and two P3 go
+to Prompt 20 Part 0.** CI, Security and Deploy green on every merge commit;
+the docs PR #809 merged; prod `/version` = `374e5826fb30` on slot 8000.
+
+Verified in depth (beyond the session's own gates):
+
+- **Part 0 (#806):** `payments.Grant` validates the order before `Lock` and
+  before its first statement, so the settle transaction of a paid invoice is
+  intact when `recordInvoicePaid` swallows `ErrInvalidOrder`; `p.Order` is
+  set in the same branch that defines `grant`, so `houseInvalid`'s `*p.Order`
+  is never a nil dereference; the counter is unlabelled (0 from boot, on
+  prod's `/metrics`); `isCurrentSubscription` guards both terminal branches
+  before the flag-ON `StopRenewal`.
+- **WP-PAY-0 (#807):** `go list -deps ./internal/dashboard/... | grep -c
+  stripe-go` = 0 on `main`; no `STRIPE_METER`, `HandleUpgrade`,
+  `registerStripePlans`, `AccruedCents` or `MeteredReporter` reference outside
+  `one_product_boot_test.go`; the root `CLAUDE.md` and `docs/CONFIG.md` rows
+  are gone; `internal/billing/CLAUDE.md` names them only in its "deleted"
+  paragraph.
+- **WP-PAY-2 (#808):** the double-billing guard holds the entitlement advisory
+  lock (the same `pg_advisory_xact_lock` every `Grant` takes) across the
+  provider call; `payments.Get` returns by value, so the deletion runner's
+  `e.ProviderRef` after `ErrNoEntitlement` is `""` (no nil dereference);
+  `StopRenewal` on a tenant with no row is a 0-row UPDATE, not an error — the
+  flag-ON branches cannot start a retry storm; `currentSubscription` prefers
+  the row's `provider_ref`, so a late terminal event of a replaced
+  subscription is ignored and a new checkout after a lapse is granted under
+  its own id; a lapsed row's stale `provider_ref` costs the deletion runner
+  one idempotent cancel of an already-cancelled subscription, nothing else;
+  `Registry.Provider` is nil-safe (`router.go:324`); `pay_stripe` defaults to
+  "key set" at `registerFlags`; `TestDashboardImportsNoStripe` is the red test
+  the design asked for.
+- **Prod (read-only, 19:36 UTC):** 0 `"level":"error"` lines since 18:25
+  (1,561 Warn = the dead-iDrive probes, RP20-10); the 12 rule files
+  sha256-equal to `main`; 12 alerts = 11 `BackendProbeFailing{idrive*}` +
+  `RoutingTruthNoVerdict{idrive}`; every job's last outcome `ok`
+  (`entitlement_lapse` 18:29); `entitlements` / `payments` /
+  `tenant_floor_quotas` / `stripe_events` 0 rows, 0 Stripe customers, 3
+  tenants (`starter`, `vault100`, `starter`); `feature_flags` empty (every
+  flag at its default); `vaultaire_payment_provider_ready{provider="stripe"} 0`,
+  `vaultaire_stripe_house_invalid_total 0`, the three `entitlements_expiring`
+  windows 0.
+
+New residuals:
+
+| # | Sev | Item | Where it goes |
+|---|---|---|---|
+| RP22-1 | **P2** | **Every deploy marks Stripe unready for 24 h, so the lapse job skips every Stripe row.** `Registry.Register` observes `Ready` inside `NewServer` (`server.go` ~418 / ~590); `StripeService.Ready` → `HouseCheckoutReady` is false until `Start` → `StartHouseVerification` has run once, so `ReadyLog.lastUnready["stripe"]` = boot on every boot. At 07:30 the job asks `UnreadyWithin(24 h)`: the provider is ready NOW (recorded), then the log says "unready at boot" → `skipped_unready`. Prod deploys two to five times a day: with the flag on and a key set, no Stripe house would ever lapse. **Proven** with a throwaway test (`fakeProvider` unready at `Register`, ready one minute later, `UnreadyWithin(24h)` ten hours later = true). RP21-1 ("a restart forgets an outage") is the same log read the other way round. Fix: readiness has three states — a provider whose verification has not completed is *pending* and never recorded; a `VerifyHousePrices` that could not reach Stripe keeps the previous verdict (only a mismatch is "unready" — RP22-5); the persistence RP21-1 asks for rides WP-PAY-3's migration. | Prompt 20 Part 0 |
+| RP22-2 | P3 | With `entitlement_lapse` ON, `customer.subscription.deleted` of a **non-house** subscription (a legacy pack) returns from the flag branch (`webhook.go:806-820`) before the `plan = 'starter'` downgrade (`:826-840`): `plan` keeps the pack label, `legacyPlan` stays true, the billing page tells the customer to e-mail support and refuses a house checkout for ever. The flag branch applies to a house only (`HouseFromSubscription` ok); a pack keeps today's downgrade. Prod: flag off, no pack subscription. | Prompt 20 Part 0 |
+| RP22-3 | P3 | A subscription acknowledged as an invalid house is recorded nowhere the deletion runner reads: the `tenants.stripe_subscription_id` write sits in the grant transaction that rolled back (`webhook.go:650`), and the runner never reads the ledger's `metadata.ids.subscription`. For an operator-made subscription with no Checkout session (`:576` heals the id only from a session) the runner finds "nothing to bill" and erases an account Stripe still charges. `houseInvalid` should record the subscription id and status on the tenant outside the rolled-back transaction. | Prompt 20 Part 0 |
+| RP22-4 | note | The guard holds the entitlement lock across up to three Stripe round trips (customer, `HasLiveSubscription`, session) on one pool connection while the inner reads take a second; a webhook of the same tenant waits on its own two. Pool 50 (`postgres.go:49`) is fine at launch scale; a `lock_timeout` on the guard's transaction would turn exhaustion into a clean error instead of a hang. | WP-PAY-3 |
+| RP22-5 | note | A transient failure of the hourly `VerifyHousePrices` (a Stripe 5xx, a timeout) sets `verified = false` → 24 h of `skipped_unready` although payments were never impeded. Same fix as RP22-1. | Prompt 20 Part 0 |
+| RP22-6 | note | `Registry.Resize` refuses a **downsize** too while `pay_stripe` is off (the design's "no new checkouts/resizes"); a customer wanting to pay less is told "switched off". Decide whether a shrink is new business. | WP-PAY-5 |
+| RP22-7 | note | `createCustomer`'s idempotency key `customer-<tenant>` with an e-mail changed within 24 h of a failed record = Stripe `idempotency_error` until the key expires. Include a hash of the e-mail in the key, or drop the key on that error. | WP-PAY-3 |
+| RP22-8 | note | `vaultaire_stripe_house_invalid_total` has no rule; WP-PAY-3's `vaultaire-payments.yml` gets `StripeHouseInvalid` (`increase(…[1h]) > 0`; unlabelled, so born at 0). The `vaultaire_entitlements_expiring` windows are `7d | 30d | in_grace` (the design wrote 14d/3d/grace) — the rules follow the code. | WP-PAY-3 |
+
+Re-confirmed: RP21-1..5 and RP20-6/7 as written. The next migration is
+**098** (WP-PAY-3: `entitlements.reminders_sent` + the persisted readiness
+log).
