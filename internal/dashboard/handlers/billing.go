@@ -43,9 +43,13 @@ func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *
 			houseSvc = svc
 		}
 		populateHouse(ctx, db, houseSvc, fl, data, sd.TenantID, r.URL.Query().Get("add"))
+		populateReceipts(ctx, db, data, sd.TenantID, logger)
 
 		if r.URL.Query().Get("upgraded") == "1" {
 			data["Upgraded"] = true
+		}
+		if r.URL.Query().Get("renewed") == "1" {
+			data["Renewed"] = true
 		}
 		if r.URL.Query().Get("resized") == "1" {
 			data["Resized"] = true

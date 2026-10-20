@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"strconv"
 	"strings"
@@ -68,6 +69,13 @@ type HouseView struct {
 	SubscriptionID     string
 	// Providers: the ways this tenant may pay now (flag on, ready).
 	Providers []string
+	// CanRenew: a prepaid or lapsed house a provider can take money for
+	// (WP-PAY-3 item 3; RP21-2's way out) — the Renew button, labelled
+	// RenewLabel ("Renew now" / "Add a year" / "Add a month"), on
+	// RenewProvider (the row's provider when it may, else any enabled).
+	CanRenew      bool
+	RenewLabel    string
+	RenewProvider string
 
 	UsedStd, UsedVault       int64
 	UsedStdFmt, UsedVaultFmt string
@@ -92,8 +100,12 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 		var err error
 		if st, err = svc.Status(ctx, tenantID); err == nil {
 			data["HouseSentence"] = houseSentence(st)
+			if p, label := renewOffer(ctx, svc, tenantID, st); p != "" {
+				v.CanRenew, v.RenewProvider, v.RenewLabel = true, p, label
+			}
 		}
 	}
+	data["House"] = v
 	if fl == nil || !fl.Enabled(FlagQuotaCheckout, tenantID) || db == nil {
 		return
 	}
@@ -145,6 +157,36 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 	}
 	v.Quote = payments.QuoteHouse(v.Std, v.Vault, v.PinHot, payments.Period(v.Period))
 	data["House"] = v
+}
+
+// renewOffer says whether the page offers to renew the house by hand and
+// through which provider: a granted house nobody renews (prepaid) or a
+// lapsed one, with the row's provider when the tenant may use it, else any
+// provider that is on (a manual house is renewed by card; a lapsed Stripe
+// house may be bought again). Never for a house a provider renews by
+// itself. Not gated by quota_checkout: the house exists already.
+func renewOffer(ctx context.Context, svc HouseBilling, tenantID string, st payments.Status) (provider, label string) {
+	if !st.Found || (st.Granted && st.Entitlement.Renewal != payments.RenewalPrepaid) {
+		return "", ""
+	}
+	e := st.Entitlement
+	if ok, _ := svc.Ready(ctx, tenantID, e.Provider); ok {
+		provider = e.Provider
+	} else if enabled := svc.Enabled(ctx, tenantID); len(enabled) > 0 {
+		provider = enabled[0]
+	}
+	if provider == "" {
+		return "", ""
+	}
+	switch {
+	case !st.Granted || st.InGrace:
+		label = "Renew now"
+	case e.Order.Period == payments.PeriodMonthly:
+		label = "Add a month"
+	default:
+		label = "Add a year"
+	}
+	return provider, label
 }
 
 // houseSentence says the entitlement the way the page does: "Paid through
@@ -422,24 +464,120 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 	}
 }
 
+// HandleRenewHouse is POST /dashboard/billing/renew (WP-PAY-3 item 3): a
+// checkout with purpose "renew" for the row's own house — a prepaid house
+// gets a period added, a lapsed one is bought again (RP21-2 closed) — on
+// the provider renewOffer chose (a form field `provider` may name one of
+// the enabled ones). A house a provider renews by itself is refused.
+func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.Logger) http.HandlerFunc {
+	back := func(w http.ResponseWriter, r *http.Request, category, msg string) {
+		middleware.SetFlash(w, category, msg)
+		http.Redirect(w, r, "/dashboard/billing", http.StatusSeeOther)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		if svc == nil || db == nil {
+			back(w, r, "error", "Renewal isn't open yet — billing is not configured. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
+			return
+		}
+		st, err := svc.Status(r.Context(), sd.TenantID)
+		if err != nil {
+			logger.Error("read entitlement for renewal", zap.Error(err), zap.String("tenant", sd.TenantID))
+			back(w, r, "error", "Something went wrong reading your account. Please try again.")
+			return
+		}
+		provider, _ := renewOffer(r.Context(), svc, sd.TenantID, st)
+		if provider == "" {
+			if st.Found && st.Granted && st.Entitlement.Renewal == payments.RenewalAuto {
+				back(w, r, "error", "Your house renews by itself; there is nothing to renew by hand. Manage Payment changes the card or stops the renewal.")
+			} else {
+				back(w, r, "error", "Renewal isn't open right now. Email "+hosts.Get().SupportEmail()+" and we will help.")
+			}
+			return
+		}
+		if asked := strings.TrimSpace(r.FormValue("provider")); asked != "" {
+			provider = asked
+		}
+		order := st.Entitlement.Order
+		base := strings.TrimRight(baseURL, "/")
+		checkoutURL, err := svc.StartCheckout(r.Context(), provider, payments.Checkout{
+			TenantID: sd.TenantID, Email: sd.Email, Order: order, Purpose: payments.PurposeRenew,
+			ReturnURL: base + "/dashboard/billing?renewed=1", CancelURL: base + "/dashboard/billing",
+		})
+		if refusedForProvider(w, err) {
+			return
+		}
+		switch {
+		case errors.Is(err, payments.ErrProviderUnavailable):
+			logger.Warn("house renewal refused: not ready", zap.Error(err), zap.String("tenant", sd.TenantID))
+			back(w, r, "error", "Renewal isn't open yet. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
+			return
+		case errors.Is(err, payments.ErrLiveSubscription):
+			back(w, r, "error", "You already have a subscription on this account that renews the house. If it does not show here, email "+hosts.Get().SupportEmail()+".")
+			return
+		case err != nil:
+			logger.Error("start house renewal", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("provider", provider))
+			back(w, r, "error", "Renewal didn't start. Nothing was charged; please try again in a minute.")
+			return
+		}
+		logger.Info("house renewal started", zap.String("tenant", sd.TenantID), zap.String("provider", provider),
+			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot), zap.String("period", string(order.Period)))
+		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
+	}
+}
+
 // refusedForProvider answers the two provider refusals as 409 with the
-// page's message (docs/PAYMENTS.md § 2.3, § 2.5) and reports whether it did.
+// page's message (docs/PAYMENTS.md § 2.3, § 2.5) — rendered in the
+// dashboard's error look (WP-PAY-3; the status and X-Error-Code are what
+// WP-PAY-2's tests pin) — and reports whether it did.
 func refusedForProvider(w http.ResponseWriter, err error) bool {
-	var code, msg string
+	var code, title, msg string
 	switch {
 	case errors.Is(err, payments.ErrProviderDisabled):
-		code, msg = "provider_disabled", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
+		code, title, msg = "provider_disabled", "This way of paying is switched off", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
 	case errors.Is(err, payments.ErrOtherProviderLive):
-		code, msg = "other_provider_live", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
+		code, title, msg = "other_provider_live", "Your house is renewed another way", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
 	default:
 		return false
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Error-Code", code)
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusConflict)
-	_, _ = fmt.Fprintf(w, "%s: %s\n", code, msg)
+	_, _ = fmt.Fprintf(w, refusalPageHTML, template.HTMLEscapeString(title), template.HTMLEscapeString(title), template.HTMLEscapeString(msg))
 	return true
 }
+
+// refusalPageHTML is the 409 page: self-contained, the dashboard's error
+// look (errors.go), a way back to billing.
+const refusalPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>%s — Stored</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#1e293b;border-radius:12px;padding:2.5rem;max-width:480px;text-align:center}
+h1{font-size:1.4rem;margin:0 0 0.75rem;color:#fbbf24}
+p{color:#94a3b8;line-height:1.6}
+a{color:#60a5fa;text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>%s</h1>
+<p>%s</p>
+<p><a href="/dashboard/billing">&larr; Back to billing</a></p>
+</div>
+</body>
+</html>
+`
 
 func periodWord(p string) string {
 	if p == string(payments.PeriodMonthly) {
