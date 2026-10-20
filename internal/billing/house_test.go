@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/FairForge/vaultaire/internal/usage"
 	_ "github.com/lib/pq"
@@ -164,7 +165,7 @@ func TestHouseCheckoutParams(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
 	svc.ConfigureHouse(testIDs, goodPrices())
 	params := svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Std: 6, Vault: 1, PinHot: 2, Period: PeriodMonthly},
-		"https://stored.ge/dashboard/billing?upgraded=1", "https://stored.ge/dashboard/billing")
+		payments.PurposeNew, "https://stored.ge/dashboard/billing?upgraded=1", "https://stored.ge/dashboard/billing")
 
 	require.Len(t, params.LineItems, 3)
 	assert.Equal(t, "price_std_m", *params.LineItems[0].Price)
@@ -179,10 +180,11 @@ func TestHouseCheckoutParams(t *testing.T) {
 	assert.True(t, *params.AllowPromotionCodes, "LET coupons")
 	assert.Equal(t, "1", params.SubscriptionData.Metadata["house"])
 	assert.Equal(t, "tenant-1", params.SubscriptionData.Metadata["tenant_id"])
+	assert.Equal(t, "new", params.SubscriptionData.Metadata["purpose"], "the ledger's purpose rides on the session")
 	assert.Equal(t, "https://stored.ge/dashboard/billing?upgraded=1", *params.SuccessURL)
 
 	// Attic-only: one line.
-	params = svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Vault: 2, Period: PeriodAnnual}, "https://x/ok", "https://x/no")
+	params = svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Vault: 2, Period: PeriodAnnual}, "", "https://x/ok", "https://x/no")
 	require.Len(t, params.LineItems, 1)
 	assert.Equal(t, "price_vault_y", *params.LineItems[0].Price)
 }

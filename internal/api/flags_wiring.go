@@ -6,6 +6,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/payments"
 )
 
 // Day-one feature flags (1.13 live-iteration kit). Adding a flag is a key
@@ -77,7 +78,15 @@ const (
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
 	// also moves the Stripe webhook's clearing branch behind it.
-	flagEntitlementLapse = "entitlement_lapse"
+	flagEntitlementLapse = payments.FlagEntitlementLapse
+
+	// flagPayStripe / flagPayBTCPay: may a tenant start new business with
+	// the provider (WP-PAY-2, docs/PAYMENTS.md § 2.3). Off = checkout and
+	// resize 409 provider_disabled; renewals, the webhook route, cancel and
+	// the portal are unaffected. pay_stripe defaults to "STRIPE_SECRET_KEY is
+	// set"; pay_btcpay is registered for /admin/flags with no provider yet.
+	flagPayStripe = payments.FlagPrefix + payments.ProviderStripe
+	flagPayBTCPay = payments.FlagPrefix + payments.ProviderBTCPay
 )
 
 // registerFlags registers every flag with its in-code default.
@@ -93,6 +102,8 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
+	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")
+	fl.Register(flagPayBTCPay, false)
 }
 
 // syncPlacementGate is resolvePutStorageClass's `sync_backend` check; nil

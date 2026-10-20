@@ -55,6 +55,18 @@ type WebhookHandler struct {
 	// subs overrides the subscription source (tests); nil = the Stripe API.
 	quotas HouseQuotas
 	subs   subscriptionFetcher
+	// flags answers entitlement_lapse per tenant (nil = off).
+	flags payments.FlagSource
+}
+
+// SetFlags wires the flag source: with entitlement_lapse ON for a tenant a
+// terminal Stripe status stops the renewal and keeps the house — the date
+// and the lapse job decide (WP-PAY-2, docs/PAYMENTS.md § 1.3).
+func (h *WebhookHandler) SetFlags(fl payments.FlagSource) { h.flags = fl }
+
+// dateDecides reports entitlement_lapse ON for the tenant.
+func (h *WebhookHandler) dateDecides(tenantID string) bool {
+	return h.flags != nil && h.flags.Enabled(payments.FlagEntitlementLapse, tenantID)
 }
 
 // SetHouseQuotas wires the quota manager the house webhooks write to.
@@ -275,7 +287,7 @@ func (h *WebhookHandler) unmarshal(event stripe.Event, what string, v any) bool 
 // Checkout's client_reference_id and the metadata.tenant_id this service
 // stamps on every session and subscription — name the tenant, and the
 // customer id is healed onto the row so later events resolve directly (the
-// persist in CreateCustomer is logged-and-continued, so a checkout can
+// persist in the pre-WP-PAY-2 CreateCustomer was logged-and-continued, so a checkout can
 // complete under a customer id the row never received). A customer that
 // resolves nowhere is not ours (another product on the Stripe account, a
 // customer made in the dashboard, a tenant already erased): the event is
@@ -596,10 +608,12 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 //	                                   Stripe moved the period on when it raised the
 //	                                   renewal invoice, and nothing was paid for it
 //	canceled / unpaid / expired /
-//	paused                           → the house is cleared, data untouched; the
-//	                                   entitlement is marked lapsed and its renewal
-//	                                   'prepaid' (this branch moves behind the
-//	                                   entitlement_lapse flag in WP-PAY-2)
+//	paused                           → entitlement_lapse ON for the tenant: renewal
+//	                                   'prepaid', the house KEPT — the date and the
+//	                                   lapse job decide (WP-PAY-2; the job is then
+//	                                   the only writer of lapsed_at). OFF: the house
+//	                                   is cleared, data untouched, the entitlement
+//	                                   marked lapsed and its renewal 'prepaid'.
 //	incomplete                       → no change (first payment pending)
 //
 // A grant never shortens a date (payments.Grant), so a stale event cannot
@@ -657,6 +671,21 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		if !current {
 			h.logger.Info("ignoring clearing event for a stale subscription",
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
+			return true, nil
+		}
+		if h.dateDecides(tenantID) {
+			if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+				if err := payments.StopRenewal(ctx, tx, tenantID); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx,
+					`UPDATE tenants SET subscription_status = $1 WHERE id = $2`, string(sub.Status), tenantID)
+				return err
+			}); err != nil {
+				return true, fmt.Errorf("stop renewal for tenant %s: %w", tenantID, err)
+			}
+			h.logger.Warn("renewal stopped — the house runs to paid_through + grace (entitlement_lapse)",
+				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 			return true, nil
 		}
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
@@ -721,17 +750,17 @@ func (h *WebhookHandler) paidThrough(sub *stripe.Subscription) time.Time {
 	return time.Unix(at, 0).UTC()
 }
 
-// isCurrentSubscription reports whether subID is the tenant's recorded
-// subscription (or the tenant has none recorded). A lookup error is
-// returned, not treated as "current" — clearing a house on a DB hiccup is
-// the wrong default.
+// isCurrentSubscription reports whether subID is the tenant's current
+// subscription: the entitlement row's provider_ref (a Stripe row), else
+// tenants.stripe_subscription_id for a tenant with no row (RP20-A3), or
+// the tenant has none recorded. A lookup error is returned, not treated as
+// "current" — clearing a house on a DB hiccup is the wrong default.
 func (h *WebhookHandler) isCurrentSubscription(ctx context.Context, tenantID, subID string) (bool, error) {
-	var stored sql.NullString
-	if err := h.stripe.db.QueryRowContext(ctx,
-		`SELECT stripe_subscription_id FROM tenants WHERE id = $1`, tenantID).Scan(&stored); err != nil {
+	current, err := h.stripe.currentSubscription(ctx, tenantID)
+	if err != nil {
 		return false, fmt.Errorf("read current subscription for tenant %s: %w", tenantID, err)
 	}
-	return !stored.Valid || stored.String == "" || stored.String == subID, nil
+	return current == "" || current == subID, nil
 }
 
 // handleSubscriptionDeleted applies customer.subscription.deleted from the
@@ -772,6 +801,24 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
 			return tenantID, nil
 		}
+	}
+
+	// entitlement_lapse ON: nobody renews it any more, the house runs to
+	// paid_through + grace and the lapse job clears it (WP-PAY-2).
+	if h.dateDecides(tenantID) && h.stripe.db != nil {
+		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+			if err := payments.StopRenewal(ctx, tx, tenantID); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx,
+				`UPDATE tenants SET subscription_status = 'canceled', stripe_subscription_id = NULL WHERE id = $1`, tenantID)
+			return err
+		}); err != nil {
+			return tenantID, fmt.Errorf("stop renewal on delete for tenant %s: %w", tenantID, err)
+		}
+		h.logger.Info("subscription deleted — renewal stopped, the house runs to paid_through + grace",
+			zap.String("tenant", tenantID))
+		return tenantID, nil
 	}
 
 	// A house: floor quotas go, data stays; the entitlement is marked lapsed

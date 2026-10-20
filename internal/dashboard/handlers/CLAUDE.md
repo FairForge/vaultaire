@@ -140,6 +140,23 @@ Shared `queryComplianceData(r, db, tenantID)` helper queries buckets table + `ob
 subscription status, value stack, cost comparison, and (flag `quota_checkout`)
 the house checkout.
 
+**Payments, not Stripe (WP-PAY-2, Stage 1a Prompt 19):** the handlers take
+`HouseBilling` — the slice of `*payments.Registry` the page uses (`Status`,
+`Ready`, `Enabled`, `StartCheckout`, `Resize`, `ManageURL`) — and
+`HandleManageBilling` takes a `payments.Provider`; no file here imports
+`internal/billing` or `stripe-go` (`TestDashboardImportsNoStripe`, a
+`go list -deps` walk). The page renders the house from the entitlement record
+(`payments.Status`; the pre-097 tenants columns are the fallback for a house
+with no row): `data["HouseSentence"]` ("Paid through 1 Mar 2027 via card
+(Stripe), renews automatically / renewal stopped", the grace end when the date
+has passed), `House.Providers` (the ways to pay that are on for the tenant).
+`HandleHouseCheckout(svc, db, flags, baseURL, logger)` (no quotas argument:
+`Registry.Resize` writes the record) answers **409** `provider_disabled` /
+`other_provider_live` through `refusedForProvider` (plain text +
+`X-Error-Code`); `ErrProviderUnavailable` and `ErrLiveSubscription` stay
+flashes. Tests: `billing_providers_test.go`; the house tests drive a real
+`payments.Registry` with a fake Stripe-named provider (`fakeHouseBilling.registry(db, payStripe)`).
+
 **One product (WP-PAY-0 = WP-R10-4, Stage 1a Prompt 19):** the legacy pack
 grid, `HandleUpgrade` + `POST /dashboard/billing/upgrade` and the metered
 "≈ $X this month" card (`populateAccruedCharges`, `billing.AccruedCents`) are
@@ -183,7 +200,7 @@ no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixt
 `HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: **houses only**
 (WP-PAY-0): `queryHouses` reads every live house (`plan = 'house'`, status
 active/past_due/trialing, its `tenant_floor_quotas` and pin-hot) and prices it
-with `billing.QuoteHouse` at the tenant's `house_period` — the sheet the
+with `payments.QuoteHouse` at the tenant's `house_period` — the sheet the
 customer saw. MRR = `housesMRR`; the by-tier table is one line per floor/add-on
 (`houseRevenueLines`); top customers = the 10 houses with the highest MRR
 (`topHouseCustomers`). A tenant on a legacy pack label without a house earns
@@ -213,7 +230,7 @@ per-backend egress from `backend_bandwidth_daily` (migration 060, attributed
 engine→BackendNote→RecordWithBackend), and the header reports modelled total,
 invoiced total, and the subsidy delta.
 
-Revenue side = the tenant's house at `billing.QuoteHouse` (`houseQuoteByTenant(queryHouses(…))`,
+Revenue side = the tenant's house at `payments.QuoteHouse` (`houseQuoteByTenant(queryHouses(…))`,
 WP-PAY-0); anything else earns $0. Margin = revenue − cost per tenant.
 
 Cards: Est. Monthly Spend (sum + fixed floors), Blended COGS/TB, Gross Margin %,

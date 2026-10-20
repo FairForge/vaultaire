@@ -2,7 +2,11 @@
 
 Stripe billing integration for stored.ge subscriptions, payments, and invoices.
 
-> **WP-PAY (design of record `docs/PAYMENTS.md`): this package is becoming the Stripe provider behind a provider-neutral entitlement record. WP-PAY-1 (2026-10-20, migration 097) is in: the webhook dual-writes `internal/payments` — see "The entitlement record" below. `HouseOrder` / `Period` are aliases of `payments.Order` / `payments.Period`.**
+> **WP-PAY (design of record `docs/PAYMENTS.md`): this package is becoming the Stripe provider behind a provider-neutral entitlement record. WP-PAY-1 (2026-10-20, migration 097) is in: the webhook dual-writes `internal/payments` — see "The entitlement record" below. `HouseOrder` / `Period` are aliases of `payments.Order` / `payments.Period`. **WP-PAY-2 (Stage 1a Prompt 19): `*StripeService` implements `payments.Provider`** — see "The Stripe provider" below; the house pricing (`QuoteHouse`, `Quote`, `ValidateHouseOrder`, `Line`) lives in `internal/payments/pricing.go` and is aliased here.**
+
+## The Stripe provider (WP-PAY-2, `provider.go`)
+
+`*StripeService` is the `payments.Provider` named `stripe` (`docs/PAYMENTS.md` § 2.2), registered in `payments.Registry` by `api/server.go` — the dashboard and the deletion runner reach Stripe only through the registry (the dashboard imports no package that reaches `stripe-go`). `Renewal` = auto. `Ready` = `STRIPE_SECRET_KEY` set ∧ `HouseCheckoutReady` (the six prices verified). `StartCheckout` = `GetCustomerID`, else **`createCustomer` — the ONLY creation site** (unexported; idempotency key `customer-<tenant>`; a failed record of the id is an error so the next checkout cannot create a second customer) — then `HasLiveSubscription` (→ `payments.ErrLiveSubscription`, R10-05) then `CreateHouseCheckout(…, purpose, …)` (the ledger's purpose in the session and subscription metadata). `Resize` = `UpdateHouseSubscription` on the current subscription (`currentSubscription`: the entitlement's `provider_ref`, else `tenants.stripe_subscription_id`), `Applied` = the house it now bills. `StopRenewal`/`ResumeRenewal` = `subscription.Update` with `cancel_at_period_end` true/false (`renewalParams`; the `customer.subscription.updated` that follows writes the entitlement's renewal). `Cancel` = `CancelSubscription` when there is a subscription (nil otherwise). `ManageURL` = `CreateBillingPortalSession`. `Webhook` = the `WebhookHandler` (`SetWebhook`). **`NewUnconfiguredStripe(logger)`** is the provider without a key: never Ready, every call `payments.ErrProviderUnconfigured`. No customer at registration any more (43.2). Tests `provider_test.go` (a fake Stripe REST API behind stripe-go's backend: the lazy customer created once across two checkouts and recorded, a live subscription refused; the renewal params; the unconfigured provider).
 
 ## The entitlement record (WP-PAY-1)
 
@@ -12,7 +16,7 @@ The webhook writes the house's floors AND the entitlement row in one transaction
 |---|---|
 | `checkout.session.completed`, `customer.subscription.{created,updated}` — `active` / `trialing` | `Grant`, `paid_through = current_period_end` (a trial is paid through its end), `renewal = auto` (`prepaid` when `cancel_at_period_end`), `provider_ref` = the subscription |
 | … `past_due` | `Grant` with `paid_through = current_period_START`: Stripe moved the period on when it raised the renewal invoice and nothing was paid for it. A grant never shortens a date, so the row keeps the last paid date and the grace runs (the floors stay, as before) |
-| … `canceled` / `unpaid` / `incomplete_expired` / `paused`, and `customer.subscription.deleted` | **still cleared now** (current-subscription guard as before) — `payments.Revoke` (floors cleared, `lapsed_at` set so the lapse job's reconcile never grants it back) + `StopRenewal` (`renewal = prepaid`). WP-PAY-2 moves this branch behind the `entitlement_lapse` flag |
+| … `canceled` / `unpaid` / `incomplete_expired` / `paused`, and `customer.subscription.deleted` | current-subscription guard (`isCurrentSubscription`: the entitlement's `provider_ref` first, `tenants.stripe_subscription_id` for a tenant with no row — RP20-A3). **`entitlement_lapse` ON for the tenant (WP-PAY-2, `SetFlags`):** `payments.StopRenewal` only — `renewal = prepaid`, the house KEPT, `lapsed_at` untouched (the date and the lapse job decide; the job is then the only writer of `lapsed_at`); `tenants.subscription_status` written (a delete also nulls `stripe_subscription_id`; `plan`/`house_period` kept). **OFF (default):** cleared as before — `payments.Revoke` (floors cleared, `lapsed_at` set so the reconcile never grants it back) + `StopRenewal`. Tests `webhook_lapse_flag_test.go` |
 | `invoice.payment_succeeded` (`webhook_ledger.go`) | the `payments` row keyed by the invoice id is SETTLED (`AmountPaid`, the lines' period, purpose from `billing_reason`, our receipt number `ST-<year>-<n>`); the subscription is FETCHED and, for an active/trialing house, `Grant` to its `current_period_end` in the same transaction — idempotent with the `updated` event of the same renewal. A redelivery is a replay (`vaultaire_payments_total{outcome="replayed"}`, no second row). Amounts come from the signed payload: a paid invoice is final at Stripe (departure from § 1.4's "fetch the invoice") |
 | `invoice.payment_failed` | ledger row `failed` (`AmountDue`); no entitlement change |
 
@@ -31,7 +35,6 @@ The webhook writes the house's floors AND the entitlement row in one transaction
 
 | Method | Purpose |
 |--------|---------|
-| `CreateCustomer(ctx, email, tenantID)` | Create Stripe customer, persist `stripe_customer_id` |
 | `GetCustomerID(ctx, tenantID)` | Look up Stripe customer ID from DB |
 | `GetSubscription(ctx, tenantID)` | Fetch subscription from Stripe |
 | `CancelSubscription(ctx, tenantID)` | Cancels **immediately** (`subscription.Cancel`). Called by the account-deletion runner (WP-R10-3, stage a); idempotent — the subscription is fetched first and an already-`canceled` one is success, so a crash between Stripe's answer and the runner's stamp cannot defer the tenant forever (`TestCancelSubscription_AlreadyCancelledIsSuccess`) |
@@ -114,7 +117,7 @@ schema, unread, until WP-PAY-7 (D-12).
   first; when `tenants` does not know it, the event's own `client_reference_id`
   / `metadata.tenant_id` (stamped on every session and subscription we create;
   invoices carry it as `subscription_details.metadata`) names the tenant and
-  the customer id is healed onto the row — `CreateCustomer` logs-and-continues
+  the customer id is healed onto the row — the pre-WP-PAY-2 `CreateCustomer` logged-and-continued
   when its persist fails, so a checkout can complete under a customer id the
   row never received. A customer that resolves nowhere is **not ours** (another
   product on the account, a dashboard-made customer, an erased tenant): 200 +

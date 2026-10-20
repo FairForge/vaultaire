@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/FairForge/vaultaire/internal/billing"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -38,7 +38,7 @@ func testCostsTemplate(t *testing.T) *template.Template {
 }
 
 // costsQueryRows expects the tenant query and, when given, the houses query
-// that prices them (WP-PAY-0: revenue = the house at billing.QuoteHouse) —
+// that prices them (WP-PAY-0: revenue = the house at payments.QuoteHouse) —
 // it runs only when the tenant query returned rows.
 func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows, houses ...*sqlmock.Rows) {
 	mock.ExpectQuery(`SELECT t.id, t.email, COALESCE\(t.plan, ''\)`).WillReturnRows(rows)
@@ -91,7 +91,7 @@ func TestCosts_MarginPerTenant(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	// A house of 1 TB attic, yearly: revenue = billing.QuoteHouse (WP-PAY-0).
+	// A house of 1 TB attic, yearly: revenue = payments.QuoteHouse (WP-PAY-0).
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
 	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
 		AddRow("t-alice", "alice@example.com", "vault5", "", oneTB, int64(0)),
@@ -106,7 +106,7 @@ func TestCosts_MarginPerTenant(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
-	q := billing.QuoteHouse(0, 1, 0, billing.PeriodAnnual)
+	q := payments.QuoteHouse(0, 1, 0, payments.PeriodAnnual)
 	// Geyser cost for 1 TB = $1.55 (155 cents); margin = quote - 155.
 	assert.Contains(t, body, "alice@example.com")
 	assert.Contains(t, body, formatCents(q.MonthlyCents)) // revenue

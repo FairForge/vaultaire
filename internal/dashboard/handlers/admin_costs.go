@@ -211,7 +211,7 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 	if len(tenants) == 0 {
 		return
 	}
-	// Revenue is the tenant's house at billing.QuoteHouse (WP-PAY-0: one
+	// Revenue is the tenant's house at payments.QuoteHouse (WP-PAY-0: one
 	// product); anything else earns nothing.
 	houseCents := houseQuoteByTenant(queryHouses(ctx, db, logger))
 

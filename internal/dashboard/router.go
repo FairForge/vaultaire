@@ -15,13 +15,13 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/auth"
-	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -45,7 +45,7 @@ type Deps struct {
 	// registered AND healthy by the probe AND its breaker not open); nil =
 	// registration only (tests, a dev box without probes).
 	RegionAvailable handlers.RegionAvailable
-	Stripe          *billing.StripeService   // Nil when STRIPE_SECRET_KEY is not set.
+	Payments        *payments.Registry       // The payment providers (WP-PAY-2); nil = no billing.
 	Google          *oauth2.Config           // Nil when GOOGLE_CLIENT_ID is not set.
 	GitHub          *oauth2.Config           // Nil when GITHUB_CLIENT_ID is not set.
 	StorageMode     string                   // e.g. "local", "s3", "quotaless", "geyser", "idrive", "wasabi"
@@ -55,7 +55,6 @@ type Deps struct {
 	Engine          *engine.CoreEngine       // Nil-safe; used by admin backends page.
 	HealthChecker   handlers.HealthChecker   // Nil-safe; backend health state provider.
 	Flags           *flags.Service           // Nil-safe; admin feature-flags page (1.13).
-	Quotas          billing.HouseQuotas      // Nil-safe; applies a resized house's floor quotas at once (Phase 1).
 	Account         *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
 	Exports         handlers.ExportService   // The one GDPR export service (WP-R10-3b); nil = the settings page says export is unavailable.
 	Egress          usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
@@ -314,15 +313,15 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(billingTmpl.ParseFS(Templates,
 			"templates/customer/billing.html",
 		))
-		// A nil *StripeService must stay a nil interface (the handlers
+		// A nil *Registry must stay a nil interface (the handlers
 		// nil-check it), so convert only when configured.
 		var billingSvc handlers.BillingService
-		if deps.Stripe != nil {
-			billingSvc = deps.Stripe
+		if deps.Payments != nil {
+			billingSvc = deps.Payments
 		}
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
-		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Quotas, deps.Flags, deps.BaseURL, deps.Logger))
-		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Stripe, deps.BaseURL, deps.Logger))
+		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Flags, deps.BaseURL, deps.Logger))
+		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Payments.Provider(payments.ProviderStripe), deps.BaseURL, deps.Logger))
 
 		// Compliance dashboard.
 		complianceTmpl := template.Must(baseTmpl.Clone())
@@ -709,13 +708,8 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 			}
 		}
 
-		// Create Stripe customer for billing (non-blocking).
-		if deps.Stripe != nil {
-			if _, stripeErr := deps.Stripe.CreateCustomer(r.Context(), email, user.TenantID); stripeErr != nil {
-				deps.Logger.Error("create stripe customer on registration",
-					zap.String("tenant", user.TenantID), zap.Error(stripeErr))
-			}
-		}
+		// No Stripe customer here (WP-PAY-2, 43.2): a tenant gets one when
+		// it first buys.
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
 			UserID:    user.ID,

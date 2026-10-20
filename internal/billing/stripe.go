@@ -3,7 +3,9 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/stripe/stripe-go/v75"
 	portalsession "github.com/stripe/stripe-go/v75/billingportal/session"
@@ -27,6 +29,9 @@ type InvoiceRow struct {
 type StripeService struct {
 	db     *sql.DB
 	logger *zap.Logger
+	// configured: a secret key was given (NewUnconfiguredStripe: false).
+	configured bool
+	webhook    http.Handler
 
 	// house is the whole-TB checkout state (house.go); subFetcher is the
 	// subscription source, replaced in tests.
@@ -39,38 +44,41 @@ type StripeService struct {
 func NewStripeService(apiKey string, db *sql.DB, logger *zap.Logger) *StripeService {
 	stripe.Key = apiKey
 	return &StripeService{
-		db:     db,
-		logger: logger,
+		db:         db,
+		logger:     logger,
+		configured: apiKey != "",
 	}
 }
 
 // --- Customer ---
 
-// CreateCustomer creates a Stripe customer and optionally persists the
-// stripe_customer_id to the tenants table.
-func (s *StripeService) CreateCustomer(ctx context.Context, email, tenantID string) (string, error) {
-	params := &stripe.CustomerParams{
-		Email: stripe.String(email),
-		Metadata: map[string]string{
-			"tenant_id": tenantID,
-		},
-	}
+// errNoCustomer: the tenant has no Stripe customer yet (it never bought).
+var errNoCustomer = errors.New("no stripe customer")
 
+// createCustomer creates the tenant's Stripe customer and records its id —
+// called only by StartCheckout, the first time a tenant buys (WP-PAY-2: no
+// customer at registration). Idempotent on the tenant for Stripe's 24 h key
+// window, so a retry after a failed record gets the same customer; a record
+// that fails is an error (a customer whose id we never kept would be
+// created again by the next checkout).
+func (s *StripeService) createCustomer(ctx context.Context, email, tenantID string) (string, error) {
+	params := &stripe.CustomerParams{
+		Email:    stripe.String(email),
+		Metadata: map[string]string{"tenant_id": tenantID},
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey("customer-" + tenantID)
 	c, err := customer.New(params)
 	if err != nil {
 		return "", fmt.Errorf("create stripe customer: %w", err)
 	}
-
 	if s.db != nil {
-		_, dbErr := s.db.ExecContext(ctx,
-			`UPDATE tenants SET stripe_customer_id = $1 WHERE id = $2`,
-			c.ID, tenantID)
-		if dbErr != nil {
-			s.logger.Error("persist stripe_customer_id",
-				zap.String("tenant", tenantID), zap.Error(dbErr))
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tenants SET stripe_customer_id = $1 WHERE id = $2`, c.ID, tenantID); err != nil {
+			return "", fmt.Errorf("record stripe customer %s for tenant %s: %w", c.ID, tenantID, err)
 		}
 	}
-
+	s.logger.Info("stripe customer created at first checkout", zap.String("tenant", tenantID), zap.String("customer", c.ID))
 	return c.ID, nil
 }
 
@@ -86,7 +94,7 @@ func (s *StripeService) GetCustomerID(ctx context.Context, tenantID string) (str
 		return "", fmt.Errorf("get customer id: %w", err)
 	}
 	if !cid.Valid || cid.String == "" {
-		return "", fmt.Errorf("no stripe customer for tenant %s", tenantID)
+		return "", fmt.Errorf("tenant %s: %w", tenantID, errNoCustomer)
 	}
 	return cid.String, nil
 }
@@ -128,15 +136,14 @@ func (s *StripeService) CancelSubscription(ctx context.Context, tenantID string)
 		return fmt.Errorf("no database")
 	}
 
-	var subID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT stripe_subscription_id FROM tenants WHERE id = $1`, tenantID).Scan(&subID)
+	ref, err := s.currentSubscription(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("get subscription id: %w", err)
 	}
-	if !subID.Valid || subID.String == "" {
+	if ref == "" {
 		return fmt.Errorf("no subscription for tenant %s", tenantID)
 	}
+	subID := sql.NullString{String: ref, Valid: true}
 
 	current, err := s.subs().Get(ctx, subID.String)
 	if err != nil {

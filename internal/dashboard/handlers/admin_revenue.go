@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
@@ -77,7 +77,7 @@ func HandleAdminRevenue(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 }
 
 // populateRevenue prices houses only (WP-PAY-0, one product): every live
-// house at billing.QuoteHouse for its period — the sheet the customer saw.
+// house at payments.QuoteHouse for its period — the sheet the customer saw.
 // The legacy pack prices and the metered estimate are gone; a tenant on a
 // pack label without a house (Bench2) earns nothing. The month trend read
 // the subscriptions table, which nothing writes (R10-14): it is gone until
@@ -117,14 +117,14 @@ func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logge
 type houseRevenue struct {
 	tenantID, email string
 	std, vault, pin int
-	period          billing.Period
+	period          payments.Period
 	usedBytes       int64
-	quote           billing.Quote
+	quote           payments.Quote
 }
 
 // queryHouses reads every live house (dashboard plan Phase 4): the floor
 // quotas and pin-hot are the Stripe items' quantities, so the MRR is
-// billing.QuoteHouse at the tenant's period.
+// payments.QuoteHouse at the tenant's period.
 func queryHouses(ctx context.Context, db *sql.DB, logger *zap.Logger) []houseRevenue {
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.email, t.house_period, f.floor, f.storage_limit_bytes,
@@ -150,9 +150,9 @@ func queryHouses(ctx context.Context, db *sql.DB, logger *zap.Logger) []houseRev
 		}
 		h, ok := byID[id]
 		if !ok {
-			h = &houseRevenue{tenantID: id, email: email, period: billing.Period(period), pin: int(pin / usage.TB), usedBytes: used}
-			if h.period != billing.PeriodMonthly {
-				h.period = billing.PeriodAnnual
+			h = &houseRevenue{tenantID: id, email: email, period: payments.Period(period), pin: int(pin / usage.TB), usedBytes: used}
+			if h.period != payments.PeriodMonthly {
+				h.period = payments.PeriodAnnual
 			}
 			byID[id] = h
 			order = append(order, id)
@@ -170,7 +170,7 @@ func queryHouses(ctx context.Context, db *sql.DB, logger *zap.Logger) []houseRev
 	out := make([]houseRevenue, 0, len(order))
 	for _, id := range order {
 		h := byID[id]
-		h.quote = billing.QuoteHouse(h.std, h.vault, h.pin, h.period)
+		h.quote = payments.QuoteHouse(h.std, h.vault, h.pin, h.period)
 		out = append(out, *h)
 	}
 	return out

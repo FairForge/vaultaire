@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 
-	"github.com/FairForge/vaultaire/internal/billing"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"go.uber.org/zap"
 )
 
@@ -59,7 +59,7 @@ func populateOnboarding(ctx context.Context, db *sql.DB, tenantID string, r *htt
 	}
 	if (intentStd > 0 || intentVault > 0) && subStatus != "active" && subStatus != "past_due" && subStatus != "trialing" {
 		status.PlanWaiting = true
-		status.PlanSummary = houseWords(billing.HouseOrder{Std: intentStd, Vault: intentVault})
+		status.PlanSummary = houseWords(payments.Order{Std: intentStd, Vault: intentVault})
 	}
 	status.AllDone = status.HasBucket && status.HasObject && status.HasWebhook && !status.PlanWaiting
 
