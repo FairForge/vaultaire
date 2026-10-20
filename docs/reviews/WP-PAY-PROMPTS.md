@@ -145,13 +145,13 @@ Architecture notes
 
 ---
 
-## Prompt WP-PAY-1 — the entitlement record (migration 095)
+## Prompt WP-PAY-1 — the entitlement record (migration 096)
 
 ```
 Stage 1a, WP-PAY-1: the entitlement record — paid_through in our DB, a payments ledger, the lapse job.
 
 Continue from WP-PAY-0 (merged as #NNN) — if it has not merged, build on main anyway; nothing
-here depends on it. Lane: Developer surface. Migration: 095 (confirm with
+here depends on it. Lane: Developer surface. Migration: 096 (095 went to WP-R11-3, Stage 1a Prompt 16; confirm with
 ls internal/database/migrations | tail -1 and gh pr list --state open — another PR may have
 claimed it; take the next free number and say so). One PR, two commits (migration + package;
 webhook + job).
@@ -176,7 +176,7 @@ Part 0 — verify, cite file:line
    0 and 0 (2026-10-18: 0/0), so the backfill is a no-op.
 
 What to build
-1. Migration 095_payments.sql exactly as docs/PAYMENTS.md § 1.2 (entitlements, payments,
+1. Migration 096_payments.sql exactly as docs/PAYMENTS.md § 1.2 (entitlements, payments,
    payment_events, invoice_counters; CHECKs; the partial index on paid_through). Additive.
 2. Package internal/payments:
    - Entitlement, Order (= billing.HouseOrder's shape; billing may alias it), Renewal.
@@ -273,7 +273,7 @@ ultrathink
 ```
 Stage 1a, WP-PAY-2: payments.Provider — Stripe becomes one provider; the dashboard stops importing stripe-go; pay_stripe / pay_btcpay flags; provider-off semantics.
 
-Continue from WP-PAY-1 (merged as #NNN, migration 095 deployed, entitlement_lapse flag OFF).
+Continue from WP-PAY-1 (merged as #NNN, migration 096 deployed, entitlement_lapse flag OFF).
 Lane: Developer surface. No migration. One PR (two commits: interface + Stripe adapter;
 dashboard + runner + flags).
 
@@ -364,7 +364,7 @@ ultrathink
 Stage 1a, WP-PAY-3: what a prepaid customer sees and what the operator can do by hand.
 
 Continue from WP-PAY-2 (merged as #NNN). Lane: Developer surface. No migration
-(invoice_counters is in 095). One PR, three commits (receipts + reminders; billing page;
+(invoice_counters is in 096). One PR, three commits (receipts + reminders; billing page;
 admin + metrics + rules).
 
 Read first: docs/PAYMENTS.md § 3.8 (renewal UX, receipts, retention), § 7 (metrics, audit,
@@ -388,7 +388,7 @@ What to build
 2. Reminders: job payment_reminders (hourly; MaxRunTime 5m) for renewal='prepaid' rows with
    lapsed_at IS NULL: steps T-14d, T-3d, T+1d, T+(grace-1)d; each step once per period
    (entitlements.reminders_sent JSONB keyed by step and paid_through — add the column in a
-   small additive migration if 095 lacks it, else a table; say which); templates
+   small additive migration if 096 lacks it, else a table; say which); templates
    renewal_reminder.html (step-aware copy) and house_lapsed.html (sent by the lapse job).
    Metric vaultaire_payment_reminders_total{step,outcome}.
 3. Billing page: the entitlement sentence ("Your house is paid through <date>; it renews
@@ -538,7 +538,7 @@ ultrathink
 Stage 1a, WP-PAY-5: switch a customer from Stripe to crypto and back without a gap or an overlap; the owner's bulk stop.
 
 Continue from WP-PAY-4 (merged as #NNN; BTCPay dark). Lane: Developer surface. No migration
-(pending_provider and next_* are in 095). One PR.
+(pending_provider and next_* are in 096). One PR.
 
 Read first: docs/PAYMENTS.md § 4 (the cutover), § 2.5 (the guard and the detector).
 
