@@ -374,7 +374,7 @@ func TestLapseJob_ReadsProviderReadyHistory(t *testing.T) {
 	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
 	reg := payments.NewRegistry(f.db, f.fl, 14*24*time.Hour, nil)
 	reg.Register(readyProvider{})
-	reg.History().Record(payments.ProviderStripe, false, time.Now().Add(-2*time.Hour))
+	reg.History().Record(payments.ProviderStripe, payments.Unready, time.Now().Add(-2*time.Hour))
 	f.runner.Ready = reg
 
 	// Act
@@ -390,5 +390,5 @@ func TestLapseJob_ReadsProviderReadyHistory(t *testing.T) {
 // readyProvider is a Stripe-named provider that is ready now.
 type readyProvider struct{ payments.Provider }
 
-func (readyProvider) Name() string                         { return payments.ProviderStripe }
-func (readyProvider) Ready(context.Context) (bool, string) { return true, "" }
+func (readyProvider) Name() string                                       { return payments.ProviderStripe }
+func (readyProvider) Ready(context.Context) (payments.Readiness, string) { return payments.Ready, "" }

@@ -722,6 +722,18 @@ func (h *WebhookHandler) houseInvalid(ctx context.Context, tenantID string, sub 
 		Resource: sub.ID, Severity: "error", Metadata: map[string]any{
 			"tenant": tenantID, "subscription": sub.ID, "std": o.Std, "vault": o.Vault, "pin_hot": o.PinHot,
 			"period": string(o.Period)}})
+	// The subscription is Stripe's and still bills: record it on the tenant
+	// — outside the rolled-back grant — so the deletion runner cancels it
+	// (RP22-3). Never over a different live id.
+	if h.stripe.db != nil {
+		if _, err := h.stripe.db.ExecContext(ctx,
+			`UPDATE tenants SET stripe_subscription_id = $1, subscription_status = $2
+			  WHERE id = $3 AND (stripe_subscription_id IS NULL OR stripe_subscription_id = '' OR stripe_subscription_id = $1)`,
+			sub.ID, string(sub.Status), tenantID); err != nil {
+			h.logger.Error("stripe webhook: could not record the invalid house's subscription on the tenant",
+				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.Error(err))
+		}
+	}
 }
 
 // clearHouseTx is the clearing branch's write: the floors cleared and the
@@ -803,9 +815,12 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 		}
 	}
 
-	// entitlement_lapse ON: nobody renews it any more, the house runs to
-	// paid_through + grace and the lapse job clears it (WP-PAY-2).
-	if h.dateDecides(tenantID) && h.stripe.db != nil {
+	// entitlement_lapse ON, for a HOUSE: nobody renews it any more, the
+	// house runs to paid_through + grace and the lapse job clears it
+	// (WP-PAY-2). A non-house subscription (a legacy pack) keeps today's
+	// downgrade below, flag or no flag (RP22-2).
+	_, isHouse := h.stripe.HouseFromSubscription(&sub)
+	if isHouse && h.dateDecides(tenantID) && h.stripe.db != nil {
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			if err := payments.StopRenewal(ctx, tx, tenantID); err != nil {
 				return err
@@ -823,7 +838,7 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 
 	// A house: floor quotas go, data stays; the entitlement is marked lapsed
 	// and nobody renews it (WP-PAY-1).
-	if _, isHouse := h.stripe.HouseFromSubscription(&sub); isHouse && h.quotas != nil && h.stripe.db != nil {
+	if isHouse && h.quotas != nil && h.stripe.db != nil {
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error { return clearHouseTx(ctx, tx, tenantID) }); err != nil {
 			return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
 		}

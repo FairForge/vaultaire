@@ -40,12 +40,14 @@ func (s *StripeService) Name() string { return payments.ProviderStripe }
 // Renewal: a Stripe subscription renews by itself.
 func (s *StripeService) Renewal() payments.Renewal { return payments.RenewalAuto }
 
-// Ready = the key is set ∧ the six house prices match prices.json.
-func (s *StripeService) Ready(context.Context) (bool, string) {
+// Ready = the key is set ∧ the six house prices match prices.json;
+// Pending while the key is set and no verification has completed (RP22-1);
+// Unready with no key, no price ids, a mismatch or a missing price.
+func (s *StripeService) Ready(context.Context) (payments.Readiness, string) {
 	if !s.configured {
-		return false, "STRIPE_SECRET_KEY is not set"
+		return payments.Unready, "STRIPE_SECRET_KEY is not set"
 	}
-	return s.HouseCheckoutReady()
+	return s.HouseReadiness()
 }
 
 // StartCheckout opens a Stripe Checkout for the house: the customer is
