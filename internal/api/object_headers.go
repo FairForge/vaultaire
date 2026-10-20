@@ -44,8 +44,10 @@ type objectHeaders struct {
 	Disposition, Encoding, Language        string
 	CacheControl, Expires, WebsiteRedirect string
 	// SSE is "AES256" for SSE-S3 and chunk encryption, "ssec" for SSE-C, ""
-	// for none.
-	SSE string
+	// for none. SSECKeyMD5 is the row's key digest (094), sent back as
+	// x-amz-server-side-encryption-customer-key-MD5 as AWS does (WP-SSEC-1).
+	SSE        string
+	SSECKeyMD5 string
 	// The Object Lock headers (RP17-1): what the key's object_locks row says
 	// — LockMode and LockRetainUntil for a retention, LegalHold "ON" or
 	// "OFF" when a row exists at all. All empty without a row: AWS sends no
@@ -184,6 +186,9 @@ func (h objectHeaders) write(w http.ResponseWriter, mode headerMode, rng *httpRa
 	case "":
 	case "ssec":
 		hd.Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+		if h.SSECKeyMD5 != "" {
+			hd.Set("x-amz-server-side-encryption-customer-key-MD5", h.SSECKeyMD5)
+		}
 	default:
 		hd.Set("x-amz-server-side-encryption", h.SSE)
 	}

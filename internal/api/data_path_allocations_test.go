@@ -55,6 +55,7 @@ var allocationSites = map[string]string{
 	// length; the Vault writes pass it (WP-R7-2).
 	"drivers/geyser.go:materializeSpool": "per unknown-length PUT: one 64 MiB spool, allocated once (it was a bytes.Buffer grown to ~256 MiB), then the temp file; a body under 1 MiB never takes it",
 	"drivers/geyser.go:materialize":      "per unknown-length PUT: the 1 MiB probe (materializeProbe)",
+	"api/sse_stream.go:readSealedBytes":  "per ranged 0x05 read: the 6-byte lead, the part table (≤ 160,006 bytes, the count checked first) and a part's 29-byte header (WP-SSEC-1 B.3)",
 	// The S3 uploader (idrive, lyve, wasabi, r2, s3compat): bounded per
 	// request, unbounded in number — the WP-R2-6 residual named in WP-P14.
 	"drivers/s3upload.go:putSinglePartIfSmall": "per PUT ≤ 16 MiB (a body of one part), and the manager's 8 × 16 MiB parts above it: no process budget — residual (WP-P14)",

@@ -873,7 +873,7 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		StorageClass: storageClass, Metadata: metadataJSON, TagCount: tagCount(tagsJSON),
 		Disposition: disposition, Encoding: contentEncoding, Language: contentLanguage,
 		CacheControl: echo.CacheControl, Expires: echo.Expires, WebsiteRedirect: echo.WebsiteRedirect,
-		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo)), SSECKeyMD5: ssecKeyMD5}
 	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	switch {
 	case latestVID != "" && !latestMarker:
@@ -1052,7 +1052,7 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 		StorageClass: engine.CustomerStorageClass(floor, backend), VersionID: vid, Metadata: meta,
 		Disposition: disposition, Encoding: attrs.ContentEncoding, Language: attrs.ContentLanguage,
 		CacheControl: attrs.CacheControl, Expires: attrs.Expires, WebsiteRedirect: attrs.WebsiteRedirect,
-		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo)), SSECKeyMD5: ssecKeyMD5}
 	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	if code := evaluateConditionalGET(r, etag, createdAt); code == http.StatusNotModified {
 		oh.write(w, headersNotModified, nil)

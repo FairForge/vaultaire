@@ -254,6 +254,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if !ok {
 		return
 	}
+	defer cs.clearKey()
 	srcSize, srcEnc, srcChunked, srcStorageKey, srcETag := cs.Size, cs.Enc, cs.Chunked, cs.StorageKey, cs.ETag
 	versionAttrs := cs.VersionAttrs
 	// A plaintext source copied into an sse_enabled bucket is sealed there
@@ -269,13 +270,27 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		refuseSSECRequired.write(w, r)
 		return
 	}
+	// A keyed destination (WP-SSEC-1 B.4): the copy is sealed under the
+	// request's key as a single 0x04 stream, whatever the source's shape
+	// (a 0x05 multipart source included); never SSE-S3 as well. The key's
+	// MD5 goes on the row, the key is cleared once the sealer has derived
+	// its DEK.
+	var destSSECKey []byte
+	var destSSECKeyMD5 string
 	if sseErr == nil && crypto.HasSSECHeaders(r) {
-		// A keyed destination: Part B.4 seals the copy under the key; until
-		// then the headers are refused rather than silently ignored (the
-		// copy used to land plaintext under a request that asked for a key).
-		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("CopyObject with a customer-provided destination key (SSE-C) is not supported yet. Download and upload with the key instead."))
-		return
+		if r.Header.Get("x-amz-server-side-encryption") != "" {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion("Cannot use SSE-S3 and SSE-C simultaneously."))
+			return
+		}
+		var kErr error
+		if destSSECKey, kErr = crypto.ParseSSECHeaders(r); kErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(kErr.Error()))
+			return
+		}
+		destSSECKeyMD5 = crypto.SSECKeyMD5(destSSECKey)
+		defer clear(destSSECKey)
+		destSSE = false // the customer's key, not the bucket's SSE-S3
 	}
 	if sseErr != nil {
 		s.logger.Error("copy: destination encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", destBucket))
@@ -297,7 +312,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	if srcChunked && s.gci != nil {
 		dp := s.writeAdapter().decidePlacement(r.Context(), placementRequest{
 			TenantID: t.ID, Bucket: destBucket, Class: destClass, Size: srcSize,
-			SSERequested: r.Header.Get("x-amz-server-side-encryption") == "AES256",
+			SSERequested: r.Header.Get("x-amz-server-side-encryption") == "AES256", SSEC: destSSECKey != nil,
 		})
 		if dp.Refusal != nil {
 			dp.Refusal.write(w, r)
@@ -344,12 +359,12 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// the copy's source, re-sealed or not as the destination's placement
 	// says. Before, every sealed source answered 501 — after the master-key
 	// ceremony every object a new bucket holds is sealed or chunk-encrypted.
-	// SSE-C needs the customer's key on the copy (x-amz-copy-source-server-
-	// side-encryption-customer-*): still 501.
+	// An SSE-C source opens under the key the request carries for it
+	// (resolveCopySource, WP-SSEC-1 B.4).
 	srcSealedS3 := cs.sealedS3()
-	if (srcEnc != "" && !sourceWhole && !srcSealedS3) || (srcChunked && !sourceWhole) {
+	if srcChunked && !sourceWhole {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("Copying objects encrypted with a customer-provided key (SSE-C) is not yet supported. Download and re-upload instead."))
+			WithSuggestion("Copying this object is not supported yet. Download and re-upload instead."))
 		return
 	}
 	if srcSealedS3 && s.sseService == nil {
@@ -453,7 +468,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	source := &readErrReader{r: reader}
 	counter := &countingReader{r: &cutReader{ctx: r.Context(), r: source}}
 	var src io.Reader = counter
-	if srcSize > 0 || destSSE {
+	if srcSize > 0 || destSSE || destSSECKey != nil {
 		// Bytes that are not the recorded size are not the source: the
 		// write fails rather than store them under a new ETag. Into an
 		// sse_enabled bucket a source with no recorded size must be empty:
@@ -465,6 +480,24 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	tee := io.TeeReader(src, hasher)
 	var sealer *sseWriteSealer
 	putLength := srcSize
+	var destEncOverride *objectEncryption
+	if destSSECKey != nil {
+		// Sealed under the customer's key as it streams (a 0x04 stream of
+		// the destination's identity): the hasher sees the plaintext, the
+		// backend the sealed length. A copy of an object onto its own key
+		// with a NEW key is the documented SSE-C key rotation.
+		sealed, sErr := crypto.SSECSeal(destSSECKey, crypto.StreamIdentity{Tenant: t.ID, Bucket: destBucket, Key: destKey}, tee, srcSize)
+		if sErr != nil {
+			releaseReservation()
+			s.logger.Error("copy: SSE-C seal failed", zap.Error(sErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		clear(destSSECKey)
+		tee = sealed
+		putLength = crypto.SSECSealedLength(srcSize)
+		destEncOverride = &objectEncryption{Algorithm: crypto.SSECAlgorithmV3, SSECKeyMD5: destSSECKeyMD5}
+	}
 	if destSSE && srcSize > 0 {
 		// The hasher and the counter see the plaintext; the backend gets
 		// the blob sealed as it streams (WP-R8-5), of a length known in
@@ -545,6 +578,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	var versionID string
 	if s.db != nil {
 		enc := sealer.encryption()
+		if destEncOverride != nil {
+			enc = *destEncOverride
+		}
 		flip, dbErr := commitBlobWrite(pctx, s.db, blobWrite{TenantID: t.ID, Bucket: destBucket, Key: destKey,
 			Bill: bill,
 			Version: &versionWrite{Size: counter.n, ETag: etag, ContentType: attrs.ContentType, Backend: backendName,
@@ -666,6 +702,7 @@ type copySource struct {
 	current                                            bool
 	size                                               int64
 	enc, backend, storageKey, floor, contentType, etag string
+	ssecKeyMD5                                         string // the version's SSE-C key digest (094)
 	createdAt                                          time.Time
 	attrs                                              objectAttrs // what the version row recorded (R61-8)
 }
@@ -682,12 +719,12 @@ func (s *Server) copySourceVersion(ctx context.Context, tenantID, bucket, key, v
 	var meta []byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT is_delete_marker, is_latest, size_bytes, COALESCE(encryption_algorithm, ''), COALESCE(backend_name, ''),
-		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type, etag, created_at, `+versionAttrColumns+`
+		       COALESCE(storage_key, ''), COALESCE(floor, ''), content_type, etag, created_at, `+versionAttrColumns+`, COALESCE(ssec_key_md5, '')
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
 		tenantID, bucket, key, versionID).Scan(&isMarker, &isLatest, &v.size, &v.enc, &v.backend, &v.storageKey, &v.floor, &v.contentType,
 		&v.etag, &v.createdAt, &meta, &v.attrs.ContentDisposition, &v.attrs.ContentEncoding, &v.attrs.ContentLanguage,
-		&v.attrs.CacheControl, &v.attrs.Expires, &v.attrs.WebsiteRedirect)
+		&v.attrs.CacheControl, &v.attrs.Expires, &v.attrs.WebsiteRedirect, &v.ssecKeyMD5)
 	v.attrs.ContentType = v.contentType
 	if len(meta) > 0 {
 		_ = json.Unmarshal(meta, &v.attrs.Metadata)

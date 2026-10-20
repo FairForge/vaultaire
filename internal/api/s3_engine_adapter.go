@@ -529,7 +529,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		StorageClass: storageClass, VersionID: w.Header().Get("x-amz-version-id"), Metadata: cachedMetadata,
 		TagCount: tagCount(cachedTags), Disposition: disposition, Encoding: cachedContentEncoding, Language: cachedContentLanguage,
 		CacheControl: cachedEcho.CacheControl, Expires: cachedEcho.Expires, WebsiteRedirect: cachedEcho.WebsiteRedirect,
-		SSE: sseOf(cachedEncAlgo, crypto.IsSSEC(cachedEncAlgo))}
+		SSE: sseOf(cachedEncAlgo, crypto.IsSSEC(cachedEncAlgo)), SSECKeyMD5: cachedSSECKeyMD5}
 	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	if oh.VersionID == "" && (vStatus == "Enabled" || vStatus == "Suspended") {
 		oh.VersionID = "null"
@@ -626,8 +626,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 					WithSuggestion(parseErr.Error()))
 				return
 			}
-			op = sseCOpener{key: ssecKey, legacy: cachedEncAlgo == crypto.SSECAlgorithm,
-				id: crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: artifact}}
+			op = newSSECOpener(ssecKey, cachedEncAlgo, crypto.StreamIdentity{Tenant: t.ID, Bucket: bucket, Key: artifact})
 		} else {
 			if a.sseService == nil {
 				// The row says the blob is SSE-S3 ciphertext and this process

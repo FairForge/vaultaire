@@ -241,8 +241,23 @@ Behaviour worth knowing before writing code against it:
   `ip_denied` / `account_suspended`). Rate-limited per tenant like the JSON API.
 - **Encryption**: SSE-C works per request at any size, sealed as it streams
   and a `Range` read by segment (since 2026-10-13, WP-R8-5 Part B; it was
-  capped at 256 MiB) — not on multipart uploads (501) nor as a CopyObject
-  source or destination (501). **A bucket can require a key** (the
+  capped at 256 MiB). **SSE-C multipart uploads** (since 2026-10-20,
+  WP-SSEC-1): `CreateMultipartUpload` and every `UploadPart` /
+  `UploadPartCopy` carry the key headers (a part with another key, or
+  without one, is 400 `InvalidArgument` and nothing is staged);
+  `CompleteMultipartUpload` carries none, as aws-cli and the SDKs send it —
+  each part is sealed under your key the moment it arrives and Complete
+  concatenates the sealed parts, so the server never needs the key again.
+  The object reads whole and by `Range` with the key (a wrong key 403, none
+  400), `HEAD`/`GET` answer `x-amz-server-side-encryption-customer-algorithm`
+  and `-key-MD5`, the ETag is the usual `<md5-of-md5s>-N`. **Copies with
+  keys**: an SSE-C source is opened with
+  `x-amz-copy-source-server-side-encryption-customer-*` (none 400, a wrong
+  key 403), an SSE-C destination sealed under the request's
+  `x-amz-server-side-encryption-customer-*` — `CopyObject` and
+  `UploadPartCopy`, on either side; copying an object onto its own key with a
+  new key (`x-amz-metadata-directive: REPLACE`) is the key rotation. SSE-C
+  bodies are never chunked and never deduplicated. **A bucket can require a key** (the
   `ssec_required` setting: `PATCH /api/v1/manage/buckets/{name}` with
   `{"ssec_required": true}`, or the dashboard's bucket settings): an unkeyed
   `PutObject`, `CreateMultipartUpload` or copy into it is 400 `InvalidRequest`
