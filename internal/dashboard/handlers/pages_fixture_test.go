@@ -61,6 +61,14 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings", nil), id))
 	write("settings", w)
 
+	// Bucket settings, with the customer-key requirement on (WP-SSEC-1 B.5).
+	_, err := db.Exec(`UPDATE buckets SET ssec_required = TRUE WHERE tenant_id = $1 AND name = 'photos'`, id)
+	require.NoError(t, err)
+	w = httptest.NewRecorder()
+	HandleBucketSettings(page("bucket_settings.html"), db, zap.NewNop()).ServeHTTP(w,
+		injectBucketRoute(injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/buckets/photos/settings", nil), id), "photos"))
+	write("bucket-settings", w)
+
 	// Two-factor enrolment (WP-R12-8): the setup page with the QR code the
 	// server renders, and the page that shows the backup codes once.
 	authSvc := auth.NewAuthService(nil, nil)
