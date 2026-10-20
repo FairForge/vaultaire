@@ -25,7 +25,13 @@ const (
 	// starts with a random nonce byte, so a magic byte alone would collide
 	// once in 256.
 	SSECAlgorithmV3 = "AES256-SSE-C-v3"
-	SSECOverhead    = 28 // 12 nonce + 16 GCM tag (the old format)
+	// SSECAlgorithmMultipart is the row value of an SSE-C object completed
+	// from a multipart upload: the 0x05 container of the parts' streams
+	// (ssec_multipart.go, WP-SSEC-1). Its stored length is not a function
+	// of the object's size alone (the parts' lengths decide it), so readers
+	// learn the layout from the blob's own header.
+	SSECAlgorithmMultipart = "AES256-SSE-C-v3-mp"
+	SSECOverhead           = 28 // 12 nonce + 16 GCM tag (the old format)
 	// legacySSECMaxBlob bounds the old-format opener: no old SSE-C blob was
 	// written over 256 MiB (the old PUT refused larger ones).
 	legacySSECMaxBlob = 256<<20 + SSECOverhead
@@ -36,8 +42,12 @@ var ErrSSECKeyMismatch = errors.New("ssec: decryption failed — wrong key")
 // IsSSEC reports whether a row's encryption_algorithm is SSE-C (either
 // format): the customer's key is needed to read it.
 func IsSSEC(algorithm string) bool {
-	return algorithm == SSECAlgorithm || algorithm == SSECAlgorithmV3
+	return algorithm == SSECAlgorithm || algorithm == SSECAlgorithmV3 || algorithm == SSECAlgorithmMultipart
 }
+
+// IsSSECMultipart reports the 0x05 container (a multipart-completed SSE-C
+// object).
+func IsSSECMultipart(algorithm string) bool { return algorithm == SSECAlgorithmMultipart }
 
 // SSECSealedLength is the stored length of an SSE-C object of size bytes in
 // the streaming format.
@@ -199,11 +209,31 @@ func HasSSECHeaders(r *http.Request) bool {
 	return r.Header.Get("x-amz-server-side-encryption-customer-algorithm") != ""
 }
 
-func ParseSSECHeaders(r *http.Request) ([]byte, error) {
-	algo := r.Header.Get("x-amz-server-side-encryption-customer-algorithm")
-	keyB64 := r.Header.Get("x-amz-server-side-encryption-customer-key")
-	md5B64 := r.Header.Get("x-amz-server-side-encryption-customer-key-MD5")
+// HasSSECCopySourceHeaders reports a copy source's customer key on the
+// request (x-amz-copy-source-server-side-encryption-customer-*, WP-SSEC-1
+// B.4).
+func HasSSECCopySourceHeaders(r *http.Request) bool {
+	return r.Header.Get("x-amz-copy-source-server-side-encryption-customer-algorithm") != ""
+}
 
+// ParseSSECHeaders reads the request's own SSE-C headers (the object being
+// written or read): nil, nil when none; the 32-byte key when all three are
+// present and consistent; an error otherwise.
+func ParseSSECHeaders(r *http.Request) ([]byte, error) {
+	return parseSSECKey(r.Header.Get("x-amz-server-side-encryption-customer-algorithm"),
+		r.Header.Get("x-amz-server-side-encryption-customer-key"),
+		r.Header.Get("x-amz-server-side-encryption-customer-key-MD5"))
+}
+
+// ParseSSECCopySourceHeaders reads the copy SOURCE's SSE-C headers
+// (x-amz-copy-source-server-side-encryption-customer-*): the same rules.
+func ParseSSECCopySourceHeaders(r *http.Request) ([]byte, error) {
+	return parseSSECKey(r.Header.Get("x-amz-copy-source-server-side-encryption-customer-algorithm"),
+		r.Header.Get("x-amz-copy-source-server-side-encryption-customer-key"),
+		r.Header.Get("x-amz-copy-source-server-side-encryption-customer-key-MD5"))
+}
+
+func parseSSECKey(algo, keyB64, md5B64 string) ([]byte, error) {
 	if algo == "" && keyB64 == "" && md5B64 == "" {
 		return nil, nil
 	}

@@ -114,6 +114,14 @@ func odPooledDrain(src io.Reader) {
 type OneDriveDriver struct {
 	tenants []*odTenant
 	logger  *zap.Logger
+
+	// The fleet fingerprint's last verdict (onedrive_fleet.go, RP18-1): the
+	// probe re-checks after an unknown one and hourly.
+	fleetMu        sync.Mutex
+	fleetState     FleetState
+	fleetAccept    string
+	fleetCheckedAt time.Time
+	fleetChecking  bool
 }
 
 type odTenant struct {
@@ -908,6 +916,7 @@ func (d *OneDriveDriver) HealthCheck(ctx context.Context) error {
 			failing = append(failing, fmt.Sprintf("%s: %v", t.name, errs[i]))
 		}
 	}
+	d.recheckFleet(ctx)
 	if len(failing) > 0 {
 		return fmt.Errorf("onedrive health: %d of %d accounts failing: %s",
 			len(failing), len(d.tenants), strings.Join(failing, "; "))

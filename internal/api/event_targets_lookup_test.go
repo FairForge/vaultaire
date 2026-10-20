@@ -37,7 +37,7 @@ func TestEventTargets_AnEventSkippedOnAFailedLookupIsCountedAndRecorded(t *testi
 	w0, n0 := webhooks(), notifications()
 
 	// Act
-	submitEventDelivery(context.Background(), f.db, zap.NewNop(), eventID, "object.deleted", f.tenantID, []byte(`{}`))
+	submitEventDelivery(context.Background(), f.db, zap.NewNop(), recordedEvent{id: eventID, eventType: "object.deleted", tenantID: f.tenantID, data: []byte(`{}`), createdAt: time.Now()})
 	notify.Fire(f.tenantID, "b", "s3:ObjectRemoved:Delete", "k", 0, "")
 
 	// Assert

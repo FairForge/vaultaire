@@ -239,6 +239,9 @@ func TestMFADelete_Enabled_InvalidCode_Denied(t *testing.T) {
 func TestMFADelete_EnableRequiresMFA(t *testing.T) {
 	f := setupMFADeleteFixture(t)
 	f.enableUserMFA(t)
+	// MFA Delete needs versioning Enabled (WP-R4-2 A.3), as on AWS.
+	_, err := f.db.Exec(`UPDATE buckets SET versioning_status = 'Enabled' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
+	require.NoError(t, err)
 
 	s3Req := &S3Request{Bucket: f.bucket, TenantID: f.tenantID}
 
@@ -267,14 +270,18 @@ func TestMFADelete_EnableRequiresMFA(t *testing.T) {
 
 	// Verify it's actually enabled
 	var enabled bool
-	err := f.db.QueryRow(
+	err = f.db.QueryRow(
 		`SELECT mfa_delete_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
 		f.tenantID, f.bucket).Scan(&enabled)
 	require.NoError(t, err)
 	assert.True(t, enabled, "mfa_delete_enabled should be TRUE after enable")
 }
 
-func TestMFADelete_EnableRequiresObjectLock(t *testing.T) {
+// TestMFADelete_EnableNeedsVersioningNotTheLock: a bucket WITHOUT Object
+// Lock enables MFA Delete together with versioning (WP-R4-2 A.3 — it was
+// refused 409 because the gate was object_lock_enabled; AWS gates MFA
+// Delete on versioning: the Configuring MFA delete page).
+func TestMFADelete_EnableNeedsVersioningNotTheLock(t *testing.T) {
 	f := setupMFADeleteFixture(t)
 	f.enableUserMFA(t)
 
@@ -304,11 +311,14 @@ func TestMFADelete_EnableRequiresObjectLock(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	f.server.handlePutBucketVersioning(w, req, s3Req)
-	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	var errResp S3Error
-	require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &errResp))
-	assert.Equal(t, "InvalidBucketState", errResp.Code)
+	var mfa bool
+	var versioning string
+	require.NoError(t, f.db.QueryRow(`SELECT mfa_delete_enabled, versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		f.tenantID, noLockBucket).Scan(&mfa, &versioning))
+	assert.True(t, mfa)
+	assert.Equal(t, "Enabled", versioning)
 }
 
 func TestMFADelete_PutVersioning_SuspendRequiresMFA(t *testing.T) {
@@ -316,8 +326,10 @@ func TestMFADelete_PutVersioning_SuspendRequiresMFA(t *testing.T) {
 	f.enableMFADelete(t)
 	f.enableUserMFA(t)
 
+	// Suspending is possible only on a bucket without Object Lock (WP-R4-2
+	// A.1), so the fixture's bucket loses its lock here.
 	_, err := f.db.Exec(
-		`UPDATE buckets SET versioning_status = 'Enabled' WHERE tenant_id = $1 AND name = $2`,
+		`UPDATE buckets SET versioning_status = 'Enabled', object_lock_enabled = FALSE WHERE tenant_id = $1 AND name = $2`,
 		f.tenantID, f.bucket)
 	require.NoError(t, err)
 

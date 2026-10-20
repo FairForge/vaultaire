@@ -366,7 +366,10 @@ func TestUploadPartCopy_SourceConditions(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
-func TestUploadPartCopy_SSECSource_501(t *testing.T) {
+// An SSE-C source needs its key on the copy (WP-SSEC-1 B.4 — it was 501):
+// without x-amz-copy-source-server-side-encryption-customer-*, AWS's 400,
+// nothing staged.
+func TestUploadPartCopy_SSECSource_NeedsItsKey(t *testing.T) {
 	f := setupUPCFixture(t, false)
 	_, err := f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, floor, content_type, encryption_algorithm)
 		VALUES ($1, 'test-bucket', 'ssec.bin', 100, 'e', 'fixed', 'standard', 'application/octet-stream', $2)`, f.tenantID, crypto.SSECAlgorithm)
@@ -375,7 +378,8 @@ func TestUploadPartCopy_SSECSource_501(t *testing.T) {
 
 	w := f.copyPart(t, "dst.bin", id, 1, "/test-bucket/ssec.bin", "", nil)
 
-	assert.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "InvalidRequest")
 	assert.Equal(t, 0, f.partRows(t, id))
 }
 

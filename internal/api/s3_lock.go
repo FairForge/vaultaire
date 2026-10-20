@@ -136,17 +136,36 @@ func (s *Server) handlePutObjectLockConfiguration(w http.ResponseWriter, r *http
 	mode := ""
 	days := 0
 
-	// Object Lock cannot be turned off once enabled (AWS): a configuration
-	// without ObjectLockEnabled used to disable it and clear the defaults.
-	if !enabled {
-		var current bool
-		if err := s.db.QueryRowContext(r.Context(),
-			`SELECT object_lock_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`,
-			t.ID, req.Bucket).Scan(&current); err == nil && current {
-			WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
-				WithSuggestion("Object Lock cannot be disabled once it is enabled on a bucket."))
-			return
-		}
+	// The bucket's state decides (WP-R4-2 A.2): Object Lock cannot be turned
+	// off once enabled (a configuration without ObjectLockEnabled used to
+	// disable it and clear the defaults), and it goes on only with
+	// versioning Enabled — AWS enables Object Lock on an existing bucket
+	// and refuses an unversioned one with InvalidBucketState (the console
+	// turns versioning on for you; the API does not). It used to go on with
+	// versioning off.
+	var current bool
+	var versioning string
+	err = s.db.QueryRowContext(r.Context(),
+		`SELECT object_lock_enabled, versioning_status FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		t.ID, req.Bucket).Scan(&current, &versioning)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.writeNoSuchBucket(w, r, t.ID, req.Bucket)
+		return
+	}
+	if err != nil {
+		s.logger.Error("object lock config: bucket read failed", zap.Error(err))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if !enabled && current {
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
+			WithSuggestion("Object Lock cannot be disabled once it is enabled on a bucket."))
+		return
+	}
+	if enabled && !current && versioning != "Enabled" {
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
+			WithMessage(lockNeedsVersioningRefusal))
+		return
 	}
 
 	if config.Rule != nil && config.Rule.DefaultRetention != nil {

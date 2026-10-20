@@ -571,3 +571,35 @@ func TestWebhookRetries_EveryOutcomeExistsAtZeroFromBoot(t *testing.T) {
 	// rise from 0 that increase() sees); /metrics registers it.
 	assert.Equal(t, 3, testutil.CollectAndCount(webhookRetries))
 }
+
+// RP18-2 (Stage 1a Prompt 17 Part 0): one event is one body. The envelope's
+// created_at is the events row's, so attempt 1 and every retry of one
+// X-Event-ID send byte-equal bodies (the signature's t is what dates the
+// request). deliverToEndpoints stamped time.Now() into it.
+func TestWebhookOutbox_ARetrySendsTheSameBodyAsTheFirstAttempt(t *testing.T) {
+	// Arrange
+	hook := newScriptedHook(t, 500, 200)
+	f := setupOutboxFixture(t, hook.srv.URL+"/hook")
+
+	// Act: attempt 1, then a retry after the wall clock has crossed a
+	// second boundary (RFC 3339 is second-precise: a body stamped "now"
+	// twice inside one second would pass by luck).
+	f.emit(t)
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(1100 * time.Millisecond)))
+	f.clock.advance(webhookBackoff[0] + time.Second)
+	require.Equal(t, 1, f.retry(t).Submitted)
+
+	// Assert
+	hook.mu.Lock()
+	defer hook.mu.Unlock()
+	require.Len(t, hook.bodies, 2)
+	assert.Equal(t, string(hook.bodies[0]), string(hook.bodies[1]), "attempt 1 and the retry: one body")
+	var env struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+	}
+	require.NoError(t, json.Unmarshal(hook.bodies[0], &env))
+	var rowCreated time.Time
+	require.NoError(t, f.db.QueryRow(`SELECT created_at FROM events WHERE id = $1`, env.ID).Scan(&rowCreated))
+	assert.Equal(t, rowCreated.UTC().Format(time.RFC3339), env.CreatedAt, "the events row's created_at")
+}

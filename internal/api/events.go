@@ -69,16 +69,17 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 	if db == nil {
 		return
 	}
-	eventID, dataJSON, ok := recordEvent(ctx, db, logger, eventType, tenantID, data)
+	ev, ok := recordEvent(ctx, db, logger, eventType, tenantID, data)
 	if !ok {
 		return
 	}
-	submitEventDelivery(ctx, db, logger, eventID, eventType, tenantID, dataJSON)
+	submitEventDelivery(ctx, db, logger, ev)
 }
 
 // submitEventDelivery queues one recorded event for the tenant's matching
 // webhooks; nothing when there are none.
-func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
+func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev recordedEvent) {
+	eventID, eventType, tenantID := ev.id, ev.eventType, ev.tenantID
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 	endpoints, gen, err := tenantWebhookEndpoints(lctx, db, logger, tenantID)
@@ -100,30 +101,42 @@ func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev
 	// The outbox rows first: the durable intent the retry job works from
 	// (WP-R11-3); the pool job is attempt 1.
 	recordWebhookIntents(lctx, db, logger, tenantID, owed)
-	eventDeliveries.submit(webhookJob(db, logger, endpoints, gen, eventID, eventType, tenantID, payload))
+	eventDeliveries.submit(webhookJob(db, logger, endpoints, gen, ev))
+}
+
+// recordedEvent is one events row as its deliveries carry it: the id, the
+// type, the tenant, the data and the row's created_at — the one date every
+// attempt of the event sends (RP18-2: a retry stamped time.Now() into the
+// envelope, so each attempt of one X-Event-ID was a different body).
+type recordedEvent struct {
+	id, eventType, tenantID string
+	data                    []byte
+	createdAt               time.Time
 }
 
 // recordEvent inserts the events row; false when nothing was recorded.
-func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) (eventID string, dataJSON []byte, ok bool) {
-	eventID = uuid.New().String()
+func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) (recordedEvent, bool) {
+	ev := recordedEvent{id: uuid.New().String(), eventType: eventType, tenantID: tenantID}
 	dataJSON, err := json.Marshal(data)
 	if err != nil {
 		logger.Error("marshal event data", zap.Error(err))
-		return "", nil, false
+		return recordedEvent{}, false
 	}
+	ev.data = dataJSON
 
-	_, err = db.ExecContext(ctx, `
+	err = db.QueryRowContext(ctx, `
 		INSERT INTO events (id, type, tenant_id, data)
-		VALUES ($1, $2, $3, $4)`,
-		eventID, eventType, tenantID, dataJSON)
+		VALUES ($1, $2, $3, $4)
+		RETURNING created_at`,
+		ev.id, eventType, tenantID, dataJSON).Scan(&ev.createdAt)
 	if err != nil {
 		logger.Error("insert event",
 			zap.Error(err),
 			zap.String("type", eventType),
 			zap.String("tenant_id", tenantID))
-		return "", nil, false
+		return recordedEvent{}, false
 	}
-	return eventID, dataJSON, true
+	return ev, true
 }
 
 // webhookEndpoint is one enabled webhook_endpoints row.
@@ -161,32 +174,21 @@ func loadWebhookEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, t
 	return endpoints, nil
 }
 
-func dispatchWebhooks(ctx context.Context, db *sql.DB, logger *zap.Logger, eventID, eventType, tenantID string, payload []byte) {
-	ctx, cancel := context.WithTimeout(ctx, webhookDeliveryTimeout)
-	defer cancel()
-
-	endpoints, err := loadWebhookEndpoints(ctx, db, logger, tenantID)
-	if err != nil {
-		logger.Error("query webhook endpoints for dispatch",
-			zap.Error(err),
-			zap.String("tenant_id", tenantID))
-		return
-	}
-	deliverToEndpoints(ctx, db, logger, endpoints, eventID, eventType, tenantID, payload)
-}
-
 // deliverToEndpoints posts the event to every endpoint whose filter
-// matches it, recording each delivery.
-func deliverToEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, eventID, eventType, tenantID string, payload []byte) {
+// matches it, recording each delivery. The body is a function of the
+// events row alone (its created_at, never the attempt's clock), so every
+// attempt of one event sends the same bytes (RP18-2).
+func deliverToEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, endpoints []webhookEndpoint, ev recordedEvent) {
 	if len(endpoints) == 0 {
 		return
 	}
+	eventID, eventType := ev.id, ev.eventType
 	eventPayload := map[string]interface{}{
 		"id":         eventID,
 		"type":       eventType,
-		"tenant_id":  tenantID,
-		"data":       json.RawMessage(payload),
-		"created_at": time.Now().UTC().Format(time.RFC3339),
+		"tenant_id":  ev.tenantID,
+		"data":       json.RawMessage(ev.data),
+		"created_at": ev.createdAt.UTC().Format(time.RFC3339),
 	}
 	body, err := json.Marshal(eventPayload)
 	if err != nil {

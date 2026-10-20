@@ -118,7 +118,7 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 // held before. A part that grew past its reservation and no longer fits is
 // refused: errPartOverQuota, its reservation given back, nothing installed.
 func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string, partNumber int,
-	reserved, measured int64, etag string, install func() error) error {
+	reserved, measured int64, etag, sealedMD5 string, install func() error) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin part install: %w", err)
@@ -156,12 +156,13 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes, sealed_md5)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (upload_id, part_number) DO UPDATE SET
 			etag       = EXCLUDED.etag,
 			size_bytes = EXCLUDED.size_bytes,
-			created_at = NOW()`, uploadID, partNumber, etag, measured); err != nil {
+			sealed_md5 = EXCLUDED.sealed_md5,
+			created_at = NOW()`, uploadID, partNumber, etag, measured, sealedMD5); err != nil {
 		return fmt.Errorf("record part metadata: %w", err)
 	}
 	// What the part holds less than it reserved goes back last: the quota

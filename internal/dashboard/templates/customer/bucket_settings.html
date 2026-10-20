@@ -94,6 +94,22 @@
         {{end}}
     </div>
 
+    <div class="card">
+        <div class="card-title">Customer key</div>
+        <label class="toggle-label" style="margin-top: 0.5rem;">
+            <input type="checkbox" name="ssec_required" value="on" {{if .SSECRequired}}checked{{end}}>
+            <span>Require a customer-provided key (SSE-C) on every write</span>
+        </label>
+        <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">
+            On, every upload into this bucket must bring its own AES-256 key (the SSE-C headers);
+            an upload without one is refused and nothing is stored. We never keep the key: it passes
+            through our servers on each request, and names, sizes, timestamps and access logs stay
+            readable to us. Objects written before you turn this on stay exactly as they were. A public
+            bucket cannot require a key, and a bucket that does cannot receive access logs or inventory
+            reports.
+        </p>
+    </div>
+
     {{if and (eq .Visibility "public-read") .CDNBaseURL}}
     <div class="card cdn-card">
         <div class="card-title">CDN URL</div>

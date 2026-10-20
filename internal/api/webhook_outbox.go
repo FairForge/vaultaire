@@ -255,6 +255,7 @@ type dueOutboxRow struct {
 	eventType             string
 	data                  []byte
 	eventOK               bool
+	createdAt             time.Time // the events row's: the one date in every attempt's body (RP18-2)
 }
 
 // RunOnce takes up to BatchSize due rows (SKIP LOCKED: two slots never take
@@ -272,7 +273,7 @@ func (w *WebhookRetrier) RunOnce(ctx context.Context) (WebhookRetryResult, error
 	rows, err := tx.QueryContext(ctx, `
 		SELECT o.id, o.tenant_id, o.event_id,
 		       COALESCE(w.id, ''), COALESCE(w.url, ''), COALESCE(w.event_filter, '{}'), COALESCE(w.secret, ''), COALESCE(w.enabled, FALSE),
-		       COALESCE(e.type, ''), COALESCE(e.data, '{}'::jsonb), e.id IS NOT NULL
+		       COALESCE(e.type, ''), COALESCE(e.data, '{}'::jsonb), e.id IS NOT NULL, COALESCE(e.created_at, o.created_at)
 		FROM webhook_outbox o
 		LEFT JOIN webhook_endpoints w ON w.id = o.endpoint_id
 		LEFT JOIN events e ON e.id = o.event_id
@@ -288,7 +289,7 @@ func (w *WebhookRetrier) RunOnce(ctx context.Context) (WebhookRetryResult, error
 		var r dueOutboxRow
 		var filter pq.StringArray
 		if err := rows.Scan(&r.id, &r.tenantID, &r.eventID, &r.ep.id, &r.ep.url, &filter, &r.ep.secret, &r.enabled,
-			&r.eventType, &r.data, &r.eventOK); err != nil {
+			&r.eventType, &r.data, &r.eventOK, &r.createdAt); err != nil {
 			_ = rows.Close()
 			return res, fmt.Errorf("webhook retry: scan: %w", err)
 		}
@@ -331,7 +332,7 @@ func (w *WebhookRetrier) RunOnce(ctx context.Context) (WebhookRetryResult, error
 			continue
 		}
 		jobs = append(jobs, webhookJob(w.db, w.logger, []webhookEndpoint{r.ep}, webhookGeneration(r.tenantID),
-			r.eventID, r.eventType, r.tenantID, r.data))
+			recordedEvent{id: r.eventID, eventType: r.eventType, tenantID: r.tenantID, data: r.data, createdAt: r.createdAt}))
 	}
 	res.Submitted = len(jobs)
 	w.pool.submit(jobs...)

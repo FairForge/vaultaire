@@ -49,12 +49,13 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		region := drivers.IDriveDefaultRegion(os.Getenv)
 		tierPref := "auto"
 		var dataResidency sql.NullString
+		ssecRequired := false
 
 		if db != nil {
 			_ = db.QueryRowContext(r.Context(),
-				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference, data_residency
+				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference, data_residency, ssec_required
 				 FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref, &dataResidency)
+				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref, &dataResidency, &ssecRequired)
 
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
@@ -78,6 +79,7 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["Slug"] = slug
 		data["Region"] = region
 		data["TierPreference"] = tierPref
+		data["SSECRequired"] = ssecRequired
 		data["RegionDisplay"] = drivers.RegionDisplayName(region)
 		data["IsEURegion"] = drivers.IsEURegion(region)
 		if dataResidency.Valid {
@@ -154,6 +156,11 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			cacheMaxAge = 86400
 		}
 
+		// Require a customer key on every write (WP-SSEC-1 B.5): a checkbox,
+		// absent when unchecked. A public bucket serves without a key and
+		// cannot require one.
+		ssecRequired := r.FormValue("ssec_required") != ""
+
 		settingsURL := fmt.Sprintf("/dashboard/buckets/%s/settings", bucketName)
 
 		if db == nil {
@@ -163,6 +170,11 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 		}
 
 		if visibility == "public-read" {
+			if ssecRequired {
+				middleware.SetFlash(w, "error", "A public bucket cannot require a customer-provided key: its objects are served without one. Keep it private, or turn the key requirement off.")
+				http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
+				return
+			}
 			var tier string
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(tier, '') FROM tenant_quotas WHERE tenant_id = $1`,
@@ -178,9 +190,9 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 
 		result, err := db.ExecContext(r.Context(),
 			`UPDATE buckets
-			 SET visibility = $1, cors_origins = $2, cache_max_age_secs = $3, tier_preference = $4, updated_at = NOW()
+			 SET visibility = $1, cors_origins = $2, cache_max_age_secs = $3, tier_preference = $4, ssec_required = $7, updated_at = NOW()
 			 WHERE tenant_id = $5 AND name = $6`,
-			visibility, corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName)
+			visibility, corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName, ssecRequired)
 		if err != nil {
 			logger.Error("update bucket settings", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save settings.")

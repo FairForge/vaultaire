@@ -241,8 +241,8 @@ func TestManagementGetBucket(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT name, COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at"}).
-			AddRow("my-bucket", []byte(`{}`), now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required"}).
+			AddRow("my-bucket", []byte(`{}`), now, false))
 
 	req := httptest.NewRequest("GET", "/api/v1/manage/buckets/my-bucket", nil)
 	w := httptest.NewRecorder()

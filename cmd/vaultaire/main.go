@@ -517,7 +517,10 @@ func refusedPrimary(mode string, drv engine.Driver) error {
 // markers recorded (WP-R7-4, R7-09; drivers/onedrive_fleet.go): a mismatch
 // is the driver's Error line and vaultaire_permafrost_fleet_mismatch 1,
 // PERMAFROST_FLEET_ACCEPT=<fingerprint> accepts a new order. Never a boot
-// failure: reads find a remapped object by the fleet walk.
+// failure: reads find a remapped object by the fleet walk. A verdict the
+// boot budget could not reach (unknown) is re-checked by the driver's probe
+// at its next run, then hourly (RP18-1); the accept value given here is
+// the one those re-checks use.
 func checkPermafrostFleet(d *drivers.OneDriveDriver) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

@@ -475,17 +475,19 @@ func (s *Server) handleTestWebhook(w http.ResponseWriter, r *http.Request) {
 	data := map[string]interface{}{"webhook_id": webhookID}
 	dataJSON, _ := json.Marshal(data)
 
-	_, err = s.db.ExecContext(r.Context(), `
+	ev := recordedEvent{id: eventID, eventType: "webhook.test", tenantID: tenantID, data: dataJSON}
+	err = s.db.QueryRowContext(r.Context(), `
 		INSERT INTO events (id, type, tenant_id, data)
-		VALUES ($1, $2, $3, $4)`,
-		eventID, "webhook.test", tenantID, dataJSON)
+		VALUES ($1, $2, $3, $4)
+		RETURNING created_at`,
+		eventID, "webhook.test", tenantID, dataJSON).Scan(&ev.createdAt)
 	if err != nil {
 		s.logger.Error("insert test event", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create test event", "")
 		return
 	}
 
-	submitEventDelivery(r.Context(), s.db, s.logger, eventID, "webhook.test", tenantID, dataJSON)
+	submitEventDelivery(r.Context(), s.db, s.logger, ev)
 
 	resp := map[string]interface{}{
 		"object":     "webhook_test",

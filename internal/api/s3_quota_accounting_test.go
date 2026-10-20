@@ -629,7 +629,7 @@ func TestQuotaAccounting_CopyEncryptedSourceRejected(t *testing.T) {
 	require.NoError(t, err)
 	w = httptest.NewRecorder()
 	f.server.handleCopyObject(w, req, f.s3Req("test-bucket", "enc-copy.bin"))
-	assert.Equal(t, 501, w.Code, "an SSE-C source needs the customer's key: NotImplemented")
+	assert.Equal(t, 400, w.Code, "an SSE-C source needs the customer's key on the copy (x-amz-copy-source-server-side-encryption-customer-*): AWS's 400 without it (WP-SSEC-1 B.4; it was 501)")
 }
 
 // The reconciliation job rewrites storage_used_bytes from the

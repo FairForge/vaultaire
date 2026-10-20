@@ -64,9 +64,17 @@ var generatedObjectRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "System-generated objects (GDPR export, access log, inventory report) not written because the target bucket is sse_enabled and the object could not be encrypted: sse_unavailable (no master key on this process). Never stored plaintext. (too_large_for_sse is gone: SSE-S3 seals any size since WP-R8-5.)",
 }, []string{"kind", "reason"})
 
+// refusedSSECRequired: the target bucket requires a customer key on every
+// write (ssec_required, WP-SSEC-1 B.5) and a generated object has none —
+// never written plaintext.
+const refusedSSECRequired = "ssec_required"
+
+// errGeneratedSSECRequired: the target bucket requires a customer key.
+var errGeneratedSSECRequired = errors.New("generated object: the target bucket requires a customer-provided key (ssec_required); nothing written")
+
 func init() {
 	for _, k := range []string{generatedKindExport, generatedKindAccessLog, generatedKindInventory} {
-		for _, r := range []string{refusedSSEUnavailable} {
+		for _, r := range []string{refusedSSEUnavailable, refusedSSECRequired} {
 			generatedObjectRefused.WithLabelValues(k, r)
 		}
 	}
@@ -152,14 +160,28 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 
 	// One read: the bucket is still the tenant's, and whether it requires
 	// encryption. An error is an error — never "not encrypted".
-	var sseBucket bool
+	var sseBucket, ssecRequired bool
 	err := g.db.QueryRowContext(ctx,
-		`SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket).Scan(&sseBucket)
+		`SELECT sse_enabled, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, bucket).Scan(&sseBucket, &ssecRequired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return deliveredObject{}, errTargetBucketGone
 	}
 	if err != nil {
 		return deliveredObject{}, fmt.Errorf("check target bucket %s: %w", bucket, err)
+	}
+	if ssecRequired {
+		// The bucket promised a customer key on every object; a generated
+		// one cannot be keyed (WP-SSEC-1 B.5). Refused before anything is
+		// rendered, reserved or written — never a plaintext object there.
+		kind := o.Kind
+		if kind == "" {
+			kind = "other"
+		}
+		generatedObjectRefused.WithLabelValues(kind, refusedSSECRequired).Inc()
+		g.logger.Error("generated object refused: its bucket requires a customer-provided key (ssec_required) and a generated object has none — never stored plaintext",
+			zap.String("kind", kind), zap.String("reason", refusedSSECRequired), zap.String("tenant_id", tenantID),
+			zap.String("bucket", bucket), zap.String("key", key))
+		return deliveredObject{}, errGeneratedSSECRequired
 	}
 	if err := checkObjectLock(ctx, g.db, tenantID, bucket, key, false); err != nil {
 		return deliveredObject{}, fmt.Errorf("target key %s/%s: %w", bucket, key, err)

@@ -66,12 +66,15 @@ func (s *Server) registerManagementRoutes() {
 // --- Buckets ---
 
 type mgmtBucket struct {
-	Object    string            `json:"object"`
-	Name      string            `json:"name"`
-	Region    string            `json:"region,omitempty"`
-	Metadata  map[string]string `json:"metadata"`
-	CreatedAt time.Time         `json:"created_at"`
-	RequestID string            `json:"request_id,omitempty"`
+	Object   string            `json:"object"`
+	Name     string            `json:"name"`
+	Region   string            `json:"region,omitempty"`
+	Metadata map[string]string `json:"metadata"`
+	// SSECRequired: every write into the bucket must carry a customer key
+	// (WP-SSEC-1 B.5, 096); present on get/patch.
+	SSECRequired *bool     `json:"ssec_required,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	RequestID    string    `json:"request_id,omitempty"`
 }
 
 func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -238,14 +241,16 @@ func (s *Server) handleMgmtGetBucket(w http.ResponseWriter, r *http.Request) {
 
 	var b mgmtBucket
 	var metaJSON []byte
+	var ssecRequired bool
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT name, COALESCE(metadata, '{}'), created_at FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, name).Scan(&b.Name, &metaJSON, &b.CreatedAt)
+		`SELECT name, COALESCE(metadata, '{}'), created_at, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&b.Name, &metaJSON, &b.CreatedAt, &ssecRequired)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found",
 			"bucket not found", "name")
 		return
 	}
+	b.SSECRequired = &ssecRequired
 	b.Object = "bucket"
 	b.Metadata = make(map[string]string)
 	_ = json.Unmarshal(metaJSON, &b.Metadata)
@@ -270,50 +275,70 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The body carries the metadata map to merge and/or the ssec_required
+	// flag (WP-SSEC-1 B.5); at least one of the two.
 	var req struct {
-		Metadata map[string]interface{} `json:"metadata"`
+		Metadata     map[string]interface{} `json:"metadata"`
+		SSECRequired *bool                  `json:"ssec_required"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
 
-	if req.Metadata == nil {
-		writeManagementError(w, ErrTypeInvalidRequest, "missing_parameter", "metadata field is required", "metadata")
+	if req.Metadata == nil && req.SSECRequired == nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "missing_parameter", "metadata or ssec_required is required", "metadata")
 		return
 	}
 
 	var existing json.RawMessage
 	var createdAt time.Time
+	var visibility string
+	var ssecRequired bool
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT COALESCE(metadata, '{}'), created_at FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, name).Scan(&existing, &createdAt)
+		`SELECT COALESCE(metadata, '{}'), created_at, visibility, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&existing, &createdAt, &visibility, &ssecRequired)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
 		return
 	}
 
-	merged, mergeErr := mergeMetadata(existing, req.Metadata)
-	if mergeErr != nil {
-		writeManagementError(w, ErrTypeInvalidRequest, "invalid_metadata", mergeErr.Error(), "metadata")
-		return
+	merged := existing
+	if req.Metadata != nil {
+		var mergeErr error
+		merged, mergeErr = mergeMetadata(existing, req.Metadata)
+		if mergeErr != nil {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_metadata", mergeErr.Error(), "metadata")
+			return
+		}
+	}
+	if req.SSECRequired != nil {
+		// A public bucket serves its objects without a key: it cannot
+		// require one (409). Objects written before the flag stay as they
+		// were; the flag governs writes from now on.
+		if *req.SSECRequired && visibility == "public-read" {
+			writeManagementError(w, ErrTypeConflict, "bucket_public", "a public bucket cannot require a customer-provided key; make it private first", "ssec_required")
+			return
+		}
+		ssecRequired = *req.SSECRequired
 	}
 
 	_, err = s.db.ExecContext(r.Context(),
-		`UPDATE buckets SET metadata = $1, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
-		merged, tenantID, name)
+		`UPDATE buckets SET metadata = $1, ssec_required = $4, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
+		merged, tenantID, name, ssecRequired)
 	if err != nil {
-		s.logger.Error("update bucket metadata", zap.Error(err))
-		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update metadata", "")
+		s.logger.Error("update bucket", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update the bucket", "")
 		return
 	}
 
 	b := mgmtBucket{
-		Object:    "bucket",
-		Name:      name,
-		Metadata:  make(map[string]string),
-		CreatedAt: createdAt,
-		RequestID: getRequestID(w),
+		Object:       "bucket",
+		Name:         name,
+		Metadata:     make(map[string]string),
+		SSECRequired: &ssecRequired,
+		CreatedAt:    createdAt,
+		RequestID:    getRequestID(w),
 	}
 	_ = json.Unmarshal(merged, &b.Metadata)
 	writeJSON(w, http.StatusOK, b)

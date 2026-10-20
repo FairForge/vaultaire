@@ -62,9 +62,9 @@ func TestEmitEvent(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 
-	mock.ExpectExec(`INSERT INTO events`).
+	mock.ExpectQuery(`INSERT INTO events`).
 		WithArgs(sqlmock.AnyArg(), "object.created", "tenant-1", sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at"}).AddRow(time.Now()))
 
 	mock.ExpectQuery(`SELECT id, url, event_filter, secret FROM webhook_endpoints`).
 		WithArgs("tenant-1").
@@ -342,9 +342,9 @@ func TestWebhookTestFire(t *testing.T) {
 		WithArgs("wh-123", "test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(true))
 
-	mock.ExpectExec(`INSERT INTO events`).
+	mock.ExpectQuery(`INSERT INTO events`).
 		WithArgs(sqlmock.AnyArg(), "webhook.test", "test-tenant", sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"created_at"}).AddRow(time.Now()))
 
 	mock.ExpectQuery(`SELECT id, url, event_filter, secret FROM webhook_endpoints`).
 		WithArgs("test-tenant").

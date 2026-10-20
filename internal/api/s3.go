@@ -801,12 +801,20 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	var echo putEchoHeaders
 	var storageKey string
 	var ssecKeyMD5 string
+	var lockMode string
+	var lockUntil sql.NullTime
+	var legalHold sql.NullBool
 
+	// One query: the head row with the key's lock row joined (RP17-1) —
+	// HEAD stays one round trip to the cache (non-negotiable 2).
 	err = s.db.QueryRowContext(r.Context(), `
-		SELECT size_bytes, etag, content_type, updated_at, COALESCE(metadata, '{}'), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(tags, '{}'), COALESCE(content_disposition, ''), COALESCE(content_encoding, ''), COALESCE(content_language, ''), COALESCE(cache_control, ''), COALESCE(http_expires, ''), COALESCE(website_redirect_location, ''), floor, COALESCE(storage_key, ''), COALESCE(ssec_key_md5, '')
-		FROM object_head_cache
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey, &ssecKeyMD5)
+		SELECT h.size_bytes, h.etag, h.content_type, h.updated_at, COALESCE(h.metadata, '{}'), COALESCE(h.backend_name, ''), COALESCE(h.encryption_algorithm, ''), COALESCE(h.tags, '{}'), COALESCE(h.content_disposition, ''), COALESCE(h.content_encoding, ''), COALESCE(h.content_language, ''), COALESCE(h.cache_control, ''), COALESCE(h.http_expires, ''), COALESCE(h.website_redirect_location, ''), h.floor, COALESCE(h.storage_key, ''), COALESCE(h.ssec_key_md5, ''),
+		       `+objectLockColumns+`
+		FROM object_head_cache h
+		LEFT JOIN object_locks l ON l.tenant_id = h.tenant_id AND l.bucket = h.bucket AND l.object_key = h.object_key
+		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
+	`, t.ID, req.Bucket, req.Object).Scan(&sizeBytes, &etag, &contentType, &updatedAt, &metadataJSON, &backendName, &encAlgo, &tagsJSON, &contentDisposition, &contentEncoding, &contentLanguage, &echo.CacheControl, &echo.Expires, &echo.WebsiteRedirect, &floor, &storageKey, &ssecKeyMD5,
+		&lockMode, &lockUntil, &legalHold)
 
 	// R85-2: a HEAD of the current object of a versioned bucket names its
 	// version, as GET does — and a key whose latest version is a delete
@@ -865,7 +873,8 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 		StorageClass: storageClass, Metadata: metadataJSON, TagCount: tagCount(tagsJSON),
 		Disposition: disposition, Encoding: contentEncoding, Language: contentLanguage,
 		CacheControl: echo.CacheControl, Expires: echo.Expires, WebsiteRedirect: echo.WebsiteRedirect,
-		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo)), SSECKeyMD5: ssecKeyMD5}
+	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	switch {
 	case latestVID != "" && !latestMarker:
 		oh.VersionID = latestVID
@@ -977,15 +986,20 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 	var attrs objectAttrs
 	var meta []byte
 	var ssecKeyMD5 string
+	var lockMode string
+	var lockUntil sql.NullTime
+	var legalHold sql.NullBool
 	err := s.db.QueryRowContext(r.Context(), `
-		SELECT is_delete_marker, is_latest, etag, content_type, size_bytes, created_at,
-		       COALESCE(storage_key, ''), COALESCE(backend_name, ''), COALESCE(encryption_algorithm, ''), COALESCE(floor, ''),
-		       `+versionAttrColumns+`, COALESCE(ssec_key_md5, '')
-		FROM object_versions
-		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = $4`,
+		SELECT v.is_delete_marker, v.is_latest, v.etag, v.content_type, v.size_bytes, v.created_at,
+		       COALESCE(v.storage_key, ''), COALESCE(v.backend_name, ''), COALESCE(v.encryption_algorithm, ''), COALESCE(v.floor, ''),
+		       `+versionAttrColumns+`, COALESCE(v.ssec_key_md5, ''),
+		       `+objectLockColumns+`
+		FROM object_versions v
+		LEFT JOIN object_locks l ON l.tenant_id = v.tenant_id AND l.bucket = v.bucket AND l.object_key = v.object_key
+		WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4`,
 		tenantID, req.Bucket, req.Object, vid).Scan(&marker, &latest, &etag, &contentType, &size, &createdAt,
 		&storageKey, &backend, &encAlgo, &floor, &meta, &attrs.ContentDisposition, &attrs.ContentEncoding, &attrs.ContentLanguage,
-		&attrs.CacheControl, &attrs.Expires, &attrs.WebsiteRedirect, &ssecKeyMD5)
+		&attrs.CacheControl, &attrs.Expires, &attrs.WebsiteRedirect, &ssecKeyMD5, &lockMode, &lockUntil, &legalHold)
 	if errors.Is(err, sql.ErrNoRows) {
 		if isUnanchoredNullVersion(r.Context(), s.db, tenantID, req.Bucket, req.Object, vid) {
 			return false // the current object is the null version (GET answers the same)
@@ -1038,7 +1052,8 @@ func (s *Server) headVersion(w http.ResponseWriter, r *http.Request, tenantID st
 		StorageClass: engine.CustomerStorageClass(floor, backend), VersionID: vid, Metadata: meta,
 		Disposition: disposition, Encoding: attrs.ContentEncoding, Language: attrs.ContentLanguage,
 		CacheControl: attrs.CacheControl, Expires: attrs.Expires, WebsiteRedirect: attrs.WebsiteRedirect,
-		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo))}
+		SSE: sseOf(encAlgo, crypto.IsSSEC(encAlgo)), SSECKeyMD5: ssecKeyMD5}
+	oh.LockMode, oh.LockRetainUntil, oh.LegalHold = lockHeadersOf(lockMode, lockUntil, legalHold)
 	if code := evaluateConditionalGET(r, etag, createdAt); code == http.StatusNotModified {
 		oh.write(w, headersNotModified, nil)
 		w.WriteHeader(http.StatusNotModified)

@@ -33,6 +33,13 @@ type copySourceRow struct {
 	StorageKey string
 	ETag       string
 	Modified   time.Time
+	// SSECKeyMD5 is the row's key digest of an SSE-C source (094); SSECKey
+	// the customer's key the request carries for it
+	// (x-amz-copy-source-server-side-encryption-customer-*, WP-SSEC-1 B.4),
+	// checked against the digest at resolve time and cleared by the caller
+	// after the open.
+	SSECKeyMD5 string
+	SSECKey    []byte
 	// VersionAttrs: the attributes of a non-current source version — what
 	// its own row recorded (R61-8, 092; a version written before 092 has its
 	// content type alone), never the current object's. nil = the head row's.
@@ -67,10 +74,10 @@ func (s *Server) resolveCopySource(w http.ResponseWriter, r *http.Request, tenan
 	// is what the ignored error did (Stage 1a Prompt 6 Part 0).
 	rowErr := s.db.QueryRowContext(r.Context(), `
 		SELECT size_bytes, COALESCE(encryption_algorithm, ''), is_chunked, COALESCE(backend_name, ''), floor, COALESCE(storage_key, ''),
-		       etag, updated_at
+		       etag, updated_at, COALESCE(ssec_key_md5, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&src.Size, &src.Enc, &src.Chunked, &src.Backend, &src.Floor, &src.StorageKey, &src.ETag, &src.Modified)
+		tenantID, bucket, key).Scan(&src.Size, &src.Enc, &src.Chunked, &src.Backend, &src.Floor, &src.StorageKey, &src.ETag, &src.Modified, &src.SSECKeyMD5)
 	found := rowErr == nil
 	if rowErr != nil && !errors.Is(rowErr, sql.ErrNoRows) {
 		s.logger.Error("copy: source row read failed", zap.Error(rowErr), zap.String("bucket", bucket), zap.String("key", key))
@@ -89,6 +96,7 @@ func (s *Server) resolveCopySource(w http.ResponseWriter, r *http.Request, tenan
 			// (WP-VM-1); a whole one from its own blob.
 			src.Size, src.Enc, src.Chunked, src.Backend, src.StorageKey = v.size, v.enc, v.backend == chunkedBackendSentinel, v.backend, v.storageKey
 			src.ETag, src.Modified = v.etag, v.createdAt
+			src.SSECKeyMD5 = v.ssecKeyMD5
 			va := v.attrs
 			src.VersionAttrs = &va
 			if v.floor != "" {
@@ -106,8 +114,36 @@ func (s *Server) resolveCopySource(w http.ResponseWriter, r *http.Request, tenan
 		WriteS3Error(w, ErrPreconditionFailed, r.URL.Path, generateRequestID())
 		return src, false
 	}
+	// An SSE-C source needs its key on the request (WP-SSEC-1 B.4): none
+	// is AWS's 400, a key of another MD5 than the row's its 403 — both
+	// before anything is read. A key on a source that is not SSE-C is
+	// ignored, as AWS ignores it.
+	if crypto.IsSSEC(src.Enc) {
+		if !crypto.HasSSECCopySourceHeaders(r) {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithMessage(sseCRefusal))
+			return src, false
+		}
+		k, kErr := crypto.ParseSSECCopySourceHeaders(r)
+		if kErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(kErr.Error()))
+			return src, false
+		}
+		if src.SSECKeyMD5 != "" && crypto.SSECKeyMD5(k) != src.SSECKeyMD5 {
+			clear(k)
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithMessage(sseCKeyRefusal))
+			return src, false
+		}
+		src.SSECKey = k
+	}
 	src.Resolved = true
 	return src, true
+}
+
+// clearKey zeroes the source's customer key, once the open has derived
+// what it needs from it.
+func (c *copySourceRow) clearKey() {
+	clear(c.SSECKey)
+	c.SSECKey = nil
 }
 
 // copySourceRange is the part of a source a copy reads: the whole object,
@@ -148,14 +184,31 @@ func (s *Server) openCopySource(ctx context.Context, tenantID string, src copySo
 	// Read from the backend the source's row records, and no other (WP-R6-1;
 	// a chunked row's name is a sentinel: its chunks have their own rows).
 	gctx := engine.WithRecordedBackend(ctx, src.Backend)
-	if src.Size > 0 {
+	if src.Size > 0 && storedBlobKnown(src.Enc) {
 		stored := src.Size
 		if src.sealedS3() {
 			stored = s.sseService.SealedLength(src.Size)
+		} else if crypto.IsSSEC(src.Enc) {
+			stored = storedBlobLength(src.Enc, src.Size, nil)
 		}
 		gctx = engine.WithExpectedSize(gctx, stored)
 	}
 	blob := src.blob()
+	if crypto.IsSSEC(src.Enc) {
+		// An SSE-C source under the customer's key (WP-SSEC-1 B.4): a
+		// single 0x04 stream, the old whole format, or a 0x05 multipart
+		// container — whole or by range, exactly as the GET opens it. The
+		// first segment is verified before anything is written; a wrong
+		// key is ErrSSECKeyMismatch (403).
+		req := sealedRead{Size: src.Size}
+		if rng.Ranged {
+			req.Ranged, req.Off, req.N = true, rng.Off, rng.N
+		}
+		return openSealed(ctx, newSSECOpener(src.SSECKey, src.Enc, crypto.StreamIdentity{Tenant: tenantID, Bucket: src.Bucket, Key: src.Key}), sealedSource{
+			whole:  func() (io.ReadCloser, error) { return s.engine.Get(gctx, container, blob) },
+			ranged: func(off, n int64) (io.ReadCloser, error) { return s.engine.GetRange(gctx, container, blob, off, n) },
+		}, req)
+	}
 	if src.sealedS3() {
 		// Opened as it streams: the header and first segment are verified
 		// before anything is reserved or written (sse_stream.go).
@@ -184,6 +237,10 @@ func (s *Server) openCopySource(ctx context.Context, tenantID string, src copySo
 // before anything is reserved or written.
 func (s *Server) writeCopySourceOpenError(w http.ResponseWriter, r *http.Request, tenantID string, src copySourceRow, err error) {
 	switch {
+	case errors.Is(err, crypto.ErrSSECKeyMismatch):
+		// The source's customer key does not open it (a row written before
+		// 094 keeps no digest to refuse it from): AWS's 403.
+		WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithMessage(sseCKeyRefusal))
 	case errors.Is(err, errSealedUnreadable):
 		s.logger.Error("copy: the encrypted source does not open", zap.Error(err),
 			zap.String("bucket", src.Bucket), zap.String("key", src.Key))

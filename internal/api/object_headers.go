@@ -2,8 +2,9 @@ package api
 
 import (
 	"crypto/subtle"
-
+	"database/sql"
 	"fmt"
+
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"net/http"
 	"strconv"
@@ -43,9 +44,41 @@ type objectHeaders struct {
 	Disposition, Encoding, Language        string
 	CacheControl, Expires, WebsiteRedirect string
 	// SSE is "AES256" for SSE-S3 and chunk encryption, "ssec" for SSE-C, ""
-	// for none.
-	SSE string
+	// for none. SSECKeyMD5 is the row's key digest (094), sent back as
+	// x-amz-server-side-encryption-customer-key-MD5 as AWS does (WP-SSEC-1).
+	SSE        string
+	SSECKeyMD5 string
+	// The Object Lock headers (RP17-1): what the key's object_locks row says
+	// — LockMode and LockRetainUntil for a retention, LegalHold "ON" or
+	// "OFF" when a row exists at all. All empty without a row: AWS sends no
+	// lock header then, never an empty one. The row is the KEY's (there is
+	// no per-version row; checkObjectLock enforces it on every version), so
+	// a version names the same lock.
+	LockMode        string
+	LockRetainUntil time.Time
+	LegalHold       string
 }
+
+// lockHeadersOf turns a LEFT-JOINed object_locks row into the three
+// values: no row (hold NULL) = none of them.
+func lockHeadersOf(mode string, until sql.NullTime, hold sql.NullBool) (lockMode string, retainUntil time.Time, legalHold string) {
+	if !hold.Valid {
+		return "", time.Time{}, ""
+	}
+	legalHold = "OFF"
+	if hold.Bool {
+		legalHold = "ON"
+	}
+	if mode != "" && until.Valid {
+		lockMode, retainUntil = mode, until.Time
+	}
+	return lockMode, retainUntil, legalHold
+}
+
+// objectLockJoin is the join every object query makes to carry the key's
+// lock row (object_head_cache or object_versions aliased as the table it
+// joins from); objectLockColumns the three columns it selects.
+const objectLockColumns = `COALESCE(l.retention_mode, ''), l.retain_until_date, l.legal_hold`
 
 // The modes a response writes the object's headers in.
 type headerMode int
@@ -142,10 +175,20 @@ func (h objectHeaders) write(w http.ResponseWriter, mode headerMode, rng *httpRa
 		hd.Set("Content-Language", h.Language)
 	}
 	setEchoHeaders(hd, cc, h.Expires, h.WebsiteRedirect)
+	if h.LockMode != "" && !h.LockRetainUntil.IsZero() {
+		hd.Set("x-amz-object-lock-mode", h.LockMode)
+		hd.Set("x-amz-object-lock-retain-until-date", h.LockRetainUntil.UTC().Format(time.RFC3339))
+	}
+	if h.LegalHold != "" {
+		hd.Set("x-amz-object-lock-legal-hold", h.LegalHold)
+	}
 	switch h.SSE {
 	case "":
 	case "ssec":
 		hd.Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+		if h.SSECKeyMD5 != "" {
+			hd.Set("x-amz-server-side-encryption-customer-key-MD5", h.SSECKeyMD5)
+		}
 	default:
 		hd.Set("x-amz-server-side-encryption", h.SSE)
 	}

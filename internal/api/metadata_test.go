@@ -157,8 +157,8 @@ func TestManagementBucketMetadata_Get(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT name, COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at"}).
-			AddRow("my-bucket", []byte(`{"color":"blue","env":"prod"}`), now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required"}).
+			AddRow("my-bucket", []byte(`{"color":"blue","env":"prod"}`), now, false))
 
 	req := httptest.NewRequest("GET", "/api/v1/manage/buckets/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -202,11 +202,11 @@ func TestManagementBucketMetadata_Patch(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"metadata", "created_at"}).
-			AddRow([]byte(`{"color":"blue"}`), now))
+		WillReturnRows(sqlmock.NewRows([]string{"metadata", "created_at", "visibility", "ssec_required"}).
+			AddRow([]byte(`{"color":"blue"}`), now, "private", false))
 
 	mock.ExpectExec(`UPDATE buckets SET metadata`).
-		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
+		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket", false).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	body := bytes.NewBufferString(`{"metadata":{"color":null,"env":"prod"}}`)

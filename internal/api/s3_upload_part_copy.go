@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"go.uber.org/zap"
 )
@@ -98,17 +97,18 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket, 
 	if !ok {
 		return
 	}
+	defer src.clearKey()
+	// The destination upload's key (WP-SSEC-1 B.1/B.4): the part is sealed
+	// under it as it is staged, whatever the source's shape.
+	seal, ok := s.uploadPartSeal(w, r, t.ID, bucket, object, uploadID, partNumber)
+	if !ok {
+		return
+	}
+	defer seal.clear()
 	if !src.Resolved {
 		// No database: nothing is known of the source's size or address.
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("UploadPartCopy needs the object index. Copy the object with CopyObject instead."))
-		return
-	}
-	if src.Enc != "" && crypto.IsSSEC(src.Enc) {
-		// SSE-C needs the customer's key on the copy (x-amz-copy-source-
-		// server-side-encryption-customer-*): not yet, as CopyObject.
-		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("Copying objects encrypted with a customer-provided key (SSE-C) is not yet supported. Download and re-upload instead."))
 		return
 	}
 	if src.sealedS3() && s.sseService == nil {
@@ -149,6 +149,7 @@ func (s *Server) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket, 
 	etag, size, ok := s.stageUploadPart(w, r, t.ID, uploadID, partNumber, partBody{
 		r:        body,
 		declared: rng.N,
+		seal:     seal,
 		begin:    func() { longOpBegin(r) },
 		failed: func(w http.ResponseWriter, err error, _ int64) bool {
 			if s.copySourceReadFailed(w, r, t.ID, src, source, err) {
