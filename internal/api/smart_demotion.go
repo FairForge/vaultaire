@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/lib/pq"
 	"go.uber.org/zap"
@@ -344,9 +345,14 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	// keeps the row's created_at and last_accessed, so a key rewritten today
 	// used to look a month old and idle and its fresh bytes went to tape the
 	// next morning — the churn MinAge exists to prevent (WP-R13-2).
+	// Never an SSE-C multipart object (the 0x05 container, RP19-1): the
+	// copy is sized by the stored length, and storedBlobLength cannot know
+	// a 0x05 blob's — it is in the blob's own header. The vault parity job
+	// skips them by the same rule; the copy-back refuses one too.
 	const eligible = `
 		FROM object_head_cache o
 		WHERE o.tenant_id = $1 AND o.backend_name = $2 AND NOT o.is_chunked AND o.size_bytes > 0
+		  AND COALESCE(o.encryption_algorithm, '') <> '` + crypto.SSECAlgorithmMultipart + `'
 		  AND o.created_at < $3 AND o.updated_at < $3
 		  AND NOT EXISTS (SELECT 1 FROM buckets b WHERE b.tenant_id = o.tenant_id AND b.name = o.bucket
 		                    AND (COALESCE(b.versioning_status,'') IN ('Enabled','Suspended')

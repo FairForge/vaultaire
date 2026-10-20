@@ -67,14 +67,22 @@ func validateMFAHeader(ctx context.Context, authSvc *auth.AuthService,
 		return errMFARequired
 	}
 
+	// A read that fails is not "MFA not configured" (RP19-10): it is the
+	// RP16-5 shape — 503 + Retry-After through writeMFADeleteRefusal — and
+	// still refuses (fails closed). Only a successful read that finds no
+	// TOTP enrolled is the 403 mfaNotConfiguredError.
 	enabled, err := authSvc.IsMFAEnabled(ctx, userID)
-	if err != nil || !enabled {
+	if err != nil {
+		return &mfaDeleteUnknownError{err: fmt.Errorf("read MFA state of the tenant's user: %w", err)}
+	}
+	if !enabled {
 		return &mfaNotConfiguredError{}
 	}
 
 	secret, err := authSvc.GetMFASecret(ctx, userID)
 	if err != nil {
-		return errMFARequired
+		// Enabled a moment ago: a failure here is the read, not the state.
+		return &mfaDeleteUnknownError{err: fmt.Errorf("read MFA secret of the tenant's user: %w", err)}
 	}
 
 	if !mfaSvc.ValidateCode(secret, code) {
@@ -153,7 +161,7 @@ func (e *mfaNotConfiguredError) Error() string {
 func (s *Server) logMFADeleteUnknown(err error, bucket string) {
 	var unknown *mfaDeleteUnknownError
 	if errors.As(err, &unknown) {
-		s.log().Error("mfa delete: flag unreadable — refused 503",
+		s.log().Error("mfa delete: the flag or the user's MFA state unreadable — refused 503",
 			zap.String("bucket", bucket), zap.Error(err))
 	}
 }

@@ -344,14 +344,15 @@ Conventions (Stripe-style):
 - `Idempotency-Key` on PUT/POST/DELETE: the 2xx response is cached 24 h and
   replayed with `Idempotency-Replayed: true`; reusing a key on a different
   method/path is 409 `idempotency_key_reuse`
-- webhooks are signed `X-Webhook-Signature: t=<unix>,v1=<hex>,sha256=<hex>`
+- webhooks are signed `X-Webhook-Signature: t=<unix>,v1=<hex>`
   with the `whsec_` secret shown once at creation (and by
   `POST /webhooks/{id}/rotate-secret`, which replaces it at once — retries of
   earlier events are signed with the new one): `v1` is HMAC-SHA256 over
   `<t>.<raw body>`; verify it and refuse a `t` more than **5 minutes** from
-  your clock (a replayed delivery). `sha256` is the old body-only HMAC, sent
-  **for one release** while receivers move to `v1` — it will be removed;
-  split the header on `,` rather than comparing it whole
+  your clock (a replayed delivery). Split the header on `,` and read the
+  elements by name rather than comparing it whole. The old body-only
+  `sha256=<hex>` element (sent for one release while receivers moved to
+  `v1`) is no longer sent since 2026-10-20
 - a delivery that does not answer 2xx (an error status, a redirect, a
   timeout after 10 s, a connection failure) is retried — up to **5 attempts**,
   1 s, 5 s, 25 s and 125 s apart (±20 %, picked up within 30 s); then the

@@ -270,28 +270,20 @@ func recordDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, deliver
 	}
 }
 
-// generateWebhookSignature is the legacy signature: HMAC-SHA256 of the body
-// alone — nothing in it dates the request, so one captured delivery could
-// be replayed for ever.
-func generateWebhookSignature(payload []byte, secret string) string {
-	h := hmac.New(sha256.New, []byte(secret))
-	h.Write(payload)
-	return "sha256=" + hex.EncodeToString(h.Sum(nil))
-}
-
 // webhookSignature is the X-Webhook-Signature value (WP-R11-3 B.2, the
-// Stripe shape): `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>`,
-// followed for one release by the legacy `sha256=<hex HMAC(body)>` element
-// so a receiver that verifies the body-only HMAC keeps working while it
-// moves to v1. A receiver checks v1 and refuses a t more than 5 minutes
-// from its clock (docs/API.md).
+// Stripe shape): `t=<unix>,v1=<hex HMAC-SHA256(secret, "<t>." + body)>` and
+// nothing else. A receiver checks v1 and refuses a t more than 5 minutes
+// from its clock (docs/API.md). The legacy body-only `sha256=` element —
+// nothing in it dated the request, so one captured delivery could be
+// replayed for ever — rode along for one release after #791 and was dropped
+// in Prompt 18 Part 0 (RP17-6).
 func webhookSignature(body []byte, secret string, at time.Time) string {
 	t := strconv.FormatInt(at.Unix(), 10)
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write([]byte(t))
 	h.Write([]byte("."))
 	h.Write(body)
-	return "t=" + t + ",v1=" + hex.EncodeToString(h.Sum(nil)) + "," + generateWebhookSignature(body, secret)
+	return "t=" + t + ",v1=" + hex.EncodeToString(h.Sum(nil))
 }
 
 func generateWebhookSecret() (string, error) {
