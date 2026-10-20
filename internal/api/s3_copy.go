@@ -260,7 +260,23 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// exactly as a PUT into it is (WP-R8-1 follow-up A1: it used to land
 	// plaintext). Refused before anything is read or written when it cannot
 	// be: no master key on this process, or over the SSE-S3 limit.
-	destSSE, sseErr := bucketSSEEnabled(r.Context(), s.db, t.ID, destBucket)
+	destEnc, sseErr := bucketEncryptionSettings(r.Context(), s.db, t.ID, destBucket)
+	destSSE := destEnc.SSE
+	if sseErr == nil && destEnc.SSECRequired && !crypto.HasSSECHeaders(r) {
+		// The destination requires a customer key (WP-SSEC-1 B.5): an
+		// unkeyed copy into it is the client's 400, before any read.
+		markClientRefusal(r.Context())
+		refuseSSECRequired.write(w, r)
+		return
+	}
+	if sseErr == nil && crypto.HasSSECHeaders(r) {
+		// A keyed destination: Part B.4 seals the copy under the key; until
+		// then the headers are refused rather than silently ignored (the
+		// copy used to land plaintext under a request that asked for a key).
+		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+			WithSuggestion("CopyObject with a customer-provided destination key (SSE-C) is not supported yet. Download and upload with the key instead."))
+		return
+	}
 	if sseErr != nil {
 		s.logger.Error("copy: destination encryption setting unreadable", zap.Error(sseErr), zap.String("bucket", destBucket))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())

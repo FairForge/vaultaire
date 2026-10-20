@@ -652,3 +652,68 @@ func useProdHosts(t *testing.T) {
 	t.Cleanup(func() { hosts.Set(prev) })
 	hosts.Set(hosts.Hosts{Canonical: "https://stored.cloud", S3: "https://s3.stored.cloud", CDN: "https://cdn.stored.cloud", BaseURL: "https://stored.cloud"})
 }
+
+// WP-SSEC-1 B.5: the "require a customer key" toggle. On: unkeyed writes
+// into the bucket are refused (the S3 API's 400); a public bucket cannot
+// require a key, so the two together are refused with a flash and the row is
+// left as it was.
+func TestHandleUpdateBucketSettings_RequireCustomerKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupDashBucketData(t, db)
+	defer cleanupDashBucketData(t, db)
+
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
+		VALUES ('test-dash-s3', 'Toggle Co', 'toggle@test.com', 'VK-s3', 'SK-s3', 'toggle-co')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier)
+		VALUES ('test-dash-s3', 1099511627776, 0, 'starter')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility)
+		VALUES ('test-dash-s3', 'toggle-bucket', 'private')
+		ON CONFLICT DO NOTHING`)
+	require.NoError(t, err)
+
+	tmpl := testBucketSettingsTemplate(t)
+	handler := HandleUpdateBucketSettings(tmpl, db, zap.NewNop())
+	post := func(form url.Values) *httptest.ResponseRecorder {
+		req := injectSessionWithTenant(
+			httptest.NewRequest("POST", "/dashboard/buckets/toggle-bucket/settings", strings.NewReader(form.Encode())),
+			"test-dash-s3")
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req = injectBucketRoute(req, "toggle-bucket")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		return w
+	}
+	flag := func() (vis string, required bool) {
+		require.NoError(t, db.QueryRow(`SELECT visibility, ssec_required FROM buckets WHERE tenant_id = 'test-dash-s3' AND name = 'toggle-bucket'`).Scan(&vis, &required))
+		return vis, required
+	}
+
+	// On.
+	w := post(url.Values{"visibility": {"private"}, "ssec_required": {"on"}})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	vis, required := flag()
+	assert.Equal(t, "private", vis)
+	assert.True(t, required)
+
+	// Public + required: refused, nothing changed.
+	w = post(url.Values{"visibility": {"public-read"}, "ssec_required": {"on"}})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.Contains(t, w.Header().Get("Set-Cookie"), "flash")
+	vis, required = flag()
+	assert.Equal(t, "private", vis, "the visibility did not flip")
+	assert.True(t, required)
+
+	// Off (an unchecked checkbox sends nothing).
+	w = post(url.Values{"visibility": {"private"}})
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	_, required = flag()
+	assert.False(t, required)
+}

@@ -2268,20 +2268,34 @@ func storageClassDisablesChunking(class string) bool {
 // it as false and the body was stored plaintext — WP-R8-1 follow-up A1):
 // false, nil only when the bucket has no row or its row says no.
 func bucketSSEEnabled(ctx context.Context, db *sql.DB, tenantID, bucket string) (bool, error) {
+	s, err := bucketEncryptionSettings(ctx, db, tenantID, bucket)
+	return s.SSE, err
+}
+
+// bucketEncryption is what a bucket asks of a write: SSE-S3 at rest
+// (sse_enabled) and/or a customer key on every write (ssec_required, 096 —
+// WP-SSEC-1 B.5).
+type bucketEncryption struct {
+	SSE, SSECRequired bool
+}
+
+// bucketEncryptionSettings reads the bucket's two encryption flags in one
+// query. No row = neither; a read that fails is an error, never "off".
+func bucketEncryptionSettings(ctx context.Context, db *sql.DB, tenantID, bucket string) (bucketEncryption, error) {
 	if db == nil {
-		return false, nil
+		return bucketEncryption{}, nil
 	}
-	var enabled bool
+	var s bucketEncryption
 	err := db.QueryRowContext(ctx,
-		"SELECT sse_enabled FROM buckets WHERE tenant_id = $1 AND name = $2",
-		tenantID, bucket).Scan(&enabled)
+		"SELECT sse_enabled, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2",
+		tenantID, bucket).Scan(&s.SSE, &s.SSECRequired)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return bucketEncryption{}, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("read sse_enabled of %s: %w", bucket, err)
+		return bucketEncryption{}, fmt.Errorf("read sse_enabled of %s: %w", bucket, err)
 	}
-	return enabled, nil
+	return s, nil
 }
 
 // HandleList processes S3 LIST requests
