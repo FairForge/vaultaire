@@ -86,6 +86,7 @@ type writePlacement struct {
 type placementRefusal struct {
 	Status     int
 	Code       string
+	Message    string // AWS's own sentence, when the code's default is not it
 	Suggestion string
 	RetryAfter string
 }
@@ -95,12 +96,30 @@ func (p *placementRefusal) write(w http.ResponseWriter, r *http.Request) {
 	if p.RetryAfter != "" {
 		w.Header().Set("Retry-After", p.RetryAfter)
 	}
+	var opts []ErrorOption
+	if p.Message != "" {
+		opts = append(opts, WithMessage(p.Message))
+	}
 	if p.Suggestion != "" {
-		WriteS3ErrorWithContext(w, p.Code, r.URL.Path, generateRequestID(), WithSuggestion(p.Suggestion))
+		opts = append(opts, WithSuggestion(p.Suggestion))
+	}
+	if len(opts) > 0 {
+		WriteS3ErrorWithContext(w, p.Code, r.URL.Path, generateRequestID(), opts...)
 		return
 	}
 	WriteS3Error(w, p.Code, r.URL.Path, generateRequestID())
 }
+
+// ssecRequiredRefusal is AWS's wording for a write without a customer key
+// into a bucket whose policy demands one (the bucket-policy
+// s3:x-amz-server-side-encryption-customer-algorithm condition): what a
+// ssec_required bucket answers (WP-SSEC-1 B.5).
+const ssecRequiredRefusal = "Requests specifying Server Side Encryption with Customer provided keys must provide an appropriate secret key."
+
+// refuseSSECRequired: the bucket requires a customer key and the write
+// carries none — 400, the client's, before any byte.
+var refuseSSECRequired = &placementRefusal{Status: http.StatusBadRequest, Code: ErrInvalidRequest, Message: ssecRequiredRefusal,
+	Suggestion: "This bucket requires SSE-C: send x-amz-server-side-encryption-customer-algorithm: AES256, -key and -key-MD5 on every write."}
 
 var (
 	refuseUnreadableEncryption = &placementRefusal{Status: http.StatusInternalServerError, Code: ErrInternalError}
@@ -149,10 +168,18 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		!req.SSEC && a.chunkingEnabled(req.TenantID)
 	chunkEncrypt := chunkable && a.chunkEncSvc != nil
 
-	bucketSSE, err := bucketSSEEnabled(ctx, a.db, req.TenantID, req.Bucket)
+	benc, err := bucketEncryptionSettings(ctx, a.db, req.TenantID, req.Bucket)
 	if err != nil {
 		a.logger.Error("write: bucket encryption setting unreadable", zap.Error(err), zap.String("bucket", req.Bucket))
 		return writePlacement{Refusal: refuseUnreadableEncryption}
+	}
+	bucketSSE := benc.SSE
+	// A bucket that requires a customer key refuses an unkeyed write, before
+	// anything else (WP-SSEC-1 B.5): the client's 400, never a plaintext
+	// object in a bucket that promised keys.
+	if benc.SSECRequired && !req.SSEC {
+		markClientRefusal(ctx)
+		return writePlacement{Refusal: refuseSSECRequired}
 	}
 	if bucketSSE && a.sseService == nil && !req.SSEC {
 		a.logger.Error("write into an encrypted bucket refused: ENCRYPTION_MASTER_KEY is not configured on this process",

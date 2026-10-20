@@ -105,6 +105,19 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A bucket that requires a customer key (WP-SSEC-1 B.5): an unkeyed
+	// Create is the client's 400, no upload row, no staging directory.
+	benc, encErr := bucketEncryptionSettings(r.Context(), s.db, t.ID, bucket)
+	if encErr != nil {
+		s.logger.Error("create multipart: bucket encryption setting unreadable", zap.Error(encErr), zap.String("bucket", bucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return
+	}
+	if benc.SSECRequired && !crypto.HasSSECHeaders(r) {
+		markClientRefusal(r.Context())
+		refuseSSECRequired.write(w, r)
+		return
+	}
 	if crypto.HasSSECHeaders(r) {
 		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
 			WithSuggestion("SSE-C is not yet supported for multipart uploads."))

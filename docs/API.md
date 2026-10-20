@@ -242,7 +242,17 @@ Behaviour worth knowing before writing code against it:
 - **Encryption**: SSE-C works per request at any size, sealed as it streams
   and a `Range` read by segment (since 2026-10-13, WP-R8-5 Part B; it was
   capped at 256 MiB) — not on multipart uploads (501) nor as a CopyObject
-  source (501). SSE-S3 requires the deployment's master
+  source or destination (501). **A bucket can require a key** (the
+  `ssec_required` setting: `PATCH /api/v1/manage/buckets/{name}` with
+  `{"ssec_required": true}`, or the dashboard's bucket settings): an unkeyed
+  `PutObject`, `CreateMultipartUpload` or copy into it is 400 `InvalidRequest`
+  ("Requests specifying Server Side Encryption with Customer provided keys
+  must provide an appropriate secret key.", the sentence AWS's bucket-policy
+  condition answers), and the bucket cannot receive server-generated objects
+  (access logs, inventory reports — refused when the target is set, 409).
+  Objects written before the flag stay as they were; a public bucket cannot
+  require a key. We never store your key — it passes through our servers on
+  every request; names, sizes, timestamps and access logs stay plaintext. SSE-S3 requires the deployment's master
   key, which production does not set today — without it a write into an
   `sse_enabled` bucket, or one that sends `x-amz-server-side-encryption:
   AES256`, is refused 503 + `Retry-After` (CreateMultipartUpload and

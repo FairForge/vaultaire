@@ -156,6 +156,9 @@ func (s *Server) handlePutBucketLogging(w http.ResponseWriter, r *http.Request, 
 			WithSuggestion("Target bucket does not exist or belongs to a different account."))
 		return
 	}
+	if !s.generatedTargetAllowed(w, r, t.ID, targetBucket) {
+		return
+	}
 
 	_, err = s.db.ExecContext(r.Context(),
 		`UPDATE buckets SET logging_enabled = TRUE, logging_target_bucket = $3, logging_prefix = $4, updated_at = NOW()
@@ -177,4 +180,25 @@ func (s *Server) handlePutBucketLogging(w http.ResponseWriter, r *http.Request, 
 		zap.String("prefix", targetPrefix))
 
 	w.WriteHeader(http.StatusOK)
+}
+
+// generatedTargetAllowed refuses a log or inventory target that requires a
+// customer key on every write (ssec_required, WP-SSEC-1 B.5): a generated
+// object cannot be keyed, so the target is refused when it is set — 409
+// InvalidBucketState — rather than every delivery into it later. A read
+// that fails is a 500, never "allowed".
+func (s *Server) generatedTargetAllowed(w http.ResponseWriter, r *http.Request, tenantID, targetBucket string) bool {
+	benc, err := bucketEncryptionSettings(r.Context(), s.db, tenantID, targetBucket)
+	if err != nil {
+		s.logger.Error("target bucket: encryption setting unreadable", zap.Error(err), zap.String("bucket", targetBucket))
+		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+		return false
+	}
+	if benc.SSECRequired {
+		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
+			WithMessage("The target bucket requires a customer-provided key on every object (SSE-C) and cannot receive server-generated objects."),
+			WithSuggestion("Choose a target bucket that does not require SSE-C, or turn the requirement off on "+targetBucket+"."))
+		return false
+	}
+	return true
 }

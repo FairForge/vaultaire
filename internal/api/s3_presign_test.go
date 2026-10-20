@@ -394,7 +394,7 @@ func TestPresignedURL_Integration(t *testing.T) {
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	// WP-R8-1 A1: whether the bucket requires encryption, read strictly once.
-	mock.ExpectQuery(`SELECT sse_enabled FROM buckets`).
+	mock.ExpectQuery(`SELECT sse_enabled, ssec_required FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
 	// The pointer flip (blob_flip.go): the head lock, the version lock, the
 	// probe, the upsert naming the address, its read-back, the bucket's

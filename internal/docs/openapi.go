@@ -906,17 +906,22 @@ func generateManagementPaths() map[string]*PathItem {
 					"404": errResp("`bucket_not_found`"),
 					"500": errResp("`no_database`"),
 				})),
-			Patch: mut(withBody(jsonOp("Management", "Merge bucket metadata", "ManagePatchBucket",
-				"Shallow-merges `metadata` into the stored map (a key set to null is removed). The whole map must be present in the body.",
+			Patch: mut(withBody(jsonOp("Management", "Update a bucket: merge metadata, require a customer key", "ManagePatchBucket",
+				"Shallow-merges `metadata` into the stored map (a key set to null is removed; the whole map must be present) and/or sets `ssec_required`. "+
+					"With `ssec_required` true, every write into the bucket must carry the SSE-C headers (a customer-provided AES-256 key): an unkeyed PutObject, "+
+					"CreateMultipartUpload or copy destination is 400 `InvalidRequest`, and the bucket cannot receive server-generated objects (access logs, "+
+					"inventory reports). The key is never stored. Objects written before the flag stay as they were. A public bucket cannot require a key.",
 				map[string]Response{
-					"200": jsonResp("Bucket with the merged metadata", ref("ManagedBucket")),
-					"400": errResp("`invalid_json`, `missing_parameter` (metadata), or `invalid_metadata`"),
+					"200": jsonResp("The bucket as updated", ref("ManagedBucket")),
+					"400": errResp("`invalid_json`, `missing_parameter` (neither metadata nor ssec_required), or `invalid_metadata`"),
 					"404": errResp("`bucket_not_found`"),
+					"409": errResp("`bucket_public`: a public bucket cannot require a customer-provided key"),
 					"500": errResp("`db_error` or `no_database`"),
 				}),
-				jsonBody("Metadata to merge", objectPtr("", map[string]*Schema{
-					"metadata": {Type: "object", Description: "Keys to set; string values", AdditionalProperties: &Schema{Type: "string", Nullable: true}},
-				}, "metadata")))),
+				jsonBody("What to change", objectPtr("", map[string]*Schema{
+					"metadata":      {Type: "object", Description: "Keys to set; string values", AdditionalProperties: &Schema{Type: "string", Nullable: true}},
+					"ssec_required": boolean("Require a customer-provided key (SSE-C) on every write into the bucket"),
+				})))),
 			Delete: mut(jsonOp("Management", "Delete a bucket", "ManageDeleteBucket",
 				"Registry-driven like S3 DeleteBucket: the bucket must be empty (no objects, versions or in-progress multipart uploads). Emits `bucket.deleted`.",
 				map[string]Response{
@@ -1893,12 +1898,13 @@ func generateJSONSchemas() map[string]Schema {
 			"region": str("Region id the bucket is homed in (e.g. `us-central-1`, `eu-west-1`); omit for the deployment default. Only regions with an enabled driver are accepted"),
 		}, "name"),
 		"ManagedBucket": object("A bucket as the management API returns it", map[string]*Schema{
-			"object":     strEnum("", "bucket"),
-			"name":       str(""),
-			"region":     str("Region the bucket is homed in; present on create"),
-			"metadata":   nullable(&Schema{Type: "object", Description: "User metadata map; present on get/patch (null in list items)", AdditionalProperties: &Schema{Type: "string"}}),
-			"created_at": dateTime(""),
-			"request_id": str("Present on single-object responses"),
+			"object":        strEnum("", "bucket"),
+			"name":          str(""),
+			"region":        str("Region the bucket is homed in; present on create"),
+			"metadata":      nullable(&Schema{Type: "object", Description: "User metadata map; present on get/patch (null in list items)", AdditionalProperties: &Schema{Type: "string"}}),
+			"ssec_required": boolean("Every write must carry a customer-provided key (SSE-C); present on get/patch"),
+			"created_at":    dateTime(""),
+			"request_id":    str("Present on single-object responses"),
 		}, "object", "name", "created_at"),
 		"BucketDeleted": object("", map[string]*Schema{
 			"object":     strEnum("", "bucket"),

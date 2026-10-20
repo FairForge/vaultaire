@@ -170,6 +170,9 @@ func (s *Server) handlePutBucketInventory(w http.ResponseWriter, r *http.Request
 			WithSuggestion("Target bucket does not exist or belongs to a different account."))
 		return
 	}
+	if !s.generatedTargetAllowed(w, r, t.ID, targetBucket) {
+		return
+	}
 
 	schedule := "daily"
 	if config.Schedule != nil && config.Schedule.Frequency != "" {
