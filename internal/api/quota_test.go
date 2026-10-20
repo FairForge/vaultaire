@@ -30,7 +30,6 @@ func (m *quotaTestManager) CheckAndReserve(_ context.Context, _ string, _ int64)
 }
 func (m *quotaTestManager) ReleaseQuota(_ context.Context, _ string, _ int64) error    { return nil }
 func (m *quotaTestManager) CreateTenant(_ context.Context, _, _ string, _ int64) error { return nil }
-func (m *quotaTestManager) UpdateQuota(_ context.Context, _ string, _ int64) error     { return nil }
 func (m *quotaTestManager) ListQuotas(_ context.Context) ([]map[string]interface{}, error) {
 	return nil, nil
 }

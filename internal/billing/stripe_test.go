@@ -12,37 +12,6 @@ import (
 func TestNewStripeService(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
 	require.NotNil(t, svc)
-	assert.NotNil(t, svc.plans)
-}
-
-func TestRegisterAndGetPlan(t *testing.T) {
-	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
-
-	svc.RegisterPlan(Plan{
-		ID:        "vault3",
-		PriceID:   "price_vault3_test",
-		Name:      "Vault 3TB",
-		PriceFmt:  "$2.99/mo",
-		StorageTB: 3,
-	})
-	svc.RegisterPlan(Plan{
-		ID:        "standard",
-		PriceID:   "price_standard_test",
-		Name:      "Standard",
-		PriceFmt:  "$3.99/TB/mo",
-		StorageTB: 0,
-	})
-
-	p, ok := svc.GetPlan("vault3")
-	assert.True(t, ok)
-	assert.Equal(t, "price_vault3_test", p.PriceID)
-	assert.Equal(t, int64(3), p.StorageTB)
-
-	_, ok = svc.GetPlan("nonexistent")
-	assert.False(t, ok)
-
-	plans := svc.Plans()
-	assert.Len(t, plans, 2)
 }
 
 func TestGetCustomerID_NoDB(t *testing.T) {
@@ -62,13 +31,6 @@ func TestCancelSubscription_NoDB(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
 	err := svc.CancelSubscription(t.Context(), "tenant-1")
 	assert.Error(t, err)
-}
-
-func TestCreateCheckoutSession_UnknownPlan(t *testing.T) {
-	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
-	_, err := svc.CreateCheckoutSession("cus_test", "nonexistent", "http://ok", "http://cancel")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown plan")
 }
 
 func TestInvoiceDateFmt(t *testing.T) {

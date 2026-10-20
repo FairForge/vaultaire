@@ -39,11 +39,10 @@ type HouseBilling interface {
 	HouseFromSubscription(sub *stripe.Subscription) (billing.HouseOrder, bool)
 }
 
-// BillingService is what the billing page needs from Stripe: the legacy
-// pack plans and the house checkout. *billing.StripeService implements it.
+// BillingService is what the billing page needs from Stripe: the house
+// checkout, the one product (WP-PAY-0). *billing.StripeService implements it.
 type BillingService interface {
 	HouseBilling
-	Plans() []billing.Plan
 }
 
 // HouseView is the billing page's house section.
@@ -121,7 +120,8 @@ type tenantHouse struct {
 	plan, status       string
 	subID, period      string
 	active             bool
-	liveOther          bool // a non-house subscription Stripe is still billing
+	liveOther          bool // a non-house subscription Stripe is still billing, or a legacy plan
+	legacy             bool // tenants.plan is a legacy pack id (legacyPlan)
 	house              usage.House
 	usedStd, usedVault int64
 }
@@ -146,6 +146,11 @@ func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, e
 	// (a legacy pack, an incomplete 3-D Secure checkout, a past-due pack)
 	// must not be joined by a second subscription (Review R10-05).
 	h.liveOther = !h.active && h.subID != "" && !terminalSubscriptionStatus(h.status)
+	// A legacy pack plan (WP-PAY-0) is moved to a house by support, never
+	// by a checkout beside it: its quota is the label's, and a pack bought
+	// before may still bill.
+	h.legacy = !h.active && legacyPlan(h.plan)
+	h.liveOther = h.liveOther || h.legacy
 
 	qm := usage.NewQuotaManager(db)
 	house, ok, err := qm.GetHouse(ctx, tenantID)
@@ -168,6 +173,25 @@ func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, e
 		}
 	}
 	return h, nil
+}
+
+// legacyOnly: refused for the legacy label alone — no subscription that
+// Stripe is still billing.
+func (h tenantHouse) legacyOnly() bool {
+	return h.legacy && (h.subID == "" || terminalSubscriptionStatus(h.status))
+}
+
+// legacyPlan reports a tenants.plan that is neither the free tier nor a
+// house: a legacy pack id ('vault3' … 'vault100', 'standard') — after
+// WP-PAY-0 only an admin tier label (Bench2 on prod: 'vault100') or a pack
+// bought before. The labels stay valid quota labels (tenant_quotas.tier,
+// the admin tier picker); only the pack checkout is gone.
+func legacyPlan(plan string) bool {
+	switch plan {
+	case "", "starter", "free", "house":
+		return false
+	}
+	return true
 }
 
 // terminalSubscriptionStatus is a Stripe subscription status that no
@@ -280,8 +304,12 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 
-		if h.liveOther {
+		if h.liveOther && !h.legacyOnly() {
 			back(w, r, "error", fmt.Sprintf("This account already has a subscription (%s). Email %s and we will move it to a house — a second checkout would bill you twice.", h.status, hosts.Get().SupportEmail()))
+			return
+		}
+		if h.legacy {
+			back(w, r, "error", fmt.Sprintf("This account is on a legacy plan (%s). Email %s and we will move it to a house — nothing changes until we do.", h.plan, hosts.Get().SupportEmail()))
 			return
 		}
 

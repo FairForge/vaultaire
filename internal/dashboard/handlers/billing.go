@@ -12,13 +12,13 @@ import (
 	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/hosts"
 	"go.uber.org/zap"
 )
 
 // HandleBilling renders the billing page with plan, subscription status,
-// invoice history, value stack, and cost comparison — and, behind the
-// quota_checkout flag, the whole-TB house checkout. svc may be a nil
+// value stack, and cost comparison — and, behind the quota_checkout flag,
+// the whole-TB house checkout, the one product (WP-PAY-0: no legacy pack
+// grid, no metered estimate). svc may be a nil
 // interface (billing not configured); fl may be nil (no flags = off).
 func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *flags.Service, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -35,8 +35,6 @@ func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *
 
 		populateBillingPlan(ctx, db, data, sd.TenantID)
 		populateHouseIntent(ctx, db, data, sd.TenantID)
-		populateAccruedCharges(ctx, db, data, sd.TenantID)
-		populateBillingPlans(svc, data)
 		populateValueStack(ctx, db, data, sd.TenantID)
 		populateCostComparison(ctx, db, data, sd.TenantID)
 		var houseSvc HouseBilling
@@ -57,61 +55,6 @@ func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *
 			logger.Error("render billing page", zap.Error(err))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
-	}
-}
-
-// HandleUpgrade redirects to a Stripe Checkout session for the chosen
-// (legacy pack) plan. baseURL makes the return URLs absolute — Stripe
-// rejects relative ones.
-func HandleUpgrade(stripe *billing.StripeService, db *sql.DB, baseURL string, logger *zap.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		sd := dashauth.GetSession(r.Context())
-		if sd == nil {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
-
-		planID := r.FormValue("plan")
-		if planID == "" {
-			http.Error(w, "Missing plan", http.StatusBadRequest)
-			return
-		}
-
-		if stripe == nil {
-			http.Error(w, "Billing not configured", http.StatusServiceUnavailable)
-			return
-		}
-
-		// A tenant with a house (or any subscription Stripe still bills)
-		// must not open a second subscription through the legacy page
-		// (Review R10-05).
-		if db != nil {
-			if h, err := loadHouse(r.Context(), db, sd.TenantID); err == nil && (h.active || h.liveOther) {
-				http.Error(w, "This account already has a subscription. Resize your house on the billing page or email "+hosts.Get().SupportEmail()+".", http.StatusConflict)
-				return
-			}
-		}
-
-		customerID, err := stripe.GetCustomerID(r.Context(), sd.TenantID)
-		if err != nil {
-			logger.Error("get customer id for upgrade", zap.Error(err))
-			http.Error(w, "Billing account not found. Please contact support.", http.StatusBadRequest)
-			return
-		}
-
-		base := strings.TrimRight(baseURL, "/")
-		checkoutURL, err := stripe.CreateCheckoutSession(
-			customerID, planID,
-			base+"/dashboard/billing?upgraded=1",
-			base+"/dashboard/billing",
-		)
-		if err != nil {
-			logger.Error("create checkout session", zap.Error(err))
-			http.Error(w, "Failed to start checkout. Please try again.", http.StatusInternalServerError)
-			return
-		}
-
-		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from Stripe API
 	}
 }
 
@@ -165,6 +108,12 @@ func populateBillingPlan(ctx context.Context, db *sql.DB, data map[string]any, t
 	if plan.Valid && plan.String != "" {
 		data["Plan"] = plan.String
 	}
+	// A tenant still labelled with a legacy pack plan (an admin tier
+	// label, or a pack bought before WP-PAY-0) is told to ask support:
+	// one product, and never a second subscription beside a first.
+	if legacyPlan(plan.String) {
+		data["LegacyPlan"] = plan.String
+	}
 	if status.Valid && status.String != "" {
 		data["SubscriptionStatus"] = status.String
 		data["HasSubscription"] = status.String == "active" || status.String == "past_due"
@@ -211,50 +160,6 @@ func populateHouseIntent(ctx context.Context, db *sql.DB, data map[string]any, t
 	if !h.Empty() {
 		data["HouseIntent"] = h
 	}
-}
-
-// populateAccruedCharges shows the month-to-date metered charge for Standard /
-// Performance tenants. Fixed-price Vault packs and the free tier show nothing.
-// Storage is the live gauge; egress is the current month's sum — the same live
-// tables the rest of the page reads, so the estimate tracks current usage.
-func populateAccruedCharges(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
-	data["IsMetered"] = false
-	if db == nil {
-		return
-	}
-
-	var tier string
-	var storageBytes int64
-	var hasHouse bool
-	if err := db.QueryRowContext(ctx,
-		`SELECT tier, storage_used_bytes,
-		        EXISTS (SELECT 1 FROM tenant_floor_quotas f WHERE f.tenant_id = tenant_quotas.tenant_id)
-		   FROM tenant_quotas WHERE tenant_id = $1`, tenantID).
-		Scan(&tier, &storageBytes, &hasHouse); err != nil {
-		return
-	}
-	if hasHouse || (tier != "standard" && tier != "performance") {
-		return // quota-sold house or fixed-price pack — never metered
-	}
-
-	var egressBytes int64
-	_ = db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		 WHERE tenant_id = $1 AND date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date`,
-		tenantID).Scan(&egressBytes)
-
-	cents := billing.AccruedCents(tier, storageBytes, egressBytes)
-	data["IsMetered"] = true
-	data["MeteredTier"] = tier
-	data["AccruedCharges"] = fmt.Sprintf("$%.2f", float64(cents)/100)
-}
-
-func populateBillingPlans(svc BillingService, data map[string]any) {
-	if svc == nil {
-		data["AvailablePlans"] = nil
-		return
-	}
-	data["AvailablePlans"] = svc.Plans()
 }
 
 func populateValueStack(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -36,8 +37,19 @@ func testCostsTemplate(t *testing.T) *template.Template {
 	return tmpl
 }
 
-func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
-	mock.ExpectQuery(`SELECT t.email, COALESCE\(t.plan, ''\)`).WillReturnRows(rows)
+// costsQueryRows expects the tenant query and, when given, the houses query
+// that prices them (WP-PAY-0: revenue = the house at billing.QuoteHouse) —
+// it runs only when the tenant query returned rows.
+func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows, houses ...*sqlmock.Rows) {
+	mock.ExpectQuery(`SELECT t.id, t.email, COALESCE\(t.plan, ''\)`).WillReturnRows(rows)
+	if len(houses) > 0 {
+		mock.ExpectQuery(`SELECT t.id, t.email, t.house_period, f.floor`).WillReturnRows(houses[0])
+	}
+}
+
+// houseRows are queryHouses' columns.
+func houseRows() *sqlmock.Rows {
+	return sqlmock.NewRows([]string{"id", "email", "house_period", "floor", "storage_limit_bytes", "pin_hot_bytes", "storage_used_bytes"})
 }
 
 func emptyActualBackendRows(mock sqlmock.Sqlmock) {
@@ -51,9 +63,9 @@ func TestCosts_PerBackendSpend(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("alice@example.com", "vault5", "", oneTB, int64(0)).
-		AddRow("bob@example.com", "vault3", "", oneTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-alice", "alice@example.com", "vault5", "", oneTB, int64(0)).
+		AddRow("t-bob", "bob@example.com", "vault3", "", oneTB, int64(0)), houseRows())
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -79,9 +91,11 @@ func TestCosts_MarginPerTenant(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
+	// A house of 1 TB attic, yearly: revenue = billing.QuoteHouse (WP-PAY-0).
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("alice@example.com", "vault5", "", oneTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-alice", "alice@example.com", "vault5", "", oneTB, int64(0)),
+		houseRows().AddRow("t-alice", "alice@example.com", "annual", "vault", oneTB, int64(0), oneTB))
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -92,26 +106,25 @@ func TestCosts_MarginPerTenant(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
-	// vault5 revenue = $9.99 (999 cents), geyser cost for 1TB = $1.55 (155 cents).
-	// Margin = 999 - 155 = 844 cents = $8.44
+	q := billing.QuoteHouse(0, 1, 0, billing.PeriodAnnual)
+	// Geyser cost for 1 TB = $1.55 (155 cents); margin = quote - 155.
 	assert.Contains(t, body, "alice@example.com")
-	assert.Contains(t, body, "vault5")
-	assert.Contains(t, body, "$9.99") // revenue
-	assert.Contains(t, body, "$1.55") // cost
-	assert.Contains(t, body, "$8.44") // margin
-	assert.NotContains(t, body, "negative")
+	assert.Contains(t, body, formatCents(q.MonthlyCents)) // revenue
+	assert.Contains(t, body, "$1.55")                     // cost
+	assert.Contains(t, body, formatSignedCents(q.MonthlyCents-155))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// A tenant on a legacy pack label without a house earns nothing: its
+// margin is minus its cost (WP-PAY-0 — the pack prices are gone).
 func TestCosts_NegativeMarginFlagged(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	// Vault18 at full 18TB fill: revenue=1799, cost=18*155=2790 → negative margin.
 	eighteenTB := int64(18 * 1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("whale@example.com", "vault18", "", eighteenTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-whale", "whale@example.com", "vault18", "", eighteenTB, int64(0)), houseRows())
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -122,11 +135,11 @@ func TestCosts_NegativeMarginFlagged(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	body := w.Body.String()
-	// revenue=1799 cents=$17.99, cost=18*155=2790 cents=$27.90, margin=-991 cents=-$9.91
+	// revenue=$0.00, cost=18*155=2790 cents=$27.90, margin=-$27.90
 	assert.Contains(t, body, "whale@example.com")
-	assert.Contains(t, body, "$17.99") // revenue
+	assert.Contains(t, body, "$0.00")  // revenue
 	assert.Contains(t, body, "$27.90") // cost
-	assert.Contains(t, body, "-$9.91") // negative margin
+	assert.Contains(t, body, "-$27.90")
 	assert.Contains(t, body, "negative")
 	assert.Contains(t, body, `<span class="neg-count">1</span>`)
 	require.NoError(t, mock.ExpectationsWereMet())
@@ -138,8 +151,8 @@ func TestCosts_BlendedCOGS(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	twoTB := int64(2 * 1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("a@test.com", "vault5", "", twoTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-a", "a@test.com", "vault5", "", twoTB, int64(0)), houseRows())
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -162,8 +175,8 @@ func TestCosts_FixedCostsIncluded(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("a@test.com", "vault5", "", oneTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-a", "a@test.com", "vault5", "", oneTB, int64(0)), houseRows())
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -185,7 +198,7 @@ func TestCosts_ZeroState(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}))
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -277,8 +290,8 @@ func TestProjectedCosts(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}).
-		AddRow("a@test.com", "vault5", "", oneTB, int64(0)))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}).
+		AddRow("t-a", "a@test.com", "vault5", "", oneTB, int64(0)), houseRows())
 	emptyActualBackendRows(mock)
 
 	handler := HandleAdminCosts(testCostsTemplate(t), db, zap.NewNop())
@@ -320,7 +333,7 @@ func TestAdminCosts_ActualBackendData(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage_used_bytes", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage_used_bytes", "egress"}))
 
 	oneTB := int64(1024 * 1024 * 1024 * 1024)
 	mock.ExpectQuery(`SELECT backend, COUNT`).
@@ -368,7 +381,7 @@ func TestActualBackends_ModelledCostForSubsidizedBackend(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 		AddRow("lyve", 10, tbBytes))
 
@@ -383,7 +396,7 @@ func TestActualBackends_InvoicedModeZeroesSubsidizedBackend(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 		AddRow("lyve", 10, tbBytes))
 
@@ -399,7 +412,7 @@ func TestActualBackends_UnsubsidizedBackendCostedInBothModes(t *testing.T) {
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
 
-		costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+		costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 		actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 			AddRow("geyser", 5, tbBytes))
 
@@ -414,7 +427,7 @@ func TestCosts_SubsidyIsModelledMinusInvoiced(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 		AddRow("lyve", 10, tbBytes))
 
@@ -447,7 +460,7 @@ func TestActualBackends_EgressCostedAtModelledRate(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	backendEgressRows(mock, sqlmock.NewRows([]string{"backend_name", "egress"}).
 		AddRow("lyve", tbBytes))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
@@ -466,7 +479,7 @@ func TestActualBackends_EgressZeroedInInvoicedMode(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	backendEgressRows(mock, sqlmock.NewRows([]string{"backend_name", "egress"}).
 		AddRow("lyve", tbBytes))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
@@ -483,7 +496,7 @@ func TestActualBackends_EgressQueryFailureDegrades(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	costsQueryRows(mock, sqlmock.NewRows([]string{"email", "plan", "tier", "storage", "egress"}))
+	costsQueryRows(mock, sqlmock.NewRows([]string{"id", "email", "plan", "tier", "storage", "egress"}))
 	actualBackendRows(mock, sqlmock.NewRows([]string{"backend_name", "count", "sum"}).
 		AddRow("lyve", 10, tbBytes))
 	// No egress expectation: table missing (pre-migration) → query errors.

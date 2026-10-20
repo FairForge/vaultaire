@@ -188,16 +188,6 @@ func (m *QuotaManager) GetUsage(ctx context.Context, tenantID string) (used, lim
 	return used, limit, nil
 }
 
-func (qm *QuotaManager) UpdateQuota(ctx context.Context, tenantID string, newLimit int64) error {
-	query := `
-        UPDATE tenant_quotas
-        SET storage_limit_bytes = $1, updated_at = NOW()
-        WHERE tenant_id = $2`
-
-	_, err := qm.db.ExecContext(ctx, query, newLimit, tenantID)
-	return err
-}
-
 // Fix ListQuotas to use correct column names:
 func (qm *QuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
 	query := `

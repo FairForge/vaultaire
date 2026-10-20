@@ -65,19 +65,9 @@ func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, 
 		logger.Debug("admin: count active subs", zap.Error(err))
 	}
 
-	// Estimate revenue from active Vault subscriptions.
-	var revenueCents int64
-	if err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(CASE
-			WHEN plan = 'vault3' THEN 299
-			WHEN plan = 'vault9' THEN 900
-			WHEN plan = 'vault18' THEN 1800
-			WHEN plan = 'vault36' THEN 3600
-			ELSE 0
-		END), 0) FROM tenants WHERE subscription_status = 'active'
-	`).Scan(&revenueCents); err != nil {
-		logger.Debug("admin: estimate revenue", zap.Error(err))
-	}
+	// Revenue = the live houses at billing.QuoteHouse (WP-PAY-0: one
+	// product; the legacy pack prices are gone).
+	revenueCents := housesMRR(queryHouses(ctx, db, logger))
 
 	return tenantCount, formatBytes(totalBytes), activeSubCount,
 		fmt.Sprintf("$%.2f", float64(revenueCents)/100)

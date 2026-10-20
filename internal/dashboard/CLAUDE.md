@@ -100,7 +100,6 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/reset-password` | GET | none | New-password form (token in query string) |
 | `/reset-password` | POST | none | Validate token + new password, update DB, invalidate ALL sessions for user, redirect to /login with flash |
 | `/dashboard/billing` | GET | session | Billing: plan, upgrade, value stack, cost comparison |
-| `/dashboard/billing/upgrade` | POST | session | Redirect to Stripe Checkout for chosen legacy pack plan (return URLs are absolute via `Deps.BaseURL`) |
 | `/dashboard/billing/house` | POST | session | Whole-TB house checkout (Phase 1), behind the `quota_checkout` flag (per tenant → global; 404 when off). Form `std`, `vault`, `pin_hot` (TB) + `period` (`annual`\|`monthly`); validated by `billing.ValidateHouseOrder`. New house → Stripe Checkout with quantity items; existing house → `UpdateHouseSubscription` (prorated; period fixed; a floor cannot shrink below its used bytes) and the floor quotas are applied at once from the returned subscription via `Deps.Quotas`. Errors come back as flash messages. Handler: `handlers/billing_house.go`; page section: `templates/customer/billing.html` `house-checkout` + `static/js/house.js` (steppers, live receipt, no inline handlers — CSP) |
 | `/dashboard/billing/portal` | POST | session | Redirect to Stripe Billing Portal |
 | `/dashboard/compliance` | GET | session | Compliance dashboard: per-bucket security posture, score |
@@ -121,7 +120,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/admin/backends/{name}/check` | POST | session + admin | Force a health check of one backend |
 | `/admin/waitlist` | GET | session + admin | Pre-launch waitlist signups (count + list) |
 | `/admin/waitlist/export` | GET | session + admin | Download waitlist signups as CSV; `?filter=house\|downstairs\|attic` cuts by the house built on the site, `?fields=email` gives the one-column launch list (Phase 4). Cells are formula-escaped (`csvSafe`: a leading `=`, `+`, `-`, `@`, tab gets a `'` — R10-28 / R11-26) |
-| `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR (legacy packs + metered + houses per floor via `queryHouseMRR`/`billing.QuoteHouse`), tier breakdown, churn, top customers |
+| `/admin/revenue` | GET | session + admin | Revenue dashboard: MRR = live houses only at `billing.QuoteHouse` (`queryHouses`; WP-PAY-0), per-floor lines, churn, top houses |
 | `/admin/costs` | GET | session + admin | Cost dashboard: backend spend, per-tenant margin, negative-margin alerts |
 | `/admin/dedup` | GET | session + admin | GCI dedup dashboard: global ratio, savings, per-tenant breakdown |
 | `/admin/support` | GET | session + admin | Customer support search (email, tenant ID, access key, Stripe ID) |
