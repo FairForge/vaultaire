@@ -403,3 +403,5 @@ func HandleXxx(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.Han
 ## Testing
 
 Tests use a minimal base template (no embedded FS) and inject session data directly into context. Run: `go test ./internal/dashboard/handlers/ -v`
+
+DB-backed fixtures clean up on a handle of their own: a test's `defer db.Close()` runs BEFORE its `t.Cleanup`, so a fixture whose cleanup used the caller's handle silently dropped its DELETEs — `r9Fixture` leaked a NULL-backend head row that the routing gauge test read as `vaultaire_routing_unknown_backend_rows{backend=""} 1` on a shared database (RP20-A6, `TestR9Fixture_LeavesNoRowBehind`).

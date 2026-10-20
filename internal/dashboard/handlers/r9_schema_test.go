@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -38,7 +39,14 @@ func r9Fixture(t *testing.T, db *sql.DB) (userID, tenantID string) {
 		`INSERT INTO bandwidth_usage_daily (tenant_id, date, ingress_bytes, egress_bytes, requests_count)
 		 VALUES ($1, CURRENT_DATE, 1, 2, 7)`, tenantID)
 	require.NoError(t, err)
+	// Its own handle: a caller's deferred db.Close runs before t.Cleanup,
+	// and the DELETEs on a closed handle were dropped (RP20-A6).
 	t.Cleanup(func() {
+		db, err := sql.Open("postgres", testutil.DSN())
+		if err != nil {
+			return
+		}
+		defer func() { _ = db.Close() }()
 		_, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM bandwidth_usage_daily WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
@@ -65,4 +73,27 @@ func TestQueryRecentUsers_MigratedColumns(t *testing.T) {
 	require.NotNil(t, found, "the newest user must be listed")
 	assert.Equal(t, "R9 Co", found.Company)
 	assert.Equal(t, "standard", found.Plan, "plan must come from the tenant joined by email")
+}
+
+// RP20-A6: the fixture's rows go even when the caller closed its handle
+// first (a deferred db.Close runs before t.Cleanup) — a leaked head row on
+// a NULL backend was read by TestRoutingRuleFile_MatchesTheExportedSeries
+// as vaultaire_routing_unknown_backend_rows{backend=""} 1.
+func TestR9Fixture_LeavesNoRowBehind(t *testing.T) {
+	// Arrange + Act: the callers' pattern, in a subtest that ends.
+	var tenantID string
+	t.Run("caller", func(t *testing.T) {
+		db := testDashDB(t)
+		defer func() { _ = db.Close() }()
+		_, tenantID = r9Fixture(t, db)
+	})
+
+	// Assert
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1`, tenantID).Scan(&n))
+	assert.Equal(t, 0, n)
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE id = $1`, tenantID).Scan(&n))
+	assert.Equal(t, 0, n)
 }

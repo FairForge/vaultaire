@@ -612,14 +612,16 @@ func (s *StripeService) subs() subscriptionFetcher {
 
 // SubscriptionPeriodEnd is the end of a subscription's current period as
 // Stripe has it now — the paid_through the entitlement backfill records for
-// a house granted before migration 097 (WP-PAY-1).
-func (s *StripeService) SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (time.Time, error) {
+// a house granted before migration 097 (WP-PAY-1) — and whether its renewal
+// was stopped there (cancel_at_period_end: the backfill records renewal
+// prepaid, RP20-5).
+func (s *StripeService) SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (end time.Time, cancelAtPeriodEnd bool, err error) {
 	sub, err := s.subs().Get(ctx, subscriptionID)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("fetch subscription %s: %w", subscriptionID, err)
+		return time.Time{}, false, fmt.Errorf("fetch subscription %s: %w", subscriptionID, err)
 	}
 	if sub.CurrentPeriodEnd <= 0 {
-		return time.Time{}, fmt.Errorf("subscription %s carries no period", subscriptionID)
+		return time.Time{}, false, fmt.Errorf("subscription %s carries no period", subscriptionID)
 	}
-	return time.Unix(sub.CurrentPeriodEnd, 0).UTC(), nil
+	return time.Unix(sub.CurrentPeriodEnd, 0).UTC(), sub.CancelAtPeriodEnd, nil
 }

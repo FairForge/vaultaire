@@ -20,7 +20,7 @@ The provider-neutral core of billing (WP-PAY, design of record `docs/PAYMENTS.md
 
 Lock order: entitlement lock → `tenant_quotas` → `tenant_floor_quotas` (`usage/ledger_tx.go`). Nothing that holds a key, head-row or upload lock takes the entitlement lock.
 
-`Order` = `{Std, Vault, PinHot int; Period}` — `billing.HouseOrder` and `billing.Period` are aliases of `payments.Order` / `payments.Period`.
+`Order` = `{Std, Vault, PinHot int; Period}` — `billing.HouseOrder` and `billing.Period` are aliases of `payments.Order` / `payments.Period`. `Order.Validate()` returns the exported, `errors.Is`-able **`ErrInvalidOrder`** (unknown period, a negative line, `PinHot > Std` — migration 097's CHECK `pin_hot_tb <= std_tb` is the same rule); `Grant` checks it before it takes the lock or runs any statement, so a caller's transaction is intact after the refusal and a webhook can tell the order's fault from a transient one (RP20-4).
 
 ## The ledger (`ledger.go`)
 

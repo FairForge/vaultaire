@@ -59,9 +59,21 @@ fmt:
 	go fmt ./...
 	gofmt -s -w .
 
-# Linting — configuration in .golangci.yml (Review R15); CI runs the same.
-lint:
-	golangci-lint run ./...
+# Linting — configuration in .golangci.yml (Review R15). The version is
+# CI's (ci.yml golangci-lint-action `version:`), run through `go run` so the
+# pre-commit hook never depends on whatever golangci-lint is on PATH (a
+# Homebrew build for an older Go refused the module — RP20-3); the first
+# run builds it into the Go cache, later runs start at once. The check
+# below fails when the two pins drift.
+GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+lint: lint-version-check
+	$(GOLANGCI_LINT) run ./...
+
+lint-version-check:
+	@grep -q 'version: $(GOLANGCI_LINT_VERSION)$$' .github/workflows/ci.yml || \
+		{ echo "Makefile GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) differs from .github/workflows/ci.yml"; exit 1; }
 
 # The Security workflow's gosec command, verbatim (see security.yml for the
 # exclusion rationale). Needs: go install github.com/securego/gosec/v2/cmd/gosec@latest
@@ -73,7 +85,7 @@ gosec:
 deadcode:
 	go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/vaultaire
 
-.PHONY: fmt lint gosec deadcode
+.PHONY: fmt lint lint-version-check gosec deadcode
 
 # Build the binary
 # Regenerate internal/api/landing.html from its sources (internal/api/landing/).

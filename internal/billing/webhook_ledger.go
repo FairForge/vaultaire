@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -89,7 +90,11 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	p := invoicePayment(tenantID, inv, inv.AmountPaid)
 
 	// The house the payment extends: the subscription as Stripe has it now.
+	// An invalid house (RP20-4) is not granted; the ledger row is settled
+	// all the same — the money was paid.
 	var grant func(*sql.Tx) error
+	var invalid error
+	var invalidSub *stripe.Subscription
 	if subID := invoiceSubscriptionID(inv); subID != "" && h.quotas != nil {
 		sub, err := h.fetchSubscription(ctx, subID)
 		switch {
@@ -109,7 +114,13 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 						renewal = payments.RenewalPrepaid
 					}
 					grant = func(tx *sql.Tx) error {
-						return payments.Grant(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+						err := payments.Grant(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+						if errors.Is(err, payments.ErrInvalidOrder) {
+							// Refused before any statement: the transaction is intact.
+							invalid, invalidSub = err, sub
+							return nil
+						}
+						return err
 					}
 				}
 			}
@@ -133,6 +144,9 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	}); err != nil {
 		return fmt.Errorf("record paid invoice %s for tenant %s: %w", inv.ID, tenantID, err)
 	}
+	if invalid != nil {
+		h.houseInvalid(ctx, tenantID, invalidSub, *p.Order, invalid)
+	}
 	outcome := payments.OutcomeSettled
 	if !settled.Newly {
 		outcome = payments.OutcomeReplayed
@@ -141,7 +155,7 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	h.logger.Info("payment recorded",
 		zap.String("tenant", tenantID), zap.String("invoice", inv.ID),
 		zap.String("invoice_number", settled.InvoiceNumber), zap.Bool("replay", !settled.Newly),
-		zap.Int64("amount_cents", inv.AmountPaid), zap.Bool("house_extended", grant != nil))
+		zap.Int64("amount_cents", inv.AmountPaid), zap.Bool("house_extended", grant != nil && invalid == nil))
 	return nil
 }
 

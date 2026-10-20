@@ -41,12 +41,15 @@ func (f fakeReady) UnreadyWithin(_ context.Context, provider string, _ time.Dura
 
 type fakePeriodEnds map[string]time.Time
 
-func (f fakePeriodEnds) SubscriptionPeriodEnd(_ context.Context, id string) (time.Time, error) {
+// stopped: subscriptions whose renewal was stopped (cancel_at_period_end).
+var stopped = map[string]bool{}
+
+func (f fakePeriodEnds) SubscriptionPeriodEnd(_ context.Context, id string) (time.Time, bool, error) {
 	end, ok := f[id]
 	if !ok {
-		return time.Time{}, fmt.Errorf("no such subscription %s", id)
+		return time.Time{}, false, fmt.Errorf("no such subscription %s", id)
 	}
-	return end, nil
+	return end, stopped[id], nil
 }
 
 func setupLapseFixture(t *testing.T) *lapseFixture {
@@ -246,6 +249,30 @@ func TestLapseJob_Backfill_FromFloorRows(t *testing.T) {
 	assert.Equal(t, 0, res.Healed, "a backfilled row matches its floors")
 
 	assert.Equal(t, 0, f.run().Backfilled, "idempotent")
+}
+
+// RP20-5: a pre-097 Stripe house whose renewal was stopped at Stripe
+// (cancel_at_period_end) is backfilled prepaid — nobody will extend it.
+func TestLapseJob_Backfill_CancelAtPeriodEnd_IsPrepaid(t *testing.T) {
+	// Arrange
+	f := setupLapseFixture(t)
+	sub := "sub_cape_" + uuid.New().String()[:8]
+	id := f.tenant(sub)
+	end := time.Now().Add(9 * 24 * time.Hour).UTC().Truncate(time.Second)
+	f.runner.Stripe = fakePeriodEnds{sub: end}
+	stopped[sub] = true
+	t.Cleanup(func() { delete(stopped, sub) })
+	require.NoError(t, f.qm.SetHouse(context.Background(), id, usage.HouseFromTB(1, 1, 0)))
+
+	// Act
+	res := f.run()
+
+	// Assert
+	assert.Equal(t, 1, res.Backfilled)
+	e := f.entitlement(id)
+	assert.Equal(t, payments.ProviderStripe, e.Provider)
+	assert.Equal(t, payments.RenewalPrepaid, e.Renewal)
+	assert.True(t, end.Equal(e.PaidThrough))
 }
 
 // Without Stripe configured a Stripe house is backfilled at now + grace.
