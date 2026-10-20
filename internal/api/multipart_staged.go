@@ -60,7 +60,7 @@ func (s *stagedPartsReader) Read(p []byte) (int, error) {
 			s.err = fmt.Errorf("open part %d: %w", part.PartNumber, err)
 			return 0, s.err
 		}
-		s.f, s.h, s.left = f, md5.New(), part.Size // #nosec G401 — the S3 part ETag
+		s.f, s.h, s.left = f, md5.New(), part.stagedSize() // #nosec G401 — the S3 part ETag, or the sealed bytes' digest
 		if s.left == 0 {
 			if err := s.finishPart(); err != nil {
 				s.err = err
@@ -102,6 +102,11 @@ func (s *stagedPartsReader) finishPart() error {
 	s.f = nil
 	s.i++
 	want := strings.ToLower(strings.Trim(part.ETag, `"`))
+	if part.SealedMD5 != "" {
+		// A sealed part (WP-SSEC-1): the file holds ciphertext, checked
+		// against the digest UploadPart took of it.
+		want = strings.ToLower(part.SealedMD5)
+	}
 	if len(want) != 32 {
 		return nil
 	}

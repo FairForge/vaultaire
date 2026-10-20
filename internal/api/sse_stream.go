@@ -22,6 +22,7 @@ package api
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -68,11 +69,20 @@ func storedBlobLength(encAlgo string, size int64, sse *crypto.SSEService) int64 
 		return size + crypto.SSECOverhead
 	case encAlgo == crypto.SSECAlgorithmV3:
 		return crypto.SSECSealedLength(size)
+	case encAlgo == crypto.SSECAlgorithmMultipart:
+		// Not a function of the size: the parts' lengths decide it, and
+		// they live in the blob's own 0x05 header (WP-SSEC-1). 0 = unknown;
+		// no caller sizes a read by it (storedBlobKnown).
+		return 0
 	case sse != nil:
 		return sse.SealedLength(size)
 	}
 	return crypto.StreamCiphertextLength(crypto.StreamHeaderSSES3, crypto.StreamSegmentSize, size)
 }
+
+// storedBlobKnown reports whether storedBlobLength can size a blob of this
+// algorithm (the 0x05 SSE-C multipart container is the one it cannot).
+func storedBlobKnown(encAlgo string) bool { return !crypto.IsSSECMultipart(encAlgo) }
 
 // errSealedUnreadable: an SSE-S3 object's stored bytes do not open — a
 // tampered or truncated blob, a key that does not unwrap, a row whose size
@@ -150,16 +160,26 @@ func (o sseS3Opener) rangeOpener(ctx context.Context, h *crypto.StreamHeader) (*
 }
 
 // sseCOpener opens SSE-C blobs under the customer's key: the format is the
-// row's (crypto.SSECAlgorithmV3 = streaming, crypto.SSECAlgorithm = old).
+// row's (crypto.SSECAlgorithmV3 = streaming, crypto.SSECAlgorithm = old,
+// crypto.SSECAlgorithmMultipart = the 0x05 container of a multipart upload's
+// sealed parts — WP-SSEC-1).
 type sseCOpener struct {
-	key    []byte
-	legacy bool
-	id     crypto.StreamIdentity // the object (the 0x04 AAD binds it)
+	key       []byte
+	legacy    bool
+	multipart bool
+	id        crypto.StreamIdentity // the object (the 0x04 AAD binds it)
+}
+
+func newSSECOpener(key []byte, encAlgo string, id crypto.StreamIdentity) sseCOpener {
+	return sseCOpener{key: key, legacy: encAlgo == crypto.SSECAlgorithm, multipart: crypto.IsSSECMultipart(encAlgo), id: id}
 }
 
 func (o sseCOpener) whole(_ context.Context, src io.Reader) (io.Reader, error) {
-	if o.legacy {
+	switch {
+	case o.legacy:
 		return crypto.SSECOpenLegacy(o.key, src)
+	case o.multipart:
+		return crypto.SSECMultipartOpen(o.key, o.id, src)
 	}
 	return crypto.SSECOpen(o.key, o.id, src)
 }
@@ -168,7 +188,178 @@ func (o sseCOpener) rangeOf(_ context.Context, h *crypto.StreamHeader, size int6
 	return crypto.SSECOpenRange(o.key, o.id, h, size, rg, src)
 }
 
-func (o sseCOpener) streaming() bool { return !o.legacy }
+// streaming: one 0x04 stream a range can be planned on. A 0x05 blob is
+// many (openMultipartRange); the old format none.
+func (o sseCOpener) streaming() bool { return !o.legacy && !o.multipart }
+
+// multipartRanger is an opener of a 0x05 blob: a range is read span by span
+// from the parts it covers.
+type multipartRanger interface {
+	openMultipartRange(ctx context.Context, src sealedSource, req sealedRead) (io.ReadCloser, error)
+}
+
+// openMultipartRange reads plaintext [Off, Off+N) of a 0x05 blob: the 6-byte
+// lead (the part count), the part table, then — per part the range spans —
+// that part's 29-byte stream header and the segments the range covers,
+// opened under the part's identity (crypto.PlanMultipartRange,
+// crypto.PlanStreamRange). The first span's first segment is verified before
+// it returns; the next span is opened as the previous ends. The key is
+// needed for every span: the openers of every span are derived up front,
+// before the caller clears it.
+func (o sseCOpener) openMultipartRange(_ context.Context, src sealedSource, req sealedRead) (io.ReadCloser, error) {
+	if !o.multipart {
+		return nil, errSealedLegacy
+	}
+	lead, err := readSealedBytes(src, 0, 6)
+	if err != nil {
+		return nil, err
+	}
+	if len(lead) < 6 || lead[0] != crypto.MultipartFormat {
+		return nil, fmt.Errorf("%w: not a 0x05 blob", errSealedUnreadable)
+	}
+	count := int(binary.BigEndian.Uint32(lead[2:6]))
+	if count == 0 || count > crypto.MaxMultipartParts {
+		return nil, fmt.Errorf("%w: %d parts", errSealedUnreadable, count)
+	}
+	table, err := readSealedBytes(src, 0, int64(crypto.MultipartHeaderLen(count)))
+	if err != nil {
+		return nil, err
+	}
+	h, err := crypto.ParseMultipartHeader(table)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
+	}
+	if h.PlainSize() != req.Size {
+		return nil, fmt.Errorf("%w: the 0x05 header names %d plaintext bytes, the row %d", errSealedUnreadable, h.PlainSize(), req.Size)
+	}
+	spans, err := crypto.PlanMultipartRange(h, req.Off, req.N)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
+	}
+	chain := &spanChain{src: src}
+	for _, sp := range spans {
+		hb, err := readSealedBytes(src, sp.StreamOffset, int64(crypto.StreamHeaderSSEC))
+		if err != nil {
+			return nil, err
+		}
+		ph, err := crypto.ParseStreamHeader(hb)
+		if err != nil {
+			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
+		}
+		pid := o.id
+		pid.Part = sp.Part
+		opener, err := crypto.SSECRangeOpener(o.key, pid, ph)
+		if err != nil {
+			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
+		}
+		plan, err := crypto.PlanStreamRange(ph, h.Parts[sp.Part-1].Plain, sp.Offset, sp.Length)
+		if err != nil {
+			return nil, fmt.Errorf("%w: part %d: %w", errSealedUnreadable, sp.Part, err)
+		}
+		chain.spans = append(chain.spans, chainSpan{opener: opener, plain: h.Parts[sp.Part-1].Plain, plan: plan,
+			off: sp.StreamOffset + plan.CipherOffset})
+	}
+	if err := chain.next(); err != nil {
+		return nil, err
+	}
+	return &readCloser{Reader: &plaintextSized{r: chain, want: req.N}, Closer: chain}, nil
+}
+
+// readSealedBytes reads exactly n stored bytes at off (fewer when the blob
+// ends first).
+func readSealedBytes(src sealedSource, off, n int64) ([]byte, error) {
+	rc, err := src.ranged(off, n)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	buf := make([]byte, n)
+	k, err := io.ReadFull(rc, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf[:k], nil
+}
+
+// chainSpan is one part's range of a 0x05 read, opened when its turn comes.
+type chainSpan struct {
+	opener *crypto.StreamRangeOpener
+	plain  int64
+	plan   crypto.StreamRange
+	off    int64
+}
+
+// spanChain reads the spans of a 0x05 range in order, one stored read open
+// at a time. A span's first segment is verified as the span is opened; a
+// failure after the first span is the reader's error (a cut), never short.
+type spanChain struct {
+	src   sealedSource
+	spans []chainSpan
+	i     int
+	cur   io.Reader
+	rc    io.ReadCloser
+	err   error
+}
+
+// next opens span i (closing the previous span's read).
+func (c *spanChain) next() error {
+	if c.rc != nil {
+		_ = c.rc.Close()
+		c.rc, c.cur = nil, nil
+	}
+	if c.i >= len(c.spans) {
+		return io.EOF
+	}
+	sp := c.spans[c.i]
+	rc, err := c.src.ranged(sp.off, sp.plan.CipherLength)
+	if err != nil {
+		return err
+	}
+	pt, err := sp.opener.OpenRange(sp.plain, sp.plan, io.LimitReader(rc, sp.plan.CipherLength))
+	if err != nil {
+		_ = rc.Close()
+		return fmt.Errorf("%w: %w", errSealedUnreadable, err)
+	}
+	c.rc, c.cur = rc, pt
+	c.i++
+	return nil
+}
+
+func (c *spanChain) Read(p []byte) (int, error) {
+	for {
+		if c.err != nil {
+			return 0, c.err
+		}
+		if c.cur == nil {
+			if err := c.next(); err != nil {
+				c.err = err
+				return 0, err
+			}
+		}
+		n, err := c.cur.Read(p)
+		if errors.Is(err, io.EOF) {
+			_ = c.rc.Close()
+			c.rc, c.cur = nil, nil
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		if err != nil {
+			c.err = err
+		}
+		return n, err
+	}
+}
+
+func (c *spanChain) Close() error {
+	if c.rc != nil {
+		err := c.rc.Close()
+		c.rc, c.cur = nil, nil
+		return err
+	}
+	return nil
+}
 
 func (o sseCOpener) rangeOpener(_ context.Context, h *crypto.StreamHeader) (*crypto.StreamRangeOpener, error) {
 	if o.legacy {
@@ -205,6 +396,21 @@ type sealedRead struct {
 // reader it returns fails, never ends short, when a later segment does not
 // open or the plaintext is not the row's size.
 func openSealed(ctx context.Context, op blobOpener, src sealedSource, req sealedRead) (io.ReadCloser, error) {
+	if mr, ok := op.(multipartRanger); ok && req.Ranged && src.ranged != nil && !op.streaming() {
+		// A 0x05 blob: the parts the range spans, each by its own stream
+		// (WP-SSEC-1 B.3). A source error may be retried whole below; a
+		// blob that does not open is final.
+		rc, err := mr.openMultipartRange(ctx, src, req)
+		switch {
+		case err == nil:
+			return rc, nil
+		case errors.Is(err, errSealedLegacy):
+		case errors.Is(err, errSealedUnreadable), errors.Is(err, crypto.ErrSSECKeyMismatch):
+			return nil, err
+		case src.rangeFallback != nil && !src.rangeFallback(err):
+			return nil, err
+		}
+	}
 	if req.Ranged && src.ranged != nil && op.streaming() {
 		rc, err := openSealedRange(ctx, op, src, req)
 		switch {
@@ -225,6 +431,9 @@ func openSealed(ctx context.Context, op blobOpener, src sealedSource, req sealed
 	pt, err := op.whole(ctx, stored)
 	if err != nil {
 		_ = stored.Close()
+		if errors.Is(err, crypto.ErrSSECKeyMismatch) {
+			return nil, err // the customer's key, decided before the status line (403)
+		}
 		return nil, fmt.Errorf("%w: %w", errSealedUnreadable, err)
 	}
 	if !req.Ranged {
@@ -313,7 +522,12 @@ type readCloser struct {
 // (sealed) bytes: fromParity reports it.
 func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID, bucket, key, container, blob, etag string,
 	size, stored int64, floor, backendName string, rng *httpRange) (rc io.ReadCloser, fromParity bool, err error) {
-	sctx := engine.WithExpectedSize(engine.WithRecordedBackend(ctx, backendName), stored)
+	sctx := engine.WithRecordedBackend(ctx, backendName)
+	if stored > 0 {
+		// A 0x05 blob's stored length is not known from the row (0): the
+		// read is not sized (storedBlobKnown).
+		sctx = engine.WithExpectedSize(sctx, stored)
+	}
 	req := sealedRead{Size: size}
 	if rng != nil {
 		req.Ranged, req.Off, req.N = true, rng.start, rng.length
@@ -328,8 +542,8 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID,
 		}
 	}
 	rc, err = openSealed(ctx, op, src, req)
-	if err == nil || errors.Is(err, errSealedUnreadable) {
-		return rc, false, err
+	if err == nil || errors.Is(err, errSealedUnreadable) || errors.Is(err, crypto.ErrSSECKeyMismatch) {
+		return rc, false, err // a blob that does not open is final: the parity copy holds the same bytes
 	}
 	if floor != usage.FloorVault || a.vaultParity == nil || errors.Is(err, engine.ErrArchived) {
 		return nil, false, err

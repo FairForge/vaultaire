@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 — S3 spec requires MD5 for ETags
 	"database/sql"
@@ -118,10 +119,29 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		refuseSSECRequired.write(w, r)
 		return
 	}
+	// SSE-C (WP-SSEC-1 B.1): the key's MD5 is recorded on the upload row —
+	// never the key — and every UploadPart must carry a key of that MD5;
+	// the parts are sealed as they are staged and Complete needs no key.
+	// SSE-S3 and SSE-C together are refused as on a PUT.
+	var ssecKeyMD5 string
 	if crypto.HasSSECHeaders(r) {
-		WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
-			WithSuggestion("SSE-C is not yet supported for multipart uploads."))
-		return
+		if r.Header.Get("x-amz-server-side-encryption") != "" {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion("Cannot use SSE-S3 and SSE-C simultaneously."))
+			return
+		}
+		if s.db == nil {
+			WriteS3ErrorWithContext(w, ErrNotImplemented, r.URL.Path, generateRequestID(),
+				WithSuggestion("SSE-C multipart uploads need the object index."))
+			return
+		}
+		key, kErr := crypto.ParseSSECHeaders(r)
+		if kErr != nil {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(kErr.Error()))
+			return
+		}
+		ssecKeyMD5 = crypto.SSECKeyMD5(key)
+		clear(key)
 	}
 	// The key must leave room for its blob address (WP-R2-1): refused
 	// before any part is uploaded.
@@ -187,11 +207,11 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
 				 content_disposition, content_encoding, content_language, cache_control, http_expires,
-				 website_redirect_location, sse_requested, reserved_floor)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+				 website_redirect_location, sse_requested, reserved_floor, ssec_key_md5)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
 			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor)
+			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor, ssecKeyMD5)
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -233,6 +253,10 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 	// object is then sealed or chunk-encrypted at Complete.
 	if bucketSSE || sseRequested {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
+	if ssecKeyMD5 != "" {
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+		w.Header().Set("x-amz-server-side-encryption-customer-key-MD5", ssecKeyMD5)
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	if err := xml.NewEncoder(w).Encode(InitiateMultipartUploadResult{
@@ -292,6 +316,14 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	if !ok {
 		return
 	}
+	// An SSE-C upload's part carries the upload's key (WP-SSEC-1 B.1): the
+	// part is sealed under it as it is staged. The wrong key, no key, or a
+	// key on a plain upload: 400, nothing staged.
+	seal, ok := s.uploadPartSeal(w, r, t.ID, bucket, object, uploadID, partNumber)
+	if !ok {
+		return
+	}
+	defer seal.clear()
 
 	// Per-upload in-flight byte cap and the staging guard are checked
 	// against the DECLARED size (stageUploadPart): the decoded length of an
@@ -302,6 +334,13 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 		if v, perr := strconv.ParseInt(r.Header.Get("x-amz-decoded-content-length"), 10, 64); perr == nil {
 			declared = v
 		}
+	}
+	if seal != nil && declared < 0 {
+		// A sealed part is sealed as a stream of a known length (the codec's
+		// sealer reads exactly that many bytes).
+		WriteS3ErrorWithContext(w, ErrMissingContentLength, r.URL.Path, generateRequestID(),
+			WithSuggestion("An SSE-C part needs its Content-Length (or x-amz-decoded-content-length)."))
+		return
 	}
 
 	// Stream part data to temp file while computing MD5 ETag.
@@ -318,6 +357,7 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	etag, size, ok := s.stageUploadPart(w, r, t.ID, uploadID, partNumber, partBody{
 		r:        src,
 		declared: declared,
+		seal:     seal,
 		failed: func(w http.ResponseWriter, err error, received int64) bool {
 			if !clientBodyFault(r.Context(), src, err) {
 				return false
@@ -379,6 +419,11 @@ type partBody struct {
 	// in-flight cap and the staging guard are checked against it before a
 	// byte is read or reserved.
 	declared int64
+	// seal, when set, seals the part under the upload's SSE-C key as it is
+	// staged (WP-SSEC-1 B.1): the file holds the part's 0x04 stream, the
+	// etag is the plaintext's MD5, the row the plaintext size and the
+	// sealed bytes' MD5.
+	seal *partSeal
 	// failed answers a failure of the copy into the part file when it is
 	// the body's (true = answered); otherwise the failure is a 500.
 	failed func(w http.ResponseWriter, err error, received int64) bool
@@ -495,13 +540,37 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 	tmp := f.Name()
 
 	hasher := md5.New() // #nosec G401 — S3 spec requires MD5 for ETags
-	size, err = io.Copy(f, io.TeeReader(body.r, hasher))
+	var sealedMD5 string
+	if body.seal == nil {
+		size, err = io.Copy(f, io.TeeReader(body.r, hasher))
+	} else {
+		// Sealed as it streams (WP-SSEC-1 B.1): the plaintext tee hashes
+		// the part's ETag and counts its size before the sealer; the
+		// sealed bytes are hashed as they land (multipart_parts.sealed_md5,
+		// re-checked at Complete) and never see the MD5 of the ETag.
+		counter := &countingReader{r: io.TeeReader(body.r, hasher)}
+		sealed, sErr := crypto.SSECSeal(body.seal.key, body.seal.id, counter, declared)
+		if sErr != nil {
+			err = sErr
+		} else {
+			sealedHash := md5.New() // #nosec G401 — the staged ciphertext's digest
+			_, err = io.Copy(io.MultiWriter(f, sealedHash), sealed)
+			size = counter.n
+			sealedMD5 = hex.EncodeToString(sealedHash.Sum(nil))
+		}
+	}
 	if closeErr := f.Close(); closeErr != nil && err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		_ = os.Remove(tmp)
 		if body.failed != nil && body.failed(w, err, size) {
+			return "", 0, false
+		}
+		if cb, isClient := body.r.(*clientBody); body.seal != nil && isClient && clientBodyFault(r.Context(), cb, err) {
+			// The sealer's own refusal of a body short or long of its
+			// declared length is the client's (as on a sealed PUT).
+			WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
 			return "", 0, false
 		}
 		s.logger.Error("failed to write part data", zap.Error(err))
@@ -539,7 +608,7 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 	if partBilled {
 		// The install, the part row and the reservation settled to the
 		// measured size: one transaction under the upload row's lock.
-		sErr := settleUploadPart(r.Context(), s.db, tenantID, uploadID, partNumber, reserved, size, etag, install)
+		sErr := settleUploadPart(r.Context(), s.db, tenantID, uploadID, partNumber, reserved, size, etag, sealedMD5, install)
 		switch {
 		case sErr == nil:
 			installed = true
@@ -567,13 +636,14 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 		return "", 0, false
 	} else if s.db != nil {
 		_, err := s.db.ExecContext(r.Context(), `
-			INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes, sealed_md5)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (upload_id, part_number) DO UPDATE SET
 				etag       = EXCLUDED.etag,
 				size_bytes = EXCLUDED.size_bytes,
+				sealed_md5 = EXCLUDED.sealed_md5,
 				created_at = NOW()
-		`, uploadID, partNumber, etag, size)
+		`, uploadID, partNumber, etag, size, sealedMD5)
 		if err != nil {
 			s.logger.Error("failed to record part metadata", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -593,7 +663,19 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 type partRecord struct {
 	PartNumber int
 	ETag       string
-	Size       int64
+	Size       int64 // the plaintext size
+	// SealedMD5 is the MD5 of a sealed part's staged bytes ("" = a
+	// plaintext part): what Complete checks the file against (WP-SSEC-1).
+	SealedMD5 string
+}
+
+// stagedSize is the number of bytes the part's staging file holds: the
+// plaintext's, or the sealed length of an SSE-C part.
+func (p partRecord) stagedSize() int64 {
+	if p.SealedMD5 != "" {
+		return crypto.SSECSealedLength(p.Size)
+	}
+	return p.Size
 }
 
 // parseCompleteMultipartBody reads the CompleteMultipartUpload XML. Read to
@@ -626,27 +708,34 @@ func parseCompleteMultipartBody(r *http.Request) (CompleteMultipartUploadRequest
 
 // multipartUploadAttrs loads the attributes and storage class recorded on
 // the upload row at CreateMultipartUpload.
-func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectAttrs, string, bool, error) {
+// uploadEncryption is what an upload row says about its encryption: the
+// SSE-S3 request (089) and the SSE-C key's MD5 (096, "" = not SSE-C).
+type uploadEncryption struct {
+	SSERequested bool
+	SSECKeyMD5   string
+}
+
+func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectAttrs, string, uploadEncryption, error) {
 	if s.db == nil {
 		memUploadsMu.RLock()
 		defer memUploadsMu.RUnlock()
 		if mu, ok := memUploads[uploadID]; ok {
-			return mu.Attrs, mu.Class, mu.SSERequested, nil
+			return mu.Attrs, mu.Class, uploadEncryption{SSERequested: mu.SSERequested}, nil
 		}
-		return objectAttrs{ContentType: "application/octet-stream"}, "", false, nil
+		return objectAttrs{ContentType: "application/octet-stream"}, "", uploadEncryption{}, nil
 	}
 	var a objectAttrs
 	var metaJSON []byte
 	var class string
-	var sseRequested bool
+	var enc uploadEncryption
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT content_type, metadata, storage_class, content_disposition, content_encoding,
-		       content_language, cache_control, http_expires, website_redirect_location, sse_requested
+		       content_language, cache_control, http_expires, website_redirect_location, sse_requested, ssec_key_md5
 		FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(
 		&a.ContentType, &metaJSON, &class, &a.ContentDisposition, &a.ContentEncoding,
-		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &sseRequested)
+		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &enc.SSERequested, &enc.SSECKeyMD5)
 	if err != nil {
-		return objectAttrs{}, "", false, fmt.Errorf("load upload attributes: %w", err)
+		return objectAttrs{}, "", uploadEncryption{}, fmt.Errorf("load upload attributes: %w", err)
 	}
 	if len(metaJSON) > 0 {
 		_ = json.Unmarshal(metaJSON, &a.Metadata)
@@ -654,7 +743,7 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 	if a.ContentType == "" {
 		a.ContentType = "application/octet-stream"
 	}
-	return a, class, sseRequested, nil
+	return a, class, enc, nil
 }
 
 // handleCompleteMultipartUpload runs the complete with the long-operation
@@ -729,7 +818,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	var parts []partRecord
 	if s.db != nil {
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT part_number, etag, size_bytes FROM multipart_parts
+			SELECT part_number, etag, size_bytes, sealed_md5 FROM multipart_parts
 			WHERE upload_id = $1
 			ORDER BY part_number ASC
 		`, uploadID)
@@ -741,7 +830,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var p partRecord
-			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size); err != nil {
+			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5); err != nil {
 				s.logger.Error("failed to scan part row", zap.Error(err))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
@@ -807,7 +896,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// that a length-lax backend commits under the declared size (R7-12).
 	for _, p := range parts {
 		st, statErr := os.Stat(partFilePath(uploadID, p.PartNumber))
-		if statErr != nil || st.Size() != p.Size {
+		if statErr != nil || st.Size() != p.stagedSize() {
 			s.logger.Warn("complete multipart: part data missing or short on disk",
 				zap.String("uploadID", uploadID), zap.Int("partNumber", p.PartNumber),
 				zap.Int64("recorded", p.Size), zap.Error(statErr))
@@ -831,11 +920,26 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	finalETag := fmt.Sprintf("\"%x-%d\"", etagHasher.Sum(nil), len(parts))
 	etagValue := strings.Trim(finalETag, "\"")
 
-	attrs, requestedClass, sseRequested, err := s.multipartUploadAttrs(r, uploadID)
+	attrs, requestedClass, uploadEnc, err := s.multipartUploadAttrs(r, uploadID)
 	if err != nil {
 		s.logger.Error("complete multipart: upload attributes unavailable", zap.Error(err))
 		WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 		return
+	}
+	sseRequested := uploadEnc.SSERequested
+	// An SSE-C upload (WP-SSEC-1 B.2): every part was sealed under the key
+	// at UploadPart; Complete carries none and needs none. The parts cannot
+	// have been staged under two keys (UploadPart refuses a second MD5),
+	// so a sealed part on a plain upload — or the reverse — is a server
+	// bug, not a client's: asserted here.
+	ssec := uploadEnc.SSECKeyMD5 != ""
+	for _, p := range parts {
+		if (p.SealedMD5 != "") != ssec {
+			s.logger.Error("complete multipart: a part's sealing does not match its upload", zap.String("upload_id", uploadID),
+				zap.Int("part", p.PartNumber), zap.Bool("upload_ssec", ssec), zap.Bool("part_sealed", p.SealedMD5 != ""))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
 	}
 
 	// The class: the header sent on CreateMultipartUpload is honoured exactly
@@ -853,7 +957,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// master key (asked again: Create's answer may be stale).
 	adapter := s.writeAdapter()
 	placement := adapter.decidePlacement(r.Context(), placementRequest{
-		TenantID: t.ID, Bucket: bucket, Class: tierClass, Size: totalSize, SSERequested: sseRequested,
+		TenantID: t.ID, Bucket: bucket, Class: tierClass, Size: totalSize, SSERequested: sseRequested, SSEC: ssec,
 	})
 	if placement.Refusal != nil {
 		placement.Refusal.write(w, r)
@@ -906,7 +1010,8 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 
 	containerName := t.NamespaceContainer(bucket)
 	// The staged parts, in order, as one stream, each re-hashed against the
-	// ETag its UploadPart answered as it is read (multipart_staged.go).
+	// ETag its UploadPart answered — or, sealed, against its sealed bytes'
+	// MD5 — as it is read (multipart_staged.go).
 	staged := newStagedPartsReader(uploadID, parts)
 	defer func() { _ = staged.Close() }()
 	// A shutdown's cut stops the body at once (the backend stores nothing);
@@ -914,7 +1019,24 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// landed get their head row (s3_long_op.go).
 	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
 	defer putCancel()
-	body := &cutReader{ctx: r.Context(), r: staged}
+	var assembled io.Reader = staged
+	var ssecHeader []byte
+	if ssec {
+		// The 0x05 container (crypto/ssec_multipart.go): the part table —
+		// a pure function of the plaintext lengths — then the sealed parts
+		// as staged. No key is involved.
+		plains := make([]int64, len(parts))
+		for i, p := range parts {
+			plains[i] = p.Size
+		}
+		if ssecHeader, err = crypto.NewSSECMultipartHeader(plains); err != nil {
+			s.logger.Error("complete multipart: 0x05 header", zap.Error(err), zap.String("upload_id", uploadID))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+		assembled = io.MultiReader(bytes.NewReader(ssecHeader), staged)
+	}
+	body := &cutReader{ctx: r.Context(), r: assembled}
 	markCompleted := func(ctx context.Context, tx *sql.Tx) error {
 		// An abort is overridden on purpose: the upload was active when this
 		// request started and every part was read in full, so a reaper abort
@@ -973,10 +1095,19 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// The whole body's MD5 (A.4, 094): the ETag stays the parts' -N, so
 		// the row records the digest a whole GET is verified against. The
 		// tee adds no read — it hashes what the sealer or the backend reads;
-		// the plaintext's, before the sealer.
+		// the plaintext's, before the sealer. An SSE-C upload's parts are
+		// ciphertext here, sealed one by one at UploadPart: no whole
+		// plaintext digest exists (body_md5 stays NULL; every segment's
+		// GCM tag is the integrity a GET verifies).
 		bodyHash := md5.New() // #nosec G401 — the S3 content digest
 		src := io.TeeReader(body, bodyHash)
 		putLength := totalSize
+		if ssec {
+			putLength = int64(len(ssecHeader))
+			for _, p := range parts {
+				putLength += p.stagedSize()
+			}
+		}
 		var sealer *sseWriteSealer
 		if placement.Kind == placeWholeSealed {
 			// Sealed as the parts stream (WP-R8-5, = WP-R3-3: this held the
@@ -1030,6 +1161,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// object is untouched until the commit (R3-15).
 		enc := sealer.encryption()
 		bodyMD5 := hex.EncodeToString(bodyHash.Sum(nil)) // every part was read to its end (staged.verified)
+		if ssec {
+			enc = objectEncryption{Algorithm: crypto.SSECAlgorithmMultipart, SSECKeyMD5: uploadEnc.SSECKeyMD5}
+			bodyMD5 = ""
+		}
 		if s.db != nil {
 			flip, dbErr := commitBlobWrite(pctx, s.db, blobWrite{TenantID: t.ID, Bucket: bucket, Key: object,
 				Bill: bill,
@@ -1095,6 +1230,10 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	}
 	if encryptedAtRest {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
+	}
+	if ssec {
+		w.Header().Set("x-amz-server-side-encryption-customer-algorithm", "AES256")
+		w.Header().Set("x-amz-server-side-encryption-customer-key-MD5", uploadEnc.SSECKeyMD5)
 	}
 	if err := xml.NewEncoder(w).Encode(CompleteMultipartUploadResult{
 		Location: location,
@@ -1460,14 +1599,14 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 			return none, false
 		}
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT part_number, etag, size_bytes FROM multipart_parts WHERE upload_id = $1 ORDER BY part_number ASC`, uploadID)
+			SELECT part_number, etag, size_bytes, sealed_md5 FROM multipart_parts WHERE upload_id = $1 ORDER BY part_number ASC`, uploadID)
 		if err != nil {
 			return none, false
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var p partRecord
-			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size); err != nil {
+			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5); err != nil {
 				return none, false
 			}
 			uploaded = append(uploaded, p)
