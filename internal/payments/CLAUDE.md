@@ -1,0 +1,37 @@
+# internal/payments
+
+The provider-neutral core of billing (WP-PAY, design of record `docs/PAYMENTS.md`; WP-PAY-1 built 2026-10-20, migration 097). **What a tenant has bought lives in our database with a date**; a payment from any provider extends the date; the `entitlement_lapse` job (`internal/api/entitlement_lapse.go`) clears a house whose date plus grace has passed. Stripe (`internal/billing`) is one provider that writes here; BTCPay (`internal/payments/btcpay`, WP-PAY-4) will be the second. Imports `internal/usage` only.
+
+## The one writer of a house
+
+`tenant_floor_quotas` + `tenant_quotas` stay the enforcement truth the write path reads; `entitlements` is the billing truth. Every function that changes a house takes the **caller's transaction** and writes both in it:
+
+| Function | What it does |
+|---|---|
+| `Lock(ctx, tx, tenant)` | `pg_advisory_xact_lock(hashtextextended('entitlement:'‖tenant, 0))` — one tenant's grants, extensions, clears (and WP-PAY-2's checkout start) one at a time. Taken first by every function below; re-entrant within a transaction |
+| `Grant(ctx, tx, tenant, Order, paidThrough, provider, ref, Renewal)` | upsert the row (`lapsed_at` cleared) + `usage.SetHouseTx`. **Never shortens a running date** (`GREATEST(paid_through, given)` — a stale or replayed event cannot take paid time away; only an operator refund shortens one, WP-PAY-7); a lapsed row takes the given date. Idempotent: a replay with the same values updates no row (`updated_at` unchanged) |
+| `Extend(ctx, tx, tenant, Period)` | `paid_through = GREATEST(paid_through, now()) + 1 month | 1 year`, in UTC; grants a lapsed row again (floors restored). **Month-end rule (accepted):** `2026-01-31 + 1 month = 2026-02-28` (Postgres), and the date stays on the 28th after |
+| `StopRenewal` | `renewal = 'prepaid'`: nobody will extend it; the house runs to `paid_through` + grace |
+| `Revoke` | `usage.ClearHouseTx` (free-tier limits, **used bytes untouched** — billing never deletes data) + `lapsed_at = now()`. Writers of `lapsed_at`: the lapse job, and — while the `entitlement_lapse` flag is OFF — the Stripe webhook's clearing branch (WP-PAY-2 moves that branch behind the flag). Marking the row is what keeps the job's reconcile from granting back a house the webhook took away |
+| `Resize` | the dashboard's in-place resize: the lines of a granted row change, the date stays; floors written |
+| `HouseWriter` | `billing.HouseQuotas` over `Resize` / `Revoke` in one transaction each — what `server.go` wires into the webhook and the dashboard (`houseQuotas`), so no path changes a house's floors without its entitlement |
+| `Get`, `StatusOf(ctx, db, tenant, grace, now)` | the read model (`Found`, `Granted`, `InGrace`, `GraceEnds`) the dashboard will show in WP-PAY-2 |
+| `InTx` | begin → fn → commit |
+
+Lock order: entitlement lock → `tenant_quotas` → `tenant_floor_quotas` (`usage/ledger_tx.go`). Nothing that holds a key, head-row or upload lock takes the entitlement lock.
+
+`Order` = `{Std, Vault, PinHot int; Period}` — `billing.HouseOrder` and `billing.Period` are aliases of `payments.Order` / `payments.Period`.
+
+## The ledger (`ledger.go`)
+
+`payments` rows keyed by `(provider, provider_id)` (a Stripe invoice id, a BTCPay invoice id, `manual:<uuid>`). `RecordPending`, `Settle` (creates or moves the row to `settled` and assigns **our invoice number** `ST-<year>-<000001>` from `invoice_counters` — the year's row is incremented with `INSERT … ON CONFLICT DO UPDATE … RETURNING` inside the settle transaction, so concurrent settles are numbered one after another and a rolled-back settle gives its number back: gapless per UTC year; a replay of a settled row returns it, `Newly` false), `Fail` (a declined charge; never moves a settled row back), `Expire` (partial or not) / `Invalidate` (open rows only), `Credit` (a settled `credit` row, no receipt number). Statuses: `pending processing settled failed expired expired_partial invalid refunded` ('failed' is WP-PAY-1's addition to the design). **Metadata keys:** `ids` (provider ids, kept), `addresses` and `txids` (dropped at erasure). The ledger is an accounting record: never pruned by the retention job; `account.EraseRows` nulls `tenant_id` and `note` and drops `addresses`/`txids`.
+
+## Knobs, readiness, metrics
+
+- `ENTITLEMENT_GRACE` (`GraceFromEnv`): a Go duration, 1h–60d, default 14 d (336h, F-26); a rejected value is a Warn and the default.
+- `ReadyHistory` — `UnreadyWithin(provider, 24h)`: the lapse job skips a tenant whose provider was unready in the window (a house is never lost because our processor was down). `AlwaysReady` until WP-PAY-2's providers feed one.
+- `vaultaire_payments_total{provider,kind,outcome=settled|failed|replayed}` (`CountPayment`, called AFTER the caller's commit; Stripe charge outcomes at 0 from boot), registered through `Collectors()`. The lapse job adds `vaultaire_entitlements_lapsed_total` and `vaultaire_entitlements_expiring{window=7d|30d|in_grace}` (read from the table) in `internal/api`.
+
+## Tests
+
+DB-backed (`testutil.DSN()`), each test on a tenant of its own (`newFixture`); invoice-number tests use a year of their own (the counter is global). `entitlement_test.go`: grant idempotent / never shortens / re-grants a lapsed row, Extend from the later of the date and now, the month-end rule (31 Jan, leap year, 31 Mar), StopRenewal + Revoke keep used bytes, the HouseWriter resize keeps the date, settle idempotent and failed→settled, **ten concurrent settles numbered 1..10 after a rolled-back one**, expire/invalidate/credit.
