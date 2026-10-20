@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/FairForge/vaultaire/internal/billing"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,7 +67,7 @@ func TestBillingPage_PackPlanTenant_ShownLiveOther(t *testing.T) {
 	require.NoError(t, err)
 
 	// Act: with the house checkout on and off.
-	on := renderBilling(t, newFakeHouseBilling(), id, true)
+	on := renderBilling(t, newFakeHouseBilling().registry(nil, true), id, true)
 	off := renderBilling(t, nil, id, false)
 
 	// Assert: both say to email support; neither offers a checkout.
@@ -86,7 +86,7 @@ func TestHouseCheckout_PackPlanTenant_Refused(t *testing.T) {
 	require.NoError(t, err)
 	fb := newFakeHouseBilling()
 
-	w := postHouse(t, HandleHouseCheckout(fb, db, nil, houseFlags(true), "https://stored.test", zap.NewNop()), id,
+	w := postHouse(t, HandleHouseCheckout(fb.registry(db, true), db, houseFlags(true), "https://stored.test", zap.NewNop()), id,
 		map[string][]string{"std": {"2"}, "vault": {"0"}, "pin_hot": {"0"}, "period": {"annual"}})
 
 	cat, msg := flashOf(t, w)
@@ -123,7 +123,7 @@ func TestAdminRevenue_HousesOnly(t *testing.T) {
 
 	// Assert
 	require.Len(t, got, 1, "only the house tenant earns")
-	want := billing.QuoteHouse(3, 2, 1, billing.PeriodMonthly)
+	want := payments.QuoteHouse(3, 2, 1, payments.PeriodMonthly)
 	assert.Equal(t, house, got[0].tenantID)
 	assert.Equal(t, want.MonthlyCents, got[0].quote.MonthlyCents)
 }

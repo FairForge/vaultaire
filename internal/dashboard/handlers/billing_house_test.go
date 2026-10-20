@@ -12,12 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/stripe/stripe-go/v75"
 	"go.uber.org/zap"
 )
 
@@ -45,49 +44,64 @@ func houseTenant(t *testing.T, db *sql.DB, intentStd, intentVault int) string {
 	return id
 }
 
+// fakeHouseBilling is a Stripe-named payments.Provider; registry puts it
+// behind a real payments.Registry, so the pages exercise the flag, the
+// double-billing guard and the record writes end to end.
 type fakeHouseBilling struct {
 	ready      bool
 	why        string
-	live       bool  // HasLiveSubscription answer
-	liveErr    error // ...or its error
+	live       bool  // StartCheckout answers ErrLiveSubscription
+	liveErr    error // ...or this error
 	liveAsked  int
 	checkout   string
-	gotOrder   billing.HouseOrder
+	gotOrder   payments.Order
 	gotSuccess string
 	gotCancel  string
-	updated    *stripe.Subscription
-	updateErr  error
-	svc        *billing.StripeService // for HouseFromSubscription
+	resizeErr  error
 }
 
 func newFakeHouseBilling() *fakeHouseBilling {
-	svc := billing.NewStripeService("sk_test_fake", nil, zap.NewNop())
-	svc.ConfigureHouse(billing.HousePriceIDs{StdAnnual: "p_sy", StdMonthly: "p_sm", VaultAnnual: "p_vy",
-		VaultMonthly: "p_vm", PinAnnual: "p_py", PinMonthly: "p_pm"}, nil)
-	return &fakeHouseBilling{ready: true, checkout: "https://checkout.stripe.test/cs_1", svc: svc}
+	return &fakeHouseBilling{ready: true, checkout: "https://checkout.stripe.test/cs_1"}
 }
-func (f *fakeHouseBilling) HouseCheckoutReady() (bool, string) { return f.ready, f.why }
-func (f *fakeHouseBilling) GetCustomerID(_ context.Context, tenantID string) (string, error) {
-	return "cus_" + tenantID, nil
+
+// registry is the payments.Registry the handlers get, with pay_stripe on
+// or off for every tenant.
+func (f *fakeHouseBilling) registry(db *sql.DB, payStripe bool) *payments.Registry {
+	fl := flags.New(nil, nil)
+	fl.Register(payments.FlagPrefix+payments.ProviderStripe, payStripe)
+	reg := payments.NewRegistry(db, fl, 0, nil)
+	reg.Register(f)
+	return reg
 }
-func (f *fakeHouseBilling) CreateCustomer(_ context.Context, _, tenantID string) (string, error) {
-	return "cus_" + tenantID, nil
-}
-func (f *fakeHouseBilling) CreateHouseCheckout(_ context.Context, _, _ string, o billing.HouseOrder, _, successURL, cancelURL string) (string, error) {
-	f.gotOrder, f.gotSuccess, f.gotCancel = o, successURL, cancelURL
+
+func (f *fakeHouseBilling) Name() string                         { return payments.ProviderStripe }
+func (f *fakeHouseBilling) Renewal() payments.Renewal            { return payments.RenewalAuto }
+func (f *fakeHouseBilling) Ready(context.Context) (bool, string) { return f.ready, f.why }
+func (f *fakeHouseBilling) StartCheckout(_ context.Context, c payments.Checkout) (string, error) {
+	f.liveAsked++
+	if f.liveErr != nil {
+		return "", f.liveErr
+	}
+	if f.live {
+		return "", payments.ErrLiveSubscription
+	}
+	f.gotOrder, f.gotSuccess, f.gotCancel = c.Order, c.ReturnURL, c.CancelURL
 	return f.checkout, nil
 }
-func (f *fakeHouseBilling) HasLiveSubscription(_ context.Context, _ string) (bool, error) {
-	f.liveAsked++
-	return f.live, f.liveErr
-}
-func (f *fakeHouseBilling) UpdateHouseSubscription(_ context.Context, _ string, o billing.HouseOrder) (*stripe.Subscription, error) {
+func (f *fakeHouseBilling) Resize(_ context.Context, _ string, o payments.Order) (payments.ResizeOutcome, error) {
 	f.gotOrder = o
-	return f.updated, f.updateErr
+	if f.resizeErr != nil {
+		return payments.ResizeOutcome{}, f.resizeErr
+	}
+	return payments.ResizeOutcome{Applied: &o}, nil
 }
-func (f *fakeHouseBilling) HouseFromSubscription(sub *stripe.Subscription) (billing.HouseOrder, bool) {
-	return f.svc.HouseFromSubscription(sub)
+func (f *fakeHouseBilling) StopRenewal(context.Context, string) error   { return nil }
+func (f *fakeHouseBilling) ResumeRenewal(context.Context, string) error { return nil }
+func (f *fakeHouseBilling) Cancel(context.Context, string) error        { return nil }
+func (f *fakeHouseBilling) ManageURL(context.Context, string, string) (string, error) {
+	return "https://billing.stripe.test/portal", nil
 }
+func (f *fakeHouseBilling) Webhook() http.Handler { return nil }
 
 func houseTemplate(t *testing.T) *template.Template {
 	t.Helper()
@@ -105,7 +119,7 @@ func TestHouse_FlagOffKeepsTheLegacyPage(t *testing.T) {
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 6, 1)
-	h := HandleBilling(houseTemplate(t), newFakeHouseBilling(), db, houseFlags(false), zap.NewNop())
+	h := HandleBilling(houseTemplate(t), newFakeHouseBilling().registry(db, true), db, houseFlags(false), zap.NewNop())
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/billing", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -126,7 +140,7 @@ func TestHouse_FlagOnPreselectsTheIntent(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 6, 1)
 	fb := newFakeHouseBilling()
-	h := HandleBilling(houseTemplate(t), fb, db, houseFlags(true), zap.NewNop())
+	h := HandleBilling(houseTemplate(t), fb.registry(db, true), db, houseFlags(true), zap.NewNop())
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/billing", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -163,7 +177,7 @@ func TestHouse_ExistingHousePreselectsItsFloors(t *testing.T) {
 	_, err = db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = $1 WHERE tenant_id = $2 AND floor = 'standard'`, 3*usage.TB/2, id)
 	require.NoError(t, err)
 
-	h := HandleBilling(houseTemplate(t), newFakeHouseBilling(), db, houseFlags(true), zap.NewNop())
+	h := HandleBilling(houseTemplate(t), newFakeHouseBilling().registry(db, true), db, houseFlags(true), zap.NewNop())
 	req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/billing", nil), id)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -202,12 +216,12 @@ func TestHandleHouseCheckout_StartsCheckoutWithAbsoluteURLs(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 0, 0)
 	fb := newFakeHouseBilling()
-	h := HandleHouseCheckout(fb, db, nil, houseFlags(true), "https://stored.ge", zap.NewNop())
+	h := HandleHouseCheckout(fb.registry(db, true), db, houseFlags(true), "https://stored.ge", zap.NewNop())
 
 	w := postHouse(t, h, id, url.Values{"std": {"0"}, "vault": {"2"}, "period": {"annual"}})
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "https://checkout.stripe.test/cs_1", w.Header().Get("Location"))
-	assert.Equal(t, billing.HouseOrder{Vault: 2, Period: billing.PeriodAnnual}, fb.gotOrder, "attic-only is sold")
+	assert.Equal(t, payments.Order{Vault: 2, Period: payments.PeriodAnnual}, fb.gotOrder, "attic-only is sold")
 	assert.Equal(t, "https://stored.ge/dashboard/billing?upgraded=1", fb.gotSuccess)
 	assert.Equal(t, "https://stored.ge/dashboard/billing", fb.gotCancel)
 
@@ -233,7 +247,7 @@ func TestHandleHouseCheckout_StartsCheckoutWithAbsoluteURLs(t *testing.T) {
 	assert.Contains(t, msg, "isn't open")
 
 	// Flag off → not found.
-	h = HandleHouseCheckout(fb, db, nil, houseFlags(false), "https://stored.ge", zap.NewNop())
+	h = HandleHouseCheckout(fb.registry(db, true), db, houseFlags(false), "https://stored.ge", zap.NewNop())
 	w = postHouse(t, h, id, url.Values{"std": {"1"}, "period": {"annual"}})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
@@ -246,7 +260,7 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 0, 0)
 	fb := newFakeHouseBilling()
-	h := HandleHouseCheckout(fb, db, nil, houseFlags(true), "https://stored.ge", zap.NewNop())
+	h := HandleHouseCheckout(fb.registry(db, true), db, houseFlags(true), "https://stored.ge", zap.NewNop())
 	order := url.Values{"std": {"2"}, "period": {"annual"}}
 
 	// 1. The webhook has not landed (no local subscription yet) but Stripe
@@ -259,14 +273,14 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	assert.Equal(t, "error", cat)
 	assert.Contains(t, msg, "already have a subscription")
 	assert.Equal(t, 1, fb.liveAsked)
-	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder, "no checkout started")
+	assert.Equal(t, payments.Order{}, fb.gotOrder, "no checkout started")
 
 	// 2. Stripe cannot be asked: refused too (never guess on a money path).
 	fb.live, fb.liveErr = false, fmt.Errorf("stripe: 503")
 	w = postHouse(t, h, id, order)
 	cat, _ = flashOf(t, w)
 	assert.Equal(t, "error", cat)
-	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+	assert.Equal(t, payments.Order{}, fb.gotOrder)
 
 	// 3. A legacy pack the local row knows about, still billing: refused
 	//    before Stripe is even asked.
@@ -279,7 +293,7 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	assert.Equal(t, "error", cat)
 	assert.Contains(t, msg, "bill you twice")
 	assert.Equal(t, asked, fb.liveAsked, "refused from the local row")
-	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+	assert.Equal(t, payments.Order{}, fb.gotOrder)
 
 	// 4. That old subscription is over (canceled) but the row still says
 	//    vault18: one product (WP-PAY-0) — support moves it, no checkout.
@@ -289,7 +303,7 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	cat, msg = flashOf(t, w)
 	assert.Equal(t, "error", cat)
 	assert.Contains(t, msg, "legacy plan")
-	assert.Equal(t, billing.HouseOrder{}, fb.gotOrder)
+	assert.Equal(t, payments.Order{}, fb.gotOrder)
 
 	// 5. Downgraded to starter (what customer.subscription.deleted writes):
 	//    a new house may be bought.
@@ -298,7 +312,7 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	w = postHouse(t, h, id, order)
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "https://checkout.stripe.test/cs_1", w.Header().Get("Location"))
-	assert.Equal(t, billing.HouseOrder{Std: 2, Period: billing.PeriodAnnual}, fb.gotOrder)
+	assert.Equal(t, payments.Order{Std: 2, Period: payments.PeriodAnnual}, fb.gotOrder)
 }
 
 func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
@@ -313,11 +327,7 @@ func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
 	require.NoError(t, err)
 
 	fb := newFakeHouseBilling()
-	fb.updated = &stripe.Subscription{ID: "sub_1", Status: "active", Items: &stripe.SubscriptionItemList{Data: []*stripe.SubscriptionItem{
-		{ID: "si_1", Price: &stripe.Price{ID: "p_sy"}, Quantity: 5},
-		{ID: "si_2", Price: &stripe.Price{ID: "p_vy"}, Quantity: 2},
-	}}}
-	h := HandleHouseCheckout(fb, db, qm, houseFlags(true), "https://stored.ge", zap.NewNop())
+	h := HandleHouseCheckout(fb.registry(db, true), db, houseFlags(true), "https://stored.ge", zap.NewNop())
 
 	// Below usage: the attic holds just over 1 TB, so it cannot shrink to 1.
 	w := postHouse(t, h, id, url.Values{"std": {"5"}, "vault": {"1"}, "period": {"annual"}})
@@ -337,9 +347,9 @@ func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
 	w = postHouse(t, h, id, url.Values{"std": {"5"}, "vault": {"2"}, "period": {"annual"}})
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/dashboard/billing?resized=1", w.Header().Get("Location"))
-	assert.Equal(t, billing.HouseOrder{Std: 5, Vault: 2, Period: billing.PeriodAnnual}, fb.gotOrder)
+	assert.Equal(t, payments.Order{Std: 5, Vault: 2, Period: payments.PeriodAnnual}, fb.gotOrder)
 	house, _, _ = qm.GetHouse(context.Background(), id)
-	assert.Equal(t, usage.HouseFromTB(5, 2, 0), house, "applied from the returned subscription, before the webhook")
+	assert.Equal(t, usage.HouseFromTB(5, 2, 0), house, "applied from the provider's answer, before the webhook")
 	cat, msg = flashOf(t, w)
 	assert.Equal(t, "success", cat)
 	assert.Contains(t, msg, "5 TB downstairs")

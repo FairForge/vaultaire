@@ -36,7 +36,7 @@ func TestHouse_WriteScreenshotFixtures(t *testing.T) {
 	template.Must(tmpl.ParseFS(os.DirFS("../templates"), "customer/billing.html"))
 
 	render := func(name, tenantID string, fb *fakeHouseBilling, query string) {
-		h := HandleBilling(tmpl, fb, db, houseFlags(true), zap.NewNop())
+		h := HandleBilling(tmpl, fb.registry(db, true), db, houseFlags(true), zap.NewNop())
 		req := injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/billing"+query, nil), tenantID)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)

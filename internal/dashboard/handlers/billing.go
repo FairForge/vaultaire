@@ -3,15 +3,16 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
-	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"go.uber.org/zap"
 )
 
@@ -58,9 +59,11 @@ func HandleBilling(tmpl *template.Template, svc BillingService, db *sql.DB, fl *
 	}
 }
 
-// HandleManageBilling redirects to the Stripe Billing Portal. baseURL makes
-// the return URL absolute — Stripe rejects a relative one (Review R10-06).
-func HandleManageBilling(stripe *billing.StripeService, baseURL string, logger *zap.Logger) http.HandlerFunc {
+// HandleManageBilling redirects to the provider's self-service page (the
+// Stripe Billing Portal). It takes the provider, never a provider SDK type
+// (WP-PAY-2); managing a payment is never flag-gated. baseURL makes the
+// return URL absolute — Stripe rejects a relative one (Review R10-06).
+func HandleManageBilling(p payments.Provider, baseURL string, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -68,21 +71,25 @@ func HandleManageBilling(stripe *billing.StripeService, baseURL string, logger *
 			return
 		}
 
-		if stripe == nil {
+		if p == nil {
 			http.Error(w, "Billing not configured", http.StatusServiceUnavailable)
 			return
 		}
 
-		portalURL, err := stripe.CreateBillingPortalSession(
+		portalURL, err := p.ManageURL(
 			r.Context(), sd.TenantID, strings.TrimRight(baseURL, "/")+"/dashboard/billing",
 		)
+		if errors.Is(err, payments.ErrProviderUnconfigured) {
+			http.Error(w, "Billing not configured", http.StatusServiceUnavailable)
+			return
+		}
 		if err != nil {
 			logger.Error("create billing portal session", zap.Error(err))
 			http.Error(w, "Failed to open billing portal. Please try again.", http.StatusInternalServerError)
 			return
 		}
 
-		http.Redirect(w, r, portalURL, http.StatusSeeOther)
+		http.Redirect(w, r, portalURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
 	}
 }
 

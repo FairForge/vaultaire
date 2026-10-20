@@ -187,9 +187,3 @@ func (s *StripeService) ManageURL(ctx context.Context, tenantID, returnURL strin
 
 // Webhook is the signed /webhook/stripe handler (nil without its secret).
 func (s *StripeService) Webhook() http.Handler { return s.webhook }
-
-// CreateCustomer is the pre-WP-PAY-2 entry point of the two registration
-// call sites; they go in the next commit, and with them this shim.
-func (s *StripeService) CreateCustomer(ctx context.Context, email, tenantID string) (string, error) {
-	return s.createCustomer(ctx, email, tenantID)
-}

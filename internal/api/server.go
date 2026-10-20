@@ -76,10 +76,14 @@ type Server struct {
 	accountExports   *AccountExportService // the one GDPR export service (WP-R10-3b); nil without DB + engine
 	auth             *auth.AuthService
 	stripe           *billing.StripeService
-	webhookHandler   *billing.WebhookHandler
-	requestCount     int64
-	siteStats        *sitestats.Collector // cookieless public-site counts (site_stats.go)
-	testMode         bool
+	// payments is the provider registry (WP-PAY-2): the dashboard's and the
+	// deletion runner's one door to money; Stripe is always registered
+	// (never Ready without STRIPE_SECRET_KEY).
+	payments       *payments.Registry
+	webhookHandler *billing.WebhookHandler
+	requestCount   int64
+	siteStats      *sitestats.Collector // cookieless public-site counts (site_stats.go)
+	testMode       bool
 	// longOpThreshold / longOpInterval: the keep-alive of slow
 	// CompleteMultipartUpload / DeleteObjects (s3_long_op.go); 0 = 10 s / 10 s.
 	longOpThreshold    time.Duration
@@ -400,7 +404,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// entitlement_lapse, default OFF = count only), reconcile. Grace:
 	// ENTITLEMENT_GRACE (14 d). The Stripe read of the backfill is wired
 	// with the Stripe service below.
-	s.entitlementLapse = NewEntitlementLapseRunner(s.db, s.flags, logger, payments.GraceFromEnv(os.Getenv, logger))
+	grace := payments.GraceFromEnv(os.Getenv, logger)
+	s.entitlementLapse = NewEntitlementLapseRunner(s.db, s.flags, logger, grace)
+	// The payment providers (WP-PAY-2): flags pay_<name>, readiness
+	// recorded every 60 s from Start; the lapse job skips a tenant whose
+	// provider was unready in the last 24 h.
+	s.payments = payments.NewRegistry(s.db, s.flags, grace, logger)
+	if s.entitlementLapse != nil {
+		s.entitlementLapse.Ready = s.payments
+	}
 
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
 	// quota on the hot backend, flag-gated per tenant (smart_demotion,
@@ -572,10 +584,21 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		if s.entitlementLapse != nil {
 			s.entitlementLapse.Stripe = s.stripe
 		}
+		if s.webhookHandler != nil {
+			// entitlement_lapse decides per tenant whether a terminal
+			// Stripe status clears or only stops the renewal.
+			s.webhookHandler.SetFlags(s.flags)
+			s.stripe.SetWebhook(s.webhookHandler)
+		}
+		s.payments.Register(s.stripe)
 
 		// One product (WP-PAY-0, F-29): the house. The legacy pack plans
 		// and the metered reporter are gone.
 		logger.Info("stripe billing service initialized")
+	} else {
+		// Named but never Ready: the gauge says 0, a page or the deletion
+		// runner can name Stripe, nothing reaches it.
+		s.payments.Register(billing.NewUnconfiguredStripe(logger))
 	}
 
 	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
@@ -874,7 +897,7 @@ func (s *Server) setupRoutes() {
 		// The region gate (Prompt 10 Part A): the picker shows a region
 		// whose driver is down by its probe or breaker as unavailable.
 		RegionAvailable: s.regionAvailableNow,
-		Stripe:          s.stripe,
+		Payments:        s.payments,
 		Google:          s.googleOAuth,
 		GitHub:          s.githubOAuth,
 		StorageMode:     storageMode,
@@ -884,7 +907,6 @@ func (s *Server) setupRoutes() {
 		Engine:          s.engine,
 		HealthChecker:   &healthCheckerAdapter{s.healthChecker},
 		Flags:           s.flags,
-		Quotas:          houseQuotas(s.quotaManager, s.db),
 		Account:         s.accountSvc,
 		Exports:         dashboardExports(s.accountExports),
 		Egress:          s.egress,
@@ -1078,14 +1100,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create Stripe customer for billing (non-blocking — registration
-	// succeeds even if Stripe is unavailable).
-	if s.stripe != nil {
-		if _, stripeErr := s.stripe.CreateCustomer(r.Context(), req.Email, tenant.ID); stripeErr != nil {
-			s.logger.Error("create stripe customer on registration",
-				zap.String("tenant", tenant.ID), zap.Error(stripeErr))
-		}
-	}
+	// No Stripe customer here (WP-PAY-2, 43.2): a tenant gets one when it
+	// first buys (billing.StripeService.StartCheckout).
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
@@ -1439,6 +1455,13 @@ func (s *Server) Start() error {
 
 	go s.startHealthChecks(ctx)
 
+	// Every payment provider's readiness, every 60 s: the gauge
+	// vaultaire_payment_provider_ready and the entitlement_lapse job's
+	// history (WP-PAY-2).
+	if s.payments != nil {
+		s.payments.StartReadiness(ctx, time.Minute)
+	}
+
 	// Verify the house prices against prices.json (retrying until they
 	// match; re-checked hourly). Only when every price id is configured.
 	if s.stripe != nil && s.stripe.HousePriceIDs().Complete() {
@@ -1452,9 +1475,7 @@ func (s *Server) Start() error {
 	}
 	if s.accountDeletion != nil {
 		s.accountDeletion.VaultParity = s.vaultParity
-		if s.stripe != nil {
-			s.accountDeletion.Stripe = s.stripe
-		}
+		s.accountDeletion.Payments = s.payments
 		if s.auth != nil {
 			s.accountDeletion.Auth = s.auth
 		}

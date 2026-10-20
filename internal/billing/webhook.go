@@ -287,7 +287,7 @@ func (h *WebhookHandler) unmarshal(event stripe.Event, what string, v any) bool 
 // Checkout's client_reference_id and the metadata.tenant_id this service
 // stamps on every session and subscription — name the tenant, and the
 // customer id is healed onto the row so later events resolve directly (the
-// persist in CreateCustomer is logged-and-continued, so a checkout can
+// persist in the pre-WP-PAY-2 CreateCustomer was logged-and-continued, so a checkout can
 // complete under a customer id the row never received). A customer that
 // resolves nowhere is not ours (another product on the Stripe account, a
 // customer made in the dashboard, a tenant already erased): the event is

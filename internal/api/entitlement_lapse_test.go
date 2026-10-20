@@ -362,3 +362,33 @@ func TestExport_CarriesTheEntitlementAndThePayments(t *testing.T) {
 	require.True(t, ok, "payments section")
 	assert.Len(t, pays, 3, "every row, across pages of one")
 }
+
+// WP-PAY-2: the job reads the providers' readiness history from the
+// registry (payments.AlwaysReady before): a provider unready 2 h ago — ready
+// now — still keeps its tenants' houses for this run.
+func TestLapseJob_ReadsProviderReadyHistory(t *testing.T) {
+	// Arrange
+	f := setupLapseFixture(t)
+	id := f.tenant("")
+	f.granted(id, time.Now().Add(-30*24*time.Hour), payments.ProviderStripe)
+	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
+	reg := payments.NewRegistry(f.db, f.fl, 14*24*time.Hour, nil)
+	reg.Register(readyProvider{})
+	reg.History().Record(payments.ProviderStripe, false, time.Now().Add(-2*time.Hour))
+	f.runner.Ready = reg
+
+	// Act
+	res := f.run()
+
+	// Assert
+	assert.Equal(t, 1, res.SkippedUnready)
+	assert.Equal(t, 0, res.Cleared)
+	_, ok := f.house(id)
+	assert.True(t, ok)
+}
+
+// readyProvider is a Stripe-named provider that is ready now.
+type readyProvider struct{ payments.Provider }
+
+func (readyProvider) Name() string                         { return payments.ProviderStripe }
+func (readyProvider) Ready(context.Context) (bool, string) { return true, "" }

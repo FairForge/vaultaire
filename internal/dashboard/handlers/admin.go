@@ -65,7 +65,7 @@ func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, 
 		logger.Debug("admin: count active subs", zap.Error(err))
 	}
 
-	// Revenue = the live houses at billing.QuoteHouse (WP-PAY-0: one
+	// Revenue = the live houses at payments.QuoteHouse (WP-PAY-0: one
 	// product; the legacy pack prices are gone).
 	revenueCents := housesMRR(queryHouses(ctx, db, logger))
 

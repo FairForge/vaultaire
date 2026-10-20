@@ -14,10 +14,12 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/google/uuid"
@@ -33,15 +35,25 @@ import (
 // the lock refuses another; a cancel mid-walk stops the walk; a failing
 // backend defers the tenant to the next day.
 
+// fakeStripe is the Stripe payments.Provider as the runner uses it: Cancel
+// only (the embedded nil interface panics on anything else).
 type fakeStripe struct {
+	payments.Provider
 	calls atomic.Int32
 	err   error
 }
 
-func (f *fakeStripe) CancelSubscription(_ context.Context, _ string) error {
+func (f *fakeStripe) Name() string { return payments.ProviderStripe }
+
+func (f *fakeStripe) Cancel(_ context.Context, _ string) error {
 	f.calls.Add(1)
 	return f.err
 }
+
+// fakeProviders is the registry's Provider lookup.
+type fakeProviders map[string]payments.Provider
+
+func (m fakeProviders) Provider(name string) payments.Provider { return m[name] }
 
 // flakyDriver is a local driver whose Delete fails on demand.
 type flakyDriver struct {
@@ -105,7 +117,7 @@ func setupDeletionFixture(t *testing.T) *deletionFixture {
 	gci := crypto.NewGlobalContentIndex(db)
 	qm := usage.NewQuotaManager(db)
 	f.runner = NewAccountDeletionRunner(db, logger, f.eng, gci, qm, account.NewService(db, logger))
-	f.runner.Stripe = f.stripe
+	f.runner.Payments = fakeProviders{payments.ProviderStripe: f.stripe}
 	f.runner.Auth = f.auth
 	f.runner.Sessions = f.sessions
 	f.runner.BatchSize = 2
@@ -344,7 +356,7 @@ func TestAccountDeletionRunner_StripeFailureDefersTheTenantAndTouchesNoObject(t 
 func TestAccountDeletionRunner_NoStripeConfiguredButSubscriptionSetDefers(t *testing.T) {
 	f := setupDeletionFixture(t)
 	f.seed(time.Now().Add(-time.Hour))
-	f.runner.Stripe = nil
+	f.runner.Payments = fakeProviders{} // Stripe not registered
 	res, err := f.runner.RunOnce(context.Background())
 	require.Error(t, err)
 	require.Len(t, res.Tenants, 1)
@@ -512,4 +524,62 @@ func TestAccountDeletionRunner_KeepsItsScheduleOnTheSharedRunner(t *testing.T) {
 	assert.Equal(t, "daily 04:30 UTC", sp.schedule())
 	assert.Equal(t, 2*time.Minute, sp.BootDelay)
 	assert.Equal(t, 6*time.Hour, sp.MaxRunTime)
+}
+
+// WP-PAY-2 (docs/PAYMENTS.md § 2.3): the runner cancels with the row's
+// provider and defers only when the row is renewed automatically and that
+// provider is unconfigured. A prepaid row has nothing to cancel.
+func (f *deletionFixture) entitlement(renewal payments.Renewal) {
+	f.t.Helper()
+	require.NoError(f.t, payments.InTx(context.Background(), f.db, func(tx *sql.Tx) error {
+		return payments.Grant(context.Background(), tx, f.tenantID, payments.Order{Std: 1, Period: payments.PeriodMonthly},
+			time.Now().Add(10*24*time.Hour), payments.ProviderStripe, "sub_"+f.suffix, renewal)
+	}))
+	f.t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM entitlements WHERE tenant_id = $1`, f.tenantID)
+		_, _ = f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, f.tenantID)
+	})
+}
+
+func TestDeletionRunner_PrepaidRow_NoCancelNeeded(t *testing.T) {
+	// Arrange: a prepaid Stripe house (renewal stopped), Stripe unconfigured.
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.entitlement(payments.RenewalPrepaid)
+	f.runner.Payments = fakeProviders{payments.ProviderStripe: billing.NewUnconfiguredStripe(nil)}
+
+	// Act
+	res, err := f.runner.RunOnce(context.Background())
+
+	// Assert
+	require.NoError(t, err, "run: %+v", res)
+	require.Len(t, res.Tenants, 1)
+	assert.Equal(t, outcomeErased, res.Tenants[0].Outcome)
+}
+
+func TestDeletionRunner_AutoRowUnconfigured_Defers(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.entitlement(payments.RenewalAuto)
+	f.runner.Payments = fakeProviders{payments.ProviderStripe: billing.NewUnconfiguredStripe(nil)}
+
+	res, err := f.runner.RunOnce(context.Background())
+
+	require.Error(t, err)
+	require.Len(t, res.Tenants, 1)
+	assert.Equal(t, outcomeDeferred, res.Tenants[0].Outcome)
+	assert.Contains(t, res.Tenants[0].Error, "not configured")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID))
+}
+
+func TestDeletionRunner_ConfiguredProvider_CancelsTheRowsProvider(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.entitlement(payments.RenewalPrepaid)
+
+	res, err := f.runner.RunOnce(context.Background())
+
+	require.NoError(t, err, "run: %+v", res)
+	assert.Equal(t, int32(1), f.stripe.calls.Load(), "a configured provider is asked to cancel even a prepaid row")
+	assert.True(t, res.Tenants[0].StripeCancelled)
 }

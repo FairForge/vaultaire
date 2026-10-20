@@ -42,6 +42,7 @@
         <div class="card-detail">
             <span class="badge badge-{{.StatusClass}}">{{.StatusLabel}}</span>
         </div>
+        {{if .HouseSentence}}<p class="card-detail text-muted">{{.HouseSentence}}</p>{{end}}
     </div>
     <div class="card">
         <div class="card-title">Storage Used</div>
@@ -188,6 +189,7 @@
             <p class="house-total"><strong id="house-monthly">{{$h.Quote.Monthly}}</strong>/mo
                 <span id="house-charge-wrap"{{if eq $h.Period "monthly"}} hidden{{end}}>&middot; billed yearly, <span id="house-charge">{{$h.Quote.Charge}}</span>/yr</span></p>
             <p class="house-help">Prices from the same sheet as the site. Egress is never billed. Resizing is prorated. Coupons go on the next page.</p>
+            {{if $h.Providers}}<p class="house-help">You can pay by {{range $i, $p := $h.Providers}}{{if $i}} or {{end}}{{$p}}{{end}}.</p>{{end}}
         </div>
 
         <div class="house-actions">

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/FairForge/vaultaire/internal/billing"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -60,7 +60,7 @@ func renderRevenue(t *testing.T, db *sql.DB) string {
 	return w.Body.String()
 }
 
-// MRR is the houses at billing.QuoteHouse, by floor, and their owners.
+// MRR is the houses at payments.QuoteHouse, by floor, and their owners.
 func TestRevenue_MRRFromHouses(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
@@ -73,8 +73,8 @@ func TestRevenue_MRRFromHouses(t *testing.T) {
 
 	body := renderRevenue(t, db)
 
-	a := billing.QuoteHouse(6, 1, 0, billing.PeriodAnnual)
-	b := billing.QuoteHouse(0, 2, 0, billing.PeriodMonthly)
+	a := payments.QuoteHouse(6, 1, 0, payments.PeriodAnnual)
+	b := payments.QuoteHouse(0, 2, 0, payments.PeriodMonthly)
 	assert.Contains(t, body, `<span class="mrr">`+formatCents(a.MonthlyCents+b.MonthlyCents)+`</span>`)
 	assert.Contains(t, body, `<span class="active">2</span>`)
 	assert.Contains(t, body, "downstairs (Standard) 1")

@@ -3,19 +3,19 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
-	"github.com/FairForge/vaultaire/internal/billing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
-	"github.com/stripe/stripe-go/v75"
 	"go.uber.org/zap"
 )
 
@@ -28,22 +28,32 @@ import (
 // with default off; flipped per tenant, then globally, from /admin/flags).
 const FlagQuotaCheckout = "quota_checkout"
 
-// HouseBilling is the slice of *billing.StripeService the house page uses.
+// HouseBilling is what the billing page needs from money — the slice of
+// *payments.Registry it uses (WP-PAY-2: the dashboard imports payments,
+// never a provider SDK — TestDashboardImportsNoStripe). Checkout goes
+// through the double-billing guard; resize writes the record when the
+// provider changed the house in place.
 type HouseBilling interface {
-	HouseCheckoutReady() (bool, string)
-	GetCustomerID(ctx context.Context, tenantID string) (string, error)
-	CreateCustomer(ctx context.Context, email, tenantID string) (string, error)
-	CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o billing.HouseOrder, purpose, successURL, cancelURL string) (string, error)
-	HasLiveSubscription(ctx context.Context, customerID string) (bool, error)
-	UpdateHouseSubscription(ctx context.Context, subID string, o billing.HouseOrder) (*stripe.Subscription, error)
-	HouseFromSubscription(sub *stripe.Subscription) (billing.HouseOrder, bool)
+	Status(ctx context.Context, tenantID string) (payments.Status, error)
+	Ready(ctx context.Context, tenantID, provider string) (bool, string)
+	Enabled(ctx context.Context, tenantID string) []string
+	StartCheckout(ctx context.Context, provider string, c payments.Checkout) (string, error)
+	Resize(ctx context.Context, tenantID string, o payments.Order) (payments.ResizeOutcome, error)
+	ManageURL(ctx context.Context, tenantID, returnURL string) (string, error)
 }
 
-// BillingService is what the billing page needs from Stripe: the house
-// checkout, the one product (WP-PAY-0). *billing.StripeService implements it.
+// BillingService is what the billing page needs: the house checkout, the
+// one product (WP-PAY-0). *payments.Registry implements it.
 type BillingService interface {
 	HouseBilling
 }
+
+// defaultProvider is the provider a checkout uses when the form names
+// none (the only one so far).
+const defaultProvider = payments.ProviderStripe
+
+// providerLabels are the providers as the page names them.
+var providerLabels = map[string]string{payments.ProviderStripe: "card (Stripe)", payments.ProviderBTCPay: "bitcoin (BTCPay)"}
 
 // HouseView is the billing page's house section.
 type HouseView struct {
@@ -53,26 +63,37 @@ type HouseView struct {
 
 	Std, Vault, PinHot int    // stepper starting values
 	Period             string // "annual" | "monthly"
-	HasHouse           bool   // an active house subscription → resize mode
+	HasHouse           bool   // a granted house → resize mode
 	Status             string
 	SubscriptionID     string
+	// Providers: the ways this tenant may pay now (flag on, ready).
+	Providers []string
 
 	UsedStd, UsedVault       int64
 	UsedStdFmt, UsedVaultFmt string
 	MinStd, MinVault         int // whole-TB floors the steppers cannot go below (usage)
 
-	Quote   billing.Quote
+	Quote   payments.Quote
 	Prices  landing.Prices
 	RoomURL string
 }
 
-// populateHouse fills data["House"]. With the flag off the section is
-// disabled and the page falls back to the legacy plan grid. add is the
+// populateHouse fills data["House"] and data["HouseSentence"]. With the
+// flag off the section is disabled (the sentence still shows). add is the
 // overview's "add a box" nudge: "downstairs" or "attic" pre-increments that
-// floor's stepper by one.
+// floor's stepper by one. The house comes from the entitlement record
+// (payments.Status); a house granted before migration 097 without a row
+// falls back to the tenants columns.
 func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.Service, data map[string]any, tenantID, add string) {
-	v := HouseView{Period: string(billing.PeriodAnnual), Prices: landing.Get()}
+	v := HouseView{Period: string(payments.PeriodAnnual), Prices: landing.Get()}
 	data["House"] = v
+	var st payments.Status
+	if svc != nil && db != nil {
+		var err error
+		if st, err = svc.Status(ctx, tenantID); err == nil {
+			data["HouseSentence"] = houseSentence(st)
+		}
+	}
 	if fl == nil || !fl.Enabled(FlagQuotaCheckout, tenantID) || db == nil {
 		return
 	}
@@ -80,7 +101,14 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 	if svc == nil {
 		v.NotReadyWhy = "billing not configured"
 	} else {
-		v.Ready, v.NotReadyWhy = svc.HouseCheckoutReady()
+		v.Ready, v.NotReadyWhy = svc.Ready(ctx, tenantID, defaultProvider)
+		for _, p := range svc.Enabled(ctx, tenantID) {
+			if l, ok := providerLabels[p]; ok {
+				v.Providers = append(v.Providers, l)
+			} else {
+				v.Providers = append(v.Providers, p)
+			}
+		}
 	}
 
 	h, err := loadHouse(ctx, db, tenantID)
@@ -89,13 +117,18 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 		return
 	}
 	v.HasHouse, v.Status, v.SubscriptionID = h.active, h.status, h.subID
+	order, period := h.order(), h.period
+	if st.Found {
+		v.HasHouse = st.Granted
+		order, period = st.Entitlement.Order, string(st.Entitlement.Order.Period)
+	}
 	v.RoomURL = landing.HouseIntent{Room: h.intent.Room}.RoomURL()
 	v.UsedStd, v.UsedVault = h.usedStd, h.usedVault
 	v.UsedStdFmt, v.UsedVaultFmt = formatBytes(h.usedStd), formatBytes(h.usedVault)
-	if h.active {
-		v.Std, v.Vault, v.PinHot = h.house.StdTB(), h.house.VaultTB(), h.house.PinHotTB()
-		if h.period != "" {
-			v.Period = h.period
+	if v.HasHouse {
+		v.Std, v.Vault, v.PinHot = order.Std, order.Vault, order.PinHot
+		if period != "" {
+			v.Period = period
 		}
 		v.MinStd, v.MinVault = wholeTBUp(h.usedStd), wholeTBUp(h.usedVault)
 	} else {
@@ -110,8 +143,34 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 	case "attic":
 		v.Vault++
 	}
-	v.Quote = billing.QuoteHouse(v.Std, v.Vault, v.PinHot, billing.Period(v.Period))
+	v.Quote = payments.QuoteHouse(v.Std, v.Vault, v.PinHot, payments.Period(v.Period))
 	data["House"] = v
+}
+
+// houseSentence says the entitlement the way the page does: "Paid through
+// 1 Mar 2027 via card (Stripe), renews automatically." — "" for a tenant
+// that never bought.
+func houseSentence(st payments.Status) string {
+	if !st.Found {
+		return ""
+	}
+	e := st.Entitlement
+	via := providerLabels[e.Provider]
+	if via == "" {
+		via = e.Provider
+	}
+	if !st.Granted {
+		return fmt.Sprintf("Your house ended on %s; your data is untouched.", e.PaidThrough.UTC().Format("2 Jan 2006"))
+	}
+	renew := "renews automatically"
+	if e.Renewal == payments.RenewalPrepaid {
+		renew = "renewal stopped"
+	}
+	s := fmt.Sprintf("Paid through %s via %s, %s.", e.PaidThrough.UTC().Format("2 Jan 2006"), via, renew)
+	if st.InGrace {
+		s += fmt.Sprintf(" The date has passed: the house is kept until %s while payment catches up.", st.GraceEnds.UTC().Format("2 Jan 2006"))
+	}
+	return s
 }
 
 // tenantHouse is what the billing page and the checkout handler read.
@@ -194,6 +253,11 @@ func legacyPlan(plan string) bool {
 	return true
 }
 
+// order is the house the tenants columns describe (the pre-097 fallback).
+func (h tenantHouse) order() payments.Order {
+	return payments.Order{Std: h.house.StdTB(), Vault: h.house.VaultTB(), PinHot: h.house.PinHotTB(), Period: payments.Period(h.period)}
+}
+
 // terminalSubscriptionStatus is a Stripe subscription status that no
 // longer bills: a new subscription may be opened next to it.
 func terminalSubscriptionStatus(status string) bool {
@@ -225,11 +289,14 @@ func formInt(r *http.Request, name string) int {
 }
 
 // HandleHouseCheckout is POST /dashboard/billing/house: a new house goes
-// to Stripe Checkout (one subscription, one item per line, quantity = TB);
-// an existing house is resized in place with proration and the quotas are
-// applied straight from the returned subscription (the webhook replays
-// the same, idempotent write moments later).
-func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuotas, fl *flags.Service, baseURL string, logger *zap.Logger) http.HandlerFunc {
+// to the provider's checkout (Stripe: one subscription, one item per line,
+// quantity = TB) behind the double-billing guard; an existing house is
+// resized in place by the provider that bills it and the record written at
+// once (the webhook replays the same, idempotent write moments later). A
+// provider whose flag is off answers 409 provider_disabled; a house renewed
+// by another provider, 409 other_provider_live (docs/PAYMENTS.md § 2.3,
+// § 2.5).
+func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseURL string, logger *zap.Logger) http.HandlerFunc {
 	back := func(w http.ResponseWriter, r *http.Request, category, msg string) {
 		middleware.SetFlash(w, category, msg)
 		http.Redirect(w, r, "/dashboard/billing", http.StatusSeeOther)
@@ -244,11 +311,11 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			http.NotFound(w, r)
 			return
 		}
-		order := billing.HouseOrder{
+		order := payments.Order{
 			Std: formInt(r, "std"), Vault: formInt(r, "vault"), PinHot: formInt(r, "pin_hot"),
-			Period: billing.Period(strings.TrimSpace(r.FormValue("period"))),
+			Period: payments.Period(strings.TrimSpace(r.FormValue("period"))),
 		}
-		if err := billing.ValidateHouseOrder(order); err != nil {
+		if err := payments.ValidateHouseOrder(order); err != nil {
 			back(w, r, "error", "That house can't be ordered: "+err.Error()+".")
 			return
 		}
@@ -256,10 +323,9 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			back(w, r, "error", "Checkout isn't open yet — billing is not configured. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
 			return
 		}
-		if ready, why := svc.HouseCheckoutReady(); !ready {
-			logger.Warn("house checkout refused: not ready", zap.String("why", why), zap.String("tenant", sd.TenantID))
-			back(w, r, "error", "Checkout isn't open yet. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
-			return
+		provider := strings.TrimSpace(r.FormValue("provider"))
+		if provider == "" {
+			provider = defaultProvider
 		}
 
 		h, err := loadHouse(r.Context(), db, sd.TenantID)
@@ -268,13 +334,23 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			back(w, r, "error", "Something went wrong reading your account. Please try again.")
 			return
 		}
-		quote := billing.QuoteHouse(order.Std, order.Vault, order.PinHot, order.Period)
+		st, err := svc.Status(r.Context(), sd.TenantID)
+		if err != nil {
+			logger.Error("read entitlement for checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
+			back(w, r, "error", "Something went wrong reading your account. Please try again.")
+			return
+		}
+		active, period := h.active, h.period
+		if st.Found {
+			active, period = st.Granted, string(st.Entitlement.Order.Period)
+		}
+		quote := payments.QuoteHouse(order.Std, order.Vault, order.PinHot, order.Period)
 
-		if h.active {
+		if active {
 			// Resize. The period is fixed for the life of the subscription
 			// and a floor cannot shrink below what is stored on it.
-			if string(order.Period) != h.period {
-				back(w, r, "error", fmt.Sprintf("Your house is billed %s; to switch, email %s.", periodWord(h.period), hosts.Get().SupportEmail()))
+			if string(order.Period) != period {
+				back(w, r, "error", fmt.Sprintf("Your house is billed %s; to switch, email %s.", periodWord(period), hosts.Get().SupportEmail()))
 				return
 			}
 			if order.Std < wholeTBUp(h.usedStd) {
@@ -287,16 +363,18 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 					formatBytes(h.usedVault), wholeTBUp(h.usedVault)))
 				return
 			}
-			sub, err := svc.UpdateHouseSubscription(r.Context(), h.subID, order)
+			out, err := svc.Resize(r.Context(), sd.TenantID, order)
+			if refusedForProvider(w, err) {
+				return
+			}
 			if err != nil {
 				logger.Error("resize house", zap.Error(err), zap.String("tenant", sd.TenantID))
 				back(w, r, "error", "The resize didn't go through. Nothing was changed; please try again.")
 				return
 			}
-			if got, ok := svc.HouseFromSubscription(sub); ok && quotas != nil {
-				if err := quotas.SetHouse(r.Context(), sd.TenantID, usage.HouseFromTB(got.Std, got.Vault, got.PinHot)); err != nil {
-					logger.Error("apply resized house", zap.Error(err), zap.String("tenant", sd.TenantID))
-				}
+			if out.RedirectURL != "" {
+				http.Redirect(w, r, out.RedirectURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
+				return
 			}
 			middleware.SetFlash(w, "success", fmt.Sprintf("Your house is now %s · %s/mo billed %s.",
 				houseWords(order), quote.Monthly(), periodWord(string(order.Period))))
@@ -313,53 +391,65 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, quotas billing.HouseQuota
 			return
 		}
 
-		customerID, err := svc.GetCustomerID(r.Context(), sd.TenantID)
-		if err != nil {
-			// Registered while Stripe was down: create the customer now.
-			customerID, err = svc.CreateCustomer(r.Context(), sd.Email, sd.TenantID)
-			if err != nil {
-				logger.Error("create stripe customer for house checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
-				back(w, r, "error", "We couldn't open a billing account for you. Email "+hosts.Get().SupportEmail()+" and we will sort it out.")
-				return
-			}
-		}
-		// Stripe is the source of truth for "already paying": a Checkout
-		// completed seconds ago (webhook not yet landed) or a pack bought
-		// out of band must not get a second subscription (Review R10-05).
-		live, err := svc.HasLiveSubscription(r.Context(), customerID)
-		if err != nil {
-			logger.Error("check live subscriptions before checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
-			back(w, r, "error", "We couldn't confirm your billing state with Stripe. Please try again in a minute.")
+		base := strings.TrimRight(baseURL, "/")
+		checkoutURL, err := svc.StartCheckout(r.Context(), provider, payments.Checkout{
+			TenantID: sd.TenantID, Email: sd.Email, Order: order, Purpose: payments.PurposeNew,
+			ReturnURL: base + "/dashboard/billing?upgraded=1", CancelURL: base + "/dashboard/billing",
+		})
+		if refusedForProvider(w, err) {
 			return
 		}
-		if live {
+		switch {
+		case errors.Is(err, payments.ErrProviderUnavailable):
+			logger.Warn("house checkout refused: not ready", zap.Error(err), zap.String("tenant", sd.TenantID))
+			back(w, r, "error", "Checkout isn't open yet. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
+			return
+		case errors.Is(err, payments.ErrLiveSubscription):
+			// The provider is the source of truth for "already paying": a
+			// checkout completed seconds ago (webhook not yet landed) must
+			// not get a second subscription (Review R10-05).
 			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your house below. If it does not appear, email "+hosts.Get().SupportEmail()+".")
 			return
-		}
-		base := strings.TrimRight(baseURL, "/")
-		checkoutURL, err := svc.CreateHouseCheckout(r.Context(), customerID, sd.TenantID, order, "new",
-			base+"/dashboard/billing?upgraded=1", base+"/dashboard/billing")
-		if err != nil {
-			logger.Error("create house checkout", zap.Error(err), zap.String("tenant", sd.TenantID))
-			back(w, r, "error", "Checkout didn't start. Please try again.")
+		case err != nil:
+			logger.Error("start house checkout", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("provider", provider))
+			back(w, r, "error", "Checkout didn't start. Nothing was charged; please try again in a minute.")
 			return
 		}
-		logger.Info("house checkout started", zap.String("tenant", sd.TenantID),
+		logger.Info("house checkout started", zap.String("tenant", sd.TenantID), zap.String("provider", provider),
 			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot),
 			zap.String("period", string(order.Period)), zap.Int64("monthly_cents", quote.MonthlyCents))
-		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from Stripe API
+		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
 	}
 }
 
+// refusedForProvider answers the two provider refusals as 409 with the
+// page's message (docs/PAYMENTS.md § 2.3, § 2.5) and reports whether it did.
+func refusedForProvider(w http.ResponseWriter, err error) bool {
+	var code, msg string
+	switch {
+	case errors.Is(err, payments.ErrProviderDisabled):
+		code, msg = "provider_disabled", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
+	case errors.Is(err, payments.ErrOtherProviderLive):
+		code, msg = "other_provider_live", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
+	default:
+		return false
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Error-Code", code)
+	w.WriteHeader(http.StatusConflict)
+	_, _ = fmt.Fprintf(w, "%s: %s\n", code, msg)
+	return true
+}
+
 func periodWord(p string) string {
-	if p == string(billing.PeriodMonthly) {
+	if p == string(payments.PeriodMonthly) {
 		return "monthly"
 	}
 	return "yearly"
 }
 
 // houseWords says a house the way the site does: "5 TB downstairs, 2 TB in the attic".
-func houseWords(o billing.HouseOrder) string {
+func houseWords(o payments.Order) string {
 	var parts []string
 	if o.Std > 0 {
 		parts = append(parts, fmt.Sprintf("%d TB downstairs", o.Std))
