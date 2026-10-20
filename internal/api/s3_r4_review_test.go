@@ -110,6 +110,8 @@ func TestObjectRetention_DateMustBeFutureAndKeyMustExist(t *testing.T) {
 
 func TestObjectLockConfig_CannotBeDisabledOnceEnabled(t *testing.T) {
 	f := setupLockFixture(t)
+	_, err := f.db.Exec(`UPDATE buckets SET versioning_status = 'Enabled' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
+	require.NoError(t, err) // the lock needs versioning Enabled (WP-R4-2 A.2)
 	put := func(body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("PUT", "/"+f.bucket+"?object-lock", strings.NewReader(body))
 		req = req.WithContext(s3Ctx(req.Context(), f.tenant))
