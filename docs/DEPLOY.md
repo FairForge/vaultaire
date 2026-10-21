@@ -403,12 +403,30 @@ Sync, every file private (`umask 077`). A failed stage is a failed run
 fails no longer holds the dump's upload back (that is how the off-box copy was
 missing from 2026-10-05 to -07: a root-only file in `configs/`).
 
+**A second off-box copy goes to Blomp** (since 2026-10-21): right after the Sync
+upload, the dump (and later the rules tar) is uploaded through an `rclone`
+**crypt** remote — `blompcrypt`, over the swift remote `blompbk` — into
+`_ops/backups/YYYY/MM/` of the Blomp container, size-verified. Blomp's storage
+URL is plain HTTP, so file contents AND names are encrypted on the box first.
+The Blomp login is the driver's own `BLOMP_USER` / `BLOMP_PASSWORD`
+(/`BLOMP_CONTAINER`) read from `configs/.env`; the crypt passwords are in
+`/opt/vaultaire/configs/blomp-backup.env` (user1 0600, rclone-obscured) and in
+plain form ONLY in the owner's Keychain (`vaultaire-blomp-backup-crypt`,
+`vaultaire-blomp-backup-salt`) — **without them the Blomp copies cannot be
+read**. The leg is optional and never fails the run: no `blomp-backup.env` =
+skipped (one log line), any failure = one `OFFBOX2 FAILED - …` line; 30 days
+kept by the name's date like Sync (Blomp's listing lags minutes, so a file it
+does not list yet goes on a later run).
+
 - **Alerting:** the script writes `vaultaire_backup_last_success_timestamp_seconds`
   (dump passed its asserts) and `vaultaire_backup_offbox_last_success_timestamp_seconds`
   (dump on Sync, size verified) into node_exporter's textfile directory
   `/var/lib/prometheus/node-exporter/` (`root:user1 0775`); rules
   `deploy/monitoring/vaultaire-backup.yml` page `BackupStale` /
   `BackupOffboxStale` after 26 h without one, or when the series is absent.
+  The Blomp leg writes `vaultaire_backup_offbox2_last_success_timestamp_seconds`;
+  `BackupSecondOffboxStale` WARNS (Sync still holds a copy) after 26 h or when
+  absent. Its textfile symlink is installed like the others.
 - **`DB_PASSWORD`** is read from `configs/.env` as everything after the first
   `=` with one level of surrounding quotes removed (what systemd's
   `EnvironmentFile` does) — a password containing `=` or wrapped in quotes
@@ -420,6 +438,13 @@ missing from 2026-10-05 to -07: a root-only file in `configs/`).
   rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
   → `zcat <dump> | psql` (plain SQL, psql ≥ 16.10 for the `\restrict` header).
   Verified 2026-10-07: the downloaded dump is byte-identical to the local one.
+- **Restore from Blomp** (the box gone too): on any machine with rclone, export
+  `RCLONE_CONFIG_BLOMPBK_TYPE=swift`, `_AUTH=https://authenticate.blomp.com/v2.0`,
+  `_AUTH_VERSION=2`, `_TENANT=storage`, `_USER`/`_KEY` = the Blomp login (Keychain
+  `blomp`), `RCLONE_CONFIG_BLOMPCRYPT_TYPE=crypt`,
+  `_REMOTE=blompbk:<container>/_ops/backups`, `_PASSWORD=$(rclone obscure <Keychain
+  vaultaire-blomp-backup-crypt>)`, `_PASSWORD2=$(rclone obscure <…-salt>)`; then
+  `rclone lsf -R blompcrypt:` → `rclone copyto blompcrypt:<y>/<m>/<file> .`.
 - **History:** the run failed on 2026-10-05, -06 and -07 (`config tar failed`,
   then a bridge 500) — two root-only `.env` copies from the 2026-10-04 primary
   swap were unreadable to user1 and the dump's upload sat behind the tar; the
