@@ -149,6 +149,10 @@ type AccountDeletionRunner struct {
 	// sweep and before the pass after the row erase.
 	beforeSweep      func()
 	beforeFinalSweep func()
+
+	// settles are the walks of lagging backends a run owes (erasure_settle.go),
+	// loaded from job_runs.result at the start of RunOnce.
+	settles erasureSettleState
 }
 
 // TenantErasure is one tenant's outcome in a run.
@@ -178,9 +182,14 @@ type TenantErasure struct {
 	// SweptBackends are the registered backends the sweep ran on;
 	// UnsweptBackends are named by the tenant's rows and have no driver —
 	// bytes there, if any, were not reached.
-	SweptBackends   []string         `json:"swept_backends,omitempty"`
-	UnsweptBackends []string         `json:"unswept_backends,omitempty"`
-	Rows            map[string]int64 `json:"rows,omitempty"`
+	SweptBackends   []string `json:"swept_backends,omitempty"`
+	UnsweptBackends []string `json:"unswept_backends,omitempty"`
+	// Settling are the backends whose listing lags (erasure_settle.go): the
+	// rows are erased, and a walk started at SettleAfter or later that
+	// finds nothing there finishes the erasure (outcome "settling").
+	Settling    []string         `json:"settling,omitempty"`
+	SettleAfter *time.Time       `json:"settle_after,omitempty"`
+	Rows        map[string]int64 `json:"rows,omitempty"`
 	// KeysShredded counts the tenant key versions deleted with the rows
 	// (WP-R8-1): from then on every blob sealed under them — a copy the
 	// sweep missed, a backup of a backend — is unreadable.
@@ -194,8 +203,18 @@ type AccountDeletionResult struct {
 	Erased    int             `json:"erased"`
 	Deferred  int             `json:"deferred"`
 	Cancelled int             `json:"cancelled"`
-	Duration  string          `json:"duration"`
-	Errors    []string        `json:"errors,omitempty"`
+	// Settling counts tenants whose rows went in this run and whose lagging
+	// backends still owe a walk (erasure_settle.go).
+	Settling int      `json:"settling,omitempty"`
+	Duration string   `json:"duration"`
+	Errors   []string `json:"errors,omitempty"`
+	// Notes are what did not fail the run: erasures waiting for a listing
+	// to settle, a settle walk that found something.
+	Notes []string `json:"notes,omitempty"`
+
+	// owed is the settle state the run ends with (nil when it could not be
+	// read): the job's job_runs.result.
+	owed *erasureSettleState
 }
 
 // NewAccountDeletionRunner builds the runner; nil without a DB or engine.
@@ -209,7 +228,7 @@ func NewAccountDeletionRunner(db *sql.DB, logger *zap.Logger, eng engine.Engine,
 	}
 	// Start every result at 0: AccountDeletionDeferred reads an increase, and
 	// a series that first appears at 1 after a restart is not one.
-	for _, r := range []string{outcomeErased, outcomeDeferred, outcomeCancelled} {
+	for _, r := range []string{outcomeErased, outcomeDeferred, outcomeCancelled, outcomeSettling} {
 		accountDeletionTenants.WithLabelValues(r)
 	}
 	// The sweep's series too, for every backend registered at this point
@@ -244,18 +263,27 @@ func NewAccountDeletionRunner(db *sql.DB, logger *zap.Logger, eng engine.Engine,
 // cancel, a backend refused a delete, the per-tenant deadline) or the due
 // list could not be read. last_success_at then stays put and every hourly
 // check retries — that retry is the point: the erasure is owed on its date,
-// and each stage is idempotent. A cancelled tenant does not fail the run.
+// and each stage is idempotent. A cancelled tenant does not fail the run,
+// nor does one waiting for a lagging listing to settle: the job runs again
+// at the first hourly check after its walk is due (Again, erasure_settle.go).
+// The owed walks are the job's job_runs.result.
 func (r *AccountDeletionRunner) spec() jobSpec {
 	return jobSpec{
 		Name: r.JobName, Hour: 4, Minute: 30,
 		BootDelay: 2 * time.Minute, MaxRunTime: r.MaxRunTime,
+		Again: r.settleDue,
 		Run: func(ctx context.Context) (jobReport, error) {
 			res, err := r.RunOnce(ctx)
 			if len(res.Tenants) > 0 || err != nil {
 				r.logger.Info("account deletion run", zap.Int("erased", res.Erased), zap.Int("deferred", res.Deferred),
-					zap.Int("cancelled", res.Cancelled), zap.String("duration", res.Duration), zap.Strings("errors", res.Errors))
+					zap.Int("cancelled", res.Cancelled), zap.Int("settling", res.Settling),
+					zap.String("duration", res.Duration), zap.Strings("errors", res.Errors))
 			}
-			return jobReport{Rows: int64(res.Erased)}, err
+			rep := jobReport{Rows: int64(res.Erased), Note: strings.Join(res.Notes, "; ")}
+			if res.owed != nil {
+				rep.Result = *res.owed
+			}
+			return rep, err
 		},
 	}
 }
@@ -271,8 +299,19 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 	}
 	start := r.now()
 
+	// The walks earlier erasures owe a lagging backend (erasure_settle.go),
+	// first: they are the oldest debts.
+	st, err := r.loadSettles(ctx)
+	if err != nil {
+		return res, fmt.Errorf("account deletion: %w", err)
+	}
+	r.settles = st
+	r.settleErasures(ctx, &res)
+
 	dues, err := r.account.ListDue(ctx, start, accountDeletionDueLimit)
 	if err != nil {
+		owed := r.settles
+		res.owed = &owed
 		return res, fmt.Errorf("account deletion: %w", err)
 	}
 	for _, d := range dues {
@@ -291,12 +330,18 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 			res.Erased++
 		case outcomeCancelled:
 			res.Cancelled++
+		case outcomeSettling:
+			res.Settling++
+			res.Notes = append(res.Notes, fmt.Sprintf("tenant %s: rows erased, %s's listing settling until %s",
+				d.TenantID, strings.Join(te.Settling, ", "), te.SettleAfter.UTC().Format(time.RFC3339)))
 		default:
 			res.Deferred++
 			res.Errors = append(res.Errors, fmt.Sprintf("tenant %s deferred: %s", d.TenantID, te.Error))
 		}
 	}
 	res.Duration = r.now().Sub(start).String()
+	owed := r.settles
+	res.owed = &owed
 
 	if len(res.Errors) > 0 {
 		return res, errors.New(strings.Join(res.Errors, "; "))
@@ -319,6 +364,13 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		case outcomeErased:
 			audit.Record(ctx, r.db, audit.Entry{TenantID: d.TenantID, EventType: "account", Action: "account.erased",
 				Severity: "warning", Metadata: r.auditMeta(ctx, te, d)})
+		case outcomeSettling:
+			// The rows are gone; the account.erased row is written once the
+			// lagging backends' walks come back empty (erasure_settle.go).
+			meta := r.auditMeta(ctx, te, d)
+			meta["settling"], meta["settle_after"] = te.Settling, te.SettleAfter
+			audit.Record(ctx, r.db, audit.Entry{TenantID: d.TenantID, EventType: "account", Action: "account.erasure_settling",
+				Severity: "warning", Metadata: meta})
 		case outcomeCancelled:
 			audit.Record(ctx, r.db, audit.Entry{UserID: d.UserID, TenantID: d.TenantID, EventType: "account", Action: "account.erasure_cancelled",
 				Severity: "warning", Metadata: r.auditMeta(ctx, te, d)})
@@ -402,14 +454,26 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		}
 	}
 
+	// A backend whose listing lags cannot prove itself empty today: the walk
+	// it owes is recorded BEFORE the rows go, so a run stopped right after
+	// the erase still owes it (erasure_settle.go).
+	lagging := r.laggingBackends(plan.backends)
+	if len(lagging) > 0 {
+		if err := r.recordSettles(ctx, d, lagging); err != nil {
+			return r.defer_(te, log, "record the settle walk", err)
+		}
+	}
+
 	// c. Rows (one transaction; refuses when a cancel landed meanwhile).
 	rows, err := r.account.EraseRows(ctx, d.UserID, d.TenantID, d.Email, r.now())
 	if errors.Is(err, account.ErrNotPending) {
+		r.forgetSettles(ctx, d.TenantID, log)
 		te.Outcome = outcomeCancelled
 		log.Warn("account deletion: cancelled before the row erase; objects already deleted are gone")
 		return te
 	}
 	if err != nil {
+		r.forgetSettles(ctx, d.TenantID, log)
 		return r.defer_(te, log, "erase rows", err)
 	}
 	te.Rows = rows.Rows
@@ -450,9 +514,29 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		r.Auth.Evict(d.UserID, d.TenantID)
 	}
 
-	// e. Report.
+	// From here no write for the tenant can land: the lagging backends'
+	// walks count from now.
 	te.Outcome = outcomeErased
-	log.Info("account erased",
+	if len(lagging) > 0 {
+		due, err := r.startSettles(ctx, d.TenantID, r.now())
+		if err != nil {
+			// The state is still the run's result at its end.
+			log.Error("account deletion: could not record when writes stopped — the run's result carries it", zap.Error(err))
+		}
+		te.Outcome, te.SettleAfter = outcomeSettling, &due
+		for _, lb := range lagging {
+			te.Settling = append(te.Settling, lb.name)
+		}
+		log.Info("account rows erased — waiting for a lagging listing to settle before the erasure is declared",
+			zap.Strings("settling", te.Settling), zap.Time("settle_after", due))
+	}
+
+	// e. Report.
+	msg := "account erased"
+	if te.Outcome == outcomeSettling {
+		msg = "account rows erased, lagging backends settling"
+	}
+	log.Info(msg,
 		zap.Bool("stripe_cancelled", te.StripeCancelled),
 		zap.Int("objects_deleted", te.ObjectsDeleted), zap.Int("chunked_released", te.ChunkedReleased),
 		zap.Int("locked_erased", te.LockedErased), zap.Int("multipart_aborted", te.MultipartAborted),

@@ -53,6 +53,9 @@ type fakeSwift struct {
 	putDelay    time.Duration
 	inflight    int
 	maxInflight int
+	// lagging: names the container listing does not show yet although they
+	// exist (Blomp's listing hid ~30 objects for 90+ minutes, 2026-10-21).
+	lagging map[string]bool
 }
 
 type fakeSwiftObject struct {
@@ -135,6 +138,22 @@ func (f *fakeSwift) overQuota(name string, n int64) bool {
 		}
 	}
 	return used+n > f.quotaBytes
+}
+
+// lagListing makes the container listing leave name out (true) or show it.
+func (f *fakeSwift) lagListing(name string, lags bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lagging == nil {
+		f.lagging = map[string]bool{}
+	}
+	f.lagging[name] = lags
+}
+
+func (f *fakeSwift) listingLags(name string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lagging[name]
 }
 
 func (f *fakeSwift) object(name string) (fakeSwiftObject, bool) {
@@ -261,7 +280,7 @@ func (f *fakeSwift) serveContainer(w http.ResponseWriter, r *http.Request) {
 		}
 		var out []map[string]any
 		for _, n := range f.names() {
-			if !strings.HasPrefix(n, prefix) || n <= marker {
+			if !strings.HasPrefix(n, prefix) || n <= marker || f.listingLags(n) {
 				continue
 			}
 			if len(out) == limit {

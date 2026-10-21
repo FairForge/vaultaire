@@ -560,6 +560,53 @@ func countWalk(t *testing.T, d *SwiftDriver, tenant, container string) int {
 	return n
 }
 
+// RB-1: a container listing lags its writes (Blomp, 2026-10-21: ~30 objects
+// unlisted for 90+ minutes), so a walk that finds nothing is no proof. The
+// driver says how long to wait (engine.ListingLagger) before it is.
+func TestSwift_AWalkMissesWhatTheListingHasNotShownYet(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "seen", bytes.NewReader([]byte("a"))))
+	require.NoError(t, d.Put(ctx, "b1", "lagged", bytes.NewReader([]byte("b"))))
+	f.lagListing("t-t1/b1/lagged", true)
+
+	assert.Equal(t, 1, countWalk(t, d, "t1", "b1"), "the walk sees only what the listing shows")
+	ok, err := d.Exists(ctx, "b1", "lagged")
+	require.NoError(t, err)
+	assert.True(t, ok, "yet the object is there")
+
+	var lagger engine.ListingLagger = d
+	assert.Equal(t, 3*time.Hour, lagger.ListingLag(), "the default wait before an empty walk proves anything")
+
+	f.lagListing("t-t1/b1/lagged", false)
+	assert.Equal(t, 2, countWalk(t, d, "t1", "b1"))
+}
+
+func TestBlompConfigFromEnv_ListingSettle(t *testing.T) {
+	env := func(v string) func(string) string {
+		kv := map[string]string{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_LISTING_SETTLE": v}
+		return func(k string) string { return kv[k] }
+	}
+	lag := func(v string) time.Duration {
+		cfg, ok, err := BlompConfigFromEnv(env(v))
+		require.NoError(t, err, v)
+		require.True(t, ok)
+		d, err := NewSwiftDriver("blomp", cfg, zap.NewNop())
+		require.NoError(t, err)
+		return d.ListingLag()
+	}
+	assert.Equal(t, 3*time.Hour, lag(""))
+	assert.Equal(t, 90*time.Minute, lag("90m"))
+	assert.Equal(t, time.Duration(0), lag("off"), "off: the listing is trusted (a lab)")
+	for _, bad := range []string{"30s", "49h", "soon", "-1h"} {
+		_, ok, err := BlompConfigFromEnv(env(bad))
+		assert.Error(t, err, bad)
+		assert.False(t, ok)
+	}
+}
+
 // The pieces of a large object go up concurrently, at most PutConcurrency
 // at a time, and land in order in the manifest.
 func TestSwift_LargeObjectPiecesGoUpInParallel(t *testing.T) {

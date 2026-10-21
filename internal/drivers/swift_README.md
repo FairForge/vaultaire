@@ -104,10 +104,20 @@ objects written in that minute were still there 90 minutes later — the
 listing had not named them yet. `WalkTenant` (the erasure sweep) and any
 cleanup that starts from a listing can therefore miss objects written in the
 last minute(s); the deletion runner's second pass narrows it, it does not
-close it. Before customer data goes on `blomp`, the sweep needs a re-walk
-after a delay on this backend (a follow-up), or the rows must name every
-blob (they do for whole objects: the runner deletes each recorded object by
-its address, not by listing).
+close it. (Whole objects with a row are deleted by their address, never
+from a listing.)
+
+**Closed for the erasure (RB-1, 2026-10-21):** the driver declares the lag
+(`engine.ListingLagger`, `ListingLag()` = `BLOMP_LISTING_SETTLE`, 3 h).
+On such a backend the account-deletion runner erases the rows as before but
+records `account.erasure_settling`, not `account.erased`: the tenant is
+declared erased only after a walk that STARTED at least the lag after the
+end of the row erase (keys gone, sessions revoked, auth cache evicted — the
+moment no write for the tenant can land) and found nothing. Every walk
+deletes what it finds; one that finds something is walked again an hour
+later; one that cannot run defers the tenant (the run fails, retried
+hourly). The owed walks live in the `account_deletion` job's
+`job_runs.result` (`settling`). See `internal/api/erasure_settle.go`.
 
 ## Capacity — the vendor view
 
@@ -164,6 +174,7 @@ before any customer data goes there.
 | `BLOMP_PUT_CONCURRENCY` | `4` | 1–16 pieces of one object in flight |
 | `BLOMP_PUT_BUDGET` | `1GiB` | bytes of pieces held by every upload of the process; at least one segment |
 | `BLOMP_ALLOW_UNSEALED` | off | see above |
+| `BLOMP_LISTING_SETTLE` | `3h` | how long the listing may lag a write (1m–48h, or `off` — a lab only): the account erasure's wait before an empty walk proves the tenant gone |
 
 ## Live tests
 
