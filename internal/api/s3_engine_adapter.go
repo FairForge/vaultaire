@@ -909,7 +909,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		zap.String("engine.artifact", artifact),
 		zap.Int64("bytes", written))
 
-	emitEvent(r.Context(), a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
+	emitEventAfterResponse(r.Context(), a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": object, "size": written,
 	})
 }
@@ -1898,7 +1898,7 @@ func (a *S3ToEngine) handleChunkedGet(
 		zap.Int("chunks", len(plan)),
 		zap.Int64("bytes", written))
 
-	emitEvent(ctx, a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
+	emitEventAfterResponse(ctx, a.db, a.logger, "object.downloaded", t.ID, map[string]interface{}{
 		"bucket": bucket, "key": artifact, "size": written, "chunked": true,
 	})
 

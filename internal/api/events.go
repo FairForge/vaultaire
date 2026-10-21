@@ -76,6 +76,22 @@ func emitEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, t
 	submitEventDelivery(ctx, db, logger, ev)
 }
 
+// eventAfterResponseTimeout bounds an event recorded after the response body
+// was streamed (emitEventAfterResponse).
+const eventAfterResponseTimeout = 5 * time.Second
+
+// emitEventAfterResponse is emitEvent for an event recorded once the response
+// body is out: the client may have gone on its last byte (aws-cli closes the
+// connection at once), which cancels the request context — the insert then
+// failed with "context canceled" and the event and its webhooks were lost.
+// It runs on the request's values without its cancellation, bounded by
+// eventAfterResponseTimeout.
+func emitEventAfterResponse(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), eventAfterResponseTimeout)
+	defer cancel()
+	emitEvent(ctx, db, logger, eventType, tenantID, data)
+}
+
 // submitEventDelivery queues one recorded event for the tenant's matching
 // webhooks; nothing when there are none.
 func submitEventDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, ev recordedEvent) {
