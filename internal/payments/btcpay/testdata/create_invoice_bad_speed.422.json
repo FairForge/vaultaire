@@ -1,0 +1,1 @@
+[{"path":"request","message":"The request field is required."},{"path":"checkout.speedPolicy","message":"Error converting value \"FooSpeed\" to type 'System.Nullable`1[BTCPayServer.Client.Models.SpeedPolicy]'. Path 'checkout.speedPolicy', line 1, position 68."}]

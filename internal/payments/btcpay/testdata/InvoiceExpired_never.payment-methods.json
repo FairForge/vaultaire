@@ -1,0 +1,25 @@
+[
+ {
+  "activated": true,
+  "destination": "bcrt1q8rkqxwvmd5m662nxsd03npzdgwmlut3ct57yet",
+  "paymentLink": "bitcoin:bcrt1q8rkqxwvmd5m662nxsd03npzdgwmlut3ct57yet?amount=0.00011807",
+  "rate": "84699",
+  "paymentMethodPaid": "0",
+  "totalPaid": "0",
+  "due": "0.00011807",
+  "amount": "0.00011807",
+  "paymentMethodFee": "0",
+  "payments": [],
+  "paymentMethodId": "BTC-CHAIN",
+  "additionalData": {
+   "feeMode": "MultiplePaymentsOnly",
+   "paymentMethodFeeRate": 100.0,
+   "payjoinEnabled": false,
+   "recommendedFeeRate": 100.0,
+   "keyPath": "0/15",
+   "keyIndex": 15,
+   "accountDerivation": null
+  },
+  "currency": "BTC"
+ }
+]

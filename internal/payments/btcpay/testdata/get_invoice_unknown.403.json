@@ -1,0 +1,1 @@
+{"missingPermission":"btcpay.store.canviewinvoices","code":"missing-permission","message":"Insufficient API Permissions. Please use an API key with permission \"btcpay.store.canviewinvoices\". You can create an API key in your account's settings / Api Keys."}

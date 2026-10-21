@@ -127,6 +127,8 @@ var (
 		Suggestion: "This bucket encrypts objects at rest and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseCleartextTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket stores on a backend reached without TLS, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
+	refuseSealedTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
+		Suggestion: "This bucket stores on a third-party network, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseNoMasterKeyRequested = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "The request asks for server-side encryption (x-amz-server-side-encryption: AES256) and the server's encryption key is not available right now. Nothing was stored; retry later."}
 )
@@ -197,18 +199,24 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		return writePlacement{Refusal: refuseNoMasterKeyRequested}
 	}
 
-	// A tier on a cleartext transport (BLOMP: Blomp's storage URL is plain
-	// HTTP) takes only sealed bytes — SSE-S3 whatever the bucket says, or
-	// the customer's own key; with no master key the write is refused.
-	// BLOMP_ALLOW_UNSEALED lifts it (testing; the bucket's own rules stay).
-	cleartextTier := req.Class == "BLOMP" && !req.SSEC && !a.allowUnsealedCleartext
-	if cleartextTier && a.sseService == nil && req.Size > 0 {
-		a.logger.Error("write onto a cleartext-transport tier refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+	// A sealed-only tier takes only sealed bytes — SSE-S3 whatever the
+	// bucket says, or the customer's own key; with no master key the write
+	// is refused. BLOMP: Blomp's storage URL is plain HTTP. SIA: s3d's app
+	// key and the Sia hosts must read nothing, and an account erasure is a
+	// crypto-shred at once although s3d unpins deleted data only hourly.
+	// BLOMP_ALLOW_UNSEALED / SIA_ALLOW_UNSEALED lift it per tier (the
+	// bucket's own rules stay).
+	sealedTier := !req.SSEC && sealedOnlyClass(req.Class, a.allowUnsealedCleartext, a.allowUnsealedSia)
+	if sealedTier && a.sseService == nil && req.Size > 0 {
+		a.logger.Error("write onto a sealed-only tier refused: ENCRYPTION_MASTER_KEY is not configured on this process",
 			zap.String("bucket", req.Bucket), zap.String("class", req.Class))
+		if req.Class == "SIA" {
+			return writePlacement{Refusal: refuseSealedTierNoKey}
+		}
 		return writePlacement{Refusal: refuseCleartextTierNoKey}
 	}
 
-	encryptionRequired := (req.SSERequested || bucketSSE || cleartextTier) && !req.SSEC
+	encryptionRequired := (req.SSERequested || bucketSSE || sealedTier) && !req.SSEC
 	if a.sseService != nil && encryptionRequired && !chunkEncrypt && req.Size > 0 {
 		return writePlacement{Kind: placeWholeSealed}
 	}
@@ -216,4 +224,17 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		return writePlacement{Kind: placeChunked, ChunkEncrypted: chunkEncrypt}
 	}
 	return writePlacement{Kind: placeWhole}
+}
+
+// sealedOnlyClass reports whether a write of class must be sealed (SSE-S3
+// or the customer's key): BLOMP unless BLOMP_ALLOW_UNSEALED, SIA unless
+// SIA_ALLOW_UNSEALED. Placement and CopyObject share it.
+func sealedOnlyClass(class string, allowUnsealedBlomp, allowUnsealedSia bool) bool {
+	switch class {
+	case "BLOMP":
+		return !allowUnsealedBlomp
+	case "SIA":
+		return !allowUnsealedSia
+	}
+	return false
 }

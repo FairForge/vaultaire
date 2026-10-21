@@ -301,9 +301,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	// floor it is billed on (header, then the destination bucket's tier).
 	destClass := resolvePutStorageClass(r.Context(), s.db, s.engine, tierPlacementGate(s.flags), t.ID, destBucket,
 		r.Header.Get("x-amz-storage-class"))
-	if destClass == "BLOMP" && destSSECKey == nil && !s.allowUnsealedCleartext {
-		// Blomp's storage URL is plain HTTP: the copy is sealed (SSE-S3)
-		// whatever the bucket says, or refused without a master key below.
+	if destSSECKey == nil && sealedOnlyClass(destClass, s.allowUnsealedCleartext, s.allowUnsealedSia) {
+		// A sealed-only tier (BLOMP: plain HTTP; SIA: a third-party network):
+		// the copy is sealed (SSE-S3) whatever the bucket says, or refused
+		// without a master key below.
 		destSSE = true
 	}
 	// A chunked source is copied as a manifest only where a PUT of its
