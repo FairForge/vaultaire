@@ -51,6 +51,7 @@ import (
 //	vault_parity         2 m    +45 s   (parity shards of vault-floor objects, WP-VAULT-1; only with a leg)
 //	pack_gc              1 h    +7 m    (the pack store, internal/packstore; only with the sync backend)
 //	stripe_gc            1 h    +9 m    (orphan pieces of striped objects, drivers/webdav_stripe.go; only with the sync backend)
+//	swift_segment_gc     1 h    +11 m   (orphan pieces of Blomp's large objects, drivers/swift_segment_gc.go; only with the blomp backend)
 //	webhook_retry        30 s   +25 s   (due webhook_outbox rows back to the delivery pool, WP-R11-3)
 //
 // The three cleanups used to wait a full hour after every start before
@@ -165,6 +166,9 @@ func (s *Server) registerJobs() {
 		s.jobs.Register(s.packGC.spec())
 	}
 	if g := newStripeGC(s.engine, logger); g != nil {
+		s.jobs.Register(g.spec())
+	}
+	if g := newSwiftSegmentGC(s.engine, logger); g != nil {
 		s.jobs.Register(g.spec())
 	}
 	// The logging_enabled gate is loaded here, before the first request can

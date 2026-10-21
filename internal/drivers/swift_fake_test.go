@@ -68,6 +68,7 @@ type fakeSwift struct {
 
 type fakeSwiftObject struct {
 	data        []byte
+	modified    time.Time
 	contentType string
 	manifest    []fakeSwiftSegment // non-nil = a static large object
 }
@@ -179,6 +180,25 @@ func (f *fakeSwift) listingLags(name string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.lagging[name]
+}
+
+// age moves the modified time of every object under prefix back by d.
+func (f *fakeSwift) age(prefix string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for n, o := range f.objects {
+		if strings.HasPrefix(n, prefix) {
+			o.modified = o.modified.Add(-d)
+			f.objects[n] = o
+		}
+	}
+}
+
+// put stores an object directly (a crashed upload's leftovers).
+func (f *fakeSwift) put(name string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[name] = fakeSwiftObject{data: data, modified: time.Now()}
 }
 
 func (f *fakeSwift) object(name string) (fakeSwiftObject, bool) {
@@ -316,16 +336,30 @@ func (f *fakeSwift) serveContainer(w http.ResponseWriter, r *http.Request) {
 		if l := q.Get("limit"); l != "" {
 			limit, _ = strconv.Atoi(l)
 		}
+		delim := q.Get("delimiter")
 		var out []map[string]any
 		for _, n := range f.names() {
 			if !strings.HasPrefix(n, prefix) || n <= marker || f.listingLags(n) {
 				continue
 			}
+			if delim != "" && strings.HasSuffix(marker, delim) && strings.HasPrefix(n, marker) {
+				continue // inside the subdir the last page ended on
+			}
 			if len(out) == limit {
 				break
 			}
+			if delim != "" {
+				if i := strings.Index(n[len(prefix):], delim); i >= 0 {
+					sub := n[:len(prefix)+i+len(delim)]
+					if len(out) == 0 || out[len(out)-1]["subdir"] != sub {
+						out = append(out, map[string]any{"subdir": sub})
+					}
+					continue
+				}
+			}
 			o, _ := f.object(n)
-			out = append(out, map[string]any{"name": n, "bytes": len(o.data), "hash": md5hex(o.data)})
+			out = append(out, map[string]any{"name": n, "bytes": len(o.data), "hash": md5hex(o.data),
+				"last_modified": o.modified.UTC().Format("2006-01-02T15:04:05.000000")})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
@@ -346,7 +380,7 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 	f.mu.Unlock()
 	switch r.Method {
 	case http.MethodPut:
-		if strings.Contains(name, "/_segments/") {
+		if strings.Contains(name, "/_segments/") && !strings.HasSuffix(name, "/manifest") { // a piece, not its generation's marker
 			f.mu.Lock()
 			f.inflight++
 			f.maxInflight = max(f.maxInflight, f.inflight)
@@ -387,7 +421,7 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 				all = append(all, seg.data...)
 			}
 			f.mu.Lock()
-			f.objects[name] = fakeSwiftObject{data: all, contentType: r.Header.Get("Content-Type"), manifest: segs}
+			f.objects[name] = fakeSwiftObject{data: all, modified: time.Now(), contentType: r.Header.Get("Content-Type"), manifest: segs}
 			f.mu.Unlock()
 			w.Header().Set("Etag", `"`+md5hex(all)+`"`)
 			w.WriteHeader(http.StatusCreated)
@@ -398,7 +432,7 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 			return
 		}
 		f.mu.Lock()
-		f.objects[name] = fakeSwiftObject{data: body, contentType: r.Header.Get("Content-Type")}
+		f.objects[name] = fakeSwiftObject{data: body, modified: time.Now(), contentType: r.Header.Get("Content-Type")}
 		f.mu.Unlock()
 		w.Header().Set("Etag", md5hex(body))
 		w.WriteHeader(http.StatusCreated)
@@ -421,6 +455,7 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 				out = append(out, entry{Name: p, Hash: s.Etag, Bytes: s.SizeBytes})
 			}
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Static-Large-Object", "True")
 			_ = json.NewEncoder(w).Encode(out)
 			return
 		}

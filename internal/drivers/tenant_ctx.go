@@ -41,7 +41,8 @@ func Collectors() []prometheus.Collector {
 		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads, webdavDeleteElsewhere, webdavFolderFilesMax, webdavFolderFull,
 		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans, driverHedges, driverHedgesWon, driverDNSRefreshes, lyveBucketLockEnabled, permafrostFleetMismatch,
 		swiftRequests, swiftRetries, swiftAuths, siaReadResumes, siaReadBudgetRate, siaReadBudgetWait,
-		siaWriteBudgetRate, siaWriteBudgetWait}
+		siaWriteBudgetRate, siaWriteBudgetWait,
+		swiftSegmentGCGenerations, swiftSegmentGCDeleted}
 }
 
 // InitTenantlessSeries creates the refused-call series at 0 for a backend, so
