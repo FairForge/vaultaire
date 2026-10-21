@@ -102,6 +102,33 @@ after a delay on this backend (a follow-up), or the rows must name every
 blob (they do for whole objects: the runner deletes each recorded object by
 its address, not by listing).
 
+## Capacity — the vendor view
+
+`VendorUsage` (`engine.VendorUsageReporter`) is one container HEAD:
+`X-Container-Bytes-Used` and, when a quota is set, `X-Container-Meta-Quota-Bytes`
+(Blomp's free account: 42,949,672,960 = 40 GiB). The account HEAD is 403 on
+Blomp. The daily `backend_capacity` job (08:30 UTC) records it as
+`vendor.blomp` in `job_runs.result`; `/metrics` exports
+`vaultaire_backend_vendor_used_bytes{backend="blomp"}` and
+`vaultaire_backend_vendor_limit_bytes{backend="blomp"}`, and
+`BackendVendorQuota80` / `BackendVendorQuota90` warn and page at 80 / 90 % of
+the quota (`deploy/monitoring/vaultaire-capacity.yml`) — before the 413 that
+becomes a 507 and `BackendStorageFull`.
+
+Mind what the counter is:
+
+- **It lags.** Measured 2026-10-21: the HEAD said 1,746,932,237 bytes in 31
+  objects while the listing named 34 objects of 3,021,996,109 bytes — both
+  trail writes and deletes by minutes. A daily reading is fine for growth; a
+  fill at 273 MB/s (40 GiB in ~2.5 min) outruns it, and only the 507 alert
+  catches that.
+- **It overshoots.** Swift admits a write in flight past the quota: 41.7 GiB
+  went into the 40 GiB account before the first 413.
+- **It counts everything in the container**, not only what our rows name:
+  the lab instance's objects, pieces an SLO upload left when it crashed
+  (RB-2), the canary. `BackendVendorDrift` (vendor > 1.2 × our stored + 1 GiB
+  for 3 days) is the signal that those have grown.
+
 ## Encryption — plain HTTP
 
 Rule 4 of `docs/ARCHITECTURE_CONTRACT.md`: no surface invents a key, so the

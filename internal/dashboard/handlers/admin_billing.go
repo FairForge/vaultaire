@@ -55,7 +55,7 @@ func adminMoneyStatus(err error) int {
 	switch {
 	case errors.Is(err, payments.ErrNoEntitlement), errors.Is(err, payments.ErrNoSuchPayment):
 		return http.StatusNotFound
-	case errors.Is(err, payments.ErrRefundExceeds):
+	case errors.Is(err, payments.ErrRefundExceeds), errors.Is(err, payments.ErrRefundShortened), errors.Is(err, payments.ErrRefundMismatch):
 		return http.StatusConflict
 	}
 	return http.StatusBadRequest
@@ -162,10 +162,15 @@ func HandleAdminRefund(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		cents, err := dollarsToCents(r.FormValue("amount"))
-		if err != nil {
-			adminFragment(w, http.StatusBadRequest, "error", err.Error())
-			return
+		// The amount may be left blank when the form names a refund already
+		// in the ledger (to shorten from it — RP28-1).
+		var cents int64
+		if v := strings.TrimSpace(r.FormValue("amount")); v != "" {
+			var err error
+			if cents, err = dollarsToCents(v); err != nil {
+				adminFragment(w, http.StatusBadRequest, "error", err.Error())
+				return
+			}
 		}
 		res, err := payments.RecordRefund(r.Context(), db, payments.Refund{
 			TenantID: tenantID, PaymentID: strings.TrimSpace(r.FormValue("payment_id")), AmountCents: cents,
@@ -177,8 +182,11 @@ func HandleAdminRefund(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 		logger.Warn("admin refund recorded", zap.String("tenant", tenantID), zap.String("by", sd.Email),
-			zap.Int64("amount_cents", cents), zap.Duration("shortened_by", res.ShortenedBy))
+			zap.Int64("amount_cents", cents), zap.Bool("existing", res.Existing), zap.Duration("shortened_by", res.ShortenedBy))
 		msg := fmt.Sprintf("Recorded refund %s of %s.", res.InvoiceNumber, moneyFromCents(cents))
+		if res.Existing {
+			msg = fmt.Sprintf("Refund %s is already in the ledger (recorded from the provider); nothing new recorded.", res.InvoiceNumber)
+		}
 		if res.FullyRefunded {
 			msg += " The charge is now fully refunded."
 		}
