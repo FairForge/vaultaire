@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"math/big"
 	"net/http"
@@ -23,6 +22,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 )
@@ -38,6 +39,9 @@ import (
 // at `t-<tenant>/_segments/<digest>/<generation>/<n>` IN THE SAME container
 // (rclone puts them in `<container>_segments`, which Blomp refuses — that is
 // the "Permission denied" its users report), then the manifest at the key.
+// The pieces go up PutConcurrency at a time, each held in memory (so a 5xx
+// on one is retried) under a process-wide budget of PutBudget bytes: one
+// stream to Blomp carries 37–62 MB/s, sixteen 275 MB/s (prod, 2026-10-21).
 //
 // What Blomp measured on 2026-10-21 shaped the rest: a token lives one hour
 // (re-authenticated 5 min before expiry and once on a 401); the storage URL
@@ -50,6 +54,12 @@ type SwiftDriver struct {
 	client *http.Client
 	logger *zap.Logger
 	now    func() time.Time
+
+	// putBudget holds the bytes of the pieces in memory, process-wide;
+	// pieceBuf recycles the buffers of SegmentSize pieces.
+	putBudget      *semaphore.Weighted
+	pieceBuf       sync.Pool
+	segmentBackoff func(attempt int) time.Duration
 
 	mu         sync.Mutex
 	token      string
@@ -67,6 +77,11 @@ type SwiftConfig struct {
 	Tenant      string // Keystone tenant (project) name: `storage` on Blomp
 	Container   string // the account's container: the user's e-mail on Blomp
 	SegmentSize int64  // objects above this are stored as SLO pieces of this size
+	// PutConcurrency is how many pieces of one large object go up at once
+	// (0 = swiftDefaultPutConcurrency); PutBudget bounds the bytes of the
+	// pieces every upload of the process holds (0 = swiftDefaultPutBudget).
+	PutConcurrency int
+	PutBudget      int64
 }
 
 const (
@@ -76,8 +91,18 @@ const (
 	BlompDefaultTenant = "storage"
 	// swiftMaxObjectSize is Swift's max_file_size (5 GiB + 2 on Blomp's /info).
 	swiftMaxObjectSize = 5 << 30
-	// swiftDefaultSegmentSize: whole up to 1 GiB, SLO above.
-	swiftDefaultSegmentSize = 1 << 30
+	// swiftDefaultSegmentSize: whole up to 64 MiB, SLO above — the size the
+	// parallel 64 MiB PUTs reached 275 MB/s at.
+	swiftDefaultSegmentSize = 64 << 20
+	// swiftDefaultPutConcurrency pieces of one object in flight.
+	swiftDefaultPutConcurrency = 4
+	swiftMaxPutConcurrency     = 16
+	// swiftDefaultPutBudget bounds the pieces held in memory by every
+	// upload of the process (16 pieces of 64 MiB).
+	swiftDefaultPutBudget = 1 << 30
+	// swiftMaxManifestSegments is Swift's max_manifest_segments (Blomp's
+	// /info: 1000).
+	swiftMaxManifestSegments = 1000
 	// swiftMinSegmentSize is Swift 2.17's min_segment_size: every piece of a
 	// large object but the last must be at least this.
 	swiftMinSegmentSize = 1 << 20
@@ -99,7 +124,13 @@ const (
 	// swiftCleanupTimeout bounds the bulk delete of a failed upload's pieces.
 	swiftCleanupTimeout = 2 * time.Minute
 	swiftAttempts       = 3
-	swiftListPage       = 1000
+	// swiftSegmentAttempts: a piece of a large object is held in memory and
+	// sent up to 5 times, 1/2/4/8 s apart (+ up to half again of jitter).
+	// Prod 2026-10-21 11:05 UTC: Blomp answered 503 to a streamed 1 GiB
+	// piece three uploads running — once after 633 MB of it — and a
+	// streamed piece cannot be sent again, so the 6 GiB upload failed.
+	swiftSegmentAttempts = 5
+	swiftListPage        = 1000
 )
 
 var (
@@ -126,7 +157,8 @@ func BlompConfigFromEnv(getenv func(string) string) (SwiftConfig, bool, error) {
 		return SwiftConfig{}, false, nil
 	}
 	cfg := SwiftConfig{AuthURL: BlompDefaultAuthURL, User: strings.TrimSpace(getenv("BLOMP_USER")), Password: pw,
-		Tenant: BlompDefaultTenant, SegmentSize: swiftDefaultSegmentSize}
+		Tenant: BlompDefaultTenant, SegmentSize: swiftDefaultSegmentSize,
+		PutConcurrency: swiftDefaultPutConcurrency, PutBudget: swiftDefaultPutBudget}
 	if cfg.User == "" {
 		return SwiftConfig{}, false, errors.New("BLOMP_PASSWORD is set without BLOMP_USER (the account's e-mail)")
 	}
@@ -150,6 +182,20 @@ func BlompConfigFromEnv(getenv func(string) string) (SwiftConfig, bool, error) {
 		}
 		cfg.SegmentSize = n
 	}
+	if v := strings.TrimSpace(getenv("BLOMP_PUT_CONCURRENCY")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > swiftMaxPutConcurrency {
+			return SwiftConfig{}, false, fmt.Errorf("BLOMP_PUT_CONCURRENCY %q: want 1…%d", v, swiftMaxPutConcurrency)
+		}
+		cfg.PutConcurrency = n
+	}
+	if v := strings.TrimSpace(getenv("BLOMP_PUT_BUDGET")); v != "" {
+		n, err := parseByteSize(v)
+		if err != nil {
+			return SwiftConfig{}, false, fmt.Errorf("BLOMP_PUT_BUDGET: %w", err)
+		}
+		cfg.PutBudget = n
+	}
 	if err := cfg.validate(); err != nil {
 		return SwiftConfig{}, false, err
 	}
@@ -170,6 +216,12 @@ func (c SwiftConfig) validate() error {
 	if c.SegmentSize < 1 || c.SegmentSize > swiftMaxObjectSize {
 		return fmt.Errorf("swift segment size %d: want 1 B … 5 GiB (Swift's max_file_size)", c.SegmentSize)
 	}
+	if c.PutConcurrency < 0 || c.PutConcurrency > swiftMaxPutConcurrency {
+		return fmt.Errorf("swift put concurrency %d: want 1…%d", c.PutConcurrency, swiftMaxPutConcurrency)
+	}
+	if c.PutBudget != 0 && c.PutBudget < c.SegmentSize {
+		return fmt.Errorf("swift put budget %d: below one segment (%d)", c.PutBudget, c.SegmentSize)
+	}
 	return nil
 }
 
@@ -182,6 +234,12 @@ func NewSwiftDriver(name string, cfg SwiftConfig, logger *zap.Logger) (*SwiftDri
 		logger = zap.NewNop()
 	}
 	cfg.AuthURL = strings.TrimSuffix(cfg.AuthURL, "/")
+	if cfg.PutConcurrency == 0 {
+		cfg.PutConcurrency = swiftDefaultPutConcurrency
+	}
+	if cfg.PutBudget == 0 {
+		cfg.PutBudget = max(swiftDefaultPutBudget, cfg.SegmentSize)
+	}
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodHead, http.MethodDelete, http.MethodPost} {
 		for _, o := range []string{"ok", "client_error", "server_error", "unauthorized", "transport"} {
 			swiftRequests.WithLabelValues(name, m, o)
@@ -189,6 +247,7 @@ func NewSwiftDriver(name string, cfg SwiftConfig, logger *zap.Logger) (*SwiftDri
 	}
 	InitTenantlessSeries(name)
 	return &SwiftDriver{name: name, cfg: cfg, logger: logger, now: time.Now, listPageSize: swiftListPage,
+		putBudget: semaphore.NewWeighted(cfg.PutBudget), segmentBackoff: swiftSegmentBackoff,
 		client: TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only())}, nil
 }
 
@@ -328,6 +387,7 @@ type swiftRequest struct {
 	body      io.Reader
 	bodyBytes []byte
 	size      int64 // Content-Length; -1 = chunked
+	attempts  int   // 0 = swiftAttempts; more = a piece, backed off by segmentBackoff
 }
 
 func (r swiftRequest) replayable() bool { return r.body == nil }
@@ -339,7 +399,11 @@ func (d *SwiftDriver) do(ctx context.Context, req swiftRequest) (*http.Response,
 	force := false
 	reauthed := false
 	var lastErr error
-	for attempt := 1; attempt <= swiftAttempts; attempt++ {
+	attempts, backoff := swiftAttempts, swiftBackoff
+	if req.attempts > 0 {
+		attempts, backoff = req.attempts, d.segmentBackoff
+	}
+	for attempt := 1; attempt <= attempts; attempt++ {
 		token, storageURL, err := d.session(ctx, force)
 		if err != nil {
 			return nil, err
@@ -383,9 +447,9 @@ func (d *SwiftDriver) do(ctx context.Context, req swiftRequest) (*http.Response,
 			swiftRequests.WithLabelValues(d.name, req.method, outcome).Inc()
 			return resp, nil
 		}
-		if attempt < swiftAttempts {
+		if attempt < attempts {
 			swiftRetries.WithLabelValues(d.name, req.method).Inc()
-			if err := sleepCtx(ctx, swiftBackoff(attempt)); err != nil {
+			if err := sleepCtx(ctx, backoff(attempt)); err != nil {
 				return nil, lastErr
 			}
 		}
@@ -441,6 +505,17 @@ func escapeSwiftName(name string) string {
 
 func swiftBackoff(attempt int) time.Duration {
 	base := time.Duration(attempt*attempt) * 250 * time.Millisecond
+	j, err := rand.Int(rand.Reader, big.NewInt(int64(base/2)+1))
+	if err != nil {
+		return base
+	}
+	return base + time.Duration(j.Int64())
+}
+
+// swiftSegmentBackoff waits 1, 2, 4, 8 s before a piece's next attempt,
+// plus up to half again of jitter.
+func swiftSegmentBackoff(attempt int) time.Duration {
+	base := time.Second << (attempt - 1)
 	j, err := rand.Int(rand.Reader, big.NewInt(int64(base/2)+1))
 	if err != nil {
 		return base
@@ -542,37 +617,66 @@ func (d *SwiftDriver) Get(ctx context.Context, container, artifact string) (io.R
 // GetRange reads length bytes from offset (engine.RangeGetter). A 200 to the
 // Range (a proxy that ignores it) is skipped to offset and cut to length.
 func (d *SwiftDriver) GetRange(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, error) {
+	rc, _, err := d.GetRangeInfo(ctx, container, artifact, offset, length)
+	return rc, err
+}
+
+// GetRangeInfo is GetRange reporting the object's identity
+// (engine.VersionedRangeGetter): its ETag — for a large object, Swift's
+// MD5 of the pieces' ETags, the same on every range of one manifest — and
+// its total size from Content-Range (Content-Length on a 200). One ranged
+// GET, so the parallel ranged GET may read a large object as many ranges:
+// 8 ranges of a 256 MiB Blomp object read 163 MB/s, one stream 56–122.
+func (d *SwiftDriver) GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, engine.RangeInfo, error) {
 	if offset < 0 || length <= 0 {
-		return nil, fmt.Errorf("%w: range offset %d length %d", engine.ErrInvalidInput, offset, length)
+		return nil, engine.RangeInfo{}, fmt.Errorf("%w: range offset %d length %d", engine.ErrInvalidInput, offset, length)
 	}
 	name, err := d.objectName(ctx, "GetRange", container, artifact)
 	if err != nil {
-		return nil, err
+		return nil, engine.RangeInfo{}, err
 	}
 	h := http.Header{}
 	h.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	resp, err := d.do(ctx, swiftRequest{method: http.MethodGet, name: name, header: h})
 	if err != nil {
-		return nil, err
+		return nil, engine.RangeInfo{}, err
 	}
+	info := engine.RangeInfo{ETag: strings.Trim(resp.Header.Get("Etag"), `"`)}
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
-		return resp.Body, nil
+		total, ok := contentRangeTotal(resp.Header.Get("Content-Range"))
+		if !ok {
+			drain(resp)
+			return nil, engine.RangeInfo{}, fmt.Errorf("%s GetRange %s: Content-Range %q names no total size", d.name, name, resp.Header.Get("Content-Range"))
+		}
+		info.Size = total
+		return resp.Body, info, nil
 	case http.StatusOK:
+		info.Size = resp.ContentLength
 		if _, err := io.CopyN(io.Discard, resp.Body, offset); err != nil {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("%s GetRange %s: skip to %d: %w", d.name, name, offset, err)
+			return nil, engine.RangeInfo{}, fmt.Errorf("%s GetRange %s: skip to %d: %w", d.name, name, offset, err)
 		}
 		return struct {
 			io.Reader
 			io.Closer
-		}{io.LimitReader(resp.Body, length), resp.Body}, nil
+		}{io.LimitReader(resp.Body, length), resp.Body}, info, nil
 	case http.StatusNotFound:
 		drain(resp)
-		return nil, engine.ErrNotFound(container, artifact)
+		return nil, engine.RangeInfo{}, engine.ErrNotFound(container, artifact)
 	}
 	drain(resp)
-	return nil, &SwiftError{Op: "GET (range) " + name, Status: resp.StatusCode}
+	return nil, engine.RangeInfo{}, &SwiftError{Op: "GET (range) " + name, Status: resp.StatusCode}
+}
+
+// contentRangeTotal reads the total of `bytes a-b/total`.
+func contentRangeTotal(v string) (int64, bool) {
+	_, total, ok := strings.Cut(v, "/")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(total), 10, 64)
+	return n, err == nil && n >= 0
 }
 
 // Exists HEADs the object.
@@ -864,10 +968,21 @@ func (d *SwiftDriver) putOne(ctx context.Context, name, contentType string, req 
 	return nil
 }
 
-// putLarge streams body as pieces of SegmentSize into the same container,
-// then writes the manifest at name. size -1 = unknown. A failure removes
-// the pieces already written (one bulk delete).
+// putLarge cuts body into pieces of SegmentSize (grown for a known size
+// so the manifest stays within Swift's 1000 pieces), uploads them
+// PutConcurrency at a time, then writes the manifest at name. size -1 =
+// unknown. Each piece is read into memory first — under the process-wide
+// PutBudget, waited for, never refused — so a 5xx on it is retried. A
+// failure stops the other pieces and removes every piece that may have been
+// written (one bulk delete) once they have all stopped.
 func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, body io.Reader, size int64) (err error) {
+	segSize := d.cfg.SegmentSize
+	if size > 0 {
+		segSize = max(segSize, (size+swiftMaxManifestSegments-1)/swiftMaxManifestSegments)
+		if segSize > swiftMaxObjectSize {
+			return fmt.Errorf("%w: %s put %s: %d bytes is more than %d pieces of 5 GiB", engine.ErrInvalidInput, d.name, name, size, swiftMaxManifestSegments)
+		}
+	}
 	tenantID := contextTenant(ctx)
 	digest := sha256.Sum256([]byte(name))
 	gen := make([]byte, 8)
@@ -875,62 +990,96 @@ func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, bo
 		return fmt.Errorf("%s put %s: generation: %w", d.name, name, err)
 	}
 	segPrefix := fmt.Sprintf("t-%s/_segments/%s/%x/", tenantID, hex.EncodeToString(digest[:16]), gen)
+
+	pctx, stop := context.WithCancel(ctx)
+	defer stop()
+	g, gctx := errgroup.WithContext(pctx)
+	slots := make(chan struct{}, d.cfg.PutConcurrency)
+	manifest := make([]swiftSegment, swiftMaxManifestSegments)
 	var written []string
 	defer func() {
+		if err != nil {
+			stop() // the pieces still going up stop before their removal
+		}
+		if werr := g.Wait(); err == nil {
+			err = werr
+		} else if werr != nil && errors.Is(err, context.Canceled) && ctx.Err() == nil {
+			err = werr // the piece that failed, not the stop it caused
+		}
 		if err != nil && len(written) > 0 {
 			d.removeSegments(ctx, name, written)
 		}
 	}()
 
 	br := bufio.NewReaderSize(body, 64<<10)
-	var manifest []swiftSegment
 	var total int64
-	for n := 0; ; n++ {
-		if size >= 0 && total == size {
-			break
+	n := 0
+	for ; size < 0 || total < size; n++ {
+		segLen := segSize
+		if size >= 0 {
+			segLen = min(segSize, size-total)
 		}
-		if _, perr := br.Peek(1); perr == io.EOF {
-			if size >= 0 {
-				return fmt.Errorf("%s put %s: body is %d bytes, %d declared: %w", d.name, name, total, size, io.ErrUnexpectedEOF)
-			}
-			break
-		} else if perr != nil {
-			return fmt.Errorf("%s put %s: read body: %w", d.name, name, perr)
-		}
-		segLen := d.cfg.SegmentSize
-		if size >= 0 && size-total < segLen {
-			segLen = size - total
-		}
-		segName := fmt.Sprintf("%s%08d", segPrefix, n)
-		h := md5.New() // #nosec G401 -- see the import
-		cr := &countingReader{Reader: io.LimitReader(br, segLen)}
-		req := swiftRequest{method: http.MethodPut, name: segName, body: io.TeeReader(cr, h), size: segLen}
 		if size < 0 {
-			req.size = -1 // chunked: the piece ends where the body or the segment does
-		}
-		written = append(written, segName)
-		if err := d.putSegment(ctx, req, h, cr); err != nil {
-			if size >= 0 && cr.n < segLen {
-				return fmt.Errorf("%s put %s: body ended after %d bytes, %d declared: %w (%w)", d.name, name, total+cr.n, size, io.ErrUnexpectedEOF, err)
+			if _, perr := br.Peek(1); perr == io.EOF {
+				break
+			} else if perr != nil {
+				return fmt.Errorf("%s put %s: read body: %w", d.name, name, perr)
 			}
+			if n == swiftMaxManifestSegments {
+				return fmt.Errorf("%w: %s put %s: a body of unknown length past %d pieces of %d bytes", engine.ErrInvalidInput, d.name, name, swiftMaxManifestSegments, segSize)
+			}
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-gctx.Done():
+			return gctx.Err()
+		}
+		weight := min(segLen, d.cfg.PutBudget)
+		if err := d.putBudget.Acquire(gctx, weight); err != nil {
+			<-slots
 			return err
 		}
-		if size >= 0 && cr.n != segLen {
-			return fmt.Errorf("%s put %s: body ended after %d bytes, %d declared: %w", d.name, name, total+cr.n, size, io.ErrUnexpectedEOF)
+		buf := d.pieceBuffer(segLen)
+		got, rerr := io.ReadFull(br, buf)
+		if rerr != nil && !(size < 0 && errors.Is(rerr, io.ErrUnexpectedEOF)) {
+			d.releasePiece(buf, weight)
+			<-slots
+			if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("%s put %s: body ended after %d bytes, %d declared: %w", d.name, name, total+int64(got), size, io.ErrUnexpectedEOF)
+			}
+			return fmt.Errorf("%s put %s: read body: %w", d.name, name, rerr)
 		}
-		manifest = append(manifest, swiftSegment{Path: "/" + url.PathEscape(d.cfg.Container) + "/" + escapeSwiftName(segName),
-			Etag: hex.EncodeToString(h.Sum(nil)), SizeBytes: cr.n})
-		total += cr.n
+		segName := fmt.Sprintf("%s%08d", segPrefix, n)
+		written = append(written, segName)
+		piece, i := buf[:got], n
+		g.Go(func() error {
+			defer func() { d.releasePiece(buf, weight); <-slots }()
+			etag, err := d.putSegment(gctx, segName, piece)
+			if err != nil {
+				return err
+			}
+			manifest[i] = swiftSegment{Path: "/" + url.PathEscape(d.cfg.Container) + "/" + escapeSwiftName(segName),
+				Etag: etag, SizeBytes: int64(len(piece))}
+			return nil
+		})
+		total += int64(got)
+		if size < 0 && int64(got) < segLen {
+			n++
+			break
+		}
 	}
 	if size >= 0 {
 		if _, perr := br.Peek(1); perr == nil {
 			return fmt.Errorf("%w: %s put %s: body is longer than its declared %d bytes", engine.ErrInvalidInput, d.name, name, size)
 		}
 	}
-	if len(manifest) == 0 {
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	if n == 0 {
 		return d.putOne(ctx, name, contentType, swiftRequest{bodyBytes: []byte{}})
 	}
-	mbody, err := json.Marshal(manifest)
+	mbody, err := json.Marshal(manifest[:n])
 	if err != nil {
 		return fmt.Errorf("%s put %s: manifest: %w", d.name, name, err)
 	}
@@ -957,19 +1106,45 @@ type swiftSegment struct {
 	SizeBytes int64  `json:"size_bytes"`
 }
 
-func (d *SwiftDriver) putSegment(ctx context.Context, req swiftRequest, h hash.Hash, cr *countingReader) error {
-	resp, err := d.do(ctx, req)
+// pieceBuffer is a buffer of n bytes, recycled when n is SegmentSize.
+func (d *SwiftDriver) pieceBuffer(n int64) []byte {
+	if n == d.cfg.SegmentSize {
+		if b, ok := d.pieceBuf.Get().(*[]byte); ok {
+			return *b
+		}
+	}
+	return make([]byte, n)
+}
+
+// releasePiece returns a piece's budget and its buffer.
+func (d *SwiftDriver) releasePiece(buf []byte, weight int64) {
+	if int64(cap(buf)) == d.cfg.SegmentSize {
+		b := buf[:cap(buf)]
+		d.pieceBuf.Put(&b)
+	}
+	d.putBudget.Release(weight)
+}
+
+// putSegment uploads one piece from memory (replayable: a 5xx is retried)
+// and checks the ETag Swift stored against its MD5.
+func (d *SwiftDriver) putSegment(ctx context.Context, name string, data []byte) (string, error) {
+	sum := md5.Sum(data) // #nosec G401 -- see the import
+	want := hex.EncodeToString(sum[:])
+	if data == nil {
+		data = []byte{}
+	}
+	resp, err := d.do(ctx, swiftRequest{method: http.MethodPut, name: name, bodyBytes: data, attempts: swiftSegmentAttempts})
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer drain(resp)
 	if resp.StatusCode != http.StatusCreated {
-		return &SwiftError{Op: "PUT (segment) " + req.name, Status: resp.StatusCode}
+		return "", &SwiftError{Op: "PUT (segment) " + name, Status: resp.StatusCode}
 	}
-	if got, want := strings.Trim(resp.Header.Get("Etag"), `"`), hex.EncodeToString(h.Sum(nil)); got != "" && got != want {
-		return fmt.Errorf("%s put %s: the backend stored MD5 %s for %d bytes, we sent %s", d.name, req.name, got, cr.n, want)
+	if got := strings.Trim(resp.Header.Get("Etag"), `"`); got != "" && got != want {
+		return "", fmt.Errorf("%s put %s: the backend stored MD5 %s for %d bytes, we sent %s", d.name, name, got, len(data), want)
 	}
-	return nil
+	return want, nil
 }
 
 // removeSegments bulk-deletes a failed upload's pieces (one write for all
@@ -1002,8 +1177,9 @@ func (d *SwiftDriver) removeSegments(ctx context.Context, name string, segs []st
 }
 
 var (
-	_ engine.Driver       = (*SwiftDriver)(nil)
-	_ engine.RangeGetter  = (*SwiftDriver)(nil)
-	_ engine.TenantWalker = (*SwiftDriver)(nil)
-	_ engine.KeyAddresser = (*SwiftDriver)(nil)
+	_ engine.Driver               = (*SwiftDriver)(nil)
+	_ engine.RangeGetter          = (*SwiftDriver)(nil)
+	_ engine.VersionedRangeGetter = (*SwiftDriver)(nil)
+	_ engine.TenantWalker         = (*SwiftDriver)(nil)
+	_ engine.KeyAddresser         = (*SwiftDriver)(nil)
 )

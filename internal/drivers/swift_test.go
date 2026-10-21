@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,7 +204,9 @@ func TestSwift_UnknownLength(t *testing.T) {
 
 func TestSwift_UnknownLengthPastThePeekIsALargeObject(t *testing.T) {
 	f := newFakeSwift(t)
-	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	cfg := f.config()
+	cfg.SegmentSize = 64 << 10
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
 	require.NoError(t, err)
 	ctx := swiftCtx("t1")
 	body := randomBytes(t, swiftPeekBytes+1500)
@@ -250,12 +253,15 @@ func TestSwift_FailedManifestRemovesItsPieces(t *testing.T) {
 type failNthPut struct {
 	rt   http.RoundTripper
 	n    int
+	mu   sync.Mutex
 	puts int
 	f    *fakeSwift
 }
 
 func (p *failNthPut) RoundTrip(r *http.Request) (*http.Response, error) {
 	if r.Method == http.MethodPut {
+		p.mu.Lock()
+		defer p.mu.Unlock()
 		p.puts++
 		if p.puts >= p.n {
 			p.f.failNext(http.MethodPut, http.StatusServiceUnavailable)
@@ -422,7 +428,13 @@ func TestBlompConfigFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, SwiftConfig{AuthURL: BlompDefaultAuthURL, User: "a@b.c", Password: "p", Tenant: "storage",
-		Container: "a@b.c", SegmentSize: 1 << 30}, cfg)
+		Container: "a@b.c", SegmentSize: 64 << 20, PutConcurrency: 4, PutBudget: 1 << 30}, cfg)
+
+	cfg, _, err = BlompConfigFromEnv(env(map[string]string{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p",
+		"BLOMP_PUT_CONCURRENCY": "8", "BLOMP_PUT_BUDGET": "2GiB"}))
+	require.NoError(t, err)
+	assert.Equal(t, 8, cfg.PutConcurrency)
+	assert.Equal(t, int64(2<<30), cfg.PutBudget)
 
 	cfg, _, err = BlompConfigFromEnv(env(map[string]string{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "256MiB"}))
 	require.NoError(t, err)
@@ -434,6 +446,10 @@ func TestBlompConfigFromEnv(t *testing.T) {
 		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "512KiB"},
 		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "lots"},
 		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_AUTH_URL": "ftp://x"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_PUT_CONCURRENCY": "0"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_PUT_CONCURRENCY": "17"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_PUT_CONCURRENCY": "four"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_PUT_BUDGET": "32MiB"}, // below one 64 MiB segment
 	} {
 		_, ok, err := BlompConfigFromEnv(env(bad))
 		assert.Error(t, err, "%v", bad)
@@ -452,4 +468,216 @@ func countWalk(t *testing.T, d *SwiftDriver, tenant, container string) int {
 	})
 	require.NoError(t, err)
 	return n
+}
+
+// The pieces of a large object go up concurrently, at most PutConcurrency
+// at a time, and land in order in the manifest.
+func TestSwift_LargeObjectPiecesGoUpInParallel(t *testing.T) {
+	f := newFakeSwift(t)
+	f.putDelay = 30 * time.Millisecond
+	cfg := f.config()
+	cfg.PutConcurrency = 4
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 10*1024+300)
+
+	require.NoError(t, d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+
+	assert.Equal(t, 4, f.peakSegmentPuts(), "four pieces in flight at once")
+	o, ok := f.object("t-t1/b1/big")
+	require.True(t, ok)
+	assert.Len(t, o.manifest, 11)
+	assert.Equal(t, body, o.data, "the manifest names the pieces in order")
+}
+
+// The process-wide budget bounds the pieces held in memory whatever the
+// concurrency: an upload waits for it, never fails.
+func TestSwift_PutBudgetBoundsPiecesInFlight(t *testing.T) {
+	f := newFakeSwift(t)
+	f.putDelay = 20 * time.Millisecond
+	cfg := f.config()
+	cfg.PutConcurrency = 8
+	cfg.PutBudget = 2 * cfg.SegmentSize
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	var wg sync.WaitGroup
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			body := randomBytes(t, 6*1024)
+			assert.NoError(t, d.Put(ctx, "b1", fmt.Sprintf("big%d", i), bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+		}()
+	}
+	wg.Wait()
+	assert.LessOrEqual(t, f.peakSegmentPuts(), 2)
+	assert.Len(t, f.names(), 3*6+3)
+}
+
+// A piece is held in memory, so a 5xx on it is retried.
+func TestSwift_PieceRetriedOnA5xx(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	d.segmentBackoff = func(int) time.Duration { return time.Millisecond }
+	body := randomBytes(t, 3000)
+	f.failNext(http.MethodPut, http.StatusServiceUnavailable, http.StatusBadGateway)
+
+	require.NoError(t, d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+	o, ok := f.object("t-t1/b1/big")
+	require.True(t, ok)
+	assert.Equal(t, body, o.data)
+}
+
+// One piece that keeps failing fails the upload: the others are stopped
+// and every piece written is removed.
+func TestSwift_FailedPieceRemovesTheOthers(t *testing.T) {
+	f := newFakeSwift(t)
+	cfg := f.config()
+	cfg.PutConcurrency = 3
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	d.client.Transport = &failPiece{rt: d.client.Transport, suffix: "/00000004", times: -1}
+	d.segmentBackoff = func(int) time.Duration { return time.Millisecond }
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 9*1024)
+
+	err = d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
+	require.Error(t, err)
+	var se *SwiftError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusServiceUnavailable, se.Status)
+	assert.Empty(t, f.names(), "every piece written was bulk-deleted")
+	assert.Equal(t, 1, f.count("POST bulk-delete"))
+}
+
+// Blomp 503s a piece now and then (prod 2026-10-21: three 6 GiB uploads in
+// a row). A piece is sent up to 5 times, so four 503s on one still land it.
+func TestSwift_PieceSurvivesFour503s(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	fp := &failPiece{rt: d.client.Transport, suffix: "/00000001", times: 4}
+	d.client.Transport = fp
+	var waits []time.Duration
+	var mu sync.Mutex
+	d.segmentBackoff = func(a int) time.Duration {
+		mu.Lock()
+		waits = append(waits, swiftSegmentBackoff(a))
+		mu.Unlock()
+		return time.Millisecond
+	}
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 3000)
+
+	require.NoError(t, d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+	o, ok := f.object("t-t1/b1/big")
+	require.True(t, ok)
+	assert.Equal(t, body, o.data)
+	require.Len(t, waits, 4)
+	for i, w := range waits {
+		base := time.Second << i
+		assert.GreaterOrEqual(t, w, base)
+		assert.LessOrEqual(t, w, base+base/2)
+	}
+}
+
+// failPiece answers 503 to the first `times` PUTs (-1 = every one) of a
+// piece whose name ends in suffix.
+type failPiece struct {
+	rt     http.RoundTripper
+	suffix string
+	mu     sync.Mutex
+	times  int
+}
+
+func (p *failPiece) fail() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.times == 0 {
+		return false
+	}
+	if p.times > 0 {
+		p.times--
+	}
+	return true
+}
+
+func (p *failPiece) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, p.suffix) && p.fail() {
+		if r.Body != nil {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_ = r.Body.Close()
+		}
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(strings.NewReader("")),
+			Header: http.Header{}, Request: r}, nil
+	}
+	return p.rt.RoundTrip(r)
+}
+
+// Swift's max_manifest_segments is 1000: a known size grows the piece to
+// fit; an unknown one past 1000 pieces is refused and its pieces removed.
+func TestSwift_ThousandPieceLimit(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+
+	body := randomBytes(t, 1000*1024+5000)
+	require.NoError(t, d.Put(ctx, "b1", "known", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+	o, ok := f.object("t-t1/b1/known")
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(o.manifest), 1000)
+	assert.Equal(t, body, o.data)
+	require.NoError(t, d.Delete(ctx, "b1", "known"))
+
+	big := randomBytes(t, swiftPeekBytes+1500) // 8 MiB of 1 KiB pieces
+	err = d.Put(ctx, "b1", "unknown", struct{ io.Reader }{bytes.NewReader(big)})
+	assert.ErrorIs(t, err, engine.ErrInvalidInput)
+	assert.Empty(t, f.names(), "the pieces of the refused upload were removed")
+}
+
+// GetRangeInfo (engine.VersionedRangeGetter): every range of one object
+// reports the same identity — the parallel ranged GET compares them.
+func TestSwift_GetRangeInfo(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			tenant := swiftTenant(t)
+			cleanupTenant(t, tg.drv, tenant)
+			ctx := swiftCtx(tenant)
+			seg := int(tg.drv.cfg.SegmentSize)
+			for _, n := range []int{5000, seg*2 + 100} { // a plain object, a large one
+				key := fmt.Sprintf("obj-%d", n)
+				body := randomBytes(t, n)
+				require.NoError(t, tg.drv.Put(ctx, "b1", key, bytes.NewReader(body), engine.WithContentLength(int64(n))))
+
+				rc, a, err := tg.drv.GetRangeInfo(ctx, "b1", key, 0, 100)
+				assert.Equal(t, body[:100], readAll(t, rc, err))
+				rc, b, err := tg.drv.GetRangeInfo(ctx, "b1", key, int64(n-50), 50)
+				assert.Equal(t, body[n-50:], readAll(t, rc, err))
+				assert.Equal(t, int64(n), a.Size)
+				assert.Equal(t, a, b, "one identity for every range")
+				assert.NotEmpty(t, a.ETag)
+				assert.NotContains(t, a.ETag, `"`)
+			}
+			_, _, err := tg.drv.GetRangeInfo(ctx, "b1", "absent", 0, 10)
+			assert.True(t, engine.IsObjectMiss(err), "%v", err)
+		})
+	}
+}
+
+func TestSwift_GetRangeInfoWhenTheRangeIsIgnored(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "k", strings.NewReader("0123456789")))
+	f.ignoreRange = true
+	rc, info, err := d.GetRangeInfo(ctx, "b1", "k", 3, 4)
+	assert.Equal(t, []byte("3456"), readAll(t, rc, err))
+	assert.Equal(t, int64(10), info.Size)
+	assert.Equal(t, md5hex([]byte("0123456789")), info.ETag)
 }

@@ -29,7 +29,8 @@ import (
 //     12–36 MB/s on iDrive before; the same algorithm measured 163–183.
 //   - whole objects ≥ LARGE_GET_PARALLEL_MIN_BYTES (64 MiB) on a backend
 //     whose ranged reads are real and cheap (engine.VersionedRangeGetter —
-//     the fixed-bucket S3 driver: idrive, idrive-<region>, wasabi), behind
+//     the fixed-bucket S3 driver: idrive, idrive-<region>, wasabi; lyve;
+//     the Swift driver: blomp), behind
 //     the `parallel_get` flag (default OFF, per tenant first):
 //     LARGE_GET_PARALLEL_PARTS (8) ranges of LARGE_GET_PART_BYTES (16 MiB)
 //     in flight, a range not done after LARGE_GET_HEDGE_AFTER (1 s) hedged.
@@ -384,7 +385,8 @@ func (r *parallelGetReader) Close() error {
 // parallelSource is the gate both parallel paths share: the length is
 // worth it, the tenant's flag is on, the row's backend has real ranged
 // reads and a closed breaker (engine.ParallelRangeSource — any registered
-// driver: the primary, an idrive-<region> driver of a pinned bucket, lyve),
+// driver: the primary, an idrive-<region> driver of a pinned bucket, lyve,
+// blomp),
 // and the process budget can spare two parts. ok=false: the single stream.
 func (a *S3ToEngine) parallelSource(ctx context.Context, tenantID, container, blob string, length int64) (string, engine.VersionedRangeGetter, *engine.CoreEngine, bool) {
 	cfg := a.largeGet

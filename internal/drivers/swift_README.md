@@ -28,24 +28,48 @@ a boot Fatal), never a fall-over destination.
 
 `t-<tenant>/<container>/<artifact>` in the account's container, the tenant
 from the call's context (`ErrNoTenant` without one) — the fixed-bucket shape.
-An object larger than `BLOMP_SEGMENT_SIZE` (1 GiB), or of unknown length past
+An object larger than `BLOMP_SEGMENT_SIZE` (64 MiB), or of unknown length past
 8 MiB, is a static large object: pieces at
 `t-<tenant>/_segments/<sha256(name)[:16]>/<generation>/<n>` in the same
 container, each MD5-checked against its ETag, then the manifest at the key.
-A failed upload bulk-deletes its pieces (one write); the erasure walk
-(`WalkTenant`) lists `_segments` too. Our writes never overwrite in place
+A known size grows the piece to `ceil(size / 1000)` when that is larger
+(Swift's `max_manifest_segments` is 1000 on Blomp's `/info`), so the limit
+is 1000 × 5 GiB; a body of unknown length past 1000 pieces is refused
+(`InvalidInput`). A failed upload stops its other pieces and, once they have
+all stopped, bulk-deletes every piece it started (one write); the erasure
+walk (`WalkTenant`) lists `_segments` too. Our writes never overwrite in place
 (every whole-object write has a new address since WP-R2-1), so the leftover
 pieces of an overwritten large object are not a product case.
 
 ## Behaviour
 
+- **Large uploads in parallel** (2026-10-21, after the prod bench): one
+  stream to Blomp carries 37–62 MB/s (a 256 MiB PUT 62, a 1 GiB multipart
+  Complete 54), sixteen 64 MiB PUTs in parallel 275 MB/s. So the pieces go
+  up `BLOMP_PUT_CONCURRENCY` (4) at a time. Each piece is read into memory
+  first — a buffer from a pool, under a process-wide budget of
+  `BLOMP_PUT_BUDGET` bytes (1 GiB = 16 pieces of 64 MiB, a semaphore taken
+  before the buffer; an upload waits for it, never fails) — so a piece is
+  **replayable**: sent up to 5 times, 1/2/4/8 s apart plus jitter. That is a
+  correctness fix, not only speed: on prod 2026-10-21 11:05–11:06 UTC three
+  6 GiB multipart uploads failed at Complete because Blomp answered `503` to
+  a streamed 1 GiB piece (once after 633 MB of it) and a streamed body
+  cannot be sent again. Memory: ≤ concurrency × segment per upload,
+  ≤ the budget for the process.
+- **Parallel ranged GET**: `GetRangeInfo` (`engine.VersionedRangeGetter`)
+  reports the ETag (an SLO's is Swift's MD5 of its pieces' ETags, the same
+  on every range of one manifest) and the total size from `Content-Range`,
+  so the `parallel_get` flag reads a large Blomp object as 8 ranges at once:
+  raw, 8 ranges of 256 MiB read 163 MB/s; one stream of a 1 GiB object 56.
 - **Token**: asked once and reused; asked again 5 min before it expires, and
   once on a 401 (`vaultaire_swift_auths_total{backend,reason,outcome}`). A
   changed password fails the next request after the token goes (≤ 1 h) — the
   probe's container HEAD then fails.
 - **Retries**: a 5xx or a transport error is retried up to 3 attempts in all
   when the body can be sent again (no body, or a body ≤ 8 MiB held in
-  memory); a streamed body is sent once (`vaultaire_swift_retries_total`).
+  memory) — 5 for a piece of a large object; a streamed body (a known size
+  between 8 MiB and the segment size) is sent once
+  (`vaultaire_swift_retries_total`).
 - **Delete**: HEAD first (a HEAD is not rate-limited), then ONE write — a
   plain DELETE, or `?multipart-manifest=delete` for a large object (its pieces
   go with it). A miss is `engine.NotFoundError`.
@@ -96,7 +120,9 @@ before any customer data goes there.
 | `BLOMP_AUTH_URL` | `https://authenticate.blomp.com/v2.0` | Keystone v2 base |
 | `BLOMP_TENANT` | `storage` | |
 | `BLOMP_CONTAINER` | the user | |
-| `BLOMP_SEGMENT_SIZE` | `1GiB` | 1 MiB (Swift's min_segment_size) – 5 GiB |
+| `BLOMP_SEGMENT_SIZE` | `64MiB` | 1 MiB (Swift's min_segment_size) – 5 GiB; above it an object is pieces |
+| `BLOMP_PUT_CONCURRENCY` | `4` | 1–16 pieces of one object in flight |
+| `BLOMP_PUT_BUDGET` | `1GiB` | bytes of pieces held by every upload of the process; at least one segment |
 | `BLOMP_ALLOW_UNSEALED` | off | see above |
 
 ## Live tests
