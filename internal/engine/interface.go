@@ -126,7 +126,8 @@ type RangeInfo struct {
 // ranges at once and compares every range's RangeInfo, so a concurrent
 // overwrite can never splice two objects into one body. Implement it ONLY
 // where a range costs one plain request: never on tape/archive backends.
-// Today: the fixed-bucket S3 driver (idrive, idrive-<region>, wasabi).
+// Today: the fixed-bucket S3 driver (idrive, idrive-<region>, wasabi),
+// lyve and the Swift driver (blomp).
 type VersionedRangeGetter interface {
 	GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, RangeInfo, error)
 }

@@ -42,6 +42,11 @@ type fakeSwift struct {
 	// fail[method] = statuses answered (in order) before the call is served.
 	fail        map[string][]int
 	ignoreRange bool
+	// putDelay holds every segment PUT this long; inflight/maxInflight count
+	// the segment PUTs being served at once.
+	putDelay    time.Duration
+	inflight    int
+	maxInflight int
 }
 
 type fakeSwiftObject struct {
@@ -77,6 +82,12 @@ func (f *fakeSwift) failNext(method string, statuses ...int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fail[method] = append(f.fail[method], statuses...)
+}
+
+func (f *fakeSwift) peakSegmentPuts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxInflight
 }
 
 func (f *fakeSwift) revokeTokens() {
@@ -238,6 +249,19 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 	f.mu.Unlock()
 	switch r.Method {
 	case http.MethodPut:
+		if strings.Contains(name, "/_segments/") {
+			f.mu.Lock()
+			f.inflight++
+			f.maxInflight = max(f.maxInflight, f.inflight)
+			delay := f.putDelay
+			f.mu.Unlock()
+			defer func() {
+				f.mu.Lock()
+				f.inflight--
+				f.mu.Unlock()
+			}()
+			time.Sleep(delay)
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)

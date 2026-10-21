@@ -49,6 +49,7 @@ var allocationSites = map[string]string{
 	"api/vault_parity_codec.go:encodeParity":       "per protect: one stripe (the vault_parity job, one protect at a time)",
 	"drivers/webdav.go:replayableBody":             "per PUT ≤ 8 MiB: the Sync bridge's retryable bodies (webdav_resilience.go)",
 	"drivers/onedrive.go:newODChunkBuffer":         "per upload in flight: one 60 MiB Graph upload fragment (permafrost, the fleet's chunk size), pooled (odChunkPool) — no process budget: permafrost is written only by the vault parity job (one protect at a time; WP-R7-4)",
+	"drivers/swift.go:pieceBuffer":                 "Blomp's PUT budget (BLOMP_PUT_BUDGET, 1 GiB, process-wide semaphore taken before the buffer): one piece of a large object (64 MiB, more only past 1000 pieces), pooled; BLOMP_PUT_CONCURRENCY pieces per upload",
 	"drivers/onedrive.go:fetchRange":               "per GET ≤ odAdaptiveStreams × 8 MiB (64 MiB): permafrost's ordered ranges through parfetch's window (WP-R7-4, R7-07: every range was read whole before)",
 	// The unknown-length spool of Geyser, the fixed-bucket S3 driver and
 	// permafrost (RP17-2): rare on the data path — every S3 PUT carries its
