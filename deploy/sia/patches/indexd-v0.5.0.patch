@@ -1,0 +1,19 @@
+--- a/client/v2/client.go
++++ b/client/v2/client.go
+@@ -7,6 +7,7 @@
+ 	"fmt"
+ 	"io"
+ 	"os"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -200,6 +201,8 @@
+ 		return false // interrupted RPC
+ 	case errors.Is(err, proto.ErrSectorNotFound), errors.Is(err, proto.ErrSectorCorrupt):
+ 		return false
++	case errors.Is(err, proto.ErrNotEnoughFunds), err != nil && strings.Contains(err.Error(), "not enough funds"):
++		return false // LAB: an empty account is not a host failure; the indexer refills it
+ 	default:
+ 		return err != nil
+ 	}

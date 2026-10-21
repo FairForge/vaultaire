@@ -1,0 +1,294 @@
+--- a/sdk.go
++++ b/sdk.go
+@@ -7,6 +7,8 @@
+ 	"errors"
+ 	"fmt"
+ 	"io"
++	"os"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
+@@ -117,7 +119,63 @@
+ 	sector slabs.PinnedSector
+ }
+
++// chunkRetryBackoff is the wait before each re-attempt of a chunk whose
++// recovery failed with a non-cancellation error; its length is the number of
++// retries (each attempt re-uses every sector of the slab).
++var chunkRetryBackoff = []time.Duration{
++	500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
++}
++
++// errFundsExhausted marks a chunk failure where most host reads were refused
++// for lack of account funds: the indexer refills accounts every 5 minutes, so
++// such a chunk waits for a refill (fundsRetryBackoff, ~6 min in all) instead
++// of failing the download.
++var errFundsExhausted = errors.New("host accounts out of funds")
++
++var fundsRetryBackoff = []time.Duration{
++	15 * time.Second, 30 * time.Second, 60 * time.Second, 60 * time.Second,
++	60 * time.Second, 60 * time.Second, 60 * time.Second,
++	60 * time.Second, 60 * time.Second, 60 * time.Second, 60 * time.Second,
++}
++
++// isFundsErr reports whether a host refused an RPC for lack of account funds.
++func isFundsErr(err error) bool {
++	return err != nil && (errors.Is(err, proto4.ErrNotEnoughFunds) || strings.Contains(err.Error(), "not enough funds"))
++}
++
++// shortHostKey returns a short, log-friendly form of a host key.
++func shortHostKey(hk types.PublicKey) string {
++	str := hk.String()
++	if len(str) > 20 {
++		return str[:20]
++	}
++	return str
++}
++
++// sectorErrClass buckets a sector read error for the failure summary.
++func sectorErrClass(err error, timedOut bool) string {
++	switch {
++	case timedOut:
++		return "host_timeout"
++	case errors.Is(err, context.DeadlineExceeded):
++		return "deadline"
++	case errors.Is(err, context.Canceled):
++		return "canceled"
++	}
++	msg := err.Error()
++	if len(msg) > 64 {
++		msg = msg[:64]
++	}
++	return msg
++}
++
+ func (s *SDK) downloadSlab(ctx context.Context, slab slabs.SlabSlice, slabIndex, seq int, popped *changeCounter, limiter *inflightLimiter, timeout time.Duration, onProgress func(ShardProgress)) ([][]byte, error) {
++	return s.downloadSlabAttempt(ctx, slab, slabIndex, seq, 0, popped, limiter, timeout, onProgress)
++}
++
++// downloadSlabAttempt is downloadSlab with the chunk-level attempt number,
++// which is only used for logging.
++func (s *SDK) downloadSlabAttempt(ctx context.Context, slab slabs.SlabSlice, slabIndex, seq, attempt int, popped *changeCounter, limiter *inflightLimiter, timeout time.Duration, onProgress func(ShardProgress)) ([][]byte, error) {
+ 	if slab.MinShards == 0 {
+ 		return nil, errors.New("invalid slab: min shards cannot be 0")
+ 	} else if int(slab.MinShards) > len(slab.Sectors) {
+@@ -158,6 +216,10 @@
+ 	// check after prioritizing since it removes unusable hosts, leaving
+ 	// potentially fewer than the initial batch below consumes
+ 	if len(slabHosts) < int(slab.MinShards) {
++		s.log.Warn("chunk download failed: not enough usable hosts",
++			zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("attempt", attempt),
++			zap.Int("sectors", len(slab.Sectors)), zap.Int("usableHosts", len(slabHosts)),
++			zap.Int("minShards", int(slab.MinShards)))
+ 		return nil, fmt.Errorf("slab has %d usable hosts, minimum required: %d: %w", len(slabHosts), slab.MinShards, ErrNotEnoughShards)
+ 	}
+
+@@ -168,11 +230,16 @@
+ 		err     error
+ 		hostKey types.PublicKey
+ 		elapsed time.Duration
++		// timedOut is set when the read ate its own per-host deadline (not
++		// one inherited from ctx)
++		timedOut bool
+ 	}
+ 	responseCh := make(chan result, len(slab.Sectors))
+-	var outstanding int
++	var outstanding, tried int
++	failuresByClass := make(map[string]int)
+ 	tryDownloadSector := func(d sectorDownload) {
+ 		outstanding++
++		tried++
+ 		release := s.hosts.TrackInflightRead(d.sector.HostKey)
+ 		wg.Go(func() {
+ 			defer release()
+@@ -186,7 +253,8 @@
+ 			// a read aborted because the chunk already had enough shards
+ 			// measured the cancellation, not the network, so it is not a
+ 			// congestion signal
+-			if ctx.Err() == nil {
++			// a refusal for lack of funds says nothing about congestion
++			if ctx.Err() == nil && !isFundsErr(err) {
+ 				limiter.record(permit, elapsed, err == nil)
+ 			}
+ 			// the bytes that landed are the worst-case throughput sample; the
+@@ -197,11 +265,12 @@
+ 			select {
+ 			case <-ctx.Done():
+ 			case responseCh <- result{
+-				index:   d.index,
+-				buf:     buf.Bytes(),
+-				err:     err,
+-				hostKey: d.sector.HostKey,
+-				elapsed: elapsed,
++				index:    d.index,
++				buf:      buf.Bytes(),
++				err:      err,
++				hostKey:  d.sector.HostKey,
++				elapsed:  elapsed,
++				timedOut: timedOut,
+ 			}:
+ 			}
+ 		})
+@@ -210,7 +279,11 @@
+ 	// overprovision the initial reads to avoid waiting on the slowest of
+ 	// exactly minShards hosts; the chunk completes on the first minShards
+ 	// successes and the leftover reads are cancelled
++	// LAB (lever 2): S3D_READ_OVERDRIVE=0 starts exactly MinShards reads
+ 	initial := min(int(slab.MinShards)*3/2, len(slabHosts))
++	if os.Getenv("S3D_READ_OVERDRIVE") == "0" {
++		initial = min(int(slab.MinShards), len(slabHosts))
++	}
+ 	for range initial {
+ 		tryDownloadSector(slabSectors[slabHosts[0]])
+ 		slabHosts = slabHosts[1:]
+@@ -265,10 +338,41 @@
+ 					// enough shards downloaded
+ 					return shards, nil
+ 				}
++			} else if ctx.Err() == nil {
++				// a genuine per-host failure: this slab's context is still
++				// live, so it is neither a race loser (those are cancelled
++				// only after the slab returns, and their results are dropped
++				// by the select in the read goroutine) nor a download the
++				// caller closed
++				class := sectorErrClass(res.err, res.timedOut)
++				failuresByClass[class]++
++				s.log.Warn("sector read failed",
++					zap.String("host", shortHostKey(res.hostKey)),
++					zap.String("class", class),
++					zap.String("error", res.err.Error()),
++					zap.Int64("elapsedMs", res.elapsed.Milliseconds()),
++					zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("shard", res.index),
++					zap.Int("attempt", attempt))
+ 			}
+ 			// check if enough potential successes remain
+ 			rem := int(slab.MinShards) - successful
+ 			if outstanding+len(slabHosts) < rem {
++				s.log.Warn("chunk download failed: not enough shards",
++					zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("attempt", attempt),
++					zap.Int("sectors", len(slab.Sectors)), zap.Int("minShards", int(slab.MinShards)),
++					zap.Int("hostsTried", tried), zap.Int("successes", successful),
++					zap.Int("outstanding", outstanding), zap.Int("untried", len(slabHosts)),
++					zap.Any("failuresByClass", failuresByClass))
++				var funds, failed int
++				for class, n := range failuresByClass {
++					failed += n
++					if strings.Contains(class, "not enough funds") {
++						funds += n
++					}
++				}
++				if failed > 0 && funds*2 >= failed {
++					return nil, fmt.Errorf("%w: %w", ErrNotEnoughShards, errFundsExhausted)
++				}
+ 				return nil, ErrNotEnoughShards
+ 			}
+ 			if res.err != nil && len(slabHosts) > 0 {
+@@ -676,8 +780,8 @@
+ 	writeLen int
+ }
+
+-func (s *SDK) recoverChunk(ctx context.Context, chunk slabs.SlabSlice, slabIndex, seq int, popped *changeCounter, limiter *inflightLimiter, hostTimeout time.Duration, onProgress func(ShardProgress)) (recoveredChunk, error) {
+-	shards, err := s.downloadSlab(ctx, chunk, slabIndex, seq, popped, limiter, hostTimeout, onProgress)
++func (s *SDK) recoverChunk(ctx context.Context, chunk slabs.SlabSlice, slabIndex, seq, attempt int, popped *changeCounter, limiter *inflightLimiter, hostTimeout time.Duration, onProgress func(ShardProgress)) (recoveredChunk, error) {
++	shards, err := s.downloadSlabAttempt(ctx, chunk, slabIndex, seq, attempt, popped, limiter, hostTimeout, onProgress)
+ 	if err != nil {
+ 		return recoveredChunk{}, fmt.Errorf("failed to download slab: %w", err)
+ 	}
+@@ -888,9 +992,57 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	rc, err := c.s.recoverChunk(c.ctx, chunk.slab, chunk.slabIdx, seq, c.popped, c.limiter, c.hostTimeout, c.onProgress)
+-	if err != nil {
+-		return nil, err
++	// Chunk-level retry. recoverChunk is a pure function of the chunk: every
++	// attempt allocates fresh shard buffers in downloadSlab, and nothing is
++	// written to the pooled output buffer or handed to the reader until an
++	// attempt has fully succeeded, so a failed attempt leaves no bytes behind
++	// and the retried chunk keeps its index (its place in the output order).
++	var rc recoveredChunk
++	fundsWaits := 0
++	for attempt := 0; ; attempt++ {
++		rc, err = c.s.recoverChunk(c.ctx, chunk.slab, chunk.slabIdx, seq, attempt, c.popped, c.limiter, c.hostTimeout, c.onProgress)
++		if err == nil {
++			break
++		}
++		// never retry a download that was cancelled (closed by the reader,
++		// or failed by another chunk) or a slab that cannot be valid
++		if c.ctx.Err() == nil && errors.Is(err, errFundsExhausted) && fundsWaits < len(fundsRetryBackoff) {
++			wait := fundsRetryBackoff[fundsWaits]
++			fundsWaits++
++			attempt-- // a funds wait does not use up a regular retry
++			c.s.log.Warn("chunk waiting for account refill",
++				zap.Int("slab", chunk.slabIdx), zap.Int("chunk", seq),
++				zap.Int("fundsWait", fundsWaits), zap.Duration("backoff", wait))
++			t := time.NewTimer(wait)
++			select {
++			case <-c.ctx.Done():
++				t.Stop()
++				return nil, c.ctx.Err()
++			case <-t.C:
++			}
++			continue
++		}
++		if c.ctx.Err() != nil || errors.Is(err, context.Canceled) || attempt >= len(chunkRetryBackoff) {
++			if c.ctx.Err() == nil {
++				c.s.log.Warn("chunk recovery failed, giving up",
++					zap.Int("slab", chunk.slabIdx), zap.Int("chunk", seq),
++					zap.Uint64("objectOffset", chunk.objectOffset), zap.Uint32("length", chunk.slab.Length),
++					zap.Int("attempts", attempt+1), zap.Error(err))
++			}
++			return nil, err
++		}
++		wait := chunkRetryBackoff[attempt]
++		c.s.log.Warn("chunk recovery failed, retrying",
++			zap.Int("slab", chunk.slabIdx), zap.Int("chunk", seq),
++			zap.Uint64("objectOffset", chunk.objectOffset), zap.Uint32("length", chunk.slab.Length),
++			zap.Int("attempt", attempt), zap.Duration("backoff", wait), zap.Error(err))
++		t := time.NewTimer(wait)
++		select {
++		case <-c.ctx.Done():
++			t.Stop()
++			return nil, c.ctx.Err()
++		case <-t.C:
++		}
+ 	}
+ 	out := c.bufs.get(rc.writeLen)
+ 	if err := stripedJoin(out, rc.shards, rc.skip); err != nil {
+--- a/upload.go
++++ b/upload.go
+@@ -1,6 +1,7 @@
+ package siastorage
+
+ import (
++	"go.uber.org/zap"
+ 	"context"
+ 	"fmt"
+ 	"io"
+@@ -51,6 +52,7 @@
+ 	}
+
+ 	shardUpload struct {
++		log *zap.Logger // SIA-BENCH-4 lab: per-host write failures
+ 		hosts      hostClient
+ 		accountKey types.PrivateKey
+ 		onProgress func(ShardProgress)
+@@ -307,6 +309,7 @@
+ 			pool:          newUploadPool(s.hosts, candidates, totalShards),
+ 			commitment:    slabCommitment,
+ 			shardsCh:      make(chan shard, totalShards),
++			log:           s.log,
+ 			waiting:       waiting,
+ 		}
+ 		resultCh := make(chan slabResult, 1)
+@@ -506,6 +509,9 @@
+ 				return
+ 			}
+
++			if su.log != nil && ctx.Err() == nil {
++				su.log.Warn("shard write failed", zap.Stringer("host", res.host), zap.Error(res.err), zap.Duration("elapsed", res.elapsed), zap.Int("slab", su.slabIndex), zap.Int("shard", shardIndex), zap.Bool("canRetry", res.canRetry))
++			}
+ 			active--
+
+ 			if active > 0 {

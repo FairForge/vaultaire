@@ -284,3 +284,4 @@ This file is in a public repository (Review R14-20 / decision D-20): the hostnam
 - Health: `curl https://stored.ge/health`
 - Auth-failure signal: `/metrics` exports `vaultaire_auth_failures_total{reason,key_known}` and `vaultaire_auth_failures_by_key_total{key_hash}` (Review R11-10) plus the dashboard's `vaultaire_dashboard_login_failures_total{reason}` / `_lockouts_total` (Review R12); rules in `deploy/monitoring/vaultaire-auth.yml` page on a burst against a real key and warn on dashboard stuffing/lockouts. Dashboard accounts lock for 15 min after 10 failed sign-ins in 15 min
 - Cross-compile: `GOOS=linux GOARCH=amd64 go build -o vaultaire-bin ./cmd/vaultaire`
+- Sia gateways (s3d, lab + `sia` backend): `user1` systemd user units, Stored's patched build, Litestream of each `s3d.db` (SSE-C to R2), metrics/canary/alerts — `deploy/sia/README.md`

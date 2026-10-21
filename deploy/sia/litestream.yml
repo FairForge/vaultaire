@@ -1,0 +1,28 @@
+# Litestream v0.5 — continuous replication of each mainnet s3d gateway's
+# catalogue (s3d.db: the ONLY key -> Sia-object map, and it holds the app key)
+# to R2, SSE-C encrypted (the key never leaves us: ~/.config/stored-sia/
+# litestream-ssec.key here, a copy in the owner's Keychain for restores).
+# v0.5 removed age encryption (it refuses the config); SSE-C replaces it.
+# Credentials: LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY and
+# R2_ACCOUNT_ID from ~/.config/stored-sia/litestream.env (0600).
+addr: 127.0.0.1:9097
+
+dbs:
+  - path: /home/user1/s3d-lab/data/s3d.db
+    replica:
+      type: s3
+      bucket: stored-sia-litestream
+      path: s3d-lab
+      endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+      region: auto
+      force-path-style: true
+      sse-customer-key-path: /home/user1/.config/stored-sia/litestream-ssec.key
+  - path: /home/user1/s3d-lab2/data/s3d.db
+    replica:
+      type: s3
+      bucket: stored-sia-litestream
+      path: s3d-lab2
+      endpoint: https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
+      region: auto
+      force-path-style: true
+      sse-customer-key-path: /home/user1/.config/stored-sia/litestream-ssec.key
