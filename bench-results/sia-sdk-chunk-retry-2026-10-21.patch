@@ -1,0 +1,203 @@
+--- gopath/pkg/mod/go.sia.tech/siastorage@v0.2.2-0.20260831091740-f9961f7e5391/sdk.go	2026-10-21 05:01:00.911780208 +0000
++++ sia-storage-go-retry/sdk.go	2026-10-21 14:17:05.169742197 +0000
+@@ -117,7 +117,46 @@
+ 	sector slabs.PinnedSector
+ }
+
++// chunkRetryBackoff is the wait before each re-attempt of a chunk whose
++// recovery failed with a non-cancellation error; its length is the number of
++// retries (each attempt re-uses every sector of the slab).
++var chunkRetryBackoff = []time.Duration{
++	500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
++}
++
++// shortHostKey returns a short, log-friendly form of a host key.
++func shortHostKey(hk types.PublicKey) string {
++	str := hk.String()
++	if len(str) > 20 {
++		return str[:20]
++	}
++	return str
++}
++
++// sectorErrClass buckets a sector read error for the failure summary.
++func sectorErrClass(err error, timedOut bool) string {
++	switch {
++	case timedOut:
++		return "host_timeout"
++	case errors.Is(err, context.DeadlineExceeded):
++		return "deadline"
++	case errors.Is(err, context.Canceled):
++		return "canceled"
++	}
++	msg := err.Error()
++	if len(msg) > 64 {
++		msg = msg[:64]
++	}
++	return msg
++}
++
+ func (s *SDK) downloadSlab(ctx context.Context, slab slabs.SlabSlice, slabIndex, seq int, popped *changeCounter, limiter *inflightLimiter, timeout time.Duration, onProgress func(ShardProgress)) ([][]byte, error) {
++	return s.downloadSlabAttempt(ctx, slab, slabIndex, seq, 0, popped, limiter, timeout, onProgress)
++}
++
++// downloadSlabAttempt is downloadSlab with the chunk-level attempt number,
++// which is only used for logging.
++func (s *SDK) downloadSlabAttempt(ctx context.Context, slab slabs.SlabSlice, slabIndex, seq, attempt int, popped *changeCounter, limiter *inflightLimiter, timeout time.Duration, onProgress func(ShardProgress)) ([][]byte, error) {
+ 	if slab.MinShards == 0 {
+ 		return nil, errors.New("invalid slab: min shards cannot be 0")
+ 	} else if int(slab.MinShards) > len(slab.Sectors) {
+@@ -158,6 +197,10 @@
+ 	// check after prioritizing since it removes unusable hosts, leaving
+ 	// potentially fewer than the initial batch below consumes
+ 	if len(slabHosts) < int(slab.MinShards) {
++		s.log.Warn("chunk download failed: not enough usable hosts",
++			zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("attempt", attempt),
++			zap.Int("sectors", len(slab.Sectors)), zap.Int("usableHosts", len(slabHosts)),
++			zap.Int("minShards", int(slab.MinShards)))
+ 		return nil, fmt.Errorf("slab has %d usable hosts, minimum required: %d: %w", len(slabHosts), slab.MinShards, ErrNotEnoughShards)
+ 	}
+
+@@ -168,11 +211,16 @@
+ 		err     error
+ 		hostKey types.PublicKey
+ 		elapsed time.Duration
++		// timedOut is set when the read ate its own per-host deadline (not
++		// one inherited from ctx)
++		timedOut bool
+ 	}
+ 	responseCh := make(chan result, len(slab.Sectors))
+-	var outstanding int
++	var outstanding, tried int
++	failuresByClass := make(map[string]int)
+ 	tryDownloadSector := func(d sectorDownload) {
+ 		outstanding++
++		tried++
+ 		release := s.hosts.TrackInflightRead(d.sector.HostKey)
+ 		wg.Go(func() {
+ 			defer release()
+@@ -197,11 +245,12 @@
+ 			select {
+ 			case <-ctx.Done():
+ 			case responseCh <- result{
+-				index:   d.index,
+-				buf:     buf.Bytes(),
+-				err:     err,
+-				hostKey: d.sector.HostKey,
+-				elapsed: elapsed,
++				index:    d.index,
++				buf:      buf.Bytes(),
++				err:      err,
++				hostKey:  d.sector.HostKey,
++				elapsed:  elapsed,
++				timedOut: timedOut,
+ 			}:
+ 			}
+ 		})
+@@ -265,10 +314,31 @@
+ 					// enough shards downloaded
+ 					return shards, nil
+ 				}
++			} else if ctx.Err() == nil {
++				// a genuine per-host failure: this slab's context is still
++				// live, so it is neither a race loser (those are cancelled
++				// only after the slab returns, and their results are dropped
++				// by the select in the read goroutine) nor a download the
++				// caller closed
++				class := sectorErrClass(res.err, res.timedOut)
++				failuresByClass[class]++
++				s.log.Warn("sector read failed",
++					zap.String("host", shortHostKey(res.hostKey)),
++					zap.String("class", class),
++					zap.String("error", res.err.Error()),
++					zap.Int64("elapsedMs", res.elapsed.Milliseconds()),
++					zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("shard", res.index),
++					zap.Int("attempt", attempt))
+ 			}
+ 			// check if enough potential successes remain
+ 			rem := int(slab.MinShards) - successful
+ 			if outstanding+len(slabHosts) < rem {
++				s.log.Warn("chunk download failed: not enough shards",
++					zap.Int("slab", slabIndex), zap.Int("chunk", seq), zap.Int("attempt", attempt),
++					zap.Int("sectors", len(slab.Sectors)), zap.Int("minShards", int(slab.MinShards)),
++					zap.Int("hostsTried", tried), zap.Int("successes", successful),
++					zap.Int("outstanding", outstanding), zap.Int("untried", len(slabHosts)),
++					zap.Any("failuresByClass", failuresByClass))
+ 				return nil, ErrNotEnoughShards
+ 			}
+ 			if res.err != nil && len(slabHosts) > 0 {
+@@ -676,8 +746,8 @@
+ 	writeLen int
+ }
+
+-func (s *SDK) recoverChunk(ctx context.Context, chunk slabs.SlabSlice, slabIndex, seq int, popped *changeCounter, limiter *inflightLimiter, hostTimeout time.Duration, onProgress func(ShardProgress)) (recoveredChunk, error) {
+-	shards, err := s.downloadSlab(ctx, chunk, slabIndex, seq, popped, limiter, hostTimeout, onProgress)
++func (s *SDK) recoverChunk(ctx context.Context, chunk slabs.SlabSlice, slabIndex, seq, attempt int, popped *changeCounter, limiter *inflightLimiter, hostTimeout time.Duration, onProgress func(ShardProgress)) (recoveredChunk, error) {
++	shards, err := s.downloadSlabAttempt(ctx, chunk, slabIndex, seq, attempt, popped, limiter, hostTimeout, onProgress)
+ 	if err != nil {
+ 		return recoveredChunk{}, fmt.Errorf("failed to download slab: %w", err)
+ 	}
+@@ -888,9 +958,40 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	rc, err := c.s.recoverChunk(c.ctx, chunk.slab, chunk.slabIdx, seq, c.popped, c.limiter, c.hostTimeout, c.onProgress)
+-	if err != nil {
+-		return nil, err
++	// Chunk-level retry. recoverChunk is a pure function of the chunk: every
++	// attempt allocates fresh shard buffers in downloadSlab, and nothing is
++	// written to the pooled output buffer or handed to the reader until an
++	// attempt has fully succeeded, so a failed attempt leaves no bytes behind
++	// and the retried chunk keeps its index (its place in the output order).
++	var rc recoveredChunk
++	for attempt := 0; ; attempt++ {
++		rc, err = c.s.recoverChunk(c.ctx, chunk.slab, chunk.slabIdx, seq, attempt, c.popped, c.limiter, c.hostTimeout, c.onProgress)
++		if err == nil {
++			break
++		}
++		// never retry a download that was cancelled (closed by the reader,
++		// or failed by another chunk) or a slab that cannot be valid
++		if c.ctx.Err() != nil || errors.Is(err, context.Canceled) || attempt >= len(chunkRetryBackoff) {
++			if c.ctx.Err() == nil {
++				c.s.log.Warn("chunk recovery failed, giving up",
++					zap.Int("slab", chunk.slabIdx), zap.Int("chunk", seq),
++					zap.Uint64("objectOffset", chunk.objectOffset), zap.Uint32("length", chunk.slab.Length),
++					zap.Int("attempts", attempt+1), zap.Error(err))
++			}
++			return nil, err
++		}
++		wait := chunkRetryBackoff[attempt]
++		c.s.log.Warn("chunk recovery failed, retrying",
++			zap.Int("slab", chunk.slabIdx), zap.Int("chunk", seq),
++			zap.Uint64("objectOffset", chunk.objectOffset), zap.Uint32("length", chunk.slab.Length),
++			zap.Int("attempt", attempt), zap.Duration("backoff", wait), zap.Error(err))
++		t := time.NewTimer(wait)
++		select {
++		case <-c.ctx.Done():
++			t.Stop()
++			return nil, c.ctx.Err()
++		case <-t.C:
++		}
+ 	}
+ 	out := c.bufs.get(rc.writeLen)
+ 	if err := stripedJoin(out, rc.shards, rc.skip); err != nil {
+--- s3d-src-app2/cmd/s3d/main.go	2026-10-21 13:27:39.941413219 +0000
++++ s3d-src-app2-retry/cmd/s3d/main.go	2026-10-21 14:16:28.191476811 +0000
+@@ -305,7 +305,16 @@
+ 		checkFatalError("failed to create SDK client", err)
+ 	}
+
+-	indexdSDK := sia.NewSDK(sdkClient, sia.WithUploadOptions(sdk.WithRedundancy(cfg.Sia.DataShards, cfg.Sia.ParityShards)))
++	sdkOpts := []sia.SDKOption{sia.WithUploadOptions(sdk.WithRedundancy(cfg.Sia.DataShards, cfg.Sia.ParityShards))}
++	if v := os.Getenv("S3D_DOWNLOAD_HOST_TIMEOUT"); v != "" {
++		d, err := time.ParseDuration(v)
++		if err != nil || d <= 0 {
++			checkFatalError("invalid S3D_DOWNLOAD_HOST_TIMEOUT", fmt.Errorf("%q: must be a positive Go duration: %v", v, err))
++		}
++		log.Info("download host timeout overridden", zap.Duration("timeout", d))
++		sdkOpts = append(sdkOpts, sia.WithDownloadOptions(sdk.WithDownloadHostTimeout(d)))
++	}
++	indexdSDK := sia.NewSDK(sdkClient, sdkOpts...)
+
+ 	backend, err := sia.New(ctx, indexdSDK, store, cfg.Directory,
+ 		sia.WithDiskUsageLimit(cfg.Sia.DiskUsageLimit),
