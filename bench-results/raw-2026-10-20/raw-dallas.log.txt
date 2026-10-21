@@ -1,0 +1,43 @@
+Host:      slc (linux/amd64)
+Output:    raw-dallas.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] idrive-us-central-1  (https://s3.us-central-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb         905ms  p50=85ms p95=118ms p99=118ms
+  warm_put_4kb             3150ms     32 ops/s  p50=30ms p95=32ms p99=85ms
+  warm_get_4kb             2827ms     35 ops/s  p50=27ms p95=33ms p99=38ms
+  warm_head_4kb            1438ms     35 ops/s  p50=28ms p95=29ms p99=29ms
+  warm_copy_4kb             320ms     31 ops/s  p50=32ms p95=34ms p99=34ms
+  warm_delete_single        933ms     32 ops/s  p50=28ms p95=59ms p99=61ms
+  delete_batch_100          119ms    836 ops/s
+  list_100                  110ms  returned=100
+  list_prefix                27ms  returned=30
+  medium_put_1mb            523ms     9.6 MB/s  p50=55ms p95=258ms p99=258ms
+  medium_get_1mb            570ms     8.8 MB/s  p50=56ms p95=222ms p99=222ms
+  medium_put_16mb          1014ms    78.9 MB/s  p50=163ms p95=405ms p99=405ms
+  medium_get_16mb          1143ms    70.0 MB/s  p50=244ms p95=335ms p99=335ms
+  large_put_64mb            731ms    87.5 MB/s
+  large_get_64mb            858ms    74.6 MB/s
+  multipart_put_256mb      1427ms   179.4 MB/s
+  multipart_put_256mb_16p    932ms   274.7 MB/s
+  large_put_64mb_h1         665ms    96.2 MB/s
+  multipart_put_256mb_h1_16p    964ms   265.4 MB/s
+  mpu_abort                 333ms     15 ops/s  p50=55ms p95=108ms p99=108ms
+  concurrent_ingest_20s    1665ms   689.5 MB/s    172 ops/s  p50=116ms p95=370ms p99=566ms
+  concurrent_download_20s   6508ms   176.4 MB/s     44 ops/s  p50=133ms p95=487ms p99=3134ms
+  range_get_1mb_chunks     1015ms    15.8 MB/s     16 ops/s  p50=32ms p95=330ms p99=330ms
+  burst_small_files_500    1600ms     1.2 MB/s    312 ops/s  p50=30ms p95=32ms p99=87ms
+  integrity_16mb           5768ms  ✓ checksum match
+  integrity_robust_16mb    7283ms     2.2 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    733ms    21.8 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1609ms  p50=28ms p95=79ms p99=79ms  ✓ 20/20 consistent
+  consistency_overwrite    2240ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    661ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     611ms    523 ops/s  max_clean=128 | ✓8w:186ops/s(0e) ✓16w:377ops/s(0e) ✓32w:486ops/s(0e) ✓64w:906ops/s(0e) ✓128w:1426ops/s(0e)
+  sustained_upload_60s    60000ms   477.6 MB/s     30 ops/s  p50=124ms p95=177ms p99=282ms  00s:448MB/s 10s:461MB/s 20s:490MB/s 30s:496MB/s 40s:491MB/s 50s:480MB/s
+
+
+✅ Done in 2m4s. Results: raw-dallas.json

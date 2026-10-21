@@ -1,0 +1,13 @@
+std-cf         small_put_4k                 n=30 p50 47 ms  p95 76 ms  max 94 ms
+std-cf         small_get_4k                 n=30 p50 38 ms  p95 41 ms  max 42 ms  ok
+std-cf         small_head_4k                n=30 p50 9 ms  p95 13 ms  max 45 ms
+std-cf         list_prefix                  0.01 s  [30 keys listed]
+std-cf         small_delete                 n=30 p50 40 ms  p95 47 ms  max 62 ms
+std-cf         single_put_8mb               0.16 s  51.3 MB/s
+std-cf         get_single_8mb               0.28 s  30.3 MB/s  ttfb 70 ms  ok
+std-cf         single_put_64mb              0.84 s  79.4 MB/s
+std-cf         get_single_64mb              0.48 s  141.1 MB/s  ttfb 194 ms  ok
+std-cf         single_put_256mb             0.00 s  [skipped: above -max-single-mb]
+std-cf         mpu_put_256mb                1.24 s  216.2 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.6 s]
+std-cf         get_mpu_256mb                2.48 s  108.4 MB/s  ttfb 406 ms  ok
+std-cf         range_get_1mb                n=20 p50 168 ms  p95 501 ms  max 534 ms  [of mpu-256mb.bin]

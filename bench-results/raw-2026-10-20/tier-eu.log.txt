@@ -1,0 +1,14 @@
+eu-frankfurt   small_put_4k                 n=30 p50 154 ms  p95 241 ms  max 521 ms
+eu-frankfurt   small_get_4k                 n=30 p50 138 ms  p95 147 ms  max 415 ms  ok
+eu-frankfurt   small_head_4k                n=30 p50 1 ms  p95 1 ms  max 1 ms
+eu-frankfurt   list_prefix                  0.00 s  [30 keys listed]
+eu-frankfurt   small_delete                 n=30 p50 140 ms  p95 233 ms  max 239 ms
+eu-frankfurt   single_put_8mb               1.75 s  4.8 MB/s
+eu-frankfurt   get_single_8mb               1.47 s  5.7 MB/s  ttfb 413 ms  ok
+eu-frankfurt   single_put_64mb              2.68 s  25.0 MB/s
+eu-frankfurt   get_single_64mb              2.82 s  23.8 MB/s  ttfb 1827 ms  ok
+eu-frankfurt   single_put_256mb             3.61 s  74.4 MB/s
+eu-frankfurt   get_single_256mb             16.71 s  16.1 MB/s  ttfb 1582 ms  ok
+eu-frankfurt   mpu_put_256mb                4.00 s  67.1 MB/s  [16 parts x 16 MiB, 8 wide, complete 3.4 s]
+eu-frankfurt   get_mpu_256mb                8.16 s  32.9 MB/s  ttfb 4688 ms  ok
+eu-frankfurt   range_get_1mb                n=20 p50 379 ms  p95 390 ms  max 1558 ms  [of single-256mb.bin]

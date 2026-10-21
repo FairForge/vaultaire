@@ -1,0 +1,12 @@
+eu-paris       small_put_4k                 n=30 p50 153 ms  p95 295 ms  max 546 ms
+eu-paris       small_get_4k                 n=30 p50 137 ms  p95 226 ms  max 409 ms  ok
+eu-paris       small_head_4k                n=30 p50 0 ms  p95 1 ms  max 1 ms
+eu-paris       list_prefix                  0.00 s  [30 keys listed]
+eu-paris       small_delete                 n=30 p50 138 ms  p95 183 ms  max 254 ms
+eu-paris       single_put_8mb               1.87 s  4.5 MB/s
+eu-paris       get_single_8mb               8.54 s  1.0 MB/s  ttfb 413 ms  ok
+eu-paris       single_put_64mb              3.21 s  20.9 MB/s
+eu-paris       get_single_64mb              28.36 s  2.4 MB/s  ttfb 16512 ms  ok
+eu-paris       mpu_put_256mb                4.31 s  62.3 MB/s  [16 parts x 16 MiB, 8 wide, complete 3.5 s]
+eu-paris       get_mpu_256mb                86.12 s  3.1 MB/s  ttfb 4655 ms  ok
+eu-paris       range_get_1mb                n=10 p50 2327 ms  p95 2968 ms  max 3562 ms  [of mpu-256mb.bin]

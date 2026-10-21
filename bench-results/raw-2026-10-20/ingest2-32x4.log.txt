@@ -1,0 +1,1 @@
+ingest2-32x4: 32 workers × 4.0 MiB: 4096 ok, 0 failed in 17.9s = 958.3 MB/s 228.5 ops/s; p50 121 ms p90 192 p99 472 max 1695 map[]

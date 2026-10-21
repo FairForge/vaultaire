@@ -1,0 +1,7 @@
+[22:58:49] == customer path: Standard on iDrive Dallas via origin
+[22:59:15] == customer path: Standard via Cloudflare (bodies <= 100 MB)
+[22:59:30] == customer path: EU bucket (Frankfurt) via origin
+[23:00:35] == customer path: Phoenix + Paris (new regions)
+[23:03:47] == ingest: 32 x 4 MiB and 8 x 64 MiB, 20 s each, via origin
+[23:03:52] == ingest via Cloudflare: 32 x 4 MiB
+[23:03:55] == raw: Dallas, every workload

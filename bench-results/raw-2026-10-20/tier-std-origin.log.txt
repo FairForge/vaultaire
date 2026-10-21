@@ -1,0 +1,16 @@
+std-origin     small_put_4k                 n=30 p50 35 ms  p95 36 ms  max 253 ms
+std-origin     small_get_4k                 n=30 p50 30 ms  p95 31 ms  max 85 ms  ok
+std-origin     small_head_4k                n=30 p50 1 ms  p95 1 ms  max 1 ms
+std-origin     list_prefix                  0.00 s  [30 keys listed]
+std-origin     small_delete                 n=30 p50 31 ms  p95 34 ms  max 54 ms
+std-origin     single_put_8mb               0.32 s  26.1 MB/s
+std-origin     get_single_8mb               0.28 s  29.5 MB/s  ttfb 101 ms  ok
+std-origin     single_put_64mb              0.84 s  79.6 MB/s
+std-origin     get_single_64mb              0.58 s  116.6 MB/s  ttfb 496 ms  ok
+std-origin     single_put_256mb             1.43 s  187.7 MB/s
+std-origin     get_single_256mb             2.39 s  112.2 MB/s  ttfb 614 ms  ok
+std-origin     mpu_put_256mb                1.25 s  214.5 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.6 s]
+std-origin     get_mpu_256mb                1.84 s  145.7 MB/s  ttfb 451 ms  ok
+std-origin     mpu_put_1024mb               4.25 s  252.9 MB/s  [64 parts x 16 MiB, 8 wide, complete 2.2 s]
+std-origin     get_mpu_1024mb               6.14 s  174.8 MB/s  ttfb 517 ms  ok
+std-origin     range_get_1mb                n=20 p50 118 ms  p95 388 ms  max 492 ms  [of mpu-1024mb.bin]

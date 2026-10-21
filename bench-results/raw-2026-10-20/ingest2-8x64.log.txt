@@ -1,0 +1,1 @@
+ingest2-8x64: 8 workers × 64.0 MiB: 222 ok, 0 failed in 20.6s = 723.8 MB/s 10.8 ops/s; p50 650 ms p90 1167 p99 1507 max 1910 map[]
