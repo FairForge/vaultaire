@@ -94,3 +94,25 @@ Box script (the admin JWT minted inside from `JWT_SECRET` — note: `users` has 
 - In the iDrive console: turn on the e-mail notifications for disk utilization and renewal (both empty on 2026-09-20), enable 2FA, **rotate the reseller API key** (it went through chat on 2026-10-20) and seal the new one on the box: `systemd-creds encrypt --with-key=tpm2+host --name=idrive_reseller_api_key - /etc/credstore.encrypted/idrive_reseller_api_key` + `LoadCredentialEncrypted=` in the unit (the master-key ceremony's pattern, docs/ENCRYPTION.md); set `IDRIVE_RESELLER_USER=<the prod sub-account e-mail>` in `.env`; `sudo vaultaire-switch restart`.
 - Enter the remaining plan rows (F-31): `geyser` (100 TB minimum, $155/mo), `lyve` (promo, no cap — a far `term_end`), `wasabi` (dormant), `r2` (free tier) — `BackendPlanUnknown` stops firing as each lands.
 - Keep benchmarks against iDrive under a few hundred GB (3× stored free egress, then $0.01/GB).
+
+## Post-merge review (2026-10-21)
+
+Adversarial pass over #818 and #820 (non-test diffs read against the claims; CI green on main
+through #822, the cancelled run on `e62ff68` was merge-queue supersession). **Every claim holds —
+no P0/P1.** Verified directly: the renew window is enforced on BOTH entry points (`renewOffer`
+runs again inside `HandleRenewHouse`, and an out-of-window POST would carry `StartAt` anyway, so
+it defers rather than forfeits); `Settle` spends no counter number for an `Unnumbered` row and the
+receipt mail gates on `InvoiceNumber != ""`; the capacity sums exclude the `chunked` sentinel and
+NULL backends everywhere, retained versions use the one billing rule, and the reseller key travels
+only in the `token` header with the error envelope's text never echoing it; the egress-free gauge
+on prod is exactly 3 × the stored total.
+
+| # | Sev | Finding |
+|---|---|---|
+| RP26-1 | **P3** | A Renew's trialing subscription is reachable with **$0 moved** (RP24-1), and `payments.Revoke` (entitlement.go:323) clears the floors and marks lapsed **regardless of a future `paid_through`**: a customer with a manually-paid house who clicks Renew and then cancels the trialing subscription in the Stripe portal, with `entitlement_lapse` OFF (prod default), loses the paid year today. Before RP24-1 this branch always followed a real charge. Dark on prod (no Stripe key); data untouched; → Prompt 22 Part 0: a terminal status on a GRANTED row with `paid_through > now` stops the renewal instead of revoking, flag OFF or ON — paid time is never taken by a status. |
+| RP26-2 | P4 | `vendorView` matches the reseller user case-sensitively (`users[i].Email == r.ResellerUser`, backend_capacity.go): an e-mail iDrive returns in different case is "not in /users" forever. One `strings.EqualFold`. → Prompt 22 Part 0. |
+| RP26-3 | note | **Any** `AmountPaid == 0` invoice settles unnumbered — including a 100 %-promo-code real sale (`AllowPromotionCodes` is on; the LET code). A $0 sale then has no receipt at all. Owner decision: acceptable (nothing was paid), or number-but-don't-mail. |
+
+Rules on the box were installed by the worker itself this prompt (`vaultaire-capacity.yml
+f935ad16`, `vaultaire-jobs.yml 1b2fc21c`) — nothing left as [OPS] except the owner's reseller key
+(RP25-1) and the four plan rows (RP25-2).
