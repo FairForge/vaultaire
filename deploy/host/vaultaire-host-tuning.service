@@ -1,0 +1,16 @@
+# Install: /usr/local/sbin/vaultaire-host-tuning.sh (0755) and this file as
+# /etc/systemd/system/vaultaire-host-tuning.service, then
+# `systemctl daemon-reload && systemctl enable --now vaultaire-host-tuning`.
+# docs/DEPLOY.md "Host tuning".
+[Unit]
+Description=Vaultaire host tuning (CPU governor, NIC rings, NIC IRQ affinity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/vaultaire-host-tuning.sh
+
+[Install]
+WantedBy=multi-user.target
