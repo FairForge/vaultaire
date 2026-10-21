@@ -81,7 +81,7 @@ func (s *StripeService) StartCheckout(ctx context.Context, c payments.Checkout) 
 	if purpose == "" {
 		purpose = payments.PurposeNew
 	}
-	return s.CreateHouseCheckout(ctx, customerID, c.TenantID, c.Order, purpose, c.ReturnURL, c.CancelURL)
+	return s.CreateHouseCheckout(ctx, customerID, c.TenantID, c.Order, purpose, c.StartAt, c.ReturnURL, c.CancelURL)
 }
 
 // currentSubscription is the Stripe subscription that bills the tenant's

@@ -31,7 +31,19 @@ type Checkout struct {
 	// CreditCents is a credit the ledger holds for the tenant (a provider
 	// that cannot apply one ignores it; Stripe does, BTCPay subtracts it).
 	CreditCents int64
+	// StartAt is the date the first charge may land (zero = now): a renew
+	// of a GRANTED prepaid row carries its paid_through, so a provider that
+	// can defer starts billing there instead of forfeiting the prepaid
+	// remainder (RP24-1, docs/PAYMENTS.md § 4.2 — Stripe:
+	// subscription_data.trial_end). A StartAt closer than MinDeferredStart
+	// (or past) starts now, and the page says the remaining days are
+	// forfeited.
+	StartAt time.Time
 }
+
+// MinDeferredStart is the least lead a deferred first charge needs —
+// Stripe refuses a trial_end under 48 h ahead (docs/PAYMENTS.md § 4.2).
+const MinDeferredStart = 48 * time.Hour
 
 // ResizeOutcome is what a provider did with a resize: changed the house in
 // place (Applied = the house it now bills, written to the record by the

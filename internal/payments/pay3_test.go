@@ -301,3 +301,52 @@ func TestReadiness_Persisted(t *testing.T) {
 }
 
 var _ = errors.New
+
+// RP24-3: a wire recorded on a Stripe `auto` row extends that row — the
+// audit reports the row's own provider and renewal, never manual/prepaid.
+func TestManualPayment_ExtendAuditsTheRowsProviderAndRenewal(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM audit_logs WHERE tenant_id = $1`, f.tenantID) })
+	ctx := context.Background()
+	end := time.Now().Add(10 * 24 * time.Hour).Truncate(time.Second)
+	f.tx(t, func(tx *sql.Tx) error {
+		return Grant(ctx, tx, f.tenantID, Order{Std: 1, Period: PeriodAnnual}, end, ProviderStripe, "sub_x", RenewalAuto)
+	})
+
+	f.manual(t, PeriodAnnual, nil) // the Extend branch
+
+	var provider, renewal string
+	require.NoError(t, f.db.QueryRow(`
+		SELECT metadata->>'provider', metadata->>'renewal' FROM audit_logs
+		 WHERE tenant_id = $1 AND action = 'billing.house_granted'`, f.tenantID).Scan(&provider, &renewal))
+	assert.Equal(t, ProviderStripe, provider, "the audit says what the row is")
+	assert.Equal(t, string(RenewalAuto), renewal)
+	e := f.entitlement(t)
+	assert.Equal(t, ProviderStripe, e.Provider, "the row keeps its own provider")
+	assert.Equal(t, RenewalAuto, e.Renewal)
+}
+
+// RP24-3: a refund of a Stripe charge counts under the charge's provider.
+func TestRefund_CountedByTheChargesProvider(t *testing.T) {
+	f := newFixture(t)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM audit_logs WHERE tenant_id = $1`, f.tenantID) })
+	ctx := context.Background()
+	// A settled Stripe charge in the ledger.
+	var chargeID string
+	f.tx(t, func(tx *sql.Tx) error {
+		s, err := Settle(ctx, tx, Payment{TenantID: f.tenantID, Provider: ProviderStripe,
+			ProviderID: "in_rp243_" + f.tenantID, Kind: KindCharge, Purpose: PurposeNew, AmountCents: 1000}, time.Now())
+		chargeID = s.ID
+		return err
+	})
+	before := testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeSettled))
+	manualBefore := testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderManual, KindRefund, OutcomeSettled))
+
+	_, err := RecordRefund(ctx, f.db, Refund{TenantID: f.tenantID, PaymentID: chargeID,
+		AmountCents: 400, Actor: "admin-1", Reason: "partial refund"})
+	require.NoError(t, err)
+
+	assert.Equal(t, before+1, testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeSettled)),
+		"Stripe money refunded counts as stripe")
+	assert.Equal(t, manualBefore, testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderManual, KindRefund, OutcomeSettled)))
+}

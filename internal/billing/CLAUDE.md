@@ -213,7 +213,17 @@ Stripe subscription per tenant, one item per line, `quantity` = TB.**
   **Attic-only houses are sold** and **both periods ship** (decisions 2026-09-27).
 - `CreateHouseCheckout` → hosted Checkout (subscription mode, metadata
   `house=1`, `tenant_id`, `ClientReferenceID`, Stripe idempotency key over
-  (tenant, order, 5-min window) so a double submit is one session);
+  (tenant, order, 5-min window) so a double submit is one session). **A renew
+  of a GRANTED prepaid row defers the first charge (RP24-1, § 4.2):**
+  `payments.Checkout.StartAt` = the row's `paid_through` →
+  `SubscriptionData.TrialEnd` when ≥ 48 h ahead (`payments.MinDeferredStart`;
+  Stripe refuses less) — the subscription is `trialing` until the paid date,
+  the webhook's grant keeps the date (`current_period_end` = the trial end)
+  and flips the row to `provider='stripe', renewal='auto'`; inside 48 h the
+  checkout starts now and the billing page's flash says the remaining days
+  are forfeited. The trial's **$0 `subscription_create` invoice** settles
+  with `Payment.Unnumbered`: no gapless receipt number, no receipt mail
+  (`recordInvoicePaid` gates on `settled.InvoiceNumber != ""`);
   `HasLiveSubscription` lists the customer's subscriptions and the dashboard
   refuses a new checkout while any is active/trialing/past_due/incomplete/
   unpaid/paused (R10-05 — a second Checkout is a second subscription);

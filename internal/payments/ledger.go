@@ -66,6 +66,11 @@ type Payment struct {
 	Actor    string
 	Note     string
 	Metadata map[string]any
+	// Unnumbered settles the row without a receipt number (RP24-1: the $0
+	// subscription_create invoice of a trialing Stripe subscription — the
+	// gapless counter must not spend a number on it, and no receipt is
+	// rendered or mailed for it).
+	Unnumbered bool
 }
 
 // Settled is the outcome of Settle.
@@ -190,14 +195,16 @@ func Settle(ctx context.Context, tx *sql.Tx, p Payment, at time.Time) (Settled, 
 		return Settled{ID: id, InvoiceNumber: number.String}, nil
 	}
 	at = at.UTC()
-	number, err := nextInvoiceNumber(ctx, tx, at.Year())
-	if err != nil {
-		return Settled{}, err
+	var number string
+	if !p.Unnumbered {
+		if number, err = nextInvoiceNumber(ctx, tx, at.Year()); err != nil {
+			return Settled{}, err
+		}
 	}
 	std, vault, pin, period := p.house()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE payments
-		   SET status = 'settled', settled_at = $2, invoice_number = $3,
+		   SET status = 'settled', settled_at = $2, invoice_number = NULLIF($3, ''),
 		       tenant_id = COALESCE(tenant_id, NULLIF($4, '')),
 		       amount_cents = $5, credit_cents = $6,
 		       period_start = COALESCE($7, period_start), period_end = COALESCE($8, period_end),

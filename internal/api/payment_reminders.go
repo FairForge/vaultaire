@@ -32,6 +32,12 @@ type PaymentRemindersRunner struct {
 	Grace time.Duration
 	// Mailer sends; nil or a Mailer with no Sender = nothing is sent.
 	Mailer *payments.Mailer
+	// Flags gates the grace steps (RP24-2): "in grace, N days left" and
+	// "your house ends tomorrow" announce an ending only the lapse job
+	// performs, so they go out only where entitlement_lapse is ON for the
+	// tenant (the job's own gate). Nil = no flag source = off, as
+	// everywhere. The before-steps go regardless — they are true either way.
+	Flags payments.FlagSource
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName    string
 	MaxRunTime time.Duration
@@ -42,14 +48,17 @@ type PaymentRemindersRunner struct {
 
 // PaymentRemindersResult is one run's outcome (job_runs.result).
 type PaymentRemindersResult struct {
-	Candidates int      `json:"candidates"`
-	Sent       int      `json:"sent"`
-	Failed     int      `json:"failed"`
-	Errors     []string `json:"errors,omitempty"`
+	Candidates int `json:"candidates"`
+	Sent       int `json:"sent"`
+	Failed     int `json:"failed"`
+	// SkippedFlagOff: grace steps withheld because entitlement_lapse is
+	// off for the tenant (RP24-2) — a note, never an error.
+	SkippedFlagOff int      `json:"skipped_flag_off,omitempty"`
+	Errors         []string `json:"errors,omitempty"`
 }
 
 // NewPaymentRemindersRunner builds the job; nil without a database.
-func NewPaymentRemindersRunner(db *sql.DB, logger *zap.Logger, grace time.Duration, mailer *payments.Mailer) *PaymentRemindersRunner {
+func NewPaymentRemindersRunner(db *sql.DB, logger *zap.Logger, grace time.Duration, mailer *payments.Mailer, fl payments.FlagSource) *PaymentRemindersRunner {
 	if db == nil {
 		return nil
 	}
@@ -59,7 +68,7 @@ func NewPaymentRemindersRunner(db *sql.DB, logger *zap.Logger, grace time.Durati
 	if grace <= 0 {
 		grace = payments.DefaultGrace
 	}
-	return &PaymentRemindersRunner{db: db, logger: logger, Grace: grace, Mailer: mailer,
+	return &PaymentRemindersRunner{db: db, logger: logger, Grace: grace, Mailer: mailer, Flags: fl,
 		JobName: paymentRemindersJobName, MaxRunTime: 5 * time.Minute, now: time.Now}
 }
 
@@ -69,8 +78,13 @@ func (r *PaymentRemindersRunner) spec() jobSpec {
 		Run: func(ctx context.Context) (jobReport, error) {
 			res, err := r.RunOnce(ctx)
 			rep := jobReport{Rows: int64(res.Sent), Result: res}
-			if len(res.Errors) > 0 {
-				rep.Note = strings.Join(res.Errors, "; ")
+			var notes []string
+			if res.SkippedFlagOff > 0 {
+				notes = append(notes, fmt.Sprintf("%d grace step(s) withheld: entitlement_lapse off for the tenant", res.SkippedFlagOff))
+			}
+			notes = append(notes, res.Errors...)
+			if len(notes) > 0 {
+				rep.Note = strings.Join(notes, "; ")
 			}
 			return rep, err
 		},
@@ -101,6 +115,14 @@ func (r *PaymentRemindersRunner) RunOnce(ctx context.Context) (PaymentRemindersR
 			continue
 		}
 		res.Candidates++
+		if (d.Step == payments.StepInGrace || d.Step == payments.StepLastDay) &&
+			(r.Flags == nil || !r.Flags.Enabled(payments.FlagEntitlementLapse, d.TenantID)) {
+			// RP24-2: the mail would announce an ending the lapse job only
+			// counts as would_clear while the flag is off. Not marked sent:
+			// the step goes out if the flag turns on inside its window.
+			res.SkippedFlagOff++
+			continue
+		}
 		if !canSend {
 			continue
 		}

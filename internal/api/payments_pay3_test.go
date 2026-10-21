@@ -64,7 +64,7 @@ func (f *lapseFixture) prepaid(tenantID string, paidThrough time.Time) {
 func (f *lapseFixture) reminders(sender *recordingSender, now func() time.Time) *PaymentRemindersRunner {
 	f.t.Helper()
 	m := payments.NewMailer(f.db, sender, "https://stored.test", hosts.Defaults(8000).Legal(), zap.NewNop())
-	r := NewPaymentRemindersRunner(f.db, zap.NewNop(), 14*24*time.Hour, m)
+	r := NewPaymentRemindersRunner(f.db, zap.NewNop(), 14*24*time.Hour, m, f.fl)
 	r.onlyTenants = func(id string) bool { return f.mine[id] }
 	r.JobName = "test_payment_reminders_" + uuid.New().String()[:8]
 	if now != nil {
@@ -79,6 +79,8 @@ func TestReminders_EachStepOnce(t *testing.T) {
 	id := f.tenant("")
 	pt := time.Now().Add(13 * 24 * time.Hour).Truncate(time.Second)
 	f.prepaid(id, pt)
+	// The grace steps go out only where the lapse job would act (RP24-2).
+	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
 	sender := &recordingSender{}
 	clock := time.Now()
 	r := f.reminders(sender, func() time.Time { return clock })
@@ -168,6 +170,47 @@ func TestReminders_NewPeriodResets(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.Sent, "the new period's t-14d")
 	assert.Equal(t, 2, sender.count())
+}
+
+// RP24-2: the grace steps ("in grace, N days left", "your house ends
+// tomorrow") announce an ending only the lapse job performs, so they go out
+// only where entitlement_lapse is ON for the tenant; the before-steps go
+// regardless. A withheld step is counted, not marked sent.
+func TestReminders_GraceStepsOnlyWhereTheLapseJobWouldAct(t *testing.T) {
+	f := setupLapseFixture(t)
+	flagOff := f.tenant("")
+	flagOn := f.tenant("")
+	pt := time.Now().Add(-36 * time.Hour).Truncate(time.Second) // the second day of grace: t+1d is due
+	f.prepaid(flagOff, pt)
+	f.prepaid(flagOn, pt)
+	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, flagOn, true, "test"))
+	sender := &recordingSender{}
+	r := f.reminders(sender, nil)
+
+	res, err := r.RunOnce(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, res.Candidates)
+	assert.Equal(t, 1, res.Sent, "the flag-on tenant's t+1d")
+	assert.Equal(t, 1, res.SkippedFlagOff, "the flag-off tenant's is withheld, a note")
+	require.Equal(t, 1, sender.count())
+	assert.Equal(t, flagOn+"@test.local", sender.sent[0].to)
+
+	// Not marked: the flag turning on inside the window sends it.
+	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, flagOff, true, "test"))
+	res, err = r.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Sent)
+	assert.Equal(t, 0, res.SkippedFlagOff)
+
+	// A before-step goes out whatever the flag: a third tenant, flag off,
+	// 10 days ahead.
+	before := f.tenant("")
+	f.prepaid(before, time.Now().Add(10*24*time.Hour))
+	res, err = r.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Sent, "t-14d is true either way")
+	assert.Equal(t, 0, res.SkippedFlagOff)
 }
 
 // A send that fails is counted, noted on an ok run, and retried next hour.

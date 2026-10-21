@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -164,9 +166,15 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 // lapsed one, with the row's provider when the tenant may use it, else any
 // provider that is on (a manual house is renewed by card; a lapsed Stripe
 // house may be bought again). Never for a house a provider renews by
-// itself. Not gated by quota_checkout: the house exists already.
+// itself, and only inside the reminder window — within
+// payments.ReminderLead (14 d) of the date, in grace, or lapsed (RP24-1:
+// "Add a year" by card on a freshly paid row is WP-PAY-5's switch, not a
+// renew). Not gated by quota_checkout: the house exists already.
 func renewOffer(ctx context.Context, svc HouseBilling, tenantID string, st payments.Status) (provider, label string) {
 	if !st.Found || (st.Granted && st.Entitlement.Renewal != payments.RenewalPrepaid) {
+		return "", ""
+	}
+	if st.Granted && !st.InGrace && time.Until(st.Entitlement.PaidThrough) > payments.ReminderLead {
 		return "", ""
 	}
 	e := st.Entitlement
@@ -499,15 +507,35 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 			}
 			return
 		}
-		if asked := strings.TrimSpace(r.FormValue("provider")); asked != "" {
+		if asked := strings.TrimSpace(r.FormValue("provider")); asked != "" && asked != provider {
+			// RP24-5: only a provider the page could have offered — never an
+			// arbitrary form string into Registry.For (it was logged at
+			// Error with the user's own value).
+			if !slices.Contains(svc.Enabled(r.Context(), sd.TenantID), asked) {
+				logger.Warn("house renewal: the provider form value is not an enabled provider", zap.String("tenant", sd.TenantID))
+				back(w, r, "error", "That way of paying isn't available. Email "+hosts.Get().SupportEmail()+" and we will help.")
+				return
+			}
 			provider = asked
 		}
-		order := st.Entitlement.Order
+		co := payments.Checkout{
+			TenantID: sd.TenantID, Email: sd.Email, Order: st.Entitlement.Order, Purpose: payments.PurposeRenew,
+		}
+		// A renew of a GRANTED row is a top-up: the first charge lands on
+		// the date already paid through (RP24-1; Stripe: trial_end). Inside
+		// payments.MinDeferredStart (48 h) the provider starts now, so the
+		// page says the remaining prepaid days are folded in.
+		forfeits := false
+		if st.Granted {
+			if pt := st.Entitlement.PaidThrough; pt.After(time.Now()) {
+				co.StartAt = pt
+				forfeits = time.Until(pt) < payments.MinDeferredStart
+			}
+		}
+		order := co.Order
 		base := strings.TrimRight(baseURL, "/")
-		checkoutURL, err := svc.StartCheckout(r.Context(), provider, payments.Checkout{
-			TenantID: sd.TenantID, Email: sd.Email, Order: order, Purpose: payments.PurposeRenew,
-			ReturnURL: base + "/dashboard/billing?renewed=1", CancelURL: base + "/dashboard/billing",
-		})
+		co.ReturnURL, co.CancelURL = base+"/dashboard/billing?renewed=1", base+"/dashboard/billing"
+		checkoutURL, err := svc.StartCheckout(r.Context(), provider, co)
 		if refusedForProvider(w, err) {
 			return
 		}
@@ -525,7 +553,13 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 			return
 		}
 		logger.Info("house renewal started", zap.String("tenant", sd.TenantID), zap.String("provider", provider),
-			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot), zap.String("period", string(order.Period)))
+			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot), zap.String("period", string(order.Period)),
+			zap.Time("start_at", co.StartAt), zap.Bool("starts_now", forfeits))
+		if forfeits {
+			// Seen when the customer comes back to the billing page — the
+			// design's sentence (docs/PAYMENTS.md § 4.2).
+			middleware.SetFlash(w, "info", "The paid-through date is less than two days away, so the new period starts today and the remaining prepaid days are forfeited.")
+		}
 		http.Redirect(w, r, checkoutURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
 	}
 }

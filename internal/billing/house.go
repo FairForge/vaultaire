@@ -387,7 +387,7 @@ func (s *StripeService) houseLineItems(ids HousePriceIDs, o HouseOrder) []*strip
 	return items
 }
 
-func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o HouseOrder, purpose, successURL, cancelURL string) *stripe.CheckoutSessionParams {
+func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o HouseOrder, purpose string, startAt time.Time, successURL, cancelURL string) *stripe.CheckoutSessionParams {
 	meta := map[string]string{"tenant_id": tenantID, "house": "1"}
 	if purpose != "" {
 		meta["purpose"] = purpose // the ledger's purpose (WP-PAY-2)
@@ -401,6 +401,15 @@ func (s *StripeService) houseCheckoutParams(customerID, tenantID string, o House
 		ClientReferenceID:   stripe.String(tenantID),
 		AllowPromotionCodes: stripe.Bool(true),
 		SubscriptionData:    &stripe.CheckoutSessionSubscriptionDataParams{Metadata: meta},
+	}
+	// A renew of a GRANTED prepaid row defers the first charge to the date
+	// already paid through (RP24-1, docs/PAYMENTS.md § 4.2): the
+	// subscription is `trialing` until then, so the paid remainder is never
+	// forfeited and the anniversary is the paid date. Stripe refuses a
+	// trial_end under 48 h ahead — inside that the checkout starts now and
+	// the page says the remaining days are forfeited.
+	if !startAt.IsZero() && time.Until(startAt) >= payments.MinDeferredStart {
+		params.SubscriptionData.TrialEnd = stripe.Int64(startAt.UTC().Unix())
 	}
 	params.Metadata = meta
 	return params
@@ -441,14 +450,15 @@ func (s *StripeService) HasLiveSubscription(ctx context.Context, customerID stri
 
 // CreateHouseCheckout starts a Stripe Checkout for a house and returns the
 // hosted page URL. URLs must be absolute (Stripe rejects relative ones).
-func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o HouseOrder, purpose, successURL, cancelURL string) (string, error) {
+// startAt (zero = now) defers the first charge (payments.Checkout.StartAt).
+func (s *StripeService) CreateHouseCheckout(ctx context.Context, customerID, tenantID string, o HouseOrder, purpose string, startAt time.Time, successURL, cancelURL string) (string, error) {
 	if ready, why := s.HouseCheckoutReady(); !ready {
 		return "", fmt.Errorf("house checkout unavailable: %s", why)
 	}
 	if err := ValidateHouseOrder(o); err != nil {
 		return "", fmt.Errorf("house order: %w", err)
 	}
-	params := s.houseCheckoutParams(customerID, tenantID, o, purpose, successURL, cancelURL)
+	params := s.houseCheckoutParams(customerID, tenantID, o, purpose, startAt, successURL, cancelURL)
 	params.Context = ctx
 	params.SetIdempotencyKey(houseCheckoutIdempotencyKey(tenantID, o, time.Now()))
 	sess, err := checkoutsession.New(params)
