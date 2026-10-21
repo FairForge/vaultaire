@@ -45,6 +45,9 @@ type fakeSwift struct {
 	// quotaBytes > 0: a PUT that would take the container past it answers
 	// 413 "Upload exceeds quota." (Swift's container_quotas; Blomp's 40 GiB).
 	quotaBytes int64
+	// dropUsageHeaders: the container HEAD answers without
+	// X-Container-Bytes-Used (a proxy that strips it).
+	dropUsageHeaders bool
 	// putDelay holds every segment PUT this long; inflight/maxInflight count
 	// the segment PUTs being served at once.
 	putDelay    time.Duration
@@ -232,6 +235,22 @@ func (f *fakeSwift) serveContainer(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	switch r.Method {
 	case http.MethodHead:
+		// Swift's container HEAD: the bytes and objects it holds, and
+		// container_quotas' limit when one is set (Blomp: 40 GiB).
+		f.mu.Lock()
+		var used int64
+		for _, o := range f.objects {
+			used += int64(len(o.data))
+		}
+		w.Header().Set("X-Container-Object-Count", strconv.Itoa(len(f.objects)))
+		w.Header().Set("X-Container-Bytes-Used", strconv.FormatInt(used, 10))
+		if f.quotaBytes > 0 {
+			w.Header().Set("X-Container-Meta-Quota-Bytes", strconv.FormatInt(f.quotaBytes, 10))
+		}
+		if f.dropUsageHeaders {
+			w.Header().Del("X-Container-Bytes-Used")
+		}
+		f.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodGet:
 		q := r.URL.Query()
