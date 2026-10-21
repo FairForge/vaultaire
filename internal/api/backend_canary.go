@@ -45,7 +45,7 @@ const (
 // canaryBackend reports the S3-class backends the canary runs on.
 func canaryBackend(name string) bool {
 	switch name {
-	case "idrive", "wasabi", "lyve", "r2", "s3compat":
+	case "idrive", "wasabi", "lyve", "r2", "s3compat", "sia":
 		return true
 	}
 	return strings.HasPrefix(name, "idrive-")
