@@ -634,7 +634,10 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 //	paused                           → entitlement_lapse ON for the tenant: renewal
 //	                                   'prepaid', the house KEPT — the date and the
 //	                                   lapse job decide (WP-PAY-2; the job is then
-//	                                   the only writer of lapsed_at). OFF: the house
+//	                                   the only writer of lapsed_at). OFF: a granted
+//	                                   row paid into the future is kept the same way
+//	                                   (RP26-1, payments.EndByStatus — paid time is
+//	                                   never taken by a status); otherwise the house
 //	                                   is cleared, data untouched, the entitlement
 //	                                   marked lapsed and its renewal 'prepaid'.
 //	incomplete                       → no change (first payment pending)
@@ -720,16 +723,27 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 			return true, nil
 		}
+		var ended payments.Ended
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			if err := clearHouseTx(ctx, tx, tenantID); err != nil {
+			var err error
+			if ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now()); err != nil {
 				return err
 			}
-			_, err := tx.ExecContext(ctx,
+			if ended.Kept {
+				_, err = tx.ExecContext(ctx,
+					`UPDATE tenants SET subscription_status = $1 WHERE id = $2`, string(sub.Status), tenantID)
+				return err
+			}
+			_, err = tx.ExecContext(ctx,
 				`UPDATE tenants SET subscription_status = $1, house_period = '' WHERE id = $2`,
 				string(sub.Status), tenantID)
 			return err
 		}); err != nil {
 			return true, fmt.Errorf("clear house for tenant %s: %w", tenantID, err)
+		}
+		if ended.Kept {
+			h.keptByDate(ctx, tenantID, sub, string(sub.Status), ended)
+			return true, nil
 		}
 		h.logger.Warn("house cleared — back to the free tier, data untouched",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
@@ -778,13 +792,16 @@ func (h *WebhookHandler) houseInvalid(ctx context.Context, tenantID string, sub 
 	}
 }
 
-// clearHouseTx is the clearing branch's write: the floors cleared and the
-// entitlement marked lapsed (payments.Revoke), renewal stopped.
-func clearHouseTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
-	if err := payments.Revoke(ctx, tx, tenantID); err != nil {
-		return err
+// keptByDate reports a terminal status that ended the renewal of a house
+// still paid into the future (payments.EndByStatus, RP26-1): nothing was
+// revoked, the house runs to the kept date + grace.
+func (h *WebhookHandler) keptByDate(ctx context.Context, tenantID string, sub *stripe.Subscription, status string, ended payments.Ended) {
+	if ended.Stopped {
+		payments.AuditRenewal(ctx, h.stripe.db, tenantID, payments.RenewalPrepaid, webhookActor, payments.ProviderStripe, sub.ID)
 	}
-	return payments.StopRenewal(ctx, tx, tenantID)
+	h.logger.Warn("terminal status on a house paid into the future — renewal stopped, the house kept to paid_through + grace",
+		zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", status),
+		zap.Time("paid_through", ended.PaidThrough))
 }
 
 // paidThrough is the date a granting status pays the house through: the end
@@ -884,10 +901,24 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 	}
 
 	// A house: floor quotas go, data stays; the entitlement is marked lapsed
-	// and nobody renews it (WP-PAY-1).
+	// and nobody renews it (WP-PAY-1) — unless it is paid into the future,
+	// which only stops the renewal (RP26-1).
 	if isHouse && h.quotas != nil && h.stripe.db != nil {
-		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error { return clearHouseTx(ctx, tx, tenantID) }); err != nil {
+		var ended payments.Ended
+		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+			var err error
+			if ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now()); err != nil || !ended.Kept {
+				return err
+			}
+			_, err = tx.ExecContext(ctx,
+				`UPDATE tenants SET subscription_status = 'canceled', stripe_subscription_id = NULL WHERE id = $1`, tenantID)
+			return err
+		}); err != nil {
 			return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
+		}
+		if ended.Kept {
+			h.keptByDate(ctx, tenantID, &sub, "deleted", ended)
+			return tenantID, nil
 		}
 	}
 

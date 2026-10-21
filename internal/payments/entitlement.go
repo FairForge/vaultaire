@@ -335,6 +335,44 @@ func Revoke(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	return nil
 }
 
+// Ended is what EndByStatus did.
+type Ended struct {
+	// Kept: the row is granted with a paid_through after now — the house
+	// stays, only its renewal stopped.
+	Kept        bool
+	PaidThrough time.Time
+	// Stopped: the renewal flipped to prepaid in this call (audit it).
+	Stopped bool
+}
+
+// EndByStatus applies a terminal provider status (a Stripe subscription
+// canceled / unpaid / incomplete_expired / paused / deleted) while the
+// entitlement_lapse flag is OFF: a GRANTED row whose paid_through is after
+// now keeps its house and only stops renewing — paid time is never taken by
+// a status (RP26-1, D-P23-1; a $0 trialing renew of a manually-paid house
+// reaches here when the trial is cancelled). Otherwise the house is revoked
+// as before (Revoke + StopRenewal), which is also what a tenant with no row
+// gets. The decision and the write run under the tenant's entitlement lock.
+func EndByStatus(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (Ended, error) {
+	if err := Lock(ctx, tx, tenantID); err != nil {
+		return Ended{}, err
+	}
+	e, err := Get(ctx, tx, tenantID)
+	switch {
+	case errors.Is(err, ErrNoEntitlement):
+	case err != nil:
+		return Ended{}, err
+	case e.LapsedAt == nil && e.PaidThrough.After(now):
+		stopped, err := StopRenewalChanged(ctx, tx, tenantID)
+		return Ended{Kept: true, PaidThrough: e.PaidThrough, Stopped: stopped}, err
+	}
+	if err := Revoke(ctx, tx, tenantID); err != nil {
+		return Ended{}, err
+	}
+	stopped, err := StopRenewalChanged(ctx, tx, tenantID)
+	return Ended{PaidThrough: e.PaidThrough, Stopped: stopped}, err
+}
+
 // Resize changes a granted house's lines, keeping its date (the dashboard's
 // in-place resize: Stripe has prorated it; the webhook that follows grants
 // the same items). A tenant with no granted row gets its floors only.

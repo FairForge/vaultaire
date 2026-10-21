@@ -28,6 +28,17 @@ func (f *houseFixture) grantedHouse(t *testing.T) (start, end time.Time) {
 	return start, end
 }
 
+// pastHouse is a granted house whose paid_through passed an hour ago (a
+// period that ended unpaid): a terminal status revokes it while
+// entitlement_lapse is off. A date still ahead is kept (RP26-1).
+func (f *houseFixture) pastHouse(t *testing.T) (start, end time.Time) {
+	t.Helper()
+	start = time.Now().Add(-31 * 24 * time.Hour).Truncate(time.Second)
+	end = time.Now().Add(-time.Hour).Truncate(time.Second)
+	f.post(t, "created", "customer.subscription.created", f.stripeHas(f.houseSub("active", start, end)))
+	return start, end
+}
+
 func (f *houseFixture) hasHouse(t *testing.T) bool {
 	t.Helper()
 	_, ok, err := f.qm.GetHouse(context.Background(), f.tenantID)
@@ -59,7 +70,7 @@ func TestApplyHouse_TerminalStatus_FlagOn_SetsPrepaidKeepsHouse(t *testing.T) {
 func TestApplyHouse_TerminalStatus_FlagOff_Clears(t *testing.T) {
 	f := setupHouseFixture(t)
 	f.handler.SetFlags(lapseFlag{}) // off for this tenant
-	start, end := f.grantedHouse(t)
+	start, end := f.pastHouse(t)
 
 	f.post(t, "canceled", "customer.subscription.updated", f.stripeHas(f.houseSub("canceled", start, end)))
 
@@ -90,7 +101,7 @@ func TestSubscriptionDeleted_FlagOn_SetsPrepaidKeepsHouse(t *testing.T) {
 // of a subscription that is not the row's is stale, whatever tenants says.
 func TestIsCurrentSubscription_ReadsTheEntitlementFirst(t *testing.T) {
 	f := setupHouseFixture(t)
-	start, end := f.grantedHouse(t)
+	start, end := f.pastHouse(t)
 	// tenants points elsewhere (an out-of-band edit); the entitlement row
 	// names sub_<tenant>.
 	_, err := f.db.Exec(`UPDATE tenants SET stripe_subscription_id = 'sub_other' WHERE id = $1`, f.tenantID)

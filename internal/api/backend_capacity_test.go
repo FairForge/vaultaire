@@ -392,3 +392,32 @@ func TestBackendPlan_AuditRow(t *testing.T) {
 	assert.Equal(t, f.adminID, actor)
 	assert.Equal(t, "invoice 105170", invoice)
 }
+
+// RP26-2: the reseller API may return the managed user's e-mail in another
+// case than IDRIVE_RESELLER_USER spells it — the same mailbox.
+func TestVendorView_ResellerUserCaseInsensitive(t *testing.T) {
+	f := setupCapFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/users":
+			_, _ = w.Write([]byte(`{"data":[{"email":"Prod@Stored.GE","storage_used":2.0,"enabled":true}]}`))
+		case "/usage_stats":
+			_, _ = w.Write([]byte(`[{"date":"d1","uploads":5,"downloads":100,"disk_used":1}]`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	r := NewBackendCapacityRunner(f.db, nil, zap.NewNop())
+	r.JobName = "test_backend_capacity_" + uuid.New().String()[:8]
+	r.Reseller = idrive.NewResellerClient(srv.URL, "rk")
+	r.ResellerUser = "prod@stored.ge"
+
+	res, err := r.RunOnce(context.Background())
+
+	require.NoError(t, err)
+	v, ok := res.Vendor["idrive"]
+	require.True(t, ok, "the user is found whatever case iDrive returns it in; notes: %v", res.Notes)
+	assert.Equal(t, int64(2_000_000_000), v.UsedBytes)
+	for _, n := range res.Notes {
+		assert.NotContains(t, n, "not in /users")
+	}
+}

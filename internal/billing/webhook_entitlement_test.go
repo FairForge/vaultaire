@@ -152,11 +152,10 @@ func TestStripeWebhook_PaymentFailed_LedgerRowFailed_NoEntitlementChange(t *test
 }
 
 func TestStripeWebhook_Canceled_StillClearsWhileFlagOff_SetsPrepaid(t *testing.T) {
-	// Arrange: a granted house.
+	// Arrange: a granted house whose paid date has passed (a date still
+	// ahead is kept: RP26-1).
 	f := setupHouseFixture(t)
-	start := time.Now().Add(-time.Hour).Truncate(time.Second)
-	end := start.Add(30 * 24 * time.Hour)
-	f.post(t, "created", "customer.subscription.created", f.stripeHas(f.houseSub("active", start, end)))
+	start, end := f.pastHouse(t)
 
 	// Act: Stripe cancels it.
 	f.post(t, "canceled", "customer.subscription.updated", f.stripeHas(f.houseSub("canceled", start, end)))
@@ -175,10 +174,7 @@ func TestStripeWebhook_Canceled_StillClearsWhileFlagOff_SetsPrepaid(t *testing.T
 
 func TestStripeWebhook_SubscriptionDeleted_ClearsAndSetsPrepaid(t *testing.T) {
 	f := setupHouseFixture(t)
-	start := time.Now().Add(-time.Hour).Truncate(time.Second)
-	end := start.Add(30 * 24 * time.Hour)
-	sub := f.houseSub("active", start, end)
-	f.post(t, "created", "customer.subscription.created", f.stripeHas(sub))
+	start, end := f.pastHouse(t)
 
 	deleted := f.houseSub("canceled", start, end)
 	f.post(t, "deleted", "customer.subscription.deleted", deleted)
