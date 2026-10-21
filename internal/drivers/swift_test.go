@@ -679,6 +679,7 @@ func TestSwift_FailedPieceRemovesTheOthers(t *testing.T) {
 	require.NoError(t, err)
 	d.client.Transport = &failPiece{rt: d.client.Transport, suffix: "/00000004", times: -1}
 	d.segmentBackoff = func(int) time.Duration { return time.Millisecond }
+	d.lateLandingWait = 100 * time.Millisecond
 	ctx := swiftCtx("t1")
 	body := randomBytes(t, 9*1024)
 
@@ -688,7 +689,9 @@ func TestSwift_FailedPieceRemovesTheOthers(t *testing.T) {
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, http.StatusServiceUnavailable, se.Status)
 	assert.Empty(t, f.names(), "every piece written was bulk-deleted")
-	assert.Equal(t, 1, f.count("POST bulk-delete"))
+	// The pieces the stop cut before they were sent are "not found" by the
+	// first bulk delete, so it is sent once more for a piece landing late.
+	assert.Equal(t, 2, f.count("POST bulk-delete"))
 }
 
 // Blomp 503s a piece now and then (prod 2026-10-21: three 6 GiB uploads in
@@ -834,4 +837,29 @@ func TestSwift_PreferredRangeBytesIsTheSegmentSize(t *testing.T) {
 
 	// Assert
 	assert.Equal(t, int64(32<<20), sizer.PreferredRangeBytes())
+}
+
+// A piece PUT cancelled after its body reached Swift can still land — after
+// the failed upload's bulk delete (CI 2026-10-21, TestSwift_FullAccountIs
+// BackendFull: one piece of a refused upload left). The bulk delete is
+// repeated once after lateLandingWait when it found fewer pieces than it
+// was given.
+func TestSwift_APieceThatLandsAfterTheCleanupIsRemoved(t *testing.T) {
+	f := newFakeSwift(t)
+	f.putDelay = 300 * time.Millisecond // piece 1 is held by Swift when piece 0 fails
+	cfg := f.config()
+	cfg.PutConcurrency = 2
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	d.client.Transport = &failPiece{rt: d.client.Transport, suffix: "/00000000", times: -1}
+	d.segmentBackoff = func(int) time.Duration { return time.Millisecond }
+	d.lateLandingWait = time.Second
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 2048)
+
+	err = d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
+
+	require.Error(t, err)
+	assert.Empty(t, f.names(), "the piece that landed after the first bulk delete went with the second")
+	assert.Equal(t, 2, f.count("POST bulk-delete"))
 }

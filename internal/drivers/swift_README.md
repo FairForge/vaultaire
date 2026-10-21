@@ -36,7 +36,7 @@ A known size grows the piece to `ceil(size / 1000)` when that is larger
 (Swift's `max_manifest_segments` is 1000 on Blomp's `/info`), so the limit
 is 1000 × 5 GiB; a body of unknown length past 1000 pieces is refused
 (`InvalidInput`). A failed upload stops its other pieces and, once they have
-all stopped, bulk-deletes every piece it started (one write); the erasure
+all stopped, bulk-deletes every piece it started (one write, sent again 2 s later when it found fewer than it was given: a piece PUT cut after its body reached Swift can land after the first — CI 2026-10-21); the erasure
 walk (`WalkTenant`) lists `_segments` too. Our writes never overwrite in place
 (every whole-object write has a new address since WP-R2-1), so the leftover
 pieces of an overwritten large object are not a product case.
@@ -86,6 +86,23 @@ pieces of an overwritten large object are not a product case.
   one inside the request, and at Blomp's ~3 writes a second a 6 GiB object
   of 96 pieces outran the 15 s bound — every DELETE of it answered 503
   (prod 2026-10-21). A miss is `engine.NotFoundError`.
+- **Hedge** (`swift_hedge.go`, 2026-10-21): Blomp's proxies sometimes give
+  a request no first byte for ~5 s (any proxy IP, fresh or kept-alive
+  connections) where the usual answer takes 60–650 ms — the 5 s tails of the
+  stored.ge → Blomp path were all this. A HEAD (the probe's container HEAD,
+  an object HEAD), a listing page or a **GET** with no answer after
+  `DRIVER_HEDGE_AFTER` (2 s; `0`/`off` = none) is sent once more on a
+  connection opened for it; the first answer of any status wins, the other
+  is cancelled and a late answer's body closed unread. A GET is hedged on
+  its headers, before any byte of its body is read, so the winner's body is
+  the whole answer — that is why Swift hedges a GET where the S3-class
+  drivers never do (theirs go through the SDK and rarely stall). **Never
+  hedged:** a PUT (the bytes twice), the bulk delete, and a DELETE: its
+  status is the delete's verdict, and a hedge's 404 arriving while the first
+  attempt deleted would report a miss (for a large object, skip its
+  pieces); the HEAD before it is hedged, and a second DELETE would spend one
+  of Blomp's ~3 writes a second. `vaultaire_driver_hedges_total{driver="blomp",op}`
+  / `_hedges_won_total` (op = head_bucket | head_object | list | get).
 - **Range**: 206 served as is; a 200 to a Range is skipped to the offset and
   cut.
 - **Bounds** (the bound invariant, `CLAUDE.md`): 25 s to the first byte after

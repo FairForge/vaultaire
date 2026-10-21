@@ -135,7 +135,7 @@ var boundSites = map[string]string{
 	"TunedHTTPClient s3.go:NewS3Driver":                    "s3OpTimeouts (checked above)",
 	"TunedHTTPClient geyser.go:NewGeyserDriver":            "geyserOpTimeouts: tape 5 min for GET/PUT (checked above)",
 	"TunedHTTPClient webdav.go:NewWebDAVDriver":            "the Sync bridge exception: 5 min answer, its own watchdogs",
-	"TunedHTTPClient swift.go:NewSwiftDriver":              "Blomp/Swift: 25 s to the first byte after the body (ResponseHeaderTimeout); metadata 15 s via meta",
+	"TunedHTTPClient swift.go:NewSwiftDriver":              "Blomp/Swift: 25 s to the first byte after the body (ResponseHeaderTimeout); metadata 15 s via meta; the hedge's fresh client the same bound, keep-alives off",
 	"TunedHTTPClient lyve_console.go:NewLyveConsoleClient": "management plane (the root-key console probe), bounded by the probe's 45 s context",
 	// context.WithTimeout
 	"WithTimeout put_deadline.go:attempt":            "the per-size PUT deadline (s3PutDeadline)",
@@ -150,7 +150,7 @@ var boundSites = map[string]string{
 	"WithTimeout swift.go:authenticate":              "one Keystone token request, 15 s (swiftMetaTimeout)",
 	"WithTimeout swift.go:meta":                      "a Swift HEAD / DELETE / small POST, 15 s whole (swiftMetaTimeout)",
 	"WithTimeout swift.go:listNames":                 "one Swift listing page: 15 s on a request path, 60 s in a job's walk (swiftWalkPageTimeout)",
-	"WithTimeout swift.go:removeSegments":            "a failed large upload's bulk delete of its pieces, detached, 2 min",
+	"WithTimeout swift.go:bulkDelete":                "a bulk delete of pieces (a failed upload — twice when a piece may land late —, a deleted large object): 2 min + 0.5 s a piece, ≤ 15 min",
 	"WithTimeout webdav_resilience.go:send":          "the Sync bridge exception: the caller's per-request timeout",
 	"WithTimeout webdav_folder_limit.go:notePut":     "the Sync bridge exception: a folder count, 2 × 60 s",
 	"WithTimeout webdav_stripe.go:dropGeneration":    "the Sync bridge exception: a failed striped upload's cleanup, detached, 5 min",

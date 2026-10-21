@@ -56,6 +56,14 @@ type fakeSwift struct {
 	// lagging: names the container listing does not show yet although they
 	// exist (Blomp's listing hid ~30 objects for 90+ minutes, 2026-10-21).
 	lagging map[string]bool
+	// stall[method] = how many of the next calls of method are held — no
+	// headers — until the client cancels them or release is closed (a
+	// Blomp proxy's ~5 s first byte); stallCancelled counts the held calls
+	// whose client went away.
+	stall          map[string]int
+	release        chan struct{}
+	releaseOnce    sync.Once
+	stallCancelled int
 }
 
 type fakeSwiftObject struct {
@@ -73,11 +81,15 @@ type fakeSwiftSegment struct {
 func newFakeSwift(t *testing.T) *fakeSwift {
 	f := &fakeSwift{t: t, user: "u@example.com", password: "pw", tenant: "storage", container: "u@example.com",
 		objects: map[string]fakeSwiftObject{}, tokens: map[string]bool{}, calls: map[string]int{},
-		fail: map[string][]int{}, expiresIn: time.Hour}
+		fail: map[string][]int{}, expiresIn: time.Hour, stall: map[string]int{}, release: make(chan struct{})}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
+	t.Cleanup(f.releaseStalls) // runs first: a held call never blocks Close
 	return f
 }
+
+// releaseStalls lets every held call go on.
+func (f *fakeSwift) releaseStalls() { f.releaseOnce.Do(func() { close(f.release) }) }
 
 func (f *fakeSwift) authURL() string { return f.srv.URL + "/v2.0" }
 
@@ -91,6 +103,19 @@ func (f *fakeSwift) failNext(method string, statuses ...int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fail[method] = append(f.fail[method], statuses...)
+}
+
+// stallNext holds the next n calls of method (stall).
+func (f *fakeSwift) stallNext(method string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stall[method] += n
+}
+
+func (f *fakeSwift) cancelledStalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stallCancelled
 }
 
 func (f *fakeSwift) peakSegmentPuts() int {
@@ -181,6 +206,19 @@ func (f *fakeSwift) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
+	if f.stall[r.Method] > 0 {
+		f.stall[r.Method]--
+		f.mu.Unlock()
+		select {
+		case <-r.Context().Done():
+			f.mu.Lock()
+			f.stallCancelled++
+			f.mu.Unlock()
+			return
+		case <-f.release:
+		}
+		f.mu.Lock()
+	}
 	if q := f.fail[r.Method]; len(q) > 0 {
 		f.fail[r.Method] = q[1:]
 		f.mu.Unlock()
