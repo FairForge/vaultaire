@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/payments"
+
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,8 +68,8 @@ func TestWebhook_StaleActiveUpdateAfterCancel_DoesNotRegrantTheHouse(t *testing.
 	assert.Equal(t, http.StatusOK, code)
 	_, ok = f.houseTB(t)
 	assert.False(t, ok, "a stale active payload re-granted a cancelled house")
-	_, status, _, _ := f.tenantRow(t)
-	assert.Equal(t, "canceled", status)
+	_, state, _, _ := f.record(t)
+	assert.Equal(t, "lapsed", state)
 }
 
 func TestWebhook_StaleUnpaidUpdate_DoesNotTakeAPaidHouseAway(t *testing.T) {
@@ -115,8 +117,9 @@ func TestWebhook_PausedSubscription_ClearsTheHouse(t *testing.T) {
 	_, lim, err := f.qm.GetUsage(context.Background(), f.tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, usage.FreeTierLimits.StorageBytes, lim)
-	_, status, _, _ := f.tenantRow(t)
-	assert.Equal(t, "paused", status)
+	_, state, _, _ := f.record(t)
+	assert.Equal(t, "lapsed", state)
+	assert.Equal(t, payments.RenewalPrepaid, f.entitlement(t).Renewal)
 }
 
 // gatedSubs is a subscription source that counts its calls and holds each

@@ -35,6 +35,9 @@ var (
 	ErrRefundNoPeriod = errors.New("the payment records no period: shorten paid_through with the entitlement adjustment instead")
 	// ErrNoSuchPayment: no settled charge of that id for the tenant.
 	ErrNoSuchPayment = errors.New("no such payment")
+	// ErrRefundRecorded: a refund with this provider reference is already
+	// in the ledger (a webhook redelivery — answered as handled).
+	ErrRefundRecorded = errors.New("refund already recorded")
 )
 
 // ManualPayment is a payment recorded by an operator.
@@ -307,7 +310,7 @@ func RecordRefund(ctx context.Context, db *sql.DB, r Refund) (RefundResult, erro
 			return err
 		}
 		if !settled.Newly {
-			return fmt.Errorf("refund %s/%s is already recorded", provider, ref)
+			return fmt.Errorf("%w: %s/%s", ErrRefundRecorded, provider, ref)
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE payments SET refund_of = $2::uuid WHERE id = $1::uuid`, settled.ID, r.PaymentID); err != nil {
 			return fmt.Errorf("link refund %s: %w", settled.ID, err)
@@ -352,6 +355,24 @@ func RecordRefund(ctx context.Context, db *sql.DB, r Refund) (RefundResult, erro
 	audit.Record(ctx, db, audit.Entry{Actor: r.Actor, TenantID: r.TenantID, EventType: "billing", Action: "billing.refund_recorded",
 		Resource: "payment:" + res.PaymentID, Metadata: meta})
 	return res, nil
+}
+
+// ChargeOf finds the settled (or refunded) charge row the provider knows as
+// providerID (a Stripe invoice id) for tenantID: its ledger id
+// (ErrNoSuchPayment when the ledger has none).
+func ChargeOf(ctx context.Context, db *sql.DB, tenantID, provider, providerID string) (string, error) {
+	var id string
+	err := db.QueryRowContext(ctx, `
+		SELECT id::text FROM payments
+		 WHERE provider = $1 AND provider_id = $2 AND tenant_id = $3 AND kind = 'charge' AND status IN ('settled', 'refunded')`,
+		provider, providerID, tenantID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNoSuchPayment
+	}
+	if err != nil {
+		return "", fmt.Errorf("find charge %s/%s: %w", provider, providerID, err)
+	}
+	return id, nil
 }
 
 // usageSetHouse writes the floors of a house (the adjustment's).

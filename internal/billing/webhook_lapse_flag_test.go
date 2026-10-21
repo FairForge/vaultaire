@@ -91,49 +91,40 @@ func TestSubscriptionDeleted_FlagOn_SetsPrepaidKeepsHouse(t *testing.T) {
 	e := f.entitlement(t)
 	assert.Equal(t, payments.RenewalPrepaid, e.Renewal)
 	assert.Nil(t, e.LapsedAt)
-	_, status, _, period := f.tenantRow(t)
-	assert.Equal(t, "canceled", status)
-	assert.Equal(t, "monthly", period, "the house is still in force")
+	_, state, _, period := f.record(t)
+	assert.Equal(t, "granted", state, "the house is still in force")
+	assert.Equal(t, "monthly", period)
 }
 
-// RP20-A3: the current subscription is the entitlement's provider_ref; the
-// tenants column is the fallback for a tenant with no row. A clearing event
-// of a subscription that is not the row's is stale, whatever tenants says.
+// RP20-A3 / WP-PAY-7: the current subscription is the entitlement's
+// provider_ref and nothing else.
 func TestIsCurrentSubscription_ReadsTheEntitlementFirst(t *testing.T) {
 	f := setupHouseFixture(t)
 	start, end := f.pastHouse(t)
-	// tenants points elsewhere (an out-of-band edit); the entitlement row
-	// names sub_<tenant>.
-	_, err := f.db.Exec(`UPDATE tenants SET stripe_subscription_id = 'sub_other' WHERE id = $1`, f.tenantID)
-	require.NoError(t, err)
 
 	f.post(t, "canceled", "customer.subscription.updated", f.stripeHas(f.houseSub("canceled", start, end)))
 
 	assert.False(t, f.hasHouse(t), "the entitlement's subscription was cancelled: cleared")
 }
 
-// RP22-2: with the flag ON, the deletion of a NON-house subscription (a
-// legacy pack) keeps today's downgrade — plan 'starter', nothing to stop
-// renewing; the flag branch is for a house only.
-func TestSubscriptionDeleted_PackUnderFlag_DowngradesToStarter(t *testing.T) {
-	// Arrange: a tenant on a pack, flag on.
+// RP22-2 / WP-PAY-7 (D-P23-3): the deletion of a NON-house subscription (a
+// legacy pack, no entitlement row) is ignored, flag or no flag: the record
+// holds houses only and the webhook writes no tenants column — the plan
+// label is the operator's (support moves a pack to a house).
+func TestSubscriptionDeleted_PackWithNoRow_IsIgnored(t *testing.T) {
+	// Arrange: a tenant on a pack label, flag on.
 	f := setupHouseFixture(t)
 	f.handler.SetFlags(lapseFlag{f.tenantID: true})
 	pack := subWith("sub_"+f.tenantID, "canceled", item("si_pack", "price_vault3_legacy", 1))
 	pack.Customer.ID = "cus_" + f.tenantID
-	_, err := f.db.Exec(`UPDATE tenants SET plan = 'vault3', stripe_subscription_id = $2, subscription_status = 'active' WHERE id = $1`,
-		f.tenantID, pack.ID)
+	_, err := f.db.Exec(`UPDATE tenants SET plan = 'vault3' WHERE id = $1`, f.tenantID)
 	require.NoError(t, err)
 
 	// Act
 	f.post(t, "pack-deleted", "customer.subscription.deleted", pack)
 
 	// Assert
-	plan, status, subID, period := f.tenantRow(t)
-	assert.Equal(t, "starter", plan, "a pack is downgraded, flag or no flag")
-	assert.Equal(t, "canceled", status)
-	assert.Empty(t, subID)
-	assert.Empty(t, period)
-	_, err = payments.Get(context.Background(), f.db, f.tenantID)
-	assert.ErrorIs(t, err, payments.ErrNoEntitlement, "no entitlement was ever written for a pack")
+	plan, state, _, _ := f.record(t)
+	assert.Equal(t, "vault3", plan, "the label is not the webhook's to change")
+	assert.Equal(t, "none", state, "no entitlement was ever written for a pack")
 }

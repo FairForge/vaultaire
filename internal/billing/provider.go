@@ -85,22 +85,23 @@ func (s *StripeService) StartCheckout(ctx context.Context, c payments.Checkout) 
 }
 
 // currentSubscription is the Stripe subscription that bills the tenant's
-// house: the entitlement row's provider_ref, else tenants.
-// stripe_subscription_id (a house granted before 097 — RP20-A3).
+// house: the entitlement row's provider_ref, and nothing else (WP-PAY-7 —
+// rows exist for every granted house since 097; "" = none).
 func (s *StripeService) currentSubscription(ctx context.Context, tenantID string) (string, error) {
 	if s.db == nil {
 		return "", errors.New("no database")
 	}
-	var ref sql.NullString
+	var ref string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(
-		         (SELECT provider_ref FROM entitlements
-		           WHERE tenant_id = $1 AND provider = 'stripe' AND provider_ref IS NOT NULL AND provider_ref <> ''),
-		         (SELECT NULLIF(stripe_subscription_id, '') FROM tenants WHERE id = $1))`, tenantID).Scan(&ref)
+		SELECT COALESCE(provider_ref, '') FROM entitlements
+		 WHERE tenant_id = $1 AND provider = 'stripe'`, tenantID).Scan(&ref)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("read subscription of tenant %s: %w", tenantID, err)
 	}
-	return ref.String, nil
+	return ref, nil
 }
 
 // Resize changes the house's items in place (prorated); Applied is the
@@ -163,8 +164,8 @@ func (s *StripeService) ResumeRenewal(ctx context.Context, tenantID string) erro
 	return s.setRenewal(ctx, tenantID, false)
 }
 
-// Cancel cancels the tenant's subscription now (CancelSubscription:
-// idempotent). A tenant with no subscription has nothing to cancel.
+// Cancel cancels the tenant's subscription now (cancelRef: idempotent). A
+// tenant with no subscription has nothing to cancel.
 func (s *StripeService) Cancel(ctx context.Context, tenantID string) error {
 	if !s.configured {
 		return payments.ErrProviderUnconfigured
@@ -176,7 +177,7 @@ func (s *StripeService) Cancel(ctx context.Context, tenantID string) error {
 	if subID == "" {
 		return nil
 	}
-	return s.CancelSubscription(ctx, tenantID)
+	return s.cancelRef(ctx, tenantID, subID)
 }
 
 // CancelRef cancels the named subscription now (payments.RefCanceller —

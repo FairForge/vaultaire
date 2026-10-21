@@ -261,7 +261,9 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 		agg.storageBytes += t.storageBytes
 		agg.costCents += storageCostCents
 
-		displayPlan := t.plan
+		// Every row is a granted house (queryTenantCostData): the record
+		// says so, whatever the plan label (WP-PAY-7).
+		displayPlan := houseActive.plan(t.plan)
 		if t.tier == "standard" || t.tier == "performance" {
 			displayPlan = t.tier
 		}

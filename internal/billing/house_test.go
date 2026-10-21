@@ -313,13 +313,22 @@ func (f *houseFixture) post(t *testing.T, suffix, typ string, obj any) {
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
-func (f *houseFixture) tenantRow(t *testing.T) (plan, status, subID, period string) {
+// record is what the webhook leaves: tenants.plan (never written by the
+// webhook since WP-PAY-7) and the entitlement row — state "none" (no row),
+// "granted" or "lapsed", its subscription and period.
+func (f *houseFixture) record(t *testing.T) (plan, state, subID, period string) {
 	t.Helper()
-	var sub sql.NullString
-	require.NoError(t, f.db.QueryRow(
-		`SELECT plan, subscription_status, stripe_subscription_id, house_period FROM tenants WHERE id = $1`,
-		f.tenantID).Scan(&plan, &status, &sub, &period))
-	return plan, status, sub.String, period
+	require.NoError(t, f.db.QueryRow(`SELECT COALESCE(plan, '') FROM tenants WHERE id = $1`, f.tenantID).Scan(&plan))
+	e, err := payments.Get(context.Background(), f.db, f.tenantID)
+	if errors.Is(err, payments.ErrNoEntitlement) {
+		return plan, "none", "", ""
+	}
+	require.NoError(t, err)
+	state = "granted"
+	if e.LapsedAt != nil {
+		state = "lapsed"
+	}
+	return plan, state, e.ProviderRef, string(e.Order.Period)
 }
 
 func TestWebhook_CheckoutCompletedSetsFloorQuotas(t *testing.T) {
@@ -341,9 +350,8 @@ func TestWebhook_CheckoutCompletedSetsFloorQuotas(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(7*usage.TB), limit)
 	assert.Equal(t, int64(0), used)
-	plan, status, subID, period := f.tenantRow(t)
-	assert.Equal(t, "house", plan)
-	assert.Equal(t, "active", status)
+	_, state, subID, period := f.record(t)
+	assert.Equal(t, "granted", state)
 	assert.Equal(t, sub.ID, subID)
 	assert.Equal(t, "annual", period)
 
@@ -363,7 +371,7 @@ func TestWebhook_SubscriptionUpdatedResizes(t *testing.T) {
 	house, ok, _ := f.qm.GetHouse(context.Background(), f.tenantID)
 	require.True(t, ok)
 	assert.Equal(t, usage.HouseFromTB(2, 1, 0), house)
-	_, _, _, period := f.tenantRow(t)
+	_, _, _, period := f.record(t)
 	assert.Equal(t, "monthly", period)
 
 	// Resize: the attic goes away, downstairs grows.
@@ -385,8 +393,6 @@ func TestWebhook_SubscriptionUpdatedResizes(t *testing.T) {
 	f.post(t, "unpaid", "customer.subscription.updated", f.stripeHas(sub))
 	_, ok, _ = f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.False(t, ok, "an unpaid subscription grants nothing")
-	_, _, limit, _ := f.tenantRow(t)
-	_ = limit
 	_, lim, _ := f.qm.GetUsage(context.Background(), f.tenantID)
 	assert.Equal(t, usage.FreeTierLimits.StorageBytes, lim)
 }
@@ -411,11 +417,9 @@ func TestWebhook_SubscriptionDeletedClearsOnlyTheCurrentHouse(t *testing.T) {
 	f.post(t, "del", "customer.subscription.deleted", sub)
 	_, ok, _ = f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.False(t, ok)
-	plan, status, subID, period := f.tenantRow(t)
-	assert.Equal(t, "starter", plan)
-	assert.Equal(t, "canceled", status)
-	assert.Equal(t, "", subID)
-	assert.Equal(t, "", period)
+	plan, state, _, _ := f.record(t)
+	assert.Equal(t, "lapsed", state)
+	assert.Equal(t, "starter", plan, "the webhook writes no tenants column (WP-PAY-7)")
 }
 
 func TestWebhook_LegacyPackSubscriptionLeavesQuotasAlone(t *testing.T) {
@@ -426,6 +430,7 @@ func TestWebhook_LegacyPackSubscriptionLeavesQuotasAlone(t *testing.T) {
 	f.post(t, "pack", "customer.subscription.updated", f.stripeHas(sub))
 	_, ok, _ := f.qm.GetHouse(context.Background(), f.tenantID)
 	assert.False(t, ok)
-	_, status, _, _ := f.tenantRow(t)
-	assert.Equal(t, "active", status, "the legacy status sync still runs")
+	plan, state, _, _ := f.record(t)
+	assert.Equal(t, "none", state, "a pack is no house: nothing in the record")
+	assert.Equal(t, "starter", plan, "and nothing on the tenants row (WP-PAY-7)")
 }

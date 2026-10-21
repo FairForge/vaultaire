@@ -53,8 +53,8 @@ func TestWebhook_SubscriptionDeletedBeforeTheEraseClearsTheHouseThenEraseSucceed
 	_, ok, err = f.qm.GetHouse(context.Background(), f.tenantID)
 	require.NoError(t, err)
 	assert.False(t, ok, "ClearHouse ran on the delivery")
-	plan, status, subID, _ := f.tenantRow(t)
-	assert.Equal(t, "starter/canceled/", plan+"/"+status+"/"+subID)
+	_, state, _, _ := f.record(t)
+	assert.Equal(t, "lapsed", state)
 
 	// Stage c does not conflict with what the webhook wrote.
 	res, err := account.NewService(f.db, zap.NewNop()).EraseRows(context.Background(), userID, f.tenantID, f.tenantID+"@test.local", time.Now())
@@ -92,21 +92,17 @@ func TestWebhook_SubscriptionDeletedAfterTheEraseIsAcknowledged(t *testing.T) {
 
 // A run that crashed after Stripe cancelled but before the runner's stamp
 // repeats the cancel the next day. Stripe refuses to cancel a cancelled
-// subscription, so CancelSubscription reads the status first and reports an
+// subscription, so CancelRef reads the status first and reports an
 // already-cancelled one as success.
 func TestCancelSubscription_AlreadyCancelledIsSuccess(t *testing.T) {
 	f := setupHouseFixture(t)
 	subID := "sub_cancelled_" + f.tenantID
-	_, err := f.db.Exec(`UPDATE tenants SET stripe_subscription_id = $1, subscription_status = 'active' WHERE id = $2`, subID, f.tenantID)
-	require.NoError(t, err)
 	svc := NewStripeService("sk_test_fake", f.db, zap.NewNop())
 	svc.subFetcher = fakeSubs{subID: subWith(subID, "canceled")}
 
-	require.NoError(t, svc.CancelSubscription(context.Background(), f.tenantID), "no Cancel call is made; the status is the verdict")
-	_, status, _, _ := f.tenantRow(t)
-	assert.Equal(t, "canceled", status)
+	require.NoError(t, svc.CancelRef(context.Background(), f.tenantID, subID), "no Cancel call is made; the status is the verdict")
 
 	// The fetch failing is an error (retry tomorrow), never a silent skip.
 	svc.subFetcher = fakeSubs{}
-	assert.Error(t, svc.CancelSubscription(context.Background(), f.tenantID))
+	assert.Error(t, svc.CancelRef(context.Background(), f.tenantID, subID))
 }
