@@ -1,0 +1,15 @@
+# Upload every buffered object of gateway <instance> to Sia now. s3d v0.2.1 has
+# no uploadDeadline setting (24 h default upstream later), so a PUT's 200 is
+# only on local disk until its group fills — this caps that window.
+[Unit]
+Description=s3d flush %i
+Requisite=s3d@%i.service
+After=s3d@%i.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/%i
+Environment=S3D_CONFIG_FILE=%h/%i/s3d.yml
+EnvironmentFile=%h/.config/stored-sia/%i.env
+ExecStart=/bin/sh -c 'exec "$S3D_BIN" flush'
+TimeoutStartSec=2h

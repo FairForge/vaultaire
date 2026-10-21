@@ -1,0 +1,6 @@
+[Unit]
+Description=Sia gateway textfile metrics (deploy/sia/sia-metrics.py)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I %h/stored-sia/sia-metrics.py
