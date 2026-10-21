@@ -1,0 +1,9 @@
+[23:11:16] == raw2: LA, Oregon, Virginia with the concurrent cells
+[23:14:52] == raw2: the other nine regions without the concurrent cells
+[23:36:29] == raw2 done
+[23:36:29] == ingest2: 32 x 4 MiB 20 s via origin
+[23:37:12] == ingest2: 8 x 64 MiB 20 s via origin
+[23:37:34] == ingest2: 32 x 4 MiB 20 s via Cloudflare
+[23:38:09] == ingest2: overwrite path, 16 workers x 4 MiB cycling 8 keys, 20 s
+[23:38:30] == ingest2 done
+[23:38:30] == all done

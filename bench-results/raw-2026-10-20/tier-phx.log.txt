@@ -1,0 +1,12 @@
+us-phoenix     small_put_4k                 n=30 p50 43 ms  p95 45 ms  max 198 ms
+us-phoenix     small_get_4k                 n=30 p50 37 ms  p95 52 ms  max 152 ms  ok
+us-phoenix     small_head_4k                n=30 p50 0 ms  p95 1 ms  max 1 ms
+us-phoenix     list_prefix                  0.00 s  [30 keys listed]
+us-phoenix     small_delete                 n=30 p50 38 ms  p95 39 ms  max 40 ms
+us-phoenix     single_put_8mb               0.41 s  20.6 MB/s
+us-phoenix     get_single_8mb               2.27 s  3.7 MB/s  ttfb 124 ms  ok
+us-phoenix     single_put_64mb              1.21 s  55.7 MB/s
+us-phoenix     get_single_64mb              1.88 s  35.7 MB/s  ttfb 1193 ms  ok
+us-phoenix     mpu_put_256mb                2.09 s  128.4 MB/s  [16 parts x 16 MiB, 8 wide, complete 1.1 s]
+us-phoenix     get_mpu_256mb                5.00 s  53.7 MB/s  ttfb 1418 ms  ok
+us-phoenix     range_get_1mb                n=10 p50 129 ms  p95 145 ms  max 149 ms  [of mpu-256mb.bin]

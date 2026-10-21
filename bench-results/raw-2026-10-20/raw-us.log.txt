@@ -1,0 +1,103 @@
+Host:      slc (linux/amd64)
+Output:    raw-us.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 3 (smoke=false)
+
+[1/3] idrive-us-east-1  (https://s3.us-east-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        1532ms  p50=149ms p95=165ms p99=165ms
+  warm_put_4kb             5882ms     17 ops/s  p50=54ms p95=88ms p99=150ms
+  warm_get_4kb             5074ms     20 ops/s  p50=49ms p95=55ms p99=63ms
+  warm_head_4kb            2588ms     19 ops/s  p50=49ms p95=63ms p99=67ms
+  warm_copy_4kb             591ms     17 ops/s  p50=57ms p95=73ms p99=73ms
+  warm_delete_single       1572ms     19 ops/s  p50=50ms p95=63ms p99=66ms
+  delete_batch_100          729ms    137 ops/s
+  list_100                  192ms  returned=100
+  list_prefix                51ms  returned=30
+  medium_put_1mb           1904ms     2.6 MB/s  p50=455ms p95=609ms p99=609ms
+  medium_get_1mb            909ms     5.5 MB/s  p50=145ms p95=360ms p99=360ms
+  medium_put_16mb          1520ms    52.6 MB/s  p50=225ms p95=664ms p99=664ms
+  medium_get_16mb          3118ms    25.7 MB/s  p50=642ms p95=951ms p99=951ms
+  large_put_64mb           1155ms    55.4 MB/s
+  large_get_64mb           2076ms    30.8 MB/s
+  multipart_put_256mb      2178ms   117.5 MB/s
+  multipart_put_256mb_16p   1399ms   182.9 MB/s
+  large_put_64mb_h1         990ms    64.6 MB/s
+  multipart_put_256mb_h1_16p   1366ms   187.4 MB/s
+  mpu_abort                 585ms      9 ops/s  p50=97ms p95=195ms p99=195ms
+  concurrent_ingest_20s    2790ms   411.4 MB/s    103 ops/s  p50=193ms p95=643ms p99=914ms
+  concurrent_download_20s   4458ms   257.5 MB/s     64 ops/s  p50=250ms p95=1033ms p99=1885ms
+  range_get_1mb_chunks     6526ms     2.5 MB/s      2 ops/s  p50=398ms p95=663ms p99=663ms
+  integrity_16mb           1356ms  ✓ checksum match
+  integrity_chunked_16mb   2027ms     7.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   3515ms  p50=50ms p95=144ms p99=144ms  ✓ 20/20 consistent
+  consistency_overwrite    2924ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1139ms  ✓ 10/10 immediately visible in listing
+
+[2/3] idrive-us-west-2  (https://s3.us-west-2.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb         773ms  p50=75ms p95=91ms p99=91ms
+  warm_put_4kb             3210ms     31 ops/s  p50=28ms p95=47ms p99=77ms
+  warm_get_4kb             2538ms     39 ops/s  p50=24ms p95=29ms p99=44ms
+  warm_head_4kb            1218ms     41 ops/s  p50=24ms p95=25ms p99=26ms
+  warm_copy_4kb             277ms     36 ops/s  p50=27ms p95=28ms p99=28ms
+  warm_delete_single        759ms     40 ops/s  p50=24ms p95=29ms p99=34ms
+  delete_batch_100          122ms    819 ops/s
+  list_100                   95ms  returned=100
+  list_prefix                34ms  returned=30
+  medium_put_1mb            450ms    11.1 MB/s  p50=54ms p95=231ms p99=231ms
+  medium_get_1mb           1199ms     4.2 MB/s  p50=233ms p95=298ms p99=298ms
+  medium_put_16mb           910ms    87.9 MB/s  p50=135ms p95=337ms p99=337ms
+  medium_get_16mb          4700ms    17.0 MB/s  p50=886ms p95=1157ms p99=1157ms
+  large_put_64mb            647ms    98.9 MB/s
+  large_get_64mb           1117ms    57.2 MB/s
+  multipart_put_256mb      4212ms    60.8 MB/s
+  multipart_put_256mb_16p   3129ms    81.8 MB/s
+  large_put_64mb_h1         476ms   134.3 MB/s
+  multipart_put_256mb_h1_16p   3057ms    83.7 MB/s
+  mpu_abort                 300ms     17 ops/s  p50=50ms p95=98ms p99=98ms
+  concurrent_ingest_20s   20001ms    30.0 MB/s      7 ops/s  p50=1445ms p95=12590ms p99=15034ms
+  concurrent_download_20s   2801ms   409.8 MB/s    102 ops/s  p50=177ms p95=710ms p99=1222ms
+  range_get_1mb_chunks     1017ms    15.7 MB/s     16 ops/s  p50=51ms p95=161ms p99=161ms
+  integrity_16mb            954ms  ✓ checksum match
+  integrity_chunked_16mb    871ms    18.4 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1652ms  p50=25ms p95=69ms p99=69ms  ✓ 20/20 consistent
+  consistency_overwrite    1406ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    560ms  ✓ 10/10 immediately visible in listing
+
+[3/3] idrive-us-west-4  (https://s3.us-west-4.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb         851ms  p50=84ms p95=93ms p99=93ms
+  warm_put_4kb             3103ms     32 ops/s  p50=30ms p95=33ms p99=84ms
+  warm_get_4kb             2809ms     36 ops/s  p50=27ms p95=29ms p99=32ms
+  warm_head_4kb            1379ms     36 ops/s  p50=27ms p95=29ms p99=31ms
+  warm_copy_4kb             307ms     33 ops/s  p50=30ms p95=31ms p99=31ms
+  warm_delete_single        880ms     34 ops/s  p50=28ms p95=33ms p99=35ms
+  delete_batch_100          124ms    805 ops/s
+  list_100                  112ms  returned=100
+  list_prefix                27ms  returned=30
+  medium_put_1mb          20057ms     0.2 MB/s  p50=4181ms p95=4714ms p99=4714ms
+  medium_get_1mb           1015ms     4.9 MB/s  p50=186ms p95=271ms p99=271ms
+  medium_put_16mb          3561ms    22.5 MB/s  p50=133ms p95=2964ms p99=2964ms
+  medium_get_16mb           767ms   104.2 MB/s  p50=111ms p95=320ms p99=320ms
+  large_put_64mb            596ms   107.3 MB/s
+  large_get_64mb            609ms   104.9 MB/s
+  multipart_put_256mb      1197ms   213.7 MB/s
+  multipart_put_256mb_16p    735ms   347.9 MB/s
+  large_put_64mb_h1         631ms   101.4 MB/s
+  multipart_put_256mb_h1_16p    706ms   362.1 MB/s
+  mpu_abort                1158ms      4 ops/s  p50=55ms p95=595ms p99=595ms
+  concurrent_ingest_20s    1522ms   754.1 MB/s    189 ops/s  p50=111ms p95=352ms p99=389ms
+  concurrent_download_20s   3067ms   374.2 MB/s     94 ops/s  p50=162ms p95=658ms p99=1548ms
+  range_get_1mb_chunks      637ms    25.1 MB/s     25 ops/s  p50=29ms p95=197ms p99=197ms
+  integrity_16mb            693ms  ✓ checksum match
+  integrity_chunked_16mb   1244ms    12.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1596ms  p50=28ms p95=79ms p99=79ms  ✓ 20/20 consistent
+  consistency_overwrite    1341ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    623ms  ✓ 10/10 immediately visible in listing
+
+
+✅ Done in 3m36s. Results: raw-us.json

@@ -1,0 +1,1 @@
+ingest2-cf-32x4: 32 workers × 4.0 MiB: 2801 ok, 0 failed in 20.3s = 577.5 MB/s 137.7 ops/s; p50 217 ms p90 320 p99 473 max 719 map[]

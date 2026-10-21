@@ -1,0 +1,277 @@
+Host:      slc (linux/amd64)
+Output:    raw-rest.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 9 (smoke=false)
+
+[1/9] idrive-us-southeast-1  (https://s3.us-southeast-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        1814ms  p50=174ms p95=232ms p99=232ms
+  warm_put_4kb             6552ms     15 ops/s  p50=63ms p95=79ms p99=173ms
+  warm_get_4kb             6008ms     17 ops/s  p50=59ms p95=62ms p99=66ms
+  warm_head_4kb            2880ms     17 ops/s  p50=57ms p95=58ms p99=63ms
+  warm_copy_4kb             615ms     16 ops/s  p50=60ms p95=66ms p99=66ms
+  warm_delete_single       1873ms     16 ops/s  p50=58ms p95=83ms p99=83ms
+  delete_batch_100          184ms    541 ops/s
+  list_100                  253ms  returned=100
+  list_prefix                58ms  returned=30
+  medium_put_1mb           1143ms     4.4 MB/s  p50=152ms p95=556ms p99=556ms
+  medium_get_1mb            747ms     6.7 MB/s  p50=91ms p95=390ms p99=390ms
+  medium_put_16mb          2335ms    34.3 MB/s  p50=420ms p95=863ms p99=863ms
+  medium_get_16mb          2765ms    28.9 MB/s  p50=489ms p95=848ms p99=848ms
+  large_put_64mb           1172ms    54.6 MB/s
+  large_get_64mb           4028ms    15.9 MB/s
+  multipart_put_256mb      1940ms   131.9 MB/s
+  multipart_put_256mb_16p   1681ms   152.2 MB/s
+  large_put_64mb_h1        1220ms    52.5 MB/s
+  multipart_put_256mb_h1_16p   1427ms   179.3 MB/s
+  mpu_abort                 692ms      7 ops/s  p50=115ms p95=229ms p99=229ms
+  range_get_1mb_chunks     3773ms     4.2 MB/s      4 ops/s  p50=227ms p95=414ms p99=414ms
+  integrity_16mb           2529ms  ✓ checksum match
+  integrity_chunked_16mb   2035ms     7.9 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   3575ms  p50=58ms p95=170ms p99=170ms  ✓ 20/20 consistent
+  consistency_overwrite    3035ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1296ms  ✓ 10/10 immediately visible in listing
+
+[2/9] idrive-us-midwest-1  (https://s3.us-midwest-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        1291ms  p50=123ms p95=153ms p99=153ms
+  warm_put_4kb             4531ms     22 ops/s  p50=39ms p95=64ms p99=102ms
+  warm_get_4kb             3456ms     29 ops/s  p50=34ms p95=36ms p99=46ms
+  warm_head_4kb            1644ms     30 ops/s  p50=32ms p95=33ms p99=35ms
+  warm_copy_4kb             465ms     21 ops/s  p50=49ms p95=60ms p99=60ms
+  warm_delete_single      11080ms      3 ops/s  p50=86ms p95=2186ms p99=3331ms
+  delete_batch_100        66172ms      2 ops/s
+  list_100                  170ms  returned=100
+  list_prefix                35ms  returned=30
+  medium_put_1mb           1351ms     3.7 MB/s  p50=283ms p95=372ms p99=372ms
+  medium_get_1mb            444ms    11.2 MB/s  p50=49ms p95=239ms p99=239ms
+  medium_put_16mb          2418ms    33.1 MB/s  p50=489ms p95=550ms p99=550ms
+  medium_get_16mb         10751ms     7.4 MB/s  p50=1493ms p95=4259ms p99=4259ms
+  large_put_64mb           1652ms    38.7 MB/s
+  large_get_64mb            904ms    70.8 MB/s
+  multipart_put_256mb      3570ms    71.7 MB/s
+  multipart_put_256mb_16p   3947ms    64.9 MB/s
+  large_put_64mb_h1         681ms    93.9 MB/s
+  multipart_put_256mb_h1_16p   3340ms    76.6 MB/s
+  mpu_abort                 530ms      9 ops/s  p50=91ms p95=185ms p99=185ms
+  range_get_1mb_chunks     5465ms     2.9 MB/s      3 ops/s  p50=287ms p95=941ms p99=941ms
+  integrity_16mb           1065ms  ✓ checksum match
+  integrity_chunked_16mb   6140ms     2.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   3264ms  p50=39ms p95=279ms p99=279ms  ✓ 20/20 consistent
+  consistency_overwrite    3002ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    830ms  ✓ 10/10 immediately visible in listing
+
+[3/9] idrive-us-southwest-1  (https://s3.us-southwest-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        1061ms  p50=104ms p95=118ms p99=118ms
+  warm_put_4kb             4056ms     25 ops/s  p50=38ms p95=50ms p99=103ms
+  warm_get_4kb             3479ms     29 ops/s  p50=34ms p95=35ms p99=37ms
+  warm_head_4kb            1703ms     29 ops/s  p50=34ms p95=34ms p99=36ms
+  warm_copy_4kb             375ms     27 ops/s  p50=37ms p95=38ms p99=38ms
+  warm_delete_single       1041ms     29 ops/s  p50=34ms p95=35ms p99=38ms
+  delete_batch_100          122ms    817 ops/s
+  list_100                  134ms  returned=100
+  list_prefix                34ms  returned=30
+  medium_put_1mb            918ms     5.4 MB/s  p50=165ms p95=315ms p99=315ms
+  medium_get_1mb            518ms     9.7 MB/s  p50=69ms p95=237ms p99=237ms
+  medium_put_16mb          1640ms    48.8 MB/s  p50=298ms p95=522ms p99=522ms
+  medium_get_16mb         11650ms     6.9 MB/s  p50=2033ms p95=3710ms p99=3710ms
+  large_put_64mb           1320ms    48.5 MB/s
+  large_get_64mb           5976ms    10.7 MB/s
+  multipart_put_256mb      2382ms   107.5 MB/s
+  multipart_put_256mb_16p   1880ms   136.1 MB/s
+  large_put_64mb_h1        1193ms    53.6 MB/s
+  multipart_put_256mb_h1_16p   1924ms   133.0 MB/s
+  mpu_abort                 564ms      9 ops/s  p50=68ms p95=289ms p99=289ms
+  range_get_1mb_chunks     1237ms    12.9 MB/s     13 ops/s  p50=62ms p95=234ms p99=234ms
+  integrity_16mb           3217ms  ✓ checksum match
+  integrity_chunked_16mb   2413ms     6.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2743ms  p50=39ms p95=109ms p99=109ms  ✓ 20/20 consistent
+  consistency_overwrite    2251ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    765ms  ✓ 10/10 immediately visible in listing
+
+[4/9] idrive-eu-west-1  (https://s3.eu-west-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        3651ms  p50=363ms p95=377ms p99=377ms
+  warm_put_4kb            13216ms      8 ops/s  p50=129ms p95=130ms p99=359ms
+  warm_get_4kb            12166ms      8 ops/s  p50=120ms p95=128ms p99=131ms
+  warm_head_4kb            5987ms      8 ops/s  p50=119ms p95=120ms p99=129ms
+  warm_copy_4kb            1243ms      8 ops/s  p50=124ms p95=125ms p99=125ms
+  warm_delete_single       3662ms      8 ops/s  p50=121ms p95=128ms p99=129ms
+  delete_batch_100          372ms    269 ops/s
+  list_100                  593ms  returned=100
+  list_prefix               122ms  returned=30
+  medium_put_1mb           1908ms     2.6 MB/s  p50=196ms p95=1116ms p99=1116ms
+  medium_get_1mb           9770ms     0.5 MB/s  p50=946ms p95=5862ms p99=5862ms
+  medium_put_16mb          3200ms    25.0 MB/s  p50=400ms p95=1611ms p99=1611ms
+  medium_get_16mb          2324ms    34.4 MB/s  p50=252ms p95=1311ms p99=1311ms
+  large_put_64mb           2322ms    27.6 MB/s
+  large_get_64mb           2411ms    26.5 MB/s
+  multipart_put_256mb      3761ms    68.1 MB/s
+  multipart_put_256mb_16p   2522ms   101.5 MB/s
+  large_put_64mb_h1        2334ms    27.4 MB/s
+  multipart_put_256mb_h1_16p   2717ms    94.2 MB/s
+  mpu_abort                1947ms      3 ops/s  p50=262ms p95=736ms p99=736ms
+  range_get_1mb_chunks     2848ms     5.6 MB/s      6 ops/s  p50=125ms p95=856ms p99=856ms
+  integrity_16mb           2949ms  ✓ checksum match
+  integrity_chunked_16mb   3907ms     4.1 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7001ms  p50=121ms p95=357ms p99=357ms  ✓ 20/20 consistent
+  consistency_overwrite    5863ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2895ms  ✓ 10/10 immediately visible in listing
+
+[5/9] idrive-eu-west-3  (https://s3.eu-west-3.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        4043ms  p50=392ms p95=509ms p99=509ms
+  warm_put_4kb            14418ms      7 ops/s  p50=140ms p95=150ms p99=390ms
+  warm_get_4kb            13108ms      8 ops/s  p50=130ms p95=139ms p99=144ms
+  warm_head_4kb            6529ms      8 ops/s  p50=129ms p95=138ms p99=152ms
+  warm_copy_4kb            1348ms      7 ops/s  p50=133ms p95=142ms p99=142ms
+  warm_delete_single       3928ms      8 ops/s  p50=130ms p95=137ms p99=146ms
+  delete_batch_100          236ms    422 ops/s
+  list_100                  516ms  returned=100
+  list_prefix               129ms  returned=30
+  medium_put_1mb           2052ms     2.4 MB/s  p50=214ms p95=1203ms p99=1203ms
+  medium_get_1mb           2253ms     2.2 MB/s  p50=387ms p95=912ms p99=912ms
+  medium_put_16mb          3396ms    23.6 MB/s  p50=417ms p95=1727ms p99=1727ms
+  medium_get_16mb         12218ms     6.5 MB/s  p50=2185ms p95=3467ms p99=3467ms
+  large_put_64mb           2507ms    25.5 MB/s
+  large_get_64mb           5396ms    11.9 MB/s
+  multipart_put_256mb      3481ms    73.5 MB/s
+  multipart_put_256mb_16p   2646ms    96.7 MB/s
+  large_put_64mb_h1        2530ms    25.3 MB/s
+  multipart_put_256mb_h1_16p   2616ms    97.8 MB/s
+  mpu_abort                1568ms      3 ops/s  p50=261ms p95=518ms p99=518ms
+  range_get_1mb_chunks     5877ms     2.7 MB/s      3 ops/s  p50=386ms p95=917ms p99=917ms
+  integrity_16mb           5316ms  ✓ checksum match
+  integrity_chunked_16mb   3554ms     4.5 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7457ms  p50=131ms p95=387ms p99=387ms  ✓ 20/20 consistent
+  consistency_overwrite    6175ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2886ms  ✓ 10/10 immediately visible in listing
+
+[6/9] idrive-eu-central-1  (https://s3.eu-central-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        3999ms  p50=398ms p95=410ms p99=410ms
+  warm_put_4kb            14696ms      7 ops/s  p50=144ms p95=147ms p99=400ms
+  warm_get_4kb            13743ms      7 ops/s  p50=134ms p95=147ms p99=187ms
+  warm_head_4kb            6661ms      8 ops/s  p50=132ms p95=136ms p99=163ms
+  warm_copy_4kb            1407ms      7 ops/s  p50=137ms p95=171ms p99=171ms
+  warm_delete_single       4079ms      7 ops/s  p50=133ms p95=145ms p99=161ms
+  delete_batch_100          270ms    370 ops/s
+  list_100                  531ms  returned=100
+  list_prefix               132ms  returned=30
+  medium_put_1mb           2247ms     2.2 MB/s  p50=286ms p95=1223ms p99=1223ms
+  medium_get_1mb           1626ms     3.1 MB/s  p50=150ms p95=933ms p99=933ms
+  medium_put_16mb          3967ms    20.2 MB/s  p50=559ms p95=1922ms p99=1922ms
+  medium_get_16mb          2741ms    29.2 MB/s  p50=282ms p95=1493ms p99=1493ms
+  large_put_64mb           3322ms    19.3 MB/s
+  large_get_64mb          20379ms     3.1 MB/s
+  multipart_put_256mb      4599ms    55.7 MB/s
+  multipart_put_256mb_16p   3357ms    76.2 MB/s
+  large_put_64mb_h1        3411ms    18.8 MB/s
+  multipart_put_256mb_h1_16p   3994ms    64.1 MB/s
+  mpu_abort                1775ms      3 ops/s  p50=292ms p95=624ms p99=624ms
+  range_get_1mb_chunks     6632ms     2.4 MB/s      2 ops/s  p50=395ms p95=947ms p99=947ms
+  integrity_16mb           5685ms  ✓ checksum match
+  integrity_chunked_16mb   5390ms     3.0 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   7804ms  p50=134ms p95=395ms p99=395ms  ✓ 20/20 consistent
+  consistency_overwrite    6580ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2948ms  ✓ 10/10 immediately visible in listing
+
+[7/9] idrive-eu-south-1  (https://s3.eu-south-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        4229ms  p50=421ms p95=431ms p99=431ms
+  warm_put_4kb            15483ms      6 ops/s  p50=152ms p95=153ms p99=421ms
+  warm_get_4kb            14018ms      7 ops/s  p50=139ms p95=143ms p99=146ms
+  warm_head_4kb            6945ms      7 ops/s  p50=138ms p95=139ms p99=140ms
+  warm_copy_4kb            1443ms      7 ops/s  p50=143ms p95=154ms p99=154ms
+  warm_delete_single       4315ms      7 ops/s  p50=142ms p95=148ms p99=151ms
+  delete_batch_100          271ms    369 ops/s
+  list_100                  692ms  returned=100
+  list_prefix               140ms  returned=30
+  medium_put_1mb           2207ms     2.3 MB/s  p50=224ms p95=1293ms p99=1293ms
+  medium_get_1mb           1559ms     3.2 MB/s  p50=143ms p95=979ms p99=979ms
+  medium_put_16mb          3984ms    20.1 MB/s  p50=527ms p95=1944ms p99=1944ms
+  medium_get_16mb          2858ms    28.0 MB/s  p50=301ms p95=1671ms p99=1671ms
+  large_put_64mb           3058ms    20.9 MB/s
+  large_get_64mb          17545ms     3.6 MB/s
+  multipart_put_256mb      3475ms    73.7 MB/s
+  multipart_put_256mb_16p   2599ms    98.5 MB/s
+  large_put_64mb_h1        3176ms    20.1 MB/s
+  multipart_put_256mb_h1_16p   5721ms    44.7 MB/s
+  mpu_abort                1707ms      3 ops/s  p50=285ms p95=565ms p99=565ms
+  range_get_1mb_chunks     3674ms     4.4 MB/s      4 ops/s  p50=141ms p95=1396ms p99=1396ms
+  integrity_16mb           3606ms  ✓ checksum match
+  integrity_chunked_16mb  10420ms     1.5 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   8250ms  p50=143ms p95=555ms p99=555ms  ✓ 20/20 consistent
+  consistency_overwrite    6816ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   3123ms  ✓ 10/10 immediately visible in listing
+
+[8/9] idrive-ap-northeast-1  (https://s3.ap-northeast-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        3349ms  p50=333ms p95=343ms p99=343ms
+  warm_put_4kb            12343ms      8 ops/s  p50=120ms p95=128ms p99=340ms
+  warm_get_4kb            11224ms      9 ops/s  p50=111ms p95=121ms p99=136ms
+  warm_head_4kb            5527ms      9 ops/s  p50=110ms p95=111ms p99=111ms
+  warm_copy_4kb            1144ms      9 ops/s  p50=114ms p95=116ms p99=116ms
+  warm_delete_single       3346ms      9 ops/s  p50=111ms p95=113ms p99=115ms
+  delete_batch_100          232ms    430 ops/s
+  list_100                  548ms  returned=100
+  list_prefix               111ms  returned=30
+  medium_put_1mb           1758ms     2.8 MB/s  p50=182ms p95=1021ms p99=1021ms
+  medium_get_1mb           1343ms     3.7 MB/s  p50=114ms p95=777ms p99=777ms
+  medium_put_16mb          2828ms    28.3 MB/s  p50=342ms p95=1462ms p99=1462ms
+  medium_get_16mb          2674ms    29.9 MB/s  p50=434ms p95=1213ms p99=1213ms
+  large_put_64mb           2244ms    28.5 MB/s
+  large_get_64mb           1995ms    32.1 MB/s
+  multipart_put_256mb      3165ms    80.9 MB/s
+  multipart_put_256mb_16p   2304ms   111.1 MB/s
+  large_put_64mb_h1        2147ms    29.8 MB/s
+  multipart_put_256mb_h1_16p   2235ms   114.5 MB/s
+  mpu_abort                1391ms      4 ops/s  p50=222ms p95=456ms p99=456ms
+  range_get_1mb_chunks     2488ms     6.4 MB/s      6 ops/s  p50=113ms p95=784ms p99=784ms
+  integrity_16mb           2670ms  ✓ checksum match
+  integrity_chunked_16mb   2667ms     6.0 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   6389ms  p50=113ms p95=331ms p99=331ms  ✓ 20/20 consistent
+  consistency_overwrite    8078ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   2456ms  ✓ 10/10 immediately visible in listing
+
+[9/9] idrive-eu-west-4  (https://s3.eu-west-4.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: stored-idb-raw-20261020
+  cold_dial_put_1kb        4660ms  p50=449ms p95=620ms p99=620ms
+  warm_put_4kb            17403ms      6 ops/s  p50=157ms p95=297ms p99=507ms
+  warm_get_4kb            15408ms      6 ops/s  p50=145ms p95=161ms p99=500ms
+  warm_head_4kb            7707ms      6 ops/s  p50=145ms p95=149ms p99=539ms
+  warm_copy_4kb            1723ms      6 ops/s  p50=162ms p95=254ms p99=254ms
+  warm_delete_single       4740ms      6 ops/s  p50=145ms p95=158ms p99=498ms
+  delete_batch_100          340ms    293 ops/s
+  list_100                  577ms  returned=100
+  list_prefix               143ms  returned=30
+  medium_put_1mb           4542ms     1.1 MB/s  p50=250ms p95=3533ms p99=3533ms
+  medium_get_1mb           4376ms     1.1 MB/s  p50=894ms p95=1208ms p99=1208ms
+  medium_put_16mb          4715ms    17.0 MB/s  p50=745ms p95=2249ms p99=2249ms
+  medium_get_16mb         10759ms     7.4 MB/s  p50=1852ms p95=4304ms p99=4304ms
+  large_put_64mb           3727ms    17.2 MB/s
+  large_get_64mb          60626ms     1.1 MB/s
+  multipart_put_256mb     10657ms    24.0 MB/s
+  multipart_put_256mb_16p   4435ms    57.7 MB/s
+  large_put_64mb_h1        4387ms    14.6 MB/s
+  multipart_put_256mb_h1_16p   3817ms    67.1 MB/s
+  mpu_abort                1735ms      3 ops/s  p50=288ms p95=578ms p99=578ms
+  range_get_1mb_chunks    22110ms     0.7 MB/s      1 ops/s  p50=1154ms p95=2296ms p99=2296ms
+  integrity_16mb           4297ms  ✓ checksum match
+  integrity_chunked_16mb   5092ms     3.1 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write  14096ms  p50=288ms p95=716ms p99=716ms  ✓ 20/20 consistent
+  consistency_overwrite   18308ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   3213ms  ✓ 10/10 immediately visible in listing
+
+
+✅ Done in 21m38s. Results: raw-rest.json
