@@ -39,7 +39,9 @@ item 5 is the standing Stripe list with two additions; 6–7 are counsel.
    WP-DOMAIN-1 lands), all invoice events, automatic redelivery on; copy the
    secret. Account → API keys → create a key with permissions
    `btcpay.store.cancreateinvoice`, `btcpay.store.canviewinvoices`,
-   `btcpay.store.canmodifyinvoices` for **that store only**. Put
+   `btcpay.store.canmodifyinvoices` for **that store only** (add
+   `btcpay.store.cancreatenonapprovedpullpayments` only to open refunds
+   through the API — the lab, Prompt 24; the provider does not need it). Put
    `BTCPAY_URL=https://pay.stored.cloud`, `BTCPAY_STORE_ID=…`,
    `BTCPAY_API_KEY=…`, `BTCPAY_WEBHOOK_SECRET=…` into
    `/opt/vaultaire/configs/.env` the 0600 way (write the lines locally, scp,
