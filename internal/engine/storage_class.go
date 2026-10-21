@@ -69,6 +69,13 @@ var storageClassToBackend = map[string]string{
 	// written only sealed: Blomp's storage URL is plain HTTP
 	// (api.decidePlacement, drivers/swift_README.md).
 	"BLOMP": "blomp",
+
+	// SIA is OUR internal class for Sia through the s3d gateway (never sent
+	// by clients): set by api.resolvePutStorageClass only for a bucket whose
+	// tier_preference is `sia` AND whose tenant has the `sia_backend` flag.
+	// A strict target like BLOMP, whole objects only, written sealed unless
+	// SIA_ALLOW_UNSEALED (api.decidePlacement, drivers/sia.go).
+	"SIA": "sia",
 }
 
 var backendToStorageClass = map[string]string{
@@ -84,6 +91,7 @@ var backendToStorageClass = map[string]string{
 	"r2":    "STANDARD",
 	"sync":  "STANDARD",
 	"blomp": "STANDARD",
+	"sia":   "STANDARD",
 }
 
 // ResolveStorageClass maps a class onto the backend that stores it. An

@@ -119,3 +119,25 @@ func TestWriteCandidates_NonStrictTargetOnlyStillFallToThePrimary(t *testing.T) 
 		assert.Equal(t, "idrive", got, "class %s without its driver degrades to the primary", class)
 	}
 }
+
+// `sia` is a strict, target-only backend (the sia tier), yet a lab still runs
+// it as the primary (STORAGE_MODE=sia): as the primary it takes every write.
+func TestSia_StrictTargetStillWorksAsThePrimary(t *testing.T) {
+	assert.True(t, strictTarget("sia"))
+	assert.True(t, writeOnlyWhenTargeted("sia"))
+
+	eng := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "sia"})
+	eng.AddDriver("sia", &mockDriver{name: "sia"})
+	eng.AddDriver("idrive", &mockDriver{name: "idrive"})
+	eng.SetPrimary("sia")
+	used, err := eng.Put(tenantCtx(), "c", "k", strings.NewReader("x"))
+	require.NoError(t, err)
+	assert.Equal(t, "sia", used)
+
+	// Not the primary: never a fall-over destination for another object.
+	eng2 := NewEngine(nil, nopLogger(), &Config{DefaultBackend: "idrive"})
+	eng2.AddDriver("idrive", &mockDriver{name: "idrive"})
+	eng2.AddDriver("sia", &mockDriver{name: "sia"})
+	assert.NotContains(t, eng2.buildWriteCandidateList(eng2.view(), "idrive"), "sia")
+	assert.Equal(t, []string{"sia"}, eng2.buildWriteCandidateList(eng2.view(), "sia"))
+}

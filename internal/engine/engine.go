@@ -616,6 +616,9 @@ func (e *CoreEngine) buildCandidateList(v view, preferred string) []string {
 //     for a flagged tenant's `sync` bucket (api.resolvePutStorageClass).
 //   - blomp: Blomp's Swift storage — plain HTTP, ~3 writes/s per account:
 //     only a flagged tenant's `blomp` bucket, sealed (api.decidePlacement).
+//   - sia: Sia through the s3d gateway — a flagged tenant's `sia` bucket
+//     only, whole and sealed. STORAGE_MODE=sia (a lab) still makes it the
+//     primary at boot; the admin swap refuses it like the others.
 //
 // Failover for a general-purpose write is therefore between the target, the
 // primary and the remaining general-purpose durable backends (idrive, lyve,
@@ -628,6 +631,7 @@ var targetOnlyBackends = map[string]bool{
 	"permafrost": true,
 	"sync":       true,
 	"blomp":      true,
+	"sia":        true,
 	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
@@ -667,6 +671,7 @@ func writeOnlyWhenTargeted(name string) bool {
 var strictTargetBackends = map[string]bool{
 	"sync":  true,
 	"blomp": true, // a fall-over would land an object off the tier its bucket promises, as for sync
+	"sia":   true, // likewise
 }
 
 // ErrStrictTargetUnregistered is the cause, wrapped in

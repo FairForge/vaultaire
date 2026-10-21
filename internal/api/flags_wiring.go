@@ -75,6 +75,13 @@ const (
 	// write is refused (decidePlacement). Default OFF, per tenant first.
 	flagBlompBackend = "blomp_backend"
 
+	// flagSiaBackend lets a tenant's buckets whose tier_preference is `sia`
+	// (operator-set, like `blomp`) place their objects on Sia through the
+	// s3d gateway ("sia" driver, drivers/sia.go) — whole and sealed only:
+	// without ENCRYPTION_MASTER_KEY such a write is refused (decidePlacement)
+	// unless SIA_ALLOW_UNSEALED. Default OFF, per tenant first.
+	flagSiaBackend = "sia_backend"
+
 	// flagVersionedChunking lets a chunked write (PUT, CompleteMultipartUpload,
 	// the copy's manifest branch) go into an Enabled or Suspended bucket
 	// (WP-VM-1 Part D): since 092 a manifest has an address and a version
@@ -110,6 +117,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagVaultParity, false)
 	fl.Register(flagSyncBackend, false)
 	fl.Register(flagBlompBackend, false)
+	fl.Register(flagSiaBackend, false)
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
@@ -118,11 +126,12 @@ func registerFlags(fl *flags.Service) {
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class
-// (SYNC, BLOMP); nil = never.
+// (SYNC, BLOMP, SIA); nil = never.
 type tierGate func(class, tenantID string) bool
 
 // tierPlacementGate is resolvePutStorageClass's per-tenant check of the
-// flag-gated tiers: SYNC needs `sync_backend`, BLOMP `blomp_backend`; nil
+// flag-gated tiers: SYNC needs `sync_backend`, BLOMP `blomp_backend`, SIA
+// `sia_backend`; nil
 // (no flag service) = never.
 func tierPlacementGate(fl *flags.Service) tierGate {
 	if fl == nil {
@@ -134,6 +143,8 @@ func tierPlacementGate(fl *flags.Service) tierGate {
 			return fl.Enabled(flagSyncBackend, tenantID)
 		case "BLOMP":
 			return fl.Enabled(flagBlompBackend, tenantID)
+		case "SIA":
+			return fl.Enabled(flagSiaBackend, tenantID)
 		}
 		return false
 	}
@@ -163,6 +174,21 @@ func allowUnsealedCleartextFromEnv(getenv func(string) string, logger *zap.Logge
 	}
 	if on {
 		logger.Warn("BLOMP_ALLOW_UNSEALED is set: objects of blomp-tier buckets and Vault parity shards may cross Blomp's plain-HTTP link unsealed (testing only)")
+	}
+	return on
+}
+
+// allowUnsealedSiaFromEnv reads SIA_ALLOW_UNSEALED (`true`/`1`): lets the
+// SIA tier (and a `sia` Vault parity leg) take unsealed bytes. Set = one
+// Warn line at boot.
+func allowUnsealedSiaFromEnv(getenv func(string) string, logger *zap.Logger) bool {
+	v := strings.TrimSpace(getenv("SIA_ALLOW_UNSEALED"))
+	on := v == "true" || v == "1"
+	if v != "" && !on && v != "false" && v != "0" {
+		logger.Warn("SIA_ALLOW_UNSEALED: not true/false — unsealed writes stay refused", zap.String("value", v))
+	}
+	if on {
+		logger.Warn("SIA_ALLOW_UNSEALED is set: objects of sia-tier buckets and Vault parity shards may reach s3d and the Sia hosts unsealed (testing only)")
 	}
 	return on
 }

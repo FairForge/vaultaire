@@ -1111,6 +1111,7 @@ func (s *Server) writeAdapter() *S3ToEngine {
 	a := NewS3ToEngine(s.engine, s.db, s.logger)
 	a.sseService = s.sseService
 	a.allowUnsealedCleartext = s.allowUnsealedCleartext
+	a.allowUnsealedSia = s.allowUnsealedSia
 	a.chunkEncSvc = s.chunkEncSvc
 	a.gci = s.gci
 	a.flags = s.flags

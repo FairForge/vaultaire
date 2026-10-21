@@ -18,7 +18,8 @@ import (
 func TestRefusedPrimary(t *testing.T) {
 	assert.Error(t, refusedPrimary("sync", nil))
 	assert.Error(t, refusedPrimary("blomp", nil))
-	for _, ok := range []string{"local", "idrive", "wasabi", "quotaless", "s3", "geyser", "permafrost"} {
+	// sia is target-only for placement but a lab runs STORAGE_MODE=sia: kept.
+	for _, ok := range []string{"local", "idrive", "wasabi", "quotaless", "s3", "geyser", "permafrost", "sia"} {
 		assert.NoError(t, refusedPrimary(ok, nil), ok)
 	}
 }
