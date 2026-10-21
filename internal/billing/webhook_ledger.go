@@ -134,6 +134,28 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		}
 	}
 
+	// Refunds Stripe made before this payment reached the ledger (RP28-2:
+	// charge.refunded delivered first was acknowledged with nothing to
+	// attach to). Listed only while the row is not settled yet — one Stripe
+	// call, and a listing that fails answers 500 before anything is written
+	// — and recorded only when this delivery newly settles it.
+	chargeID := ""
+	if inv.Charge != nil {
+		chargeID = inv.Charge.ID
+	}
+	var early []*stripe.Refund
+	if chargeID != "" && inv.AmountPaid > 0 {
+		_, err := payments.ChargeOf(ctx, h.stripe.db, tenantID, payments.ProviderStripe, inv.ID)
+		switch {
+		case errors.Is(err, payments.ErrNoSuchPayment):
+			if early, err = h.refundSource().ForCharge(ctx, chargeID); err != nil {
+				return fmt.Errorf("list refunds of charge %s of paid invoice %s: %w", chargeID, inv.ID, err)
+			}
+		case err != nil:
+			return err
+		}
+	}
+
 	at := time.Now()
 	if inv.StatusTransitions != nil && inv.StatusTransitions.PaidAt > 0 {
 		at = time.Unix(inv.StatusTransitions.PaidAt, 0)
@@ -155,6 +177,15 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		h.houseInvalid(ctx, tenantID, invalidSub, *p.Order, invalid)
 	} else if grant != nil {
 		h.auditGrant(ctx, tenantID, granted, invoiceSubscriptionID(inv))
+	}
+	if settled.Newly && len(early) > 0 {
+		// After the commit: a failure here is not retried by Stripe (the
+		// redelivery is a replay), so it is an Error naming the refunds —
+		// the operator records them with the admin form under their re_ ids.
+		if err := h.recordRefunds(ctx, tenantID, settled.ID, chargeID, early); err != nil {
+			h.logger.Error("stripe webhook: refunds of a newly settled charge not recorded — record them by hand",
+				zap.String("tenant", tenantID), zap.String("invoice", inv.ID), zap.String("charge", chargeID), zap.Error(err))
+		}
 	}
 	outcome := payments.OutcomeSettled
 	if !settled.Newly {

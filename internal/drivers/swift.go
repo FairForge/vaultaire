@@ -276,6 +276,13 @@ func (d *SwiftDriver) CleartextTransport() bool {
 	return !strings.HasPrefix(d.storageURL, "https://")
 }
 
+// PreferredRangeBytes (engine.RangePartSizer): a parallel GET reads Swift in
+// parts of SegmentSize. Every range pays the proxy's slow first byte
+// (~650 ms on Blomp), so 16 MiB parts spent most of their time waiting:
+// 8 × 64 MiB read a 1 GiB object at 123–369 MB/s, 8 × 16 MiB at 58–157
+// (SLC lab 2026-10-21, sha-verified). A part then also matches one SLO piece.
+func (d *SwiftDriver) PreferredRangeBytes() int64 { return d.cfg.SegmentSize }
+
 // ObjectKey (engine.KeyAddresser).
 func (d *SwiftDriver) ObjectKey(ctx context.Context, container, artifact string) string {
 	return tenantKey(contextTenant(ctx), container, artifact)
@@ -960,6 +967,38 @@ func (d *SwiftDriver) HealthCheck(ctx context.Context) error {
 		return &SwiftError{Op: "HEAD container " + d.cfg.Container, Status: status}
 	}
 	return nil
+}
+
+// VendorUsage reads the container HEAD (engine.VendorUsageReporter): its
+// X-Container-Bytes-Used, and X-Container-Meta-Quota-Bytes when a quota is
+// set (container_quotas — Blomp's 40 GiB free account). The account HEAD
+// is not asked: Blomp answers it 403. Both are Swift's own counters, which
+// lag writes and deletes by minutes (deleted bytes stayed counted after a
+// bulk delete on 2026-10-21), and Swift lets a write in flight take the
+// container past its quota (41.7 GiB accepted of 40 GiB) — the daily
+// backend_capacity job reads it, never a write path.
+func (d *SwiftDriver) VendorUsage(ctx context.Context) (engine.VendorUsage, error) {
+	status, h, _, err := d.meta(ctx, swiftRequest{method: http.MethodHead})
+	if err != nil {
+		return engine.VendorUsage{}, err
+	}
+	if status != http.StatusNoContent && status != http.StatusOK {
+		return engine.VendorUsage{}, &SwiftError{Op: "HEAD container " + d.cfg.Container, Status: status}
+	}
+	used, err := strconv.ParseInt(h.Get("X-Container-Bytes-Used"), 10, 64)
+	if err != nil || used < 0 {
+		return engine.VendorUsage{}, fmt.Errorf("%s: container HEAD gave no usable X-Container-Bytes-Used (%q)",
+			d.name, h.Get("X-Container-Bytes-Used"))
+	}
+	u := engine.VendorUsage{UsedBytes: used}
+	if q := h.Get("X-Container-Meta-Quota-Bytes"); q != "" {
+		limit, err := strconv.ParseInt(q, 10, 64)
+		if err != nil || limit < 0 {
+			return engine.VendorUsage{}, fmt.Errorf("%s: container HEAD gave an unusable X-Container-Meta-Quota-Bytes (%q)", d.name, q)
+		}
+		u.LimitBytes = limit
+	}
+	return u, nil
 }
 
 // ---- writes ---------------------------------------------------------------

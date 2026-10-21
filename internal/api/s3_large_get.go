@@ -439,11 +439,22 @@ func (a *S3ToEngine) parallelSource(ctx context.Context, tenantID, container, bl
 	if !ok {
 		return "", nil, nil, false
 	}
-	if cfg.budget.Available() < 2*cfg.partBytes {
+	if cfg.budget.Available() < 2*rangePartBytes(cfg, rg) {
 		largeGetFallbacks.WithLabelValues("budget").Inc()
 		return "", nil, nil, false
 	}
 	return backend, rg, ce, true
+}
+
+// rangePartBytes is the part size of a parallel read from rg: the driver's
+// own (engine.RangePartSizer) when it names one, else LARGE_GET_PART_BYTES.
+func rangePartBytes(cfg largeGetConfig, rg engine.VersionedRangeGetter) int64 {
+	if s, ok := rg.(engine.RangePartSizer); ok {
+		if n := s.PreferredRangeBytes(); n > 0 {
+			return n
+		}
+	}
+	return cfg.partBytes
 }
 
 // startParallel runs the parts and reads the first before it returns, so
@@ -497,17 +508,17 @@ func (a *S3ToEngine) openParallelGet(ctx context.Context, tenantID, container, b
 	if !ok {
 		return nil
 	}
-	cfg := a.largeGet
-	n := int((length + cfg.partBytes - 1) / cfg.partBytes)
+	partBytes := rangePartBytes(a.largeGet, rg)
+	n := int((length + partBytes - 1) / partBytes)
 	sizes := make([]int64, n)
 	for i := range sizes {
-		sizes[i] = cfg.partBytes
+		sizes[i] = partBytes
 	}
-	sizes[n-1] = length - int64(n-1)*cfg.partBytes
+	sizes[n-1] = length - int64(n-1)*partBytes
 
 	id := &rangeIdentity{size: objectSize}
 	fetch := func(fctx context.Context, i int) ([]byte, error) {
-		off := offset + int64(i)*cfg.partBytes
+		off := offset + int64(i)*partBytes
 		want := sizes[i]
 		rc, info, err := rg.GetRangeInfo(fctx, container, blob, off, want)
 		if err != nil {
@@ -584,9 +595,8 @@ func (a *S3ToEngine) openParallelSealed(ctx context.Context, op blobOpener, tena
 	if err != nil {
 		return nil
 	}
-	cfg := a.largeGet
 	seg := int64(h.SegmentSize)
-	partSegs := max(cfg.partBytes/seg, 1)
+	partSegs := max(rangePartBytes(a.largeGet, rg)/seg, 1)
 	first, last := offset/seg, (offset+length-1)/seg
 	n := int((last-first)/partSegs + 1)
 	starts := make([]int64, n)

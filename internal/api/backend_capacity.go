@@ -68,14 +68,24 @@ type BackendBytes struct {
 	Total int64 `json:"total"`
 }
 
-// VendorView is what the vendor's own API says (idrive today).
+// VendorView is what the vendor's own API says: idrive through the Reseller
+// API, and every driver that reports its own usage
+// (engine.VendorUsageReporter — blomp's container HEAD).
 type VendorView struct {
-	// UsedBytes = storage_used (decimal GB) × 1e9; the raw value rides too.
+	// UsedBytes = storage_used (decimal GB) × 1e9 on idrive (the raw value
+	// rides too); the driver's own byte count elsewhere.
 	UsedBytes     int64   `json:"used_bytes"`
 	StorageUsedGB float64 `json:"storage_used_gb"`
+	// LimitBytes: the most the vendor itself holds before it refuses a
+	// write (Blomp's container quota → 507); 0 = it reports none. A hard
+	// wall: the BackendVendorQuota rules read it, no plan row needed.
+	LimitBytes int64 `json:"limit_bytes,omitempty"`
 	// EgressMonthBytes / UploadsMonthBytes: this UTC month to date.
 	EgressMonthBytes  int64 `json:"egress_month_bytes"`
 	UploadsMonthBytes int64 `json:"uploads_month_bytes"`
+	// EgressUnmetered: a driver's own report carries no egress meter — no
+	// egress series is exported for it (a 0 would read as "none spent").
+	EgressUnmetered bool `json:"egress_unmetered,omitempty"`
 	// UnitChecked: the GB interpretation was sane against our stored total
 	// (both over 100 MB, within 4× of each other) — a note until then.
 	UnitChecked bool   `json:"unit_checked"`
@@ -264,7 +274,50 @@ func (r *BackendCapacityRunner) RunOnce(ctx context.Context) (BackendCapacityRes
 	_ = rows.Close()
 
 	r.vendorView(ctx, &res)
+	r.driverVendorViews(ctx, &res)
 	return res, nil
+}
+
+// vendorUsageTimeout bounds one driver's report (one metadata call).
+const vendorUsageTimeout = 30 * time.Second
+
+// driverVendorViews asks every registered driver that reports its own
+// usage (engine.VendorUsageReporter) what it holds and its limit. A driver
+// that cannot be asked (open breaker) is skipped, and a failed call is a
+// NOTE on an ok run, like the Reseller API's.
+func (r *BackendCapacityRunner) driverVendorViews(ctx context.Context, res *BackendCapacityResult) {
+	if r.engine == nil {
+		return
+	}
+	names := r.engine.GetDriverNames()
+	sort.Strings(names)
+	for _, name := range names {
+		drv, ok := r.engine.GetDriver(name)
+		if !ok {
+			continue
+		}
+		rep, ok := drv.(engine.VendorUsageReporter)
+		if !ok {
+			continue
+		}
+		if err := r.engine.CanAsk(name); err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("%s vendor view skipped: %v", name, err))
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, vendorUsageTimeout)
+		u, err := rep.VendorUsage(cctx)
+		cancel()
+		if err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf("%s vendor view failed: %v", name, err))
+			continue
+		}
+		if res.Vendor == nil {
+			res.Vendor = map[string]VendorView{}
+		}
+		// Bytes, not a converted unit: nothing to check.
+		res.Vendor[name] = VendorView{UsedBytes: u.UsedBytes, LimitBytes: u.LimitBytes,
+			EgressUnmetered: true, UnitChecked: true}
+	}
 }
 
 // vendorView asks the Reseller API what iDrive itself holds and served this
