@@ -79,8 +79,11 @@ single PutObject; 2 × 256 MiB and 1 × 1 GiB as multipart in 16 MiB parts; rand
 local MD5s in `/tmp/readfault/md5.txt` on the box), read back **at once**: 70 keys per bucket,
 every single-part object MD5 = ETag, every multipart object's download MD5 = the local
 file's, 0 transient failures (1.89 GB per bucket: us-east-1 read back in 28 s at 67 MB/s,
-us-west-1 in 8 s at 234 MB/s — the region, not a fault). **Not happening at 14:4x UTC.** The objects are left in place for the later
-re-read (`blob-verify -prefix readfault-1792593231/` on each bucket; delete them after).
+us-west-1 in 8 s at 234 MB/s — the region, not a fault). **Not happening at 14:4x UTC.** Re-read at **14:55 UTC** (a quarter hour after the
+write): 70/70 ok in both regions, 0 transient failures (us-east-1 158 MB/s, us-west-1
+190 MB/s). The objects are left in place for a re-read after some hours
+(`blob-verify -prefix readfault-1792593231/` on each `vbench-lyve-<region>` bucket with
+the bench root key; delete them after).
 
 ## 4. Remediation of the bench tenant's "23 broken chunks"
 
