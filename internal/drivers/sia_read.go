@@ -54,18 +54,16 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 const (
-	siaReadResumesDefault  = 8
-	siaReadResumesMax      = 64
-	siaReadMaxWaitDefault  = 10 * time.Minute
-	siaReadBackoffBase     = time.Second
-	siaReadBackoffCap      = time.Minute
-	siaReadBudgetMaxPerSec = int64(100 << 30)
+	siaReadResumesDefault = 8
+	siaReadResumesMax     = 64
+	siaReadMaxWaitDefault = 10 * time.Minute
+	siaReadBackoffBase    = time.Second
+	siaReadBackoffCap     = time.Minute
 )
 
 // ErrSiaReadResumeExhausted: a sia body was cut and could not be resumed
@@ -125,14 +123,7 @@ func siaReadConfigFromEnv(getenv func(string) string, logger *zap.Logger) siaRea
 			c.MaxWait = d
 		}
 	}
-	if v := strings.TrimSpace(getenv("SIA_READ_BUDGET")); v != "" && v != "0" && !strings.EqualFold(v, "off") {
-		if n, err := parseByteSize(v); err != nil || n <= 0 || n > siaReadBudgetMaxPerSec {
-			logger.Warn("invalid SIA_READ_BUDGET (need bytes per second such as 25MiB, or off), keeping default (not paced)",
-				zap.String("value", v))
-		} else {
-			c.BudgetBytesPerSec = n
-		}
-	}
+	c.BudgetBytesPerSec = siaBudgetFromEnv(getenv, "SIA_READ_BUDGET", "25MiB", logger)
 	return c
 }
 
@@ -140,21 +131,13 @@ func siaReadConfigFromEnv(getenv func(string) string, logger *zap.Logger) siaRea
 // every other fixed-bucket driver).
 type siaReads struct {
 	cfg    siaReadConfig
-	budget *rate.Limiter // nil = not paced
-	burst  int
+	budget *siaPacer // nil = not paced
 }
 
 // setSiaRead installs (or replaces) the sia read behaviour.
 func (d *IDriveDriver) setSiaRead(cfg siaReadConfig) {
-	s := &siaReads{cfg: cfg}
-	if cfg.BudgetBytesPerSec > 0 {
-		// A quarter of a second of burst, 32 KiB..4 MiB: a Read never asks
-		// the bucket for more than it can ever hold.
-		s.burst = int(min(max(cfg.BudgetBytesPerSec/4, 32<<10), 4<<20))
-		s.budget = rate.NewLimiter(rate.Limit(cfg.BudgetBytesPerSec), s.burst)
-	}
+	d.sia = &siaReads{cfg: cfg, budget: newSiaPacer("sia read budget", cfg.BudgetBytesPerSec, siaReadBudgetWait)}
 	siaReadBudgetRate.Set(float64(cfg.BudgetBytesPerSec))
-	d.sia = s
 }
 
 // NoHedge implements engine.NoHedgeDeclarer: the sia driver's reads are
@@ -173,7 +156,7 @@ func (d *IDriveDriver) wrapBody(ctx context.Context, key string, off int64, out 
 		body = &siaResumingBody{d: d, ctx: ctx, key: key, body: out.Body, etag: aws.ToString(out.ETag), start: off, want: want}
 	}
 	if d.sia.budget != nil {
-		body = &siaPacedBody{ReadCloser: body, ctx: ctx, s: d.sia}
+		body = d.sia.budget.body(ctx, body)
 	}
 	return body
 }
@@ -358,27 +341,4 @@ func siaRangeMismatch(out *s3.GetObjectOutput, off, last int64) string {
 		return fmt.Sprintf("Content-Length %d, asked %d bytes", n, last-off+1)
 	}
 	return ""
-}
-
-// siaPacedBody paces the bytes the driver delivers on SIA_READ_BUDGET.
-type siaPacedBody struct {
-	io.ReadCloser
-	ctx context.Context
-	s   *siaReads
-}
-
-func (b *siaPacedBody) Read(p []byte) (int, error) {
-	if len(p) > b.s.burst {
-		p = p[:b.s.burst]
-	}
-	n, err := b.ReadCloser.Read(p)
-	if n > 0 {
-		start := time.Now()
-		werr := b.s.budget.WaitN(b.ctx, n)
-		siaReadBudgetWait.Add(time.Since(start).Seconds())
-		if werr != nil && err == nil {
-			err = fmt.Errorf("sia read budget: %w", werr)
-		}
-	}
-	return n, err
 }

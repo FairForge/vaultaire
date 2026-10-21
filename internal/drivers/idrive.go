@@ -92,6 +92,10 @@ type IDriveDriver struct {
 	// body resumed, reads never hedged by the API, optional pacing. nil on
 	// every other fixed-bucket driver — their reads are unchanged.
 	sia *siaReads
+	// siaWrite paces the body the `sia` driver's Put takes in
+	// (SIA_WRITE_BUDGET, sia_write.go); nil = not paced, and always nil on
+	// every other fixed-bucket driver.
+	siaWrite *siaPacer
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
@@ -305,6 +309,9 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 	// uploader streams parts on the fly, so it also avoids the full-object
 	// buffering the old unknown-length path did via materialize. Small files
 	// still go as a single PutObject.
+	// The sia driver paces its source (SIA_WRITE_BUDGET, sia_write.go);
+	// data is unchanged everywhere else.
+	data = d.pacedSource(ctx, data)
 	if err := s3ParallelUpload(ctx, d.uploadClient(), d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
 		return err
 	}

@@ -58,5 +58,8 @@ func NewSiaDriver(accessKey, secretKey, endpoint, bucket string, logger *zap.Log
 	// A cut body resumed, reads never hedged, optional pacing (sia_read.go:
 	// SIA_READ_RESUMES, SIA_READ_RESUME_MAX_WAIT, SIA_READ_BUDGET).
 	d.setSiaRead(siaReadConfigFromEnv(os.Getenv, logger))
+	// The body a write takes in, paced (sia_write.go: SIA_WRITE_BUDGET) —
+	// one funding budget per Sia account serves uploads and reads.
+	d.setSiaWrite(siaWriteBudgetFromEnv(os.Getenv, logger))
 	return d, nil
 }
