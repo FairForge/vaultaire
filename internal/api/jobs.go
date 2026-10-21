@@ -109,6 +109,11 @@ type jobSpec struct {
 	MaxRunTime time.Duration
 	// Run does one run. A returned error makes the outcome "error".
 	Run func(ctx context.Context) (jobReport, error)
+	// Again, on a DAILY job: asked at every hourly check after the day's
+	// run has succeeded — true runs the job again (work the last run left
+	// due at a later hour: the account erasure waiting for a lagging
+	// listing to settle). Nil = once a day.
+	Again func(ctx context.Context) (bool, error)
 }
 
 func (sp jobSpec) daily() bool { return sp.Every <= 0 }
@@ -299,14 +304,21 @@ func (j *scheduledJob) nextRun(now, lastStart time.Time) time.Time {
 	return lastStart.Add(j.spec.Every)
 }
 
-// due reports whether a daily run is owed: no recorded success, or the last
-// one predates the most recent scheduled time.
+// due reports whether a daily run is owed: no recorded success, the last
+// one predates the most recent scheduled time, or the job's Again says its
+// last run left work due now.
 func (j *scheduledJob) due(ctx context.Context) (bool, error) {
 	last, err := lastJobSuccess(ctx, j.sched.db, j.spec.Name)
 	if err != nil {
 		return false, err
 	}
-	return last.IsZero() || last.Before(j.lastScheduled(j.sched.now())), nil
+	if last.IsZero() || last.Before(j.lastScheduled(j.sched.now())) {
+		return true, nil
+	}
+	if j.spec.Again == nil {
+		return false, nil
+	}
+	return j.spec.Again(ctx)
 }
 
 // jobLockKey is the advisory-lock key of a job: stable across processes.

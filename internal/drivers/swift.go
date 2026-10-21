@@ -85,6 +85,9 @@ type SwiftConfig struct {
 	// pieces every upload of the process holds (0 = swiftDefaultPutBudget).
 	PutConcurrency int
 	PutBudget      int64
+	// ListingSettle is how long the container's listing may lag a write
+	// (engine.ListingLagger): 0 = swiftDefaultListingSettle, < 0 = no lag.
+	ListingSettle time.Duration
 }
 
 const (
@@ -138,6 +141,13 @@ const (
 	// streamed piece cannot be sent again, so the 6 GiB upload failed.
 	swiftSegmentAttempts = 5
 	swiftListPage        = 1000
+	// swiftDefaultListingSettle is how long a container listing may lag a
+	// write: Blomp's hid ~30 existing objects for over 90 minutes on
+	// 2026-10-21, so twice that. swiftMinListingSettle and
+	// swiftMaxListingSettle bound BLOMP_LISTING_SETTLE.
+	swiftDefaultListingSettle = 3 * time.Hour
+	swiftMinListingSettle     = time.Minute
+	swiftMaxListingSettle     = 48 * time.Hour
 )
 
 var (
@@ -202,6 +212,18 @@ func BlompConfigFromEnv(getenv func(string) string) (SwiftConfig, bool, error) {
 			return SwiftConfig{}, false, fmt.Errorf("BLOMP_PUT_BUDGET: %w", err)
 		}
 		cfg.PutBudget = n
+	}
+	if v := strings.TrimSpace(getenv("BLOMP_LISTING_SETTLE")); v != "" {
+		if strings.EqualFold(v, "off") {
+			cfg.ListingSettle = -1
+		} else {
+			d, err := time.ParseDuration(v)
+			if err != nil || d < swiftMinListingSettle || d > swiftMaxListingSettle {
+				return SwiftConfig{}, false, fmt.Errorf("BLOMP_LISTING_SETTLE %q: want a duration %s…%s, or off",
+					v, swiftMinListingSettle, swiftMaxListingSettle)
+			}
+			cfg.ListingSettle = d
+		}
 	}
 	if err := cfg.validate(); err != nil {
 		return SwiftConfig{}, false, err
@@ -953,6 +975,19 @@ func (d *SwiftDriver) WalkTenant(ctx context.Context, tenantID string, fn func(e
 			return err
 		}})
 	})
+}
+
+// ListingLag (engine.ListingLagger): how long the container's listing may
+// lag a write — what a walk that finds nothing waits for before it proves
+// anything (the account-erasure sweep, api/erasure_settle.go).
+func (d *SwiftDriver) ListingLag() time.Duration {
+	switch {
+	case d.cfg.ListingSettle < 0:
+		return 0
+	case d.cfg.ListingSettle == 0:
+		return swiftDefaultListingSettle
+	}
+	return d.cfg.ListingSettle
 }
 
 // HealthCheck asks for a token (when none is current) and HEADs the

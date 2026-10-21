@@ -84,6 +84,17 @@ type TenantWalker interface {
 	WalkTenant(ctx context.Context, tenantID string, fn func(TenantObject) error) error
 }
 
+// ListingLagger is an optional interface for a driver whose listings are
+// eventually consistent: an object written up to ListingLag ago may be
+// missing from a listing (Blomp's Swift container hid ~30 existing objects
+// from its listing for over 90 minutes, 2026-10-21). A walk of such a
+// backend that finds nothing proves nothing until it started at least that
+// long after the last write it must see — the account-erasure sweep waits
+// for one (api/erasure_settle.go). 0 = the listing does not lag.
+type ListingLagger interface {
+	ListingLag() time.Duration
+}
+
 // ListedObject is one key a PageLister returned: the artifact under the
 // listed container (what Get/Delete address), its stored size and the
 // backend's last-modified time.

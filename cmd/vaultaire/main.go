@@ -467,7 +467,7 @@ func main() {
 			logger.Info("Blomp (Swift) driver added (target-only; blomp_backend flag)",
 				zap.String("user", blompCfg.User), zap.String("container", blompCfg.Container),
 				zap.Int64("segment_size", blompCfg.SegmentSize), zap.Int("put_concurrency", blompCfg.PutConcurrency),
-				zap.Int64("put_budget", blompCfg.PutBudget))
+				zap.Int64("put_budget", blompCfg.PutBudget), zap.Duration("listing_settle", blompDriver.ListingLag()))
 		}
 	}
 
