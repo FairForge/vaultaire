@@ -771,3 +771,20 @@ func TestSwift_GetRangeInfoWhenTheRangeIsIgnored(t *testing.T) {
 	assert.Equal(t, int64(10), info.Size)
 	assert.Equal(t, md5hex([]byte("0123456789")), info.ETag)
 }
+
+func TestSwift_PreferredRangeBytesIsTheSegmentSize(t *testing.T) {
+	// Arrange
+	cfg, ok, err := BlompConfigFromEnv(func(k string) string {
+		return map[string]string{"BLOMP_USER": "u@example.com", "BLOMP_PASSWORD": "pw", "BLOMP_SEGMENT_SIZE": "33554432"}[k]
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	drv, err := NewSwiftDriver("blomp", cfg, zap.NewNop())
+	require.NoError(t, err)
+
+	// Act
+	var sizer engine.RangePartSizer = drv
+
+	// Assert
+	assert.Equal(t, int64(32<<20), sizer.PreferredRangeBytes())
+}
