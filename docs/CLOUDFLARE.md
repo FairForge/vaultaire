@@ -115,6 +115,38 @@ Everything ran from the Salt Lake box against `s3.stored.ge` (bench tenant) and 
 
 Same objects, the prod origin, origin bytes from Stored's own access log on the source bucket. Sippy lands on the first view up to 500 MiB (7 of 7, listed 11–32 s later, byte-exact), 600–650 MiB 2 of 3, 750 MiB–1.5 GiB 0 of 6 (200 MiB parts, up to five in flight, abandoned after ~25–30 s; the viewer still receives the whole object; an in-progress multipart upload is left in R2). A failed key resumes on the next view and fetches only the missing parts — every failed key landed by the second or third view. Warming with small ranged GETs does not work (eight on a 2 GiB object read 7.6 GiB from the origin and never landed). Origin reads per promotion: once below 200 MiB, twice for 200–650 MiB, 3–5× above, plus one per concurrent cold viewer; the DO copier reads once (five simultaneous triggers started one job) and listed 300 MiB in 6.6 s, 1 GiB in 10 s, 5 GiB in 40 s, all byte-exact. Sippy's first byte to the first viewer: 0.8–2.5 s (a direct origin read: 0.65–0.76 s). Split adopted in plan 40.1(e): Sippy below 512 MiB (with a copier push for hot objects), the copier above, Sippy kept as the fallback, a 1-day abort-incomplete-multipart rule on Sippy buckets.
 
+## Findings 2026-10-21: Cloudflare in front of Sia (s3d)
+
+Full numbers in `bench-results/SIA-S3D-2026-10.md` § SIA-BENCH-3. Everything
+was torn down the same hour: Worker `vt-sia` + custom domain
+`vt-sia.stored.ge`, Workflow `vt-sia-hydrate`, R2 `vt-sia-hydrate` /
+`vt-sia-sippy`, and the quick tunnel.
+
+- **A Quick Tunnel carries SigV4 unchanged.** `cloudflared tunnel --url
+  http://127.0.0.1:9002` exposed one lab s3d to R2 Sippy and to a Worker with
+  no inbound port.
+- **The Sippy API takes an S3-compatible source that wrangler can't.**
+  - `PUT /accounts/{id}/r2/buckets/{b}/sippy` with
+    `source.provider = "s3"` and `source.bucketUrl = https://<host>/<bucket>`.
+    wrangler 4.151 offers only AWS and GCS.
+  - The destination R2 keys are the token-derived pair (token id /
+    SHA-256 of the token).
+  - The >750 MiB limit still holds: a 1 GiB miss was served but never
+    landed.
+  - Disabling Sippy leaves the abandoned multipart upload; abort it before
+    deleting the bucket.
+- **Workflows are the durable hydrator.**
+  - One `step.do` per 64 MiB part into an R2 multipart upload, with 4
+    in-step resumes then step retries (2 s exponential).
+  - 1 GiB landed in 43–68 s.
+  - With the origin stopped for 58 s mid-run, it completed in 96 s; the step
+    history shows each `origin 502` attempt.
+  - Running `Promise.all` over named steps parallelises parts.
+- **The Cache API on a custom domain fronts a slow origin.** A 256 MiB miss took
+  15–22 s and hits took 3.6 s, with `FixedLengthStream` guaranteeing no short
+  cached body. It is a no-op on `workers.dev`.
+- **wrangler errors on `delete` with the zone token.** It reports `User->Memberships->Read` missing. The script was deleted anyway (API 404 afterwards); check with `GET /workers/scripts/<name>/settings`.
+
 ## Open
 
 2FA on both logins and rotation of everything pasted on 2026-10-04; an **Email Sending: Edit** token + stored.ge onboarded for Email Sending (item 7 above); the R2 Data Access Logs loss-rate count (dashboard toggle, item 6); the `/admin` Access gate; R2 event notifications → Queue → `direct-uploads/complete` so direct uploads register themselves; Workflows around Vault restores; a load balancer once a second origin exists; Workers for Platforms when a customer Worker must run; the stale NS records.
