@@ -36,7 +36,7 @@ A known size grows the piece to `ceil(size / 1000)` when that is larger
 (Swift's `max_manifest_segments` is 1000 on Blomp's `/info`), so the limit
 is 1000 × 5 GiB; a body of unknown length past 1000 pieces is refused
 (`InvalidInput`). A failed upload stops its other pieces and, once they have
-all stopped, bulk-deletes every piece it started (one write); the erasure
+all stopped, bulk-deletes every piece it started (one write, sent again 2 s later when it found fewer than it was given: a piece PUT cut after its body reached Swift can land after the first — CI 2026-10-21); the erasure
 walk (`WalkTenant`) lists `_segments` too. Our writes never overwrite in place
 (every whole-object write has a new address since WP-R2-1), so the leftover
 pieces of an overwritten large object are not a product case.

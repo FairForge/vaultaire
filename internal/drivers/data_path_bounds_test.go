@@ -150,7 +150,7 @@ var boundSites = map[string]string{
 	"WithTimeout swift.go:authenticate":              "one Keystone token request, 15 s (swiftMetaTimeout)",
 	"WithTimeout swift.go:meta":                      "a Swift HEAD / DELETE / small POST, 15 s whole (swiftMetaTimeout)",
 	"WithTimeout swift.go:listNames":                 "one Swift listing page: 15 s on a request path, 60 s in a job's walk (swiftWalkPageTimeout)",
-	"WithTimeout swift.go:removeSegments":            "a failed large upload's bulk delete of its pieces, detached, 2 min",
+	"WithTimeout swift.go:bulkDelete":                "a bulk delete of pieces (a failed upload — twice when a piece may land late —, a deleted large object): 2 min + 0.5 s a piece, ≤ 15 min",
 	"WithTimeout webdav_resilience.go:send":          "the Sync bridge exception: the caller's per-request timeout",
 	"WithTimeout webdav_folder_limit.go:notePut":     "the Sync bridge exception: a folder count, 2 × 60 s",
 	"WithTimeout webdav_stripe.go:dropGeneration":    "the Sync bridge exception: a failed striped upload's cleanup, detached, 5 min",

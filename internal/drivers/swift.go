@@ -63,6 +63,10 @@ type SwiftDriver struct {
 	// cleanups counts the background removals of a deleted large object's
 	// pieces (waitCleanups, for tests).
 	cleanups sync.WaitGroup
+	// lateLandingWait: a failed upload's bulk delete that found fewer
+	// pieces than it was given is sent again after this long (0 = never) —
+	// a piece PUT cancelled after its body reached Swift can still land.
+	lateLandingWait time.Duration
 	// hedgeAfter (DRIVER_HEDGE_AFTER, 0 = none) and fresh (keep-alives off):
 	// a HEAD, a listing page or a GET's headers with no answer by then is
 	// sent once more on a connection opened for it (swift_hedge.go).
@@ -138,6 +142,10 @@ const (
 	swiftCleanupTimeout  = 2 * time.Minute
 	swiftCleanupPerPiece = 500 * time.Millisecond
 	swiftCleanupMax      = 15 * time.Minute
+	// swiftLateLandingWait is how long a failed upload waits before its
+	// second bulk delete (a cancelled piece PUT lands within milliseconds
+	// of its body).
+	swiftLateLandingWait = 2 * time.Second
 	swiftAttempts        = 3
 	// swiftSegmentAttempts: a piece of a large object is held in memory and
 	// sent up to 5 times, 1/2/4/8 s apart (+ up to half again of jitter).
@@ -283,9 +291,10 @@ func NewSwiftDriver(name string, cfg SwiftConfig, logger *zap.Logger) (*SwiftDri
 	initSwiftHedgeSeries(name)
 	return &SwiftDriver{name: name, cfg: cfg, logger: logger, now: time.Now, listPageSize: swiftListPage,
 		putBudget: semaphore.NewWeighted(cfg.PutBudget), segmentBackoff: swiftSegmentBackoff,
-		client:     TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only()),
-		fresh:      TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only(), WithFreshConnections()),
-		hedgeAfter: driverHedgeAfterFromEnv(logger)}, nil
+		lateLandingWait: swiftLateLandingWait,
+		client:          TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only()),
+		fresh:           TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only(), WithFreshConnections()),
+		hedgeAfter:      driverHedgeAfterFromEnv(logger)}, nil
 }
 
 // Name is the registration name.
@@ -1161,7 +1170,7 @@ func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, bo
 			err = werr // the piece that failed, not the stop it caused
 		}
 		if err != nil && len(written) > 0 {
-			d.removeSegments(ctx, name, written)
+			d.removeFailedUpload(ctx, name, written)
 		}
 	}()
 
@@ -1305,7 +1314,36 @@ func (d *SwiftDriver) putSegment(ctx context.Context, name string, data []byte) 
 // large object (one request for all of them), detached from a caller that
 // may have gone.
 func (d *SwiftDriver) removeSegments(ctx context.Context, name string, segs []string) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx),
+	if _, err := d.bulkDelete(context.WithoutCancel(ctx), segs); err != nil {
+		d.warnPiecesLeft(name, len(segs), err)
+	}
+}
+
+// removeFailedUpload removes a failed upload's pieces: one bulk delete, and
+// a second after lateLandingWait when the first found fewer than it was
+// given — a piece the upload stopped mid-flight may land after the first
+// (its body was already with Swift; the stop only closed the connection).
+func (d *SwiftDriver) removeFailedUpload(ctx context.Context, name string, segs []string) {
+	ctx = context.WithoutCancel(ctx)
+	res, err := d.bulkDelete(ctx, segs)
+	if err == nil && res.NotFound > 0 && d.lateLandingWait > 0 {
+		_ = sleepCtx(ctx, d.lateLandingWait)
+		_, err = d.bulkDelete(ctx, segs)
+	}
+	if err != nil {
+		d.warnPiecesLeft(name, len(segs), err)
+	}
+}
+
+func (d *SwiftDriver) warnPiecesLeft(name string, pieces int, err error) {
+	d.logger.Warn("swift: large-object pieces were not all removed — the erasure walk lists them under _segments",
+		zap.String("backend", d.name), zap.String("object", name), zap.Int("pieces", pieces), zap.Error(err))
+}
+
+// bulkDelete deletes names in one request, bounded 2 min + 0.5 s a name
+// (≤ 15 min).
+func (d *SwiftDriver) bulkDelete(ctx context.Context, segs []string) (swiftBulkResult, error) {
+	cctx, cancel := context.WithTimeout(ctx,
 		min(swiftCleanupTimeout+time.Duration(len(segs))*swiftCleanupPerPiece, swiftCleanupMax))
 	defer cancel()
 	var b strings.Builder
@@ -1320,16 +1358,13 @@ func (d *SwiftDriver) removeSegments(ctx context.Context, name string, segs []st
 	if err == nil && status != http.StatusOK {
 		err = &SwiftError{Op: "bulk delete", Status: status}
 	}
+	var res swiftBulkResult
 	if err == nil {
-		var res swiftBulkResult
 		if res, err = parseSwiftBulk(body); err == nil {
 			err = res.err("bulk delete")
 		}
 	}
-	if err != nil {
-		d.logger.Warn("swift: large-object pieces were not all removed — the erasure walk lists them under _segments",
-			zap.String("backend", d.name), zap.String("object", name), zap.Int("pieces", len(segs)), zap.Error(err))
-	}
+	return res, err
 }
 
 var (
