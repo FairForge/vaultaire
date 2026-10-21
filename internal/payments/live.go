@@ -10,11 +10,9 @@ import (
 // a house is live when its entitlement row is granted — lapsed_at IS NULL,
 // in grace or not. This is the one replacement for every read of
 // tenants.{plan = 'house', subscription_status, house_period}: a status the
-// provider reported is not what the tenant holds, the record is.
-
-// LiveHouseTenantsSQL selects the tenant id of every granted entitlement —
-// for a reader that joins or counts in SQL (`WHERE t.id IN (` + it + `)`).
-const LiveHouseTenantsSQL = `SELECT tenant_id FROM entitlements WHERE lapsed_at IS NULL`
+// provider reported is not what the tenant holds, the record is. A reader
+// that joins in SQL writes the same predicate as a literal
+// (`entitlements … lapsed_at IS NULL`; never concatenated — gosec G202).
 
 // LiveHouses reads every granted entitlement, ordered by tenant id.
 func LiveHouses(ctx context.Context, db *sql.DB) ([]Entitlement, error) {
@@ -48,7 +46,7 @@ func LiveHouses(ctx context.Context, db *sql.DB) ([]Entitlement, error) {
 // "active subscriptions").
 func CountLiveHouses(ctx context.Context, db *sql.DB) (int, error) {
 	var n int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+LiveHouseTenantsSQL+`) l`).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entitlements WHERE lapsed_at IS NULL`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count live houses: %w", err)
 	}
 	return n, nil
