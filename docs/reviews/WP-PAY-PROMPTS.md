@@ -47,7 +47,11 @@ item 5 is the standing Stripe list with two additions; 6–7 are counsel.
    tool result or a command line) — or as systemd credentials when the F-14
    credential path is in place. Flip `pay_btcpay` for your own tenant first.
 5. **Stripe (the R10 list, unchanged, plus two):** endpoint pinned to API
-   version 2023-08-16 with the six event types, `STRIPE_SECRET_KEY` and
+   version 2023-08-16 with the eight event types (`checkout.session.completed`,
+   `invoice.payment_succeeded`, `invoice.payment_failed`,
+   `customer.subscription.{created,updated,deleted}`, `charge.refunded` —
+   WP-PAY-7 — and `charge.refund.updated` — Prompt 24, RP28-2; the list is
+   in `internal/billing/CLAUDE.md`), `STRIPE_SECRET_KEY` and
    `STRIPE_WEBHOOK_SECRET` together, the six `STRIPE_PRICE_*`, Customer
    Portal: quantity updates **off**, cancellation allowed, **reactivation
    off** (new — it is the one way a customer defeats the switch guard);
