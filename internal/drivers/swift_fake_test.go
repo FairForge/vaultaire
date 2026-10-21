@@ -306,6 +306,22 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		if r.Method == http.MethodGet && mm == "get" && o.manifest != nil {
+			// Swift's listing shape of a manifest (format=raw is the PUT shape).
+			type entry struct {
+				Name  string `json:"name"`
+				Hash  string `json:"hash"`
+				Bytes int64  `json:"bytes"`
+			}
+			out := make([]entry, 0, len(o.manifest))
+			for _, s := range o.manifest {
+				p, _ := url.PathUnescape(s.Path)
+				out = append(out, entry{Name: p, Hash: s.Etag, Bytes: s.SizeBytes})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+			return
+		}
 		if o.manifest != nil {
 			w.Header().Set("X-Static-Large-Object", "True")
 		}

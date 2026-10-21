@@ -60,6 +60,9 @@ type SwiftDriver struct {
 	putBudget      *semaphore.Weighted
 	pieceBuf       sync.Pool
 	segmentBackoff func(attempt int) time.Duration
+	// cleanups counts the background removals of a deleted large object's
+	// pieces (waitCleanups, for tests).
+	cleanups sync.WaitGroup
 
 	mu         sync.Mutex
 	token      string
@@ -121,9 +124,13 @@ const (
 	swiftMetaTimeout   = 15 * time.Second
 	// swiftWalkPageTimeout bounds one listing page of a job's walk.
 	swiftWalkPageTimeout = 60 * time.Second
-	// swiftCleanupTimeout bounds the bulk delete of a failed upload's pieces.
-	swiftCleanupTimeout = 2 * time.Minute
-	swiftAttempts       = 3
+	// swiftCleanupTimeout bounds the bulk delete of a failed upload's or a
+	// deleted large object's pieces, plus swiftCleanupPerPiece for each
+	// (Blomp removes ~3 objects a second), at most swiftCleanupMax.
+	swiftCleanupTimeout  = 2 * time.Minute
+	swiftCleanupPerPiece = 500 * time.Millisecond
+	swiftCleanupMax      = 15 * time.Minute
+	swiftAttempts        = 3
 	// swiftSegmentAttempts: a piece of a large object is held in memory and
 	// sent up to 5 times, 1/2/4/8 s apart (+ up to half again of jitter).
 	// Prod 2026-10-21 11:05 UTC: Blomp answered 503 to a streamed 1 GiB
@@ -715,11 +722,12 @@ func (d *SwiftDriver) Delete(ctx context.Context, container, artifact string) er
 	return nil
 }
 
-// deleteName deletes one stored name with ONE write: a HEAD tells a large
-// object (deleted with `?multipart-manifest=delete`, which takes its pieces)
-// from a plain one (a plain DELETE) — Swift answers 200 with "Not an SLO
-// manifest" in the body to the first on a plain object, so asking it
-// blindly would cost a second write. found is false for a miss.
+// deleteName deletes one stored name with ONE write in the caller's time: a
+// HEAD tells a large object from a plain one (Swift answers 200 with "Not an
+// SLO manifest" to `?multipart-manifest=delete` on a plain object, so asking
+// blindly would cost a second write). A plain object is one DELETE; a large
+// one is its manifest read, the manifest deleted, and its pieces removed by
+// one bulk delete in the background. found is false for a miss.
 func (d *SwiftDriver) deleteName(ctx context.Context, name string) (found bool, err error) {
 	status, hdr, _, err := d.meta(ctx, swiftRequest{method: http.MethodHead, name: name})
 	if err != nil {
@@ -745,25 +753,78 @@ func (d *SwiftDriver) deleteName(ctx context.Context, name string) (found bool, 
 		}
 		return false, &SwiftError{Op: "DELETE " + name, Status: status}
 	}
-	h := http.Header{}
-	h.Set("Accept", "application/json")
-	status, _, body, err := d.meta(ctx, swiftRequest{method: http.MethodDelete, name: name,
-		query: url.Values{"multipart-manifest": {"delete"}}, header: h})
+	// A large object: its manifest alone (one write), then its pieces in
+	// the background. Swift's own ?multipart-manifest=delete removes the
+	// pieces one by one inside the request — at Blomp's ~3 writes a second
+	// a 6 GiB object of 96 pieces outran the 15 s bound (prod 2026-10-21).
+	segs, err := d.manifestSegments(ctx, name)
 	if err != nil {
 		return false, err
+	}
+	status, _, _, err = d.meta(ctx, swiftRequest{method: http.MethodDelete, name: name})
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case http.StatusNoContent, http.StatusOK:
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, &SwiftError{Op: "DELETE (manifest) " + name, Status: status}
+	}
+	if len(segs) > 0 {
+		d.cleanups.Add(1)
+		go func() {
+			defer d.cleanups.Done()
+			d.removeSegments(ctx, name, segs)
+		}()
+	}
+	return true, nil
+}
+
+// manifestSegments names the pieces of a large object: its manifest read
+// with ?multipart-manifest=get. Only names under a tenant's _segments/ are
+// returned — a manifest never makes us delete anything else.
+func (d *SwiftDriver) manifestSegments(ctx context.Context, name string) ([]string, error) {
+	status, _, body, err := d.meta(ctx, swiftRequest{method: http.MethodGet, name: name,
+		query: url.Values{"multipart-manifest": {"get"}}})
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, nil
 	}
 	if status != http.StatusOK {
-		return false, &SwiftError{Op: "DELETE (large object) " + name, Status: status, Body: string(body)}
+		return nil, &SwiftError{Op: "GET (manifest) " + name, Status: status}
 	}
-	res, err := parseSwiftBulk(body)
-	if err != nil {
-		return false, fmt.Errorf("%s delete %s: %w", d.name, name, err)
+	var entries []struct {
+		Name string `json:"name"` // Swift's listing shape
+		Path string `json:"path"` // format=raw
 	}
-	if err := res.err("delete " + name); err != nil {
-		return false, err
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, fmt.Errorf("%s delete %s: manifest: %w", d.name, name, err)
 	}
-	return res.Deleted > 0, nil
+	prefix := "/" + d.cfg.Container + "/"
+	var segs []string
+	for _, e := range entries {
+		p := e.Name
+		if p == "" {
+			p = e.Path
+		}
+		if u, err := url.PathUnescape(p); err == nil {
+			p = u
+		}
+		seg, ok := strings.CutPrefix(p, prefix)
+		if !ok || !strings.HasPrefix(seg, "t-") || !strings.Contains(seg, "/_segments/") {
+			continue
+		}
+		segs = append(segs, seg)
+	}
+	return segs, nil
 }
+
+// waitCleanups waits for the background removals of pieces (tests).
+func (d *SwiftDriver) waitCleanups() { d.cleanups.Wait() }
 
 // swiftBulkResult is the JSON body of a bulk delete or a manifest delete.
 type swiftBulkResult struct {
@@ -1147,10 +1208,12 @@ func (d *SwiftDriver) putSegment(ctx context.Context, name string, data []byte) 
 	return want, nil
 }
 
-// removeSegments bulk-deletes a failed upload's pieces (one write for all
-// of them), detached from a caller that may have gone.
+// removeSegments bulk-deletes the pieces of a failed upload or a deleted
+// large object (one request for all of them), detached from a caller that
+// may have gone.
 func (d *SwiftDriver) removeSegments(ctx context.Context, name string, segs []string) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), swiftCleanupTimeout)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx),
+		min(swiftCleanupTimeout+time.Duration(len(segs))*swiftCleanupPerPiece, swiftCleanupMax))
 	defer cancel()
 	var b strings.Builder
 	for _, s := range segs {
@@ -1171,7 +1234,7 @@ func (d *SwiftDriver) removeSegments(ctx context.Context, name string, segs []st
 		}
 	}
 	if err != nil {
-		d.logger.Warn("swift: a failed upload's pieces were not all removed — the erasure walk lists them under _segments",
+		d.logger.Warn("swift: large-object pieces were not all removed — the erasure walk lists them under _segments",
 			zap.String("backend", d.name), zap.String("object", name), zap.Int("pieces", len(segs)), zap.Error(err))
 	}
 }
