@@ -276,6 +276,13 @@ func (d *SwiftDriver) CleartextTransport() bool {
 	return !strings.HasPrefix(d.storageURL, "https://")
 }
 
+// PreferredRangeBytes (engine.RangePartSizer): a parallel GET reads Swift in
+// parts of SegmentSize. Every range pays the proxy's slow first byte
+// (~650 ms on Blomp), so 16 MiB parts spent most of their time waiting:
+// 8 × 64 MiB read a 1 GiB object at 123–369 MB/s, 8 × 16 MiB at 58–157
+// (SLC lab 2026-10-21, sha-verified). A part then also matches one SLO piece.
+func (d *SwiftDriver) PreferredRangeBytes() int64 { return d.cfg.SegmentSize }
+
 // ObjectKey (engine.KeyAddresser).
 func (d *SwiftDriver) ObjectKey(ctx context.Context, container, artifact string) string {
 	return tenantKey(contextTenant(ctx), container, artifact)

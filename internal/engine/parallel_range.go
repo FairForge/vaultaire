@@ -67,3 +67,12 @@ func (e *CoreEngine) RecordReadOutcome(backend string, err error) {
 		b.RecordFailure()
 	}
 }
+
+// RangePartSizer is implemented by a VersionedRangeGetter whose ranged reads
+// pay a high fixed cost each, so a parallel GET reads it in larger parts than
+// LARGE_GET_PART_BYTES: Blomp (Swift) answers every range after ~650 ms, and
+// a 1 GiB object read in 8 × 64 MiB parts ran 123–369 MB/s against 58–157 in
+// 8 × 16 MiB ones (SLC lab, 2026-10-21). 0 = the configured part size.
+type RangePartSizer interface {
+	PreferredRangeBytes() int64
+}

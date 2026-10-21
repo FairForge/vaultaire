@@ -61,6 +61,13 @@ pieces of an overwritten large object are not a product case.
   on every range of one manifest) and the total size from `Content-Range`,
   so the `parallel_get` flag reads a large Blomp object as 8 ranges at once:
   raw, 8 ranges of 256 MiB read 163 MB/s; one stream of a 1 GiB object 56.
+  **Parts are the segment size** (`PreferredRangeBytes`, engine.RangePartSizer),
+  not `LARGE_GET_PART_BYTES`: every range pays ~650 ms before its first byte,
+  so 16 MiB parts gained little. SLC lab 2026-10-21, 1 GiB object through
+  Vaultaire, sha-verified: one stream 32–51 MB/s, 8 × 16 MiB 58–157, **8 × 64
+  MiB 123–369**, 16 × 64 MiB 98–358 (no better than 8), 16 × 16 MiB 47–66.
+  A Blomp read holds up to 8 × 64 MiB = 512 MiB of `LARGE_GET_PARALLEL_BUDGET_BYTES`
+  (2 GiB): the fifth concurrent one takes the single stream.
 - **Token**: asked once and reused; asked again 5 min before it expires, and
   once on a 401 (`vaultaire_swift_auths_total{backend,reason,outcome}`). A
   changed password fails the next request after the token goes (≤ 1 h) — the
