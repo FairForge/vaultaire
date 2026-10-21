@@ -1,0 +1,13 @@
+{
+ "startsAt": 1792618472,
+ "expiresAt": null,
+ "id": "2TMzQnUFcVnt5N9SqdZGXSiqKypt",
+ "name": "lab refund",
+ "description": "lab",
+ "currency": "BTC",
+ "amount": "0.0001181",
+ "BOLT11Expiration": 30,
+ "archived": false,
+ "viewLink": "http://127.0.0.1:23001/pull-payments/2TMzQnUFcVnt5N9SqdZGXSiqKypt",
+ "autoApproveClaims": true
+}

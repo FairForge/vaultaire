@@ -1,0 +1,36 @@
+{
+ "headers": {
+  "Host": "capture:8080",
+  "User-Agent": "BTCPayServer/2.4.5",
+  "Content-Type": "application/json",
+  "BTCPay-Sig": "sha256=1edba26e60a12c17f96b997ce04c2c8ec0346ef421dae422c4b68c9d91f78099",
+  "Content-Length": "819"
+ },
+ "body_b64": "ewogICJhZnRlckV4cGlyYXRpb24iOiBmYWxzZSwKICAicGF5bWVudE1ldGhvZElkIjogIkJUQy1DSEFJTiIsCiAgInBheW1lbnQiOiB7CiAgICAiaWQiOiAiOGE1NDJkZjkzMmI3ODEzMjdhZWFhNjIzNzRiZGU3NjdiMDJjNzA4OWY4MWY4MDMwMTNmOWY5ZmU4NmY5MDNjMC0xIiwKICAgICJyZWNlaXZlZERhdGUiOiAxNzkyNjE3OTY2LAogICAgInZhbHVlIjogIjAuMDAwMDU5MDMiLAogICAgImZlZSI6ICIwIiwKICAgICJzdGF0dXMiOiAiUHJvY2Vzc2luZyIsCiAgICAiZGVzdGluYXRpb24iOiAiYmNydDFxNjJzN3hoNjcwd3BmY20waHkyNWRlemd0NmN4ajduOHUzZzNrbmgiCiAgfSwKICAiZGVsaXZlcnlJZCI6ICJVZldDRnpwOG5CRlg0WUZxMVprNmpUIiwKICAid2ViaG9va0lkIjogIlBBcGYyb2s0aFZ1WXdrUlRGUUZXbVEiLAogICJvcmlnaW5hbERlbGl2ZXJ5SWQiOiAiVWZXQ0Z6cDhuQkZYNFlGcTFaazZqVCIsCiAgImlzUmVkZWxpdmVyeSI6IGZhbHNlLAogICJ0eXBlIjogIkludm9pY2VSZWNlaXZlZFBheW1lbnQiLAogICJ0aW1lc3RhbXAiOiAxNzkyNjE3OTY2LAogICJzdG9yZUlkIjogIkNjbzZRQnRZdWJZTnRmM1RXbzhqM1R0TmR3VmlvOXR5QlhTbUZDRG9KcGs5IiwKICAiaW52b2ljZUlkIjogIjhMeWtHM21wRnU0UWdmMXZhcmRDQjQiLAogICJtZXRhZGF0YSI6IHsKICAgICJvcmRlciI6ICIxIFRCIHN0YW5kYXJkIHllYXJseSIsCiAgICAicHVycG9zZSI6ICJuZXciLAogICAgInRlbmFudF9pZCI6ICJ0LWxhYiIsCiAgICAicGF5bWVudF9pZCI6ICIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDAiCiAgfQp9",
+ "body": {
+  "afterExpiration": false,
+  "paymentMethodId": "BTC-CHAIN",
+  "payment": {
+   "id": "8a542df932b781327aeaa62374bde767b02c7089f81f803013f9f9fe86f903c0-1",
+   "receivedDate": 1792617966,
+   "value": "0.00005903",
+   "fee": "0",
+   "status": "Processing",
+   "destination": "bcrt1q62s7xh670wpfcm0hy25dezgt6cxj7n8u3g3knh"
+  },
+  "deliveryId": "UfWCFzp8nBFX4YFq1Zk6jT",
+  "webhookId": "PApf2ok4hVuYwkRTFQFWmQ",
+  "originalDeliveryId": "UfWCFzp8nBFX4YFq1Zk6jT",
+  "isRedelivery": false,
+  "type": "InvoiceReceivedPayment",
+  "timestamp": 1792617966,
+  "storeId": "Cco6QBtYubYNtf3TWo8j3TtNdwVio9tyBXSmFCDoJpk9",
+  "invoiceId": "8LykG3mpFu4Qgf1vardCB4",
+  "metadata": {
+   "order": "1 TB standard yearly",
+   "purpose": "new",
+   "tenant_id": "t-lab",
+   "payment_id": "00000000-0000-0000-0000-000000000000"
+  }
+ }
+}
