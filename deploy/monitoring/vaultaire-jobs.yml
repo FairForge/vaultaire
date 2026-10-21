@@ -4,7 +4,8 @@
 #   vaultaire_job_last_success_timestamp_seconds{job_name}   unix time of the job's last successful run,
 #                                                        READ FROM job_runs (0 = never succeeded)
 #   vaultaire_job_runs_total{job_name,outcome}          runs in this process: ok / error / interrupted
-#   vaultaire_account_deletion_tenants_total{result}    erased / deferred / cancelled
+#   vaultaire_account_deletion_tenants_total{result}    erased / deferred / cancelled / settling (rows erased, a lagging
+#                                                        listing's walk still owed — not a failure; RB-1, erasure_settle.go)
 #   vaultaire_stale_copy_lost_writes_total{source}      objects whose bytes the delete of a stale copy removed while a
 #                                                        write of the same key was in flight (reclaim / delete / overwrite)
 #   vaultaire_account_exports_total{result}             GDPR exports: completed / retried / failed / expired (WP-R10-3b)
