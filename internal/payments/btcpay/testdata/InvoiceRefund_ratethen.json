@@ -1,0 +1,27 @@
+{
+ "headers": {
+  "Host": "capture:8080",
+  "User-Agent": "BTCPayServer/2.4.5",
+  "Content-Type": "application/json",
+  "BTCPay-Sig": "sha256=7b12472e8086e25fd7b107f7a57b4a6fbc6b82379f6ac2659ad815a5ca631bf2",
+  "Content-Length": "530"
+ },
+ "body_b64": "ewogICJwdWxsUGF5bWVudElkIjogIjJUTXpRblVGY1ZudDVOOVNxZFpHWFNpcUt5cHQiLAogICJkZWxpdmVyeUlkIjogIjdWbnFVQzVnNnNmVTVjb0t1MUFFUG0iLAogICJ3ZWJob29rSWQiOiAiUEFwZjJvazRoVnVZd2tSVEZRRldtUSIsCiAgIm9yaWdpbmFsRGVsaXZlcnlJZCI6ICI3Vm5xVUM1ZzZzZlU1Y29LdTFBRVBtIiwKICAiaXNSZWRlbGl2ZXJ5IjogZmFsc2UsCiAgInR5cGUiOiAiSW52b2ljZVJlZnVuZCIsCiAgInRpbWVzdGFtcCI6IDE3OTI2MTg0NzMsCiAgInN0b3JlSWQiOiAiQ2NvNlFCdFl1YllOdGYzVFdvOGozVHROZHdWaW85dHlCWFNtRkNEb0pwazkiLAogICJpbnZvaWNlSWQiOiAiU0x2NGc5dG9Xck5Xb015M29SUFdpViIsCiAgIm1ldGFkYXRhIjogewogICAgIm9yZGVyIjogIjEgVEIgc3RhbmRhcmQgeWVhcmx5IiwKICAgICJwdXJwb3NlIjogIm5ldyIsCiAgICAidGVuYW50X2lkIjogInQtbGFiIiwKICAgICJwYXltZW50X2lkIjogIjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMCIKICB9Cn0=",
+ "body": {
+  "pullPaymentId": "2TMzQnUFcVnt5N9SqdZGXSiqKypt",
+  "deliveryId": "7VnqUC5g6sfU5coKu1AEPm",
+  "webhookId": "PApf2ok4hVuYwkRTFQFWmQ",
+  "originalDeliveryId": "7VnqUC5g6sfU5coKu1AEPm",
+  "isRedelivery": false,
+  "type": "InvoiceRefund",
+  "timestamp": 1792618473,
+  "storeId": "Cco6QBtYubYNtf3TWo8j3TtNdwVio9tyBXSmFCDoJpk9",
+  "invoiceId": "SLv4g9toWrNWoMy3oRPWiV",
+  "metadata": {
+   "order": "1 TB standard yearly",
+   "purpose": "new",
+   "tenant_id": "t-lab",
+   "payment_id": "00000000-0000-0000-0000-000000000000"
+  }
+ }
+}

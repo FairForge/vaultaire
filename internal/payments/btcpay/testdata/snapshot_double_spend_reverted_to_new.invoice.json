@@ -1,0 +1,42 @@
+{
+ "id": "4kU2wVBCL8fMfFkhWhfXmk",
+ "storeId": "Cco6QBtYubYNtf3TWo8j3TtNdwVio9tyBXSmFCDoJpk9",
+ "amount": "10.00",
+ "paidAmount": "0",
+ "checkoutLink": "http://127.0.0.1:23001/i/4kU2wVBCL8fMfFkhWhfXmk",
+ "status": "New",
+ "additionalStatus": "None",
+ "monitoringExpiration": 1792618239,
+ "expirationTime": 1792618119,
+ "createdTime": 1792618059,
+ "availableStatusesForManualMarking": [
+  "Settled",
+  "Invalid"
+ ],
+ "archived": false,
+ "paymentMethods": [],
+ "type": "Standard",
+ "currency": "USD",
+ "metadata": {
+  "tenant_id": "t-lab"
+ },
+ "checkout": {
+  "speedPolicy": "MediumSpeed",
+  "paymentMethods": [
+   "BTC-CHAIN"
+  ],
+  "defaultPaymentMethod": null,
+  "expirationMinutes": 1,
+  "monitoringMinutes": 2,
+  "paymentTolerance": 0.0,
+  "redirectURL": null,
+  "redirectAutomatically": false,
+  "defaultLanguage": null,
+  "lazyPaymentMethods": null
+ },
+ "receipt": {
+  "enabled": true,
+  "showQR": true,
+  "showPayments": true
+ }
+}

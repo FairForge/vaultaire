@@ -54,9 +54,11 @@ type S3ToEngine struct {
 	sseService *crypto.SSEService
 	// allowUnsealedCleartext: see Server.allowUnsealedCleartext.
 	allowUnsealedCleartext bool
-	chunkEncSvc            *crypto.ChunkEncryptionService
-	gci                    *crypto.GlobalContentIndex
-	chunkingThreshold      int64 // minimum object size for chunking (default 64 MB)
+	// allowUnsealedSia: see Server.allowUnsealedSia.
+	allowUnsealedSia  bool
+	chunkEncSvc       *crypto.ChunkEncryptionService
+	gci               *crypto.GlobalContentIndex
+	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
 
 	// chunkStoreConcurrency bounds the parallel chunk-store workers of one
 	// chunked PUT (default defaultChunkStoreConcurrency; env
@@ -2166,6 +2168,9 @@ var tierPreferenceToStorageClass = map[string]string{
 	// → Blomp's Swift storage, only for a tenant with the blomp_backend
 	// flag and only sealed (decidePlacement); operator-set only.
 	"blomp": "BLOMP",
+	// → Sia through the s3d gateway, only for a tenant with the sia_backend
+	// flag, whole and sealed (decidePlacement); operator-set only.
+	"sia": "SIA",
 }
 
 func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
@@ -2226,13 +2231,14 @@ func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine
 //
 // A `sync` bucket tier resolves to SYNC (→ the Sync.com WebDAV bridge) only
 // when allowTier says the tenant has the `sync_backend` flag, a `blomp` one
-// to BLOMP only with `blomp_backend`; otherwise the bucket places as an
+// to BLOMP only with `blomp_backend`, a `sia` one to SIA only with
+// `sia_backend`; otherwise the bucket places as an
 // `auto` one (Sync's terms: no customer data without its written consent).
 // nil allowTier = never.
 func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, allowTier tierGate, tenantID, bucket, header string) string {
 	requested := clientStorageClass(header)
 	class := bucketTierStorageClass(ctx, db, tenantID, bucket)
-	if (class == "SYNC" || class == "BLOMP") && (allowTier == nil || !allowTier(class, tenantID)) {
+	if (class == "SYNC" || class == "BLOMP" || class == "SIA") && (allowTier == nil || !allowTier(class, tenantID)) {
 		class = ""
 	}
 	if class != "" && class != "STANDARD" {
@@ -2274,7 +2280,7 @@ func clientStorageClass(header string) string {
 // must be addressable as one R2 key for the CDN / direct-serve path.
 func storageClassDisablesChunking(class string) bool {
 	switch class {
-	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC", "SYNC", "BLOMP":
+	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC", "SYNC", "BLOMP", "SIA":
 		return true
 	}
 	return false
