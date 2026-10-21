@@ -194,10 +194,10 @@
 
     <div id="billing-refund-feedback"></div>
     <form hx-post="/admin/tenants/{{.TenantID}}/billing/refund" hx-target="#billing-refund-feedback" hx-swap="innerHTML" style="margin-top:1rem">
-        <div class="card-detail"><strong>Record a refund</strong> made outside (Stripe dashboard, a wire back): a credit-note row linked to the charge; optionally shorten paid-through by the refunded share of what the charge bought.</div>
+        <div class="card-detail"><strong>Record a refund</strong> of a manual or crypto charge (a wire back, a BTCPay pull payment): a credit-note row linked to the charge; optionally shorten paid-through by the refunded share of what the charge bought. <strong>A Stripe refund is recorded by the webhook</strong> under its <code>re_…</code> id: to shorten paid-through for one, give the charge's (or the refund row's) Id and that <code>re_…</code> id, leave the amount blank and tick shorten — once per refund.</div>
         <div class="form-row">
-            <label>Charge id</label><input type="text" name="payment_id" placeholder="the Id column" class="form-input-sm" required>
-            <label>Amount (USD)</label><input type="text" name="amount" placeholder="53.88" class="form-input-sm" required>
+            <label>Charge or refund id</label><input type="text" name="payment_id" placeholder="the Id column" class="form-input-sm" required>
+            <label>Amount (USD)</label><input type="text" name="amount" placeholder="53.88 (blank for a recorded refund)" class="form-input-sm">
             <label>Provider ref</label><input type="text" name="provider_ref" placeholder="re_…" class="form-input-sm">
             <label><input type="checkbox" name="shorten" value="on"> shorten paid-through</label>
             <label>Reason (required)</label><input type="text" name="reason" class="form-input-sm" required>

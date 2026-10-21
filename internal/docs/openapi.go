@@ -1453,25 +1453,25 @@ func generateAdminPaths() map[string]*PathItem {
 			Post: admin(withBody(jsonOp("Admin", "Record a refund made outside", "AdminRecordRefund",
 				"A refund made in the Stripe dashboard or by wire: a settled `refund` ledger row (a credit-note number from the same counter) linked to the charge, "+
 					"the charge marked `refunded` once its refunds reach its amount; `shorten_paid_through` takes the refunded share of the period the charge bought off "+
-					"the date (the charge must record a period). `reason` is required. Audited `billing.refund_recorded`.",
+					"the date (the charge must record a period). `reason` is required. Audited `billing.refund_recorded`. "+
+					"**A Stripe charge's refunds are recorded by the `charge.refunded` webhook** under their `re_…` id: for a Stripe charge `provider_ref` must be that id; "+
+					"a refund already in the ledger (named by `provider_ref`, or by its own row id as `payment_id`) is not recorded again — 200 with `existing: true`, "+
+					"and with `shorten_paid_through` the date is shortened by that refund's share once (audited `billing.paid_through_adjusted`).",
 				map[string]Response{
-					"201": jsonResp("Recorded", objectPtr("", map[string]*Schema{
-						"payment_id": str("The refund row"), "invoice_number": str("Its credit-note number"),
-						"fully_refunded": {Type: "boolean"}, "shortened_by": str("A Go duration (`0s` when not asked)"),
-						"paid_through": dateTime("Present when the date was shortened"),
-					}, "payment_id", "invoice_number", "fully_refunded", "shortened_by")),
-					"400": textResp("`reason is required`, a non-positive amount, or a shortening asked of a charge with no period"),
+					"201": jsonResp("Recorded", ref("AdminRefundResult")),
+					"200": jsonResp("Already in the ledger (`existing: true`); shortened when asked", ref("AdminRefundResult")),
+					"400": textResp("`reason is required`, a non-positive amount, a shortening asked of a charge with no period, or a Stripe charge without the refund's `re_…` id"),
 					"404": textResp("No settled charge of that id for the tenant"),
-					"409": textResp("The refunds of the charge would exceed what was paid"),
+					"409": textResp("The refunds of the charge would exceed what was paid; the refund already shortened the date; the named refund is of another charge or amount"),
 				}),
 				jsonBody("The refund", objectPtr("", map[string]*Schema{
-					"payment_id":           str("The charge's ledger id"),
-					"amount_cents":         {Type: "integer", Description: "USD cents given back"},
-					"provider_ref":         str("The provider's own id of the refund (`re_…`), optional"),
+					"payment_id":           str("The charge's ledger id, or a refund row's (to shorten from a recorded refund)"),
+					"amount_cents":         {Type: "integer", Description: "USD cents given back (0 / absent when naming a recorded refund)"},
+					"provider_ref":         str("The provider's own id of the refund (`re_…`): required for a Stripe charge, optional otherwise"),
 					"shorten_paid_through": {Type: "boolean", Description: "Take the refunded share of the period off the date"},
 					"note":                 str("Free text; dropped at erasure"),
 					"reason":               str("Required (audited)"),
-				}, "payment_id", "amount_cents", "reason")))),
+				}, "payment_id", "reason")))),
 		},
 		"/api/v1/admin/dedup-gc": {
 			Post: admin(jsonOp("Admin", "Start one dedup GC run", "AdminDedupGC",
@@ -2298,6 +2298,12 @@ func generateJSONSchemas() map[string]Schema {
 			"period_start": dateTime(""), "period_end": dateTime(""), "settled_at": dateTime(""),
 			"refund_of": str("The charge a refund row refunds"), "house": str("The house snapshot, in words"),
 		}, "id", "kind", "purpose", "status", "provider", "provider_id", "amount_cents"),
+		"AdminRefundResult": object("A refund recorded (201) or found in the ledger (200, RP28-1)", map[string]*Schema{
+			"payment_id": str("The refund row"), "invoice_number": str("Its credit-note number"),
+			"fully_refunded": {Type: "boolean"}, "shortened_by": str("A Go duration (`0s` when not asked)"),
+			"paid_through": dateTime("Present when the date was shortened"),
+			"existing":     {Type: "boolean", Description: "The refund was already in the ledger (recorded by the provider's webhook or an earlier call)"},
+		}, "payment_id", "invoice_number", "fully_refunded", "shortened_by", "existing"),
 		"JobStarted": object("A job run was started and continues on the server", map[string]*Schema{
 			"job":        str("Job name"),
 			"status":     strEnum("", "started"),

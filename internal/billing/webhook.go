@@ -57,6 +57,8 @@ type WebhookHandler struct {
 	subs   subscriptionFetcher
 	// refunds overrides the refund source of charge.refunded (tests).
 	refunds refundLister
+	// charges overrides the charge source of charge.refund.updated (tests).
+	charges chargeFetcher
 	// flags answers entitlement_lapse per tenant (nil = off).
 	flags payments.FlagSource
 	// receipts mails the receipt of a NEWLY settled invoice (nil = none).
@@ -285,6 +287,8 @@ func (h *WebhookHandler) handle(ctx context.Context, event stripe.Event) (string
 		return h.handleSubscriptionDeleted(ctx, event)
 	case "charge.refunded":
 		return h.handleChargeRefunded(ctx, event)
+	case "charge.refund.updated":
+		return h.handleRefundUpdated(ctx, event)
 	default:
 		h.logger.Debug("unhandled webhook event", zap.String("type", string(event.Type)))
 	}
