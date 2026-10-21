@@ -122,3 +122,54 @@ leg needs:
    leave within `TombstoneMaxAge` or at the 50 % rewrite); `EraseTenant` →
    nothing extra (rows go with `EraseRows`, the forced rewrite removes bytes).
 5. Tests: the parity fixture with a local driver named `sync`.
+
+## Evaluated 2026-10-21, not built: small `SIA`-class objects through the pack store
+
+Question: route SIA-tier PUTs under `SIA_PACK_MAX_BYTES` (e.g. 4 MiB) into
+packs on the `sia` backend (s3d issue #235 "no more hosts available" with
+many small files; slab padding per small object). Verdict: **it does not fit
+with contained changes**, so only `SIA_WRITE_BUDGET` shipped
+(`internal/drivers/sia_write.go`). What it would take:
+
+1. **The PUT is synchronous; the writer is not.** A member is stored only
+   when its pack is sealed (`Writer.Add` returns a `SealedPack` or nil), a
+   Writer is single-goroutine, and a seal is one ≤ 256 MiB upload. A PUT
+   must be readable at its 200, so either one pack per PUT (no batching —
+   pointless) or a NEW acknowledged-but-unsealed state: a shared,
+   concurrency-safe open pack on local disk, with reads served from the
+   staging file until the seal, and a crash-recovery story for members
+   acknowledged but never sealed (today a crash before the commit "loses
+   nothing the caller recorded" — a PUT 200 IS a record). That is a new
+   durability tier, not a routing change. (s3d already does this — its 200
+   is its local buffer — and already packs small objects into slabs; the
+   real gap is #235, an s3d bug to fix upstream.)
+2. **Head rows cannot name a member.** `object_head_cache.backend_name` /
+   `storage_key` name a driver and a blob address (`objectBlobAddress`,
+   `commitBlobWrite`); a packed object needs a sentinel backend (like
+   `chunked`) plus a member reference, and every reader of those columns
+   must learn it: the GET/HEAD/range/parallel-GET path (where the sia
+   promotion work is landing), CopyObject, versions (`object_versions`
+   rows, `usage.VersionRetained` matching by address and kind), the
+   `retired_blobs` collector (a displaced member = `Store.Delete`, under the
+   key's lock), `routing_truth` (a new sentinel is `unknown_backend` today),
+   the deletion runner, `key_reencrypt` (re-seal a member = rewrite),
+   Object Lock, vault parity. Likely a migration (or a reserved
+   `storage_key` grammar) — and `pack_members` is keyed `(tenant, key)`
+   live-unique, which conflicts with versioning's one blob per version.
+3. **Billing/erasure are fine as they are**: `pack_members` is erased by
+   `account.EraseRows` and the forced rewrite removes bytes; the head row
+   would keep billing the logical size. `pack_gc` is registered only for
+   `packStoreBackend = "sync"` (`api/pack_gc.go`) — it would need one GC
+   per pack backend (`newPackGCFor` already takes the name), and the GC's
+   rewrite reads a whole pack in one GET, which on sia spends the shared
+   read budget (pace it with `SIA_READ_BUDGET`, or cap `MaxRewriteBytes`).
+4. **Nothing in the store is sync-specific** beyond defaults (256 MiB
+   target, 50,000 per folder) — the Store/Writer/GC take any
+   `engine.Driver`, and ranged reads go through `engine.RangeGetter`, which
+   the sia driver implements (with its resume). So the blocker is (1)+(2),
+   the API's object model, not this package.
+
+A smaller step that fits today: a BATCH writer (a job — e.g. the Vault
+parity leg above, or a future archive of many tiny objects) can use a
+`packstore.New(db, siaDriver, Options{BackendName: "sia"})` as is, plus a
+`pack_gc` registration for `sia`.
