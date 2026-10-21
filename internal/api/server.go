@@ -36,6 +36,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/idrive"
 	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/FairForge/vaultaire/internal/payments/btcpay"
 	"github.com/FairForge/vaultaire/internal/sitestats"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -83,9 +84,12 @@ type Server struct {
 	payments         *payments.Registry
 	paymentReminders *PaymentRemindersRunner // the payment_reminders job (WP-PAY-3)
 	webhookHandler   *billing.WebhookHandler
-	requestCount     int64
-	siteStats        *sitestats.Collector // cookieless public-site counts (site_stats.go)
-	testMode         bool
+	// btcpay is the BTCPay provider (WP-PAY-4); nil unless all four
+	// BTCPAY_* settings are set (btcpay_wiring.go).
+	btcpay       *btcpay.Provider
+	requestCount int64
+	siteStats    *sitestats.Collector // cookieless public-site counts (site_stats.go)
+	testMode     bool
 	// longOpThreshold / longOpInterval: the keep-alive of slow
 	// CompleteMultipartUpload / DeleteObjects (s3_long_op.go); 0 = 10 s / 10 s.
 	longOpThreshold    time.Duration
@@ -634,6 +638,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		// runner can name Stripe, nothing reaches it.
 		s.payments.Register(billing.NewUnconfiguredStripe(logger))
 	}
+	s.setupBTCPay(os.Getenv, os.ReadFile)
 
 	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
 	// the alerter skips tenants with no bandwidth_limit_bytes.
@@ -654,6 +659,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		mailer := payments.NewMailer(s.db, s.emailSender, s.baseURL, s.hosts.Legal(), logger)
 		if s.webhookHandler != nil {
 			s.webhookHandler.SetReceiptSender(mailer)
+		}
+		if s.btcpay != nil {
+			s.btcpay.SetReceiptSender(mailer)
 		}
 		if s.entitlementLapse != nil {
 			s.entitlementLapse.Mailer = mailer
@@ -909,6 +917,7 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("Registering Stripe webhook route")
 		s.router.Post("/webhook/stripe", s.webhookHandler.ServeHTTP)
 	}
+	s.registerBTCPayRoute()
 
 	// Public status page — no auth, renders HTML.
 	s.router.Get("/status", s.handleStatusPage)
@@ -1513,6 +1522,12 @@ func (s *Server) Start() error {
 	// Every payment provider's readiness, every 60 s: the gauge
 	// vaultaire_payment_provider_ready and the entitlement_lapse job's
 	// history (WP-PAY-2).
+	if s.btcpay != nil {
+		// BTCPay's own check (health + its store, every 60 s): Ready after
+		// one success, Unready after two failures in a row — what the
+		// registry records below.
+		s.btcpay.Start(ctx, time.Minute)
+	}
 	if s.payments != nil {
 		s.payments.StartReadiness(ctx, time.Minute)
 	}

@@ -101,7 +101,9 @@ const (
 	// the provider (WP-PAY-2, docs/PAYMENTS.md § 2.3). Off = checkout and
 	// resize 409 provider_disabled; renewals, the webhook route, cancel and
 	// the portal are unaffected. pay_stripe defaults to "STRIPE_SECRET_KEY is
-	// set"; pay_btcpay is registered for /admin/flags with no provider yet.
+	// set"; pay_btcpay defaults OFF — the BTCPay provider (WP-PAY-4) is
+	// registered only with its four BTCPAY_* settings, and the flag gates
+	// its checkout only (its webhook route stays mounted while configured).
 	flagPayStripe = payments.FlagPrefix + payments.ProviderStripe
 	flagPayBTCPay = payments.FlagPrefix + payments.ProviderBTCPay
 )
