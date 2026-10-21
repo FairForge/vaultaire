@@ -67,8 +67,10 @@ The entitlement record (WP-PAY-1, 097) is in `Deleted`, before `tenants`: `entit
 
 `Kept`: `stripe_events` (ledger; `tenant_id` nulled), `audit_logs` /
 `audit_logs_archive` rows keyed by the tenant only (operator actions; `ip` and
-`user_agent` nulled), `billing_charges`, `metered_usage_reports`,
-`abuse_reports`. Never touched: `global_content_index` rows (dedup GC sweeps the
+`user_agent` nulled), `abuse_reports` (`billing_charges`, `metered_usage_reports`
+and `subscriptions` were dropped by migration 100, WP-PAY-7). `payment_events`
+also carries the runner's `deletion_cancel` stamps and the webhook's
+`invalid_house` rows (WP-PAY-7): anonymised with the rest. Never touched: `global_content_index` rows (dedup GC sweeps the
 zero-ref ones the release marked), `job_runs`.
 
 **`TestErasedTablesCoverSchema`** walks `information_schema.columns` for every

@@ -145,24 +145,106 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 	// Free-tier defaults (migration 034 semantics) must hold on a fresh DB
 	// even though 034's ALTER is skipped when tenant_quotas doesn't exist yet.
 	var tier string
-	var limitBytes, capCents int64
+	var limitBytes int64
 	err = fdb.QueryRowContext(ctx,
-		"SELECT tier, storage_limit_bytes, spending_cap_cents FROM tenant_quotas WHERE tenant_id = $1",
-		tenant.ID).Scan(&tier, &limitBytes, &capCents)
+		"SELECT tier, storage_limit_bytes FROM tenant_quotas WHERE tenant_id = $1",
+		tenant.ID).Scan(&tier, &limitBytes)
 	require.NoError(t, err)
 	assert.Equal(t, "free", tier, "new tenants must default to the free tier")
 	assert.Equal(t, int64(5368709120), limitBytes, "free tier must default to 5 GB")
-	assert.Equal(t, int64(0), capCents, "spending cap must default to 0 (no cap)")
 
-	// The metered-billing reporter's tenant scan (internal/billing/metered.go)
-	// must work against the migrated schema.
-	rows, err := fdb.QueryContext(ctx, `
-		SELECT tenant_id, tier, spending_cap_cents
-		FROM tenant_quotas
-		WHERE tier IN ('standard', 'performance') AND spending_cap_cents > 0`)
-	require.NoError(t, err, "metered-billing SELECT must succeed on a fresh migrations-only database")
-	defer func() { _ = rows.Close() }()
-	require.NoError(t, rows.Err())
+	// WP-PAY-7 (migration 100): a fresh database never has what the contract
+	// dropped — the files that created it no longer do.
+	assertContractDropped(ctx, t, fdb)
+}
+
+// assertContractDropped: the objects migration 100 drops are absent.
+func assertContractDropped(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	var cols int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		 WHERE (table_name = 'tenants' AND column_name IN
+		        ('stripe_subscription_id', 'subscription_status', 'house_period', 'deletion_stripe_cancelled_at'))
+		    OR (table_name = 'tenant_quotas' AND column_name = 'spending_cap_cents')`).Scan(&cols))
+	assert.Zero(t, cols, "a dropped column exists")
+	for _, table := range []string{"subscriptions", "billing_charges", "metered_usage_reports"} {
+		var reg sql.NullString
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1)::text`, table).Scan(&reg))
+		assert.False(t, reg.Valid, "table %s exists", table)
+	}
+}
+
+// droppedAttnums counts the dropped-column slots of a table (pg_attribute
+// keeps one per DROP COLUMN; 1600 columns, dropped included, is the cap).
+func droppedAttnums(ctx context.Context, t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM pg_attribute WHERE attrelid = $1::regclass AND attisdropped`, table).Scan(&n))
+	return n
+}
+
+// TestMigration100_Idempotent — the contract drop (WP-PAY-7) on a database
+// migrated as prod is, then re-applied the way every deploy re-applies the
+// whole set: the objects stay gone, and no pass re-adds a column for 100 to
+// drop again (the files that created them were emptied in the same change —
+// otherwise tenants would gain four dropped-column slots per deploy).
+func TestMigration100_Idempotent(t *testing.T) {
+	cfg := testutil.DBConfig()
+	ctx := context.Background()
+	admin, err := sql.Open("postgres", testutil.DSNFor(cfg))
+	require.NoError(t, err)
+	defer func() { _ = admin.Close() }()
+	require.NoError(t, admin.PingContext(ctx))
+
+	const dbName = freshDBName + "_m100"
+	_, err = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+dbName)
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CREATE DATABASE "+dbName)
+	require.NoError(t, err)
+	c := cfg
+	c.Database = dbName
+	db, err := sql.Open("postgres", testutil.DSNFor(c))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = db.Close()
+		_, _ = admin.Exec("DROP DATABASE IF EXISTS " + dbName + " WITH (FORCE)")
+	})
+
+	// Arrange: the schema as prod holds it before 100 — every file up to 099,
+	// then the objects 100 drops, as the old files created them.
+	files := migrationFiles(t)
+	for _, f := range files {
+		if filepath.Base(f) >= "100_" {
+			continue
+		}
+		applyFile(ctx, t, db, f)
+	}
+	_, err = db.ExecContext(ctx, `
+		ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255);
+		ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'none';
+		ALTER TABLE tenants ADD COLUMN IF NOT EXISTS house_period TEXT NOT NULL DEFAULT '';
+		ALTER TABLE tenants ADD COLUMN IF NOT EXISTS deletion_stripe_cancelled_at TIMESTAMPTZ;
+		ALTER TABLE tenant_quotas ADD COLUMN IF NOT EXISTS spending_cap_cents BIGINT NOT NULL DEFAULT 0;
+		CREATE TABLE IF NOT EXISTS subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+		    tenant_id VARCHAR(255) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE);
+		CREATE TABLE IF NOT EXISTS billing_charges (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id VARCHAR(255) NOT NULL);
+		CREATE TABLE IF NOT EXISTS metered_usage_reports (id BIGSERIAL PRIMARY KEY, tenant_id TEXT NOT NULL);`)
+	require.NoError(t, err)
+
+	// Act: the deploy that carries 100, then two more deploys.
+	applyAllMigrations(ctx, t, db, "on the deploy that carries 100")
+	assertContractDropped(ctx, t, db)
+	slots := droppedAttnums(ctx, t, db, "tenants")
+	quotaSlots := droppedAttnums(ctx, t, db, "tenant_quotas")
+	applyAllMigrations(ctx, t, db, "on the next deploy")
+	applyAllMigrations(ctx, t, db, "on the one after")
+
+	// Assert
+	assertContractDropped(ctx, t, db)
+	assert.Equal(t, slots, droppedAttnums(ctx, t, db, "tenants"), "a re-run re-added a column for 100 to drop again")
+	assert.Equal(t, quotaSlots, droppedAttnums(ctx, t, db, "tenant_quotas"))
 }
 
 // applyAllMigrations runs every migration file in sorted order. Each file is
@@ -170,17 +252,31 @@ func TestMigrations_FreshDatabaseBootstrap(t *testing.T) {
 // same strictness as `psql -v ON_ERROR_STOP=1` (Runbook 0.6).
 func applyAllMigrations(ctx context.Context, t *testing.T, db *sql.DB, when string) {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
-	require.NoError(t, err)
-	require.NotEmpty(t, files, "no migration files found")
-	sort.Strings(files)
-
-	for _, f := range files {
+	for _, f := range migrationFiles(t) {
 		content, err := os.ReadFile(f)
 		require.NoError(t, err)
 		_, err = db.ExecContext(ctx, string(content))
 		require.NoError(t, err, "migration %s must apply cleanly %s", filepath.Base(f), when)
 	}
+}
+
+// migrationFiles is the set in apply order.
+func migrationFiles(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join("migrations", "*.sql"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files, "no migration files found")
+	sort.Strings(files)
+	return files
+}
+
+// applyFile runs one migration file as one batch.
+func applyFile(ctx context.Context, t *testing.T, db *sql.DB, f string) {
+	t.Helper()
+	content, err := os.ReadFile(f)
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, string(content))
+	require.NoError(t, err, "migration %s must apply cleanly", filepath.Base(f))
 }
 
 // TestMigrations_Reapply — WP-9 (CR-10): the deploy pipeline re-applies the
