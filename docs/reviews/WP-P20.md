@@ -122,3 +122,77 @@ ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-payments_test.yml &&
 ssh vaultaire-slc 'sudo install -m 0644 /tmp/vaultaire-payments.yml /tmp/vaultaire-jobs.yml /etc/prometheus/rules/ && promtool check rules /etc/prometheus/rules/vaultaire-payments.yml /etc/prometheus/rules/vaultaire-jobs.yml && sudo systemctl reload prometheus'
 ssh vaultaire-slc "curl -s localhost:9090/api/v1/rules | python3 -c 'import sys,json; print([g[\"name\"] for g in json.load(sys.stdin)[\"data\"][\"groups\"]])'"
 ```
+
+## Post-merge review (2026-10-21, meta)
+
+Adversarial pass over #812 and #813 against `docs/PAYMENTS.md` § 2.5, § 3.8,
+§ 4.2, `internal/payments/CLAUDE.md` and the code at `e815506`. **Every claim
+above holds; no P0/P1. One P2 (RP24-1) and one P3 (RP24-2) go to Prompt 21
+Part 0; RP23-3 is closed by this review.** CI, Security and Deploy green on
+every merge commit; the docs PR #815 (left `CONFLICTING` by the WP-CAP-1 plan
+merge #814) rebased, its STATUS line folded with #814's sentence, merged;
+prod `/version` = `5cb3a5770b9d` on slot 8000.
+
+Verified in depth (beyond the session's own gates):
+
+- **Part 0 (#812):** `payments.Readiness` is a typed three-state value whose
+  zero is `Unready`; `transientPriceError` keeps the verdict only for a
+  `*stripe.Error` with status 0, 5xx or 429 and for a non-Stripe error (a
+  dial, a timeout) — a Stripe 4xx decides; `StartHouseVerification` retries
+  an unreachable Stripe in 5 min without the "DISABLED" Error line;
+  `ReadyLog.RecordReason` ignores `Pending`; `Registry.observe` exports 0 for
+  it; `houseInvalid`'s UPDATE is guarded on `stripe_subscription_id IS NULL
+  OR '' OR = $1`; `handleSubscriptionDeleted` evaluates `isHouse` before the
+  flag-ON branch; the guard's `SET LOCAL lock_timeout` precedes `Lock` and
+  `55P03` maps to `ErrProviderUnavailable`.
+- **WP-PAY-3 (#813):** `GrantRecorded`'s `RETURNING` under the upsert's
+  `WHERE NOT (…)` makes a replay `sql.ErrNoRows` → `Changed=false` with the
+  floors still written (idempotent, as before); `AuditGranted` writes nothing
+  for it. `ReadReceipt` / `HandleReceipt` take the tenant from the session
+  and answer 404 for another tenant's id (proven in the note; the route is in
+  the `RequireSession` + CSRF group). The admin dashboard forms sit in the
+  group with `RequireAdmin`, CSRF and `RequireAdminMFA`; the admin API routes
+  are each wrapped in `requireAdmin`. `RecordRefund` reads the charge `FOR
+  UPDATE` under the entitlement lock and sums settled refunds before it
+  writes, so two concurrent refunds cannot exceed the charge. The lapse
+  job's `clear` re-reads the row under the lock and only then revokes;
+  `lapseSkippedCollector` reads `job_runs.result` (no series before the first
+  run; the rule's `min_over_time(…[30h])` is two daily runs). Every new
+  counter pair is pre-created at 0 (`vaultaire_payment_reminders_total` 4 × 2,
+  `vaultaire_payment_webhook_total` 4 outcomes) — the RP14-9 lesson holds.
+  The readiness row is written on a state change and hourly with `GREATEST`
+  on both timestamps and the last reason kept across a ready write. The
+  mailer is wired after both the webhook handler (`server.go:569`) and the
+  lapse runner (`:409`) exist (`:621`), so neither reference is nil.
+- **Rules:** `promtool test rules` passes for `vaultaire-payments_test.yml` and
+  `vaultaire-jobs_test.yml` on the box's promtool 2.53 once the test files sit
+  beside the rule files (the first run from a `tests/` subdirectory read the
+  OLD installed `vaultaire-jobs.yml` and failed on `payment_reminders` — a
+  path trap, not a rule fault). **Installed by this review (RP23-3 closed):**
+  `/etc/prometheus/rules/vaultaire-payments.yml` `e1ed3ac4…` and
+  `vaultaire-jobs.yml` `a73e3494…` (= `main`), the previous jobs file kept as
+  `vaultaire-jobs.yml.bak-20261020c`, `promtool check rules` SUCCESS (5 + 9
+  rules), `systemctl reload prometheus`, the `vaultaire-payments` group is in
+  `/api/v1/rules`.
+- **Prod (read-only, 00:05 UTC 2026-10-21):** 0 `"level":"error"` lines on
+  slot 8000 since the #813 switch (2 Warn); `payment_provider_readiness` =
+  one row `stripe | last_unready_at 23:05:01 | "STRIPE_SECRET_KEY is not set"`;
+  `entitlements` 0, `payments` 0; `entitlement_lapse` last `ok` 22:33
+  (`skipped_unready 0`), `payment_reminders` last `ok` 23:08 (`candidates 0`);
+  every payment series at 0; `STORAGE_MODE=idrive` (#811); `/health` healthy;
+  1 alert (`RoutingTruthNoVerdict{idrive}`, the 05:30 run not yet due on the
+  revived account). `feature_flags` has **4** rows, not 3: `parallel_get` for
+  the sync-lab tenant beside `sync_backend` and the two `vault_parity` rows.
+
+### Findings (RP24-*)
+
+| # | Sev | Finding | Where it goes |
+|---|---|---|---|
+| RP24-1 | **P2** | **Renew on a prepaid house opens a Stripe subscription that starts today.** `HandleRenewHouse` → `Registry.StartCheckout(purpose=renew)` → `StripeService.StartCheckout` → `houseCheckoutParams`: `SubscriptionData` carries metadata only — no `TrialEnd` — so Checkout bills the first period at once and the subscription's anniversary is today. `applyHouse` / `recordInvoicePaid` then `Grant` with `paid_through = GREATEST(row, current_period_end)`. D-P20-A5 shows "Add a year" on ANY granted prepaid row: a house prepaid to 2027-10-20 renewed on 2026-11-01 ends up paid through 2027-11-01 — a year's price for 12 days, the prepaid remainder forfeited, and the house auto-renews from 2026-11-01 for ever. The design routes "add a year" to a PREPAID provider's checkout (§ 3.8) and makes a card on a prepaid date a *switch* with `subscription_data.trial_end = paid_through` (§ 4.2; Stripe's ≥ 48 h minimum, verified in stripe-go v75 on 2026-10-18). Second half: `recordInvoicePaid` records `inv.AmountPaid` with no zero guard, so the $0 `subscription_create` invoice of a trialing subscription would take a gapless receipt number and mail a $0 receipt. Fix: a Stripe checkout for a GRANTED row (purpose `renew`) sets `TrialEnd = paid_through` when that is ≥ 48 h away (else starts now and the page says the remaining days are forfeited — the design's sentence); `payments.Checkout` carries the date (`StartAt`) so the interface stays provider-neutral; the button shows only inside the reminder window (≤ 14 d before the date, in grace, lapsed) — before that "Add a year" by card is WP-PAY-5's switch; a $0 invoice is recorded without a receipt number and sends no receipt. | Prompt 21 Part 0 |
+| RP24-2 | P3 | `PaymentRemindersRunner` reads no flag: with `entitlement_lapse` OFF (prod's default, per tenant) the `t+1d` ("in grace, N days left") and `last-day` ("your house ends tomorrow") mails announce an ending the lapse job only counts as `would_clear`. The two before-steps are true either way. Fix: the grace steps are sent only where the lapse job would act (`flags.Enabled(entitlement_lapse, tenant)`); a skipped step is counted in the result. | Prompt 21 Part 0 |
+| RP24-3 | P4 | `RecordManualPayment`'s Extend branch builds `Granted{Provider: manual, Renewal: prepaid}` for the audit while the row keeps its own provider and renewal (a wire recorded on a Stripe `auto` row audits `house_granted` as manual/prepaid); `RecordRefund` counts `CountPayment(ProviderManual, KindRefund, …)` for a refund of a Stripe charge. Report the row's values; label by the charge's provider. | Prompt 21 Part 0 |
+| RP24-4 | P4 | `RecordRefund` shortens `paid_through` with its own UPDATE — `internal/payments/CLAUDE.md` says it "calls" `AdjustEntitlement`; it does not, and no `billing.paid_through_adjusted` row is written for the shortening (the `billing.refund_recorded` row carries `shortened_by`). Fix the sentence or route through `AdjustEntitlement`. | Prompt 21 Part 0 (docs) |
+| RP24-5 | P4 | `HandleRenewHouse` takes any `provider` form value and hands it to `Registry.For`: an unknown name is `ErrUnknownProvider`, logged at Error with a user-chosen string. Validate against `svc.Enabled` first. | Prompt 21 Part 0 |
+| RP24-6 | note | The receipt mail is sent inside the webhook's answer (`Detached`, ≤ 15 s) and the lapsed mail inside the lapse loop; with `LogSender` instant, with a slow mail provider a webhook could outlive Stripe's wait and be redelivered (the dedup makes that harmless). Fine until a real sender is wired; then consider the delivery pool. | note |
+| RP24-7 | note | The note's "feature_flags 3 rows" is 4 (`parallel_get` for the sync-lab tenant, #693). | — |
+| RP23-3 | closed | `vaultaire-payments.yml` + `vaultaire-jobs.yml` installed on the box by this review (hashes above). | — |
