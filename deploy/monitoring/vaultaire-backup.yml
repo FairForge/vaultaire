@@ -6,6 +6,8 @@
 # (deploy/monitoring/README.md "Backup metrics"; `node_textfile_scrape_error` 0 = read):
 #   vaultaire_backup_last_success_timestamp_seconds         the pg_dump passed its size + DDL asserts
 #   vaultaire_backup_offbox_last_success_timestamp_seconds  the dump is on Sync.com, size verified
+#   vaultaire_backup_offbox2_last_success_timestamp_seconds the dump is on Blomp (rclone crypt), size verified
+#                                                           — optional leg, never fails the run (warning)
 #   vaultaire_backup_run_last_success_timestamp_seconds     the whole run finished (written last):
 #                                                           configs tar — the only backup of .env —
 #                                                           rules tar + upload, retention
@@ -49,3 +51,12 @@ groups:
         annotations:
           summary: "No complete backup run in > 26 h (configs/rules tar or retention failing)"
           description: "The dump may be fine (BackupStale / BackupOffboxStale say), but a later stage of pg-backup.sh has failed for over 26 hours: the configs tar is the only backup of /opt/vaultaire/configs/.env, the rules tar is the only copy of the installed alert rules, and a failed retention fills the Sync account. `grep 'BACKUP FAILED' /opt/vaultaire/logs/backup.log | tail` names the stage."
+
+      - alert: BackupSecondOffboxStale
+        expr: (time() - vaultaire_backup_offbox2_last_success_timestamp_seconds) > 26 * 3600 or absent(vaultaire_backup_offbox2_last_success_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No second off-box copy (Blomp) of the database dump in > 26 h"
+          description: "The dump has not reached Blomp (rclone crypt remote) with a verified size for over 26 hours. Sync still holds the off-box copy (BackupOffboxStale says), so this is a warning: `grep OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the step (login from BLOMP_* in .env, crypt remote in configs/blomp-backup.env, Blomp 503s or a full account)."

@@ -61,6 +61,13 @@ pieces of an overwritten large object are not a product case.
   on every range of one manifest) and the total size from `Content-Range`,
   so the `parallel_get` flag reads a large Blomp object as 8 ranges at once:
   raw, 8 ranges of 256 MiB read 163 MB/s; one stream of a 1 GiB object 56.
+  **Parts are the segment size** (`PreferredRangeBytes`, engine.RangePartSizer),
+  not `LARGE_GET_PART_BYTES`: every range pays ~650 ms before its first byte,
+  so 16 MiB parts gained little. SLC lab 2026-10-21, 1 GiB object through
+  Vaultaire, sha-verified: one stream 32–51 MB/s, 8 × 16 MiB 58–157, **8 × 64
+  MiB 123–369**, 16 × 64 MiB 98–358 (no better than 8), 16 × 16 MiB 47–66.
+  A Blomp read holds up to 8 × 64 MiB = 512 MiB of `LARGE_GET_PARALLEL_BUDGET_BYTES`
+  (2 GiB): the fifth concurrent one takes the single stream.
 - **Token**: asked once and reused; asked again 5 min before it expires, and
   once on a 401 (`vaultaire_swift_auths_total{backend,reason,outcome}`). A
   changed password fails the next request after the token goes (≤ 1 h) — the
@@ -101,6 +108,33 @@ close it. Before customer data goes on `blomp`, the sweep needs a re-walk
 after a delay on this backend (a follow-up), or the rows must name every
 blob (they do for whole objects: the runner deletes each recorded object by
 its address, not by listing).
+
+## Capacity — the vendor view
+
+`VendorUsage` (`engine.VendorUsageReporter`) is one container HEAD:
+`X-Container-Bytes-Used` and, when a quota is set, `X-Container-Meta-Quota-Bytes`
+(Blomp's free account: 42,949,672,960 = 40 GiB). The account HEAD is 403 on
+Blomp. The daily `backend_capacity` job (08:30 UTC) records it as
+`vendor.blomp` in `job_runs.result`; `/metrics` exports
+`vaultaire_backend_vendor_used_bytes{backend="blomp"}` and
+`vaultaire_backend_vendor_limit_bytes{backend="blomp"}`, and
+`BackendVendorQuota80` / `BackendVendorQuota90` warn and page at 80 / 90 % of
+the quota (`deploy/monitoring/vaultaire-capacity.yml`) — before the 413 that
+becomes a 507 and `BackendStorageFull`.
+
+Mind what the counter is:
+
+- **It lags.** Measured 2026-10-21: the HEAD said 1,746,932,237 bytes in 31
+  objects while the listing named 34 objects of 3,021,996,109 bytes — both
+  trail writes and deletes by minutes. A daily reading is fine for growth; a
+  fill at 273 MB/s (40 GiB in ~2.5 min) outruns it, and only the 507 alert
+  catches that.
+- **It overshoots.** Swift admits a write in flight past the quota: 41.7 GiB
+  went into the 40 GiB account before the first 413.
+- **It counts everything in the container**, not only what our rows name:
+  the lab instance's objects, pieces an SLO upload left when it crashed
+  (RB-2), the canary. `BackendVendorDrift` (vendor > 1.2 × our stored + 1 GiB
+  for 3 days) is the signal that those have grown.
 
 ## Encryption — plain HTTP
 

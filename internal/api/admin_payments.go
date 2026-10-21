@@ -131,11 +131,12 @@ func adminMoneyError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, payments.ErrReasonRequired):
 		http.Error(w, "reason is required", http.StatusBadRequest)
-	case errors.Is(err, payments.ErrOrderRequired), errors.Is(err, payments.ErrInvalidOrder), errors.Is(err, payments.ErrRefundNoPeriod):
+	case errors.Is(err, payments.ErrOrderRequired), errors.Is(err, payments.ErrInvalidOrder), errors.Is(err, payments.ErrRefundNoPeriod),
+		errors.Is(err, payments.ErrRefundProviderRef):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, payments.ErrNoEntitlement), errors.Is(err, payments.ErrNoSuchPayment):
 		http.Error(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, payments.ErrRefundExceeds):
+	case errors.Is(err, payments.ErrRefundExceeds), errors.Is(err, payments.ErrRefundShortened), errors.Is(err, payments.ErrRefundMismatch):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -244,11 +245,17 @@ func (s *Server) handleAdminRefund(w http.ResponseWriter, r *http.Request) {
 	s.logger.Warn("admin refund recorded", zap.String("tenant", tenantID), zap.String("actor", actor),
 		zap.String("refund_of", req.PaymentID), zap.Int64("amount_cents", req.AmountCents), zap.Duration("shortened_by", res.ShortenedBy))
 	out := map[string]any{"payment_id": res.PaymentID, "invoice_number": res.InvoiceNumber, "fully_refunded": res.FullyRefunded,
-		"shortened_by": res.ShortenedBy.String()}
+		"shortened_by": res.ShortenedBy.String(), "existing": res.Existing}
 	if req.ShortenPaidThrough {
 		out["paid_through"] = res.PaidThrough.UTC()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	// 200 for a refund already in the ledger (an idempotent hit, or the
+	// shortening of it — RP28-1); 201 for a new row.
+	if res.Existing {
+		w.WriteHeader(http.StatusOK)
+	} else {
+		w.WriteHeader(http.StatusCreated)
+	}
 	_ = json.NewEncoder(w).Encode(out)
 }

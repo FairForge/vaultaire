@@ -92,3 +92,48 @@ tests:
             exp_annotations:
               summary: "Backend lyve is registered but has no plan row"
               description: "A paid backend without a backend_plans row has no capacity, renewal or payment watch — the exact hole the 2026-09 iDrive lapse fell through. Enter it: PUT /api/v1/admin/backends/lyve/plan (F-31 names the five rows)."
+
+  # Blomp: the vendor reports its own hard quota (40 GiB). At 34 GiB the
+  # vendor-quota warning fires and the plan rules stay silent although a
+  # plan row of the same 40 GiB exists — one page, the hard-wall wording.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backend_vendor_used_bytes{backend="blomp"}'
+        values: '36507222016x200'
+      - series: 'vaultaire_backend_vendor_limit_bytes{backend="blomp"}'
+        values: '42949672960x200'
+      - series: 'vaultaire_backend_stored_bytes{backend="blomp",kind="objects"}'
+        values: '1000000x200'
+      - series: 'vaultaire_backend_plan_bytes{backend="blomp"}'
+        values: '42949672960x200'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: BackendVendorQuota80
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: BackendVendorQuota80
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              backend: blomp
+            exp_annotations:
+              summary: "Backend blomp is at 80% of the vendor's own quota"
+              description: "The vendor's meter (or our stored bytes) is at or past 80% of the hard limit the vendor itself reports. At 100% it refuses writes (507 InsufficientStorage). Buy a larger plan, free space, or stop placing new buckets there; the numbers are in job_runs.result of backend_capacity (vendor.blomp)."
+      - eval_time: 30m
+        alertname: BackendVendorQuota90
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: BackendCapacity80
+        exp_alerts: []
+
+  # Blomp today (~1 MiB of 40 GiB): silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backend_vendor_used_bytes{backend="blomp"}'
+        values: '1048576x200'
+      - series: 'vaultaire_backend_vendor_limit_bytes{backend="blomp"}'
+        values: '42949672960x200'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: BackendVendorQuota80
+        exp_alerts: []
