@@ -225,6 +225,12 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 			return flipResult{}, err
 		}
 	}
+	// A promoted copy of an older object of the key (a Sia object hydrated
+	// into the primary, sia_promotion.go) is never served again: retired
+	// with the write.
+	if err := retireSiaPromotionsOnWrite(ctx, tx, w.TenantID, w.Bucket, w.Key, nAddr); err != nil {
+		return flipResult{}, err
+	}
 	if w.DryRun {
 		res.Displaced = displaced
 		return res, nil // rolled back by the deferred Rollback

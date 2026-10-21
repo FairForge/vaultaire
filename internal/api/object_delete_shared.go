@@ -33,6 +33,7 @@ type objectDeleteAftermath struct {
 	gci           *crypto.GlobalContentIndex
 	quota         QuotaManager
 	smartPromoter *SmartPromoter
+	siaPromoter   *SiaPromoter
 	vaultParity   *VaultParity
 	notify        *NotificationDispatcher
 	logger        *zap.Logger
@@ -150,12 +151,12 @@ func (d objectDeleteAftermath) forBatch(ctx context.Context, tenantID, bucket st
 }
 
 func (s *Server) objectDeleteAftermath() objectDeleteAftermath {
-	return objectDeleteAftermath{db: s.db, gci: s.gci, quota: s.quotaManager, smartPromoter: s.smartPromoter,
+	return objectDeleteAftermath{db: s.db, gci: s.gci, quota: s.quotaManager, smartPromoter: s.smartPromoter, siaPromoter: s.siaPromoter,
 		vaultParity: s.vaultParity, notify: NewNotificationDispatcher(s.db, s.logger), logger: s.log()}
 }
 
 func (a *S3ToEngine) objectDeleteAftermath() objectDeleteAftermath {
-	return objectDeleteAftermath{db: a.db, gci: a.gci, quota: a.quota, smartPromoter: a.smartPromoter,
+	return objectDeleteAftermath{db: a.db, gci: a.gci, quota: a.quota, smartPromoter: a.smartPromoter, siaPromoter: a.siaPromoter,
 		vaultParity: a.vaultParity, notify: a.notifySvc, logger: a.logger}
 }
 
@@ -226,6 +227,9 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 			// A Smart-demoted object has a second copy the delete did not
 			// reach: settled whatever superseded it (WP-R13-2).
 			d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
+			// A promoted copy of the deleted object (sia_promotion.go): the
+			// write that superseded the delete retired it in its flip.
+			d.siaPromoter.OnObjectChanged(ctx, tenantID, bucket, key)
 		}
 	}
 	d.announce(ctx, tenantID, bucket, key)
@@ -248,6 +252,7 @@ func (d objectDeleteAftermath) afterObjectGone(ctx context.Context, tenantID, bu
 			zap.String("bucket", bucket), zap.String("key", key))
 	}
 	d.smartPromoter.OnDelete(ctx, tenantID, bucket, key)
+	d.siaPromoter.OnObjectChanged(ctx, tenantID, bucket, key)
 	d.vaultParity.OnObjectDeleted(ctx, tenantID, bucket, key)
 }
 

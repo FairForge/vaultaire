@@ -54,6 +54,7 @@ var exportExcludedTables = map[string]string{
 	"object_metadata":      "chunk manifest of a deduplicated object; `objects` carries the object",
 	"tenant_chunk_refs":    "chunk references of a deduplicated object; `objects` carries the object",
 	"smart_demotions":      "Smart-tier placement ledger; the class the customer sees is in `objects`",
+	"sia_promotions":       "promoted copies of Sia objects on the primary (101): a cache of an object already in `objects`",
 	"vault_parity":         "the parity copy's placement ledger (WP-VAULT-1): where the engine keeps a second copy of an object already in `objects`",
 	"vault_parity_orphans": "the parity reconcile pass's first sightings of shard folders no row names (Prompt 2a PR 5): operational bookkeeping about stray bytes, nothing of the user's",
 	"s3_long_op_incidents": "long S3 operations a stopping server slot cancelled or failed after its 200 (082): operational bookkeeping about a request; the object itself is in `objects`",

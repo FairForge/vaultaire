@@ -2243,7 +2243,7 @@ func generateJSONSchemas() map[string]Schema {
 			})),
 		}, "job", "registered_backends", "unknown_backend_rows", "shared_stores", "last_outcome", "last_note"),
 		"UnknownBackendRows": object("Rows of one table whose backend no driver is registered under", map[string]*Schema{
-			"table":   strEnum("", "object_head_cache", "smart_demotions", "object_versions"),
+			"table":   strEnum("", "object_head_cache", "smart_demotions", "sia_promotions", "object_versions"),
 			"backend": str("The recorded name; empty for rows with none (NULL)"),
 			"rows":    integer(""),
 		}, "table", "backend", "rows"),

@@ -306,6 +306,10 @@ func (c *RoutingTruthChecker) unknownBackendRows(ctx context.Context) ([]unknown
 			UNION ALL
 			SELECT cold_backend FROM smart_demotions WHERE hot_deleted_at IS NULL AND ($2 = '' OR tenant_id = $2)) x
 			WHERE NOT (b = ANY($1::text[])) GROUP BY 1`},
+		// A promoted copy of a Sia object (sia_promotion.go) is read from
+		// the backend its row names.
+		{"sia_promotions", `SELECT promoted_backend, COUNT(*) FROM sia_promotions
+			WHERE ($2 = '' OR tenant_id = $2) AND NOT (promoted_backend = ANY($1::text[])) GROUP BY 1`},
 		// A chunked version names its manifest with the same sentinel
 		// (WP-VM-1): checked chunk by chunk below, never a route.
 		{"object_versions", `SELECT COALESCE(backend_name, ''), COUNT(*) FROM object_versions

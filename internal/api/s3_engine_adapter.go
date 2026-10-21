@@ -94,6 +94,10 @@ type S3ToEngine struct {
 	// PR B). Nil = no promotion (tests, callers that never set it).
 	smartPromoter *SmartPromoter
 
+	// siaPromoter hydrates large Sia objects into the primary before they
+	// are served (sia_promotion.go). Nil = every sia read streams from sia.
+	siaPromoter *SiaPromoter
+
 	// vaultParity serves a vault-floor object from its parity copy when its
 	// backend fails (WP-VAULT-1) and erases the shards with the object.
 	// Nil-safe.
@@ -566,6 +570,28 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 
+	// A large Sia object is hydrated into the primary before it is served
+	// (sia_promotion.go): read from its promoted copy when one is ready,
+	// else 503 SlowDown + Retry-After while one promotion runs. The head row
+	// still describes the object (and the class it reports); only the read
+	// is moved, so every integrity check of a whole read applies.
+	var siaObj siaObject
+	siaCopy := false
+	if cacheHit && version == nil && a.siaPromoter != nil && cachedBackendName == a.siaPromoter.SourceBackend && !cachedIsChunked {
+		siaObj = siaObject{tenantID: t.ID, bucket: bucket, key: artifact, etag: cachedETag, storageKey: cachedStorageKey,
+			encAlgo: cachedEncAlgo, bodyMD5: cachedBodyMD5, size: cachedSize}
+		plan := a.siaPromoter.OnRead(r.Context(), siaObj, siaWantBytes(r, cachedSize))
+		switch plan.decision {
+		case siaReadWait:
+			w.Header().Del("x-amz-version-id")
+			writeSiaWait(w, r, plan.retryAfter)
+			return
+		case siaReadPromoted:
+			cachedBackendName, blob, siaCopy = plan.backend, plan.blob, true
+			w.Header().Set("x-vaultaire-served-from", "promoted")
+		}
+	}
+
 	// Chunked objects are reassembled from their individual chunk storage
 	// keys. A failure here must FAIL the request — never fall through to the
 	// plain path: a whole-object blob can exist at this key from before the
@@ -765,6 +791,15 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 	if err != nil {
+		if siaCopy && isObjectMissingErr(err) {
+			// The promoted copy is gone (it never should be while its row
+			// is ready): retired, and this read waits on a new promotion —
+			// never a 404 for an object that is on sia.
+			a.siaPromoter.dropMissing(r.Context(), siaObj, cachedBackendName, blob)
+			w.Header().Del("x-vaultaire-served-from")
+			writeSiaWait(w, r, siaRetryAfterMin)
+			return
+		}
 		if errors.Is(err, engine.ErrAllBackendsUnavailable) {
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())

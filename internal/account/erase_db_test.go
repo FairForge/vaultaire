@@ -99,6 +99,7 @@ func (f *eraseFixture) seed(scheduledAt time.Time) {
 	f.exec(`INSERT INTO object_locks (tenant_id, bucket, object_key, retention_mode, retain_until_date) VALUES ($1, $2, 'k', 'COMPLIANCE', NOW() + INTERVAL '10 years')`, tn, b)
 	f.exec(`INSERT INTO object_locations (tenant_id, bucket, object_key, backend_name) VALUES ($1, $2, 'k', 'local')`, tn, b)
 	f.exec(`INSERT INTO smart_demotions (tenant_id, bucket, object_key, etag, size_bytes, hot_backend, cold_backend, reason) VALUES ($1, $2, 'k', 'e', 1, 'idrive', 'lyve', 'idle')`, tn, b)
+	f.exec(`INSERT INTO sia_promotions (tenant_id, bucket, object_key, source_key, etag, size_bytes, stored_bytes, promoted_backend, promoted_key, state) VALUES ($1, $2, 'k', 'k@a', 'e', 1, 1, 'idrive', 'k@b', 'ready')`, tn, b)
 	f.exec(`INSERT INTO multipart_uploads (upload_id, tenant_id, bucket, object_key, status) VALUES ($1, $2, $3, 'big', 'active')`, "upload-"+strings.Repeat("a", 24)+s, tn, b)
 	f.exec(`INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes) VALUES ($1, 1, 'p', 5)`, "upload-"+strings.Repeat("a", 24)+s)
 	f.exec(`INSERT INTO bucket_notifications (tenant_id, bucket, event_filter, target_type, target_url) VALUES ($1, $2, 's3:ObjectCreated:*', 'webhook', 'https://example.com/n')`, tn, b)

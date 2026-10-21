@@ -137,6 +137,9 @@ var sweepBucketSources = []struct{ table, query string }{
 	{"object_versions", `SELECT DISTINCT bucket FROM object_versions WHERE tenant_id = $1`},
 	{"multipart_uploads", `SELECT DISTINCT bucket FROM multipart_uploads WHERE tenant_id = $1`},
 	{"smart_demotions", `SELECT DISTINCT bucket FROM smart_demotions WHERE tenant_id = $1`},
+	// A promoted copy of a Sia object sits in its bucket's container on the
+	// primary (sia_promotion.go).
+	{"sia_promotions", `SELECT DISTINCT bucket FROM sia_promotions WHERE tenant_id = $1`},
 	{"object_locks", `SELECT DISTINCT bucket FROM object_locks WHERE tenant_id = $1`},
 	{"object_metadata", `SELECT DISTINCT bucket_name FROM object_metadata WHERE tenant_id::text = $1`},
 	{"tenant_chunk_refs", `SELECT DISTINCT bucket_name FROM tenant_chunk_refs WHERE tenant_id::text = $1`},
@@ -246,7 +249,8 @@ func (r *AccountDeletionRunner) planSweep(ctx context.Context, tenantID string) 
 		SELECT DISTINCT backend_name FROM object_versions WHERE tenant_id = $1 AND COALESCE(backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`')
 		UNION SELECT DISTINCT backend_name FROM object_locations WHERE tenant_id = $1 AND COALESCE(backend_name, '') <> ''
 		UNION SELECT hot_backend FROM smart_demotions WHERE tenant_id = $1
-		UNION SELECT cold_backend FROM smart_demotions WHERE tenant_id = $1`, tenantID)
+		UNION SELECT cold_backend FROM smart_demotions WHERE tenant_id = $1
+		UNION SELECT promoted_backend FROM sia_promotions WHERE tenant_id = $1`, tenantID)
 	if err != nil {
 		return plan, fmt.Errorf("backends named by the tenant's rows: %w", err)
 	}
