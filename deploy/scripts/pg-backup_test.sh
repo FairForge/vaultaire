@@ -110,6 +110,7 @@ PROM=$TMP/prom; mkdir -p "$PROM/rules" "$PROM/consoles"; echo "groups: []" > "$P
 echo "rule_files: []" > "$PROM/prometheus.yml"; echo "receivers: []" > "$PROM/alertmanager.yml"; : > "$PROM/consoles/c.html"
 METRICS=$TMP/metrics; mkdir -p "$METRICS"
 REMOTE=$TMP/remote; mkdir -p "$REMOTE"
+REMOTE2=$TMP/remote2; mkdir -p "$REMOTE2"
 BIN=$TMP/bin; mkdir -p "$BIN"
 printf 'DB_HOST=localhost\nDB_PASSWORD="p=w=d"\n' > "$ROOT/configs/.env"
 printf 'RCLONE_CONFIG_SYNCBK_TYPE=webdav\n' > "$ROOT/configs/sync-backup.env"
@@ -122,10 +123,14 @@ head -c 20000 /dev/urandom | base64
 EOF
 cat > "$BIN/rclone" <<EOF
 #!/bin/bash
-# Fake rclone: the remote is a directory; "syncbk:" maps to $REMOTE.
+# Fake rclone: a remote is a directory; "syncbk:" maps to $REMOTE, "blompcrypt:" to $REMOTE2.
 echo "\$*" >> "$TMP/rclone.log"
 [ -e "$TMP/rclone-\$1-fails" ] && { echo "fake rclone: \$1 failed" >&2; exit 1; }
-to_path() { printf '%s/%s' "$REMOTE" "\${1#syncbk:}"; }
+case "\$*" in *blompcrypt:*)
+  echo "\$RCLONE_CONFIG_BLOMPBK_USER|\$RCLONE_CONFIG_BLOMPBK_KEY|\$RCLONE_CONFIG_BLOMPCRYPT_REMOTE|\$RCLONE_CONFIG_BLOMPCRYPT_TYPE" > "$TMP/rclone2-env"
+  [ -e "$TMP/rclone2-fails" ] && { echo "fake rclone: blomp unreachable" >&2; exit 1; } ;;
+esac
+to_path() { case "\$1" in blompcrypt:*) printf '%s/%s' "$REMOTE2" "\${1#blompcrypt:}" ;; *) printf '%s/%s' "$REMOTE" "\${1#syncbk:}" ;; esac; }
 case "\$1" in
   copyto)  src=\${*: -2:1}; dst=\$(to_path "\${*: -1}"); mkdir -p "\$(dirname "\$dst")"; cp "\$src" "\$dst" ;;
   size)    printf '{"count":1,"bytes":%s}\n' "\$(stat -c%s "\$(to_path "\$3")")" ;;
@@ -149,7 +154,7 @@ run_backup() {
 }
 
 RUN_METRIC=vaultaire_backup_run_last_success_timestamp_seconds
-reset_run() { rm -f "$TMP"/rclone-*-fails "$TMP/tar-configs-fails"; rm -rf "${REMOTE:?}"/* "${ROOT:?}/backups"/* "${METRICS:?}"/*; : > "$ROOT/logs/backup.log"; sleep 1; }
+reset_run() { rm -f "$TMP"/rclone-*-fails "$TMP/rclone2-fails" "$TMP/rclone2-env" "$TMP/tar-configs-fails"; rm -rf "${REMOTE:?}"/* "${REMOTE2:?}"/* "${ROOT:?}/backups"/* "${METRICS:?}"/*; : > "$ROOT/logs/backup.log"; sleep 1; }
 
 # 3a. the config tar fails (the 2026-10-05 shape): the dump is still off-box.
 touch "$TMP/tar-configs-fails"
@@ -228,5 +233,64 @@ check "3g: no run timestamp" [ ! -e "$METRICS/$RUN_METRIC.prom" ]
 RULES=$HERE/../monitoring/vaultaire-backup.yml
 check "3h: BackupRunIncomplete rule on $RUN_METRIC" grep -q "alert: BackupRunIncomplete" "$RULES"
 check "3h: it covers absence" grep -q "absent($RUN_METRIC)" "$RULES"
+
+# --- 4. the second off-box leg (Blomp through an rclone crypt remote) -----------------
+OFFBOX2_METRIC=vaultaire_backup_offbox2_last_success_timestamp_seconds
+
+# 4a. not set up on this box (no blomp-backup.env): skipped, logged, the run completes.
+reset_run
+if run_backup; then pass "4a: run completes without the Blomp leg"; else fail "4a: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+check "4a: logged as skipped" grep -q 'OFFBOX2: .*blomp-backup.env not present, Blomp copy skipped' "$ROOT/logs/backup.log"
+check "4a: no Blomp call made" [ ! -e "$TMP/rclone2-env" ]
+check "4a: no offbox2 timestamp" [ ! -e "$METRICS/$OFFBOX2_METRIC.prom" ]
+
+# 4b. set up: dump + rules on Blomp, size verified, login from .env, crypt from its file.
+printf 'DB_HOST=localhost\nDB_PASSWORD="p=w=d"\nBLOMP_USER=ops@example.com\nBLOMP_PASSWORD="b=l=p"\n' > "$ROOT/configs/.env"
+printf 'RCLONE_CONFIG_BLOMPCRYPT_TYPE=crypt\n' > "$ROOT/configs/blomp-backup.env"
+reset_run
+if run_backup; then pass "4b: run completes with the Blomp leg"; else fail "4b: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+n2_dump=$(find "$REMOTE2/$(date -u +%Y/%m)" -name 'vaultaire_*.sql.gz' 2>/dev/null | wc -l | tr -d ' '); n2_rules=$(find "$REMOTE2" -name 'prometheus_*.tar.gz' | wc -l | tr -d ' '); n2_cfg=$(find "$REMOTE2" -name 'configs_*' | wc -l | tr -d ' ')
+check "4b: dump + rules on Blomp under YYYY/MM, configs never (dump=$n2_dump rules=$n2_rules configs=$n2_cfg)" [ "$n2_dump/$n2_rules/$n2_cfg" = "1/1/0" ]
+check "4b: still on Sync too" [ "$(find "$REMOTE" -name 'vaultaire_*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+check "4b: rclone saw the login from .env (unquoted) and the crypt remote over blompbk:<user>/_ops/backups ($(cut -d'|' -f1,3,4 "$TMP/rclone2-env"))" [ "$(cat "$TMP/rclone2-env")" = "ops@example.com|b=l=p|blompbk:ops@example.com/_ops/backups|crypt" ]
+check "4b: the Blomp password never appears in rclone's arguments" [ -z "$(grep -F 'b=l=p' "$TMP/rclone.log")" ]
+f=$METRICS/$OFFBOX2_METRIC.prom
+if [ -f "$f" ] && grep -qE "^$OFFBOX2_METRIC [0-9]{10}$" "$f"; then pass "4b: $OFFBOX2_METRIC written"; else fail "4b: $OFFBOX2_METRIC missing or malformed: $(cat "$f" 2>/dev/null)"; fi
+check "4b: logged" grep -q 'Off-box copy 2 completed' "$ROOT/logs/backup.log"
+check "4b: run timestamp written" [ -f "$METRICS/$RUN_METRIC.prom" ]
+
+# 4c. BLOMP_CONTAINER, when set, names the container.
+printf 'DB_PASSWORD=x\nBLOMP_USER=ops@example.com\nBLOMP_PASSWORD=pw\nBLOMP_CONTAINER=other\n' > "$ROOT/configs/.env"
+reset_run; run_backup >/dev/null || true
+check "4c: BLOMP_CONTAINER names the container ($(cut -d'|' -f3 "$TMP/rclone2-env"))" [ "$(cut -d'|' -f3 "$TMP/rclone2-env")" = "blompbk:other/_ops/backups" ]
+
+# 4d. Blomp unreachable: logged, no offbox2 timestamp, and the run still completes.
+printf 'DB_PASSWORD=x\nBLOMP_USER=ops@example.com\nBLOMP_PASSWORD=pw\n' > "$ROOT/configs/.env"
+reset_run; touch "$TMP/rclone2-fails"
+if run_backup 2>/dev/null; then pass "4d: a failing Blomp leg does not fail the run"; else fail "4d: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+check "4d: logged as OFFBOX2 FAILED with its stage" grep -q 'OFFBOX2 FAILED - stage=offbox2: upload of vaultaire_' "$ROOT/logs/backup.log"
+check "4d: no BACKUP FAILED line" [ -z "$(grep 'BACKUP FAILED' "$ROOT/logs/backup.log")" ]
+check "4d: no offbox2 timestamp" [ ! -e "$METRICS/$OFFBOX2_METRIC.prom" ]
+check "4d: Sync timestamp written" [ -f "$METRICS/vaultaire_backup_offbox_last_success_timestamp_seconds.prom" ]
+check "4d: run timestamp written" [ -f "$METRICS/$RUN_METRIC.prom" ]
+
+# 4e. .env without BLOMP_PASSWORD: logged, skipped, the run completes.
+printf 'DB_PASSWORD=x\nBLOMP_USER=ops@example.com\n' > "$ROOT/configs/.env"
+reset_run
+if run_backup; then pass "4e: run completes"; else fail "4e: run failed"; fi
+check "4e: logged" grep -q 'OFFBOX2 FAILED - stage=offbox2: BLOMP_PASSWORD not set' "$ROOT/logs/backup.log"
+
+# 4f. Blomp retention by the date in the name, like Sync's.
+printf 'DB_PASSWORD=x\nBLOMP_USER=ops@example.com\nBLOMP_PASSWORD=pw\n' > "$ROOT/configs/.env"
+reset_run; old=$(date -u -d '-40 days' +%Y%m%d); mkdir -p "$REMOTE2/2026/01"
+: > "$REMOTE2/2026/01/vaultaire_${old}_030001.sql.gz"
+run_backup >/dev/null || true
+check "4f: 40-day-old Blomp dump deleted by its name" [ ! -e "$REMOTE2/2026/01/vaultaire_${old}_030001.sql.gz" ]
+check "4f: the fresh one kept" [ "$(find "$REMOTE2" -name 'vaultaire_*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+
+# 4g. its alert rule.
+check "4g: BackupSecondOffboxStale rule on $OFFBOX2_METRIC" grep -q "alert: BackupSecondOffboxStale" "$RULES"
+check "4g: it covers absence" grep -q "absent($OFFBOX2_METRIC)" "$RULES"
+rm -f "$ROOT/configs/blomp-backup.env"
 
 exit $FAILED
