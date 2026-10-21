@@ -125,8 +125,10 @@ offbox_copy() {
 offbox2_setup() {
   local user pass container
   [ -r "$OFFBOX2_ENV" ] || { echo "$(date): OFFBOX2: $OFFBOX2_ENV not present, Blomp copy skipped" >> "$LOG"; return 1; }
-  user=$(env_value_from "$ENV_FILE" BLOMP_USER) && [ -n "$user" ] || { offbox2_failed "BLOMP_USER not set in $ENV_FILE"; return 1; }
-  pass=$(env_value_from "$ENV_FILE" BLOMP_PASSWORD) && [ -n "$pass" ] || { offbox2_failed "BLOMP_PASSWORD not set in $ENV_FILE"; return 1; }
+  user=$(env_value_from "$ENV_FILE" BLOMP_USER) || user=
+  [ -n "$user" ] || { offbox2_failed "BLOMP_USER not set in $ENV_FILE"; return 1; }
+  pass=$(env_value_from "$ENV_FILE" BLOMP_PASSWORD) || pass=
+  [ -n "$pass" ] || { offbox2_failed "BLOMP_PASSWORD not set in $ENV_FILE"; return 1; }
   container=$(env_value_from "$ENV_FILE" BLOMP_CONTAINER) || container=
   set -a
   # shellcheck source=/dev/null
