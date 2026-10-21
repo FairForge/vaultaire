@@ -267,3 +267,22 @@ func IsCleartextTransport(d Driver) bool {
 	c, ok := d.(CleartextTransportDeclarer)
 	return ok && c.CleartextTransport()
 }
+
+// NoHedgeDeclarer is an optional driver interface: a backend whose reads
+// must never be requested twice. The API's large GETs (the parallel ranged
+// read, LARGE_GET_HEDGE_AFTER, and the chunked read, CHUNK_GET_HEDGE_AFTER)
+// re-request a slow or failed part from the same backend; on the `sia`
+// driver every read spends the sia.storage account's per-host read budget,
+// so a hedge spends it twice and starves the read it was meant to rescue
+// (bench-results/SIA-S3D-2026-10.md, SIA-BENCH-3/5). Such a driver recovers
+// a broken body itself (drivers/sia_read.go). The driver-level hedge of
+// small idempotent calls (drivers/hedge.go, DRIVER_HEDGE_AFTER) is not this.
+type NoHedgeDeclarer interface {
+	NoHedge() bool
+}
+
+// IsNoHedge reports whether d declares that its reads are never hedged.
+func IsNoHedge(d Driver) bool {
+	n, ok := d.(NoHedgeDeclarer)
+	return ok && n.NoHedge()
+}

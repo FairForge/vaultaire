@@ -1,6 +1,8 @@
 package drivers
 
 import (
+	"os"
+
 	"go.uber.org/zap"
 )
 
@@ -49,5 +51,12 @@ func SiaConfigFromEnv(getenv func(string) string) (endpoint, bucket string) {
 // local s3d gateway. EnsureBucket creates `bucket` on first boot, like the
 // iDrive region drivers.
 func NewSiaDriver(accessKey, secretKey, endpoint, bucket string, logger *zap.Logger) (*IDriveDriver, error) {
-	return NewFixedBucketS3Driver("sia", accessKey, secretKey, endpoint, siaSigningRegion, bucket, logger)
+	d, err := NewFixedBucketS3Driver("sia", accessKey, secretKey, endpoint, siaSigningRegion, bucket, logger)
+	if err != nil {
+		return nil, err
+	}
+	// A cut body resumed, reads never hedged, optional pacing (sia_read.go:
+	// SIA_READ_RESUMES, SIA_READ_RESUME_MAX_WAIT, SIA_READ_BUDGET).
+	d.setSiaRead(siaReadConfigFromEnv(os.Getenv, logger))
+	return d, nil
 }

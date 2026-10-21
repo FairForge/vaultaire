@@ -97,4 +97,11 @@ var (
 	// backend allows an upload to hold its connection (Sync's bridges:
 	// SYNC_WEBDAV_SOURCE_MIN_RATE). Wraps ErrCallerAborted.
 	ErrSourceTooSlow = fmt.Errorf("%w: it arrived below the minimum rate", ErrCallerAborted)
+
+	// ErrObjectChanged: a read that had to be re-issued part way (the sia
+	// driver resuming a body s3d cut, drivers/sia_read.go) found another
+	// object at the key — a 412 to its If-Match, or another ETag. The body
+	// fails rather than splice two objects; it is the object's state, not
+	// the backend's health, so the breaker is never charged.
+	ErrObjectChanged = fmt.Errorf("the object changed during the read")
 )
