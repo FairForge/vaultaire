@@ -84,12 +84,9 @@ var exportExcludedTables = map[string]string{
 	"retired_blobs": "addresses of displaced object blobs awaiting deletion (WP-R2-1): storage bookkeeping, not the customer's data; the objects themselves are in `objects`",
 	// scaffolding with no writer in the product (D-12)
 	"artifacts":                    "no writer (D-12 scaffolding)",
-	"billing_charges":              "no writer (D-12 scaffolding)",
 	"billing_credits":              "no writer (R10-14)",
 	"billing_policies":             "no writer (D-12 scaffolding)",
 	"invoices":                     "no writer (R10-14)",
-	"subscriptions":                "no writer (R10-14)",
-	"metered_usage_reports":        "no writer (D-12 scaffolding)",
 	"grace_periods":                "no writer (D-12 scaffolding)",
 	"upgrade_suggestions":          "no writer (D-12 scaffolding)",
 	"upgrade_triggers":             "no writer (D-12 scaffolding)",

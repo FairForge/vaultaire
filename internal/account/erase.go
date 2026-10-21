@@ -276,12 +276,6 @@ var Kept = []Rule{
 	// operatorTrailScrub in Deleted, before the DELETE of their own entries.)
 	{"audit_logs", `UPDATE audit_logs SET ip = NULL, user_agent = NULL WHERE tenant_id = $1`, ByTenant},
 	{"audit_logs_archive", `UPDATE audit_logs_archive SET ip = NULL, user_agent = NULL WHERE tenant_id = $1`, ByTenant},
-	// Financial ledgers (no PII beyond the tenant id; a dispute needs them).
-	{"billing_charges", "", ByTenant},
-	{"metered_usage_reports", "", ByTenant},
-	// No writer (R10-14), 0 rows on prod: nothing to erase, and the build
-	// that runs while migration 100 drops it must not name it (WP-PAY-7).
-	{"subscriptions", "", ByTenant},
 	// Abuse reports name the reporter and the URL, not the tenant's PII;
 	// the moderation record outlives the account.
 	{"abuse_reports", "", ByTenant},

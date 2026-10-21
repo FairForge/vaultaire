@@ -21,9 +21,8 @@
 --   (billing_charges deliberately NOT here — migration 019 already owns it)
 
 -- Deviations from the (deleted) Go DDL, on purpose:
---   * tenant_quotas gains spending_cap_cents (migration 043 adds it to
---     existing DBs, but 043 is skipped on a fresh DB where the table doesn't
---     exist yet — so it must be baked in here).
+--   * (tenant_quotas carried spending_cap_cents here until migration 100
+--     dropped it — WP-PAY-7 / F-29.)
 --   * every FK referencing tenant_quotas(tenant_id) is ON DELETE CASCADE so
 --     account deletion can remove the quota row without walking nine child
 --     tables; artifacts→tenants likewise.
@@ -39,7 +38,6 @@ CREATE TABLE IF NOT EXISTS tenant_quotas (
     bandwidth_limit_bytes BIGINT DEFAULT NULL,
     bandwidth_used_bytes BIGINT NOT NULL DEFAULT 0,
     tier VARCHAR(50) NOT NULL DEFAULT 'free',
-    spending_cap_cents BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

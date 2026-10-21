@@ -18,18 +18,5 @@ CREATE INDEX IF NOT EXISTS idx_stripe_events_type
 CREATE INDEX IF NOT EXISTS idx_stripe_events_tenant
     ON stripe_events (tenant_id);
 
--- Billing charges ledger (for usage-based billing records).
-CREATE TABLE IF NOT EXISTS billing_charges (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   VARCHAR(255) NOT NULL,
-    charge_type VARCHAR(50) NOT NULL,      -- "storage", "bandwidth", "overage", "addon"
-    amount_cents INTEGER NOT NULL,
-    description TEXT,
-    stripe_invoice_id VARCHAR(255),
-    period_start DATE,
-    period_end   DATE,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_billing_charges_tenant
-    ON billing_charges (tenant_id, created_at);
+-- (A billing_charges ledger was created here until migration 100 dropped it:
+-- no writer, D-12.)

@@ -47,9 +47,9 @@ func newTestTenant(t *testing.T, db *sql.DB, m *QuotaManager, prefix, tier strin
 	return tenantID
 }
 
-// The migrations own the quota schema: the table must exist with the column
-// the Go DDL used to lack (spending_cap_cents, read by billing/metered.go)
-// and the cascade FK from quota_usage_events.
+// The migrations own the quota schema: the table exists without the
+// spending cap migration 100 dropped (F-29: no metered tier) and with the
+// cascade FK from quota_usage_events.
 func TestQuotaSchema_OwnedByMigrations(t *testing.T) {
 	db := setupTestDB(t)
 
@@ -57,7 +57,7 @@ func TestQuotaSchema_OwnedByMigrations(t *testing.T) {
 	require.NoError(t, db.QueryRow(`
 		SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		               WHERE table_name = 'tenant_quotas' AND column_name = 'spending_cap_cents')`).Scan(&hasCap))
-	assert.True(t, hasCap, "tenant_quotas.spending_cap_cents must exist (migration 043/056)")
+	assert.False(t, hasCap, "tenant_quotas.spending_cap_cents is dropped (migration 100)")
 
 	var cascade bool
 	require.NoError(t, db.QueryRow(`

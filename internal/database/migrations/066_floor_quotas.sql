@@ -10,7 +10,8 @@
 --                         keep the single total quota in tenant_quotas.
 --   object_head_cache.floor  'standard' | 'vault', set from the storage class
 --                         resolved at write time (GLACIER/DEEP_ARCHIVE = vault).
---   tenants.house_period  'annual' | 'monthly' | '' — the Stripe period bought.
+--   (tenants.house_period was added here until migration 100 dropped it:
+--   the period bought is the entitlement's — WP-PAY-7.)
 --   tenant_quotas.pin_hot_bytes  pin-hot add-on (bytes that must never demote).
 --
 -- Idempotent — safe to re-run on every deploy.
@@ -28,7 +29,6 @@ CREATE TABLE IF NOT EXISTS tenant_floor_quotas (
 );
 
 ALTER TABLE object_head_cache ADD COLUMN IF NOT EXISTS floor TEXT NOT NULL DEFAULT 'standard';
-ALTER TABLE tenants ADD COLUMN IF NOT EXISTS house_period TEXT NOT NULL DEFAULT '';
 ALTER TABLE tenant_quotas ADD COLUMN IF NOT EXISTS pin_hot_bytes BIGINT NOT NULL DEFAULT 0;
 
 -- Backfill: objects already in the attic. An `archive` bucket resolves to

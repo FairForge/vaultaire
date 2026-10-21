@@ -15,11 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// WP-PAY-7: the tenants billing columns migration 100 drops have no reader
+// WP-PAY-7: what migration 100 drops — the tenants billing columns,
+// tenant_quotas.spending_cap_cents and D-12's three tables — has no reader
 // or writer left — no SQL literal of the product (non-test Go under
 // internal/ and cmd/) names one. Two-slot safety: the build that runs while
 // the drop migrates must not touch them.
-var droppedTenantsColumns = regexp.MustCompile(`\b(stripe_subscription_id|subscription_status|house_period|deletion_stripe_cancelled_at)\b`)
+var droppedTenantsColumns = regexp.MustCompile(`\b(stripe_subscription_id|subscription_status|house_period|deletion_stripe_cancelled_at|spending_cap_cents|billing_charges|metered_usage_reports)\b|\b(FROM|JOIN|INTO|UPDATE|TABLE)\s+subscriptions\b`)
 
 // droppedColumnsExempt are the files allowed to name them (none: the
 // pre-097 backfill went before the drop, so this build runs on either schema).

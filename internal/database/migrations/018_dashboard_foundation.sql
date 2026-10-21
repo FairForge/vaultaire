@@ -7,30 +7,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT '
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
 
 -- Add Stripe and subscription columns to tenants
+-- (stripe_subscription_id and subscription_status were added here until
+-- migration 100 dropped them — WP-PAY-7; the deploy re-runs every file, so
+-- the ADDs went with the drop.)
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR(255);
-ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR(255);
-ALTER TABLE tenants ADD COLUMN IF NOT EXISTS subscription_status VARCHAR(50) NOT NULL DEFAULT 'none';
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plan VARCHAR(50) NOT NULL DEFAULT 'starter';
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMP;
 
--- Subscriptions table: tracks Stripe subscription state changes
-CREATE TABLE IF NOT EXISTS subscriptions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id VARCHAR(255) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    stripe_subscription_id VARCHAR(255) NOT NULL,
-    stripe_customer_id VARCHAR(255) NOT NULL,
-    plan VARCHAR(50) NOT NULL DEFAULT 'starter',
-    status VARCHAR(50) NOT NULL DEFAULT 'active',
-    current_period_start TIMESTAMP,
-    current_period_end TIMESTAMP,
-    cancel_at TIMESTAMP,
-    canceled_at TIMESTAMP,
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_subscriptions_tenant_id ON subscriptions(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe_sub_id ON subscriptions(stripe_subscription_id);
+-- (The subscriptions table was created here until migration 100 dropped it:
+-- no writer, R10-14 / D-12.)
 
 -- Bandwidth usage daily: time-series per-tenant for billing and dashboard charts
 CREATE TABLE IF NOT EXISTS bandwidth_usage_daily (
