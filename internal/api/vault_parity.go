@@ -265,6 +265,10 @@ type VaultParity struct {
 	// parity shards of an unsealed object rebuild it, and they would cross
 	// the network readable.
 	AllowCleartextLegs bool
+	// AllowSiaLeg lets `sia` be the leg (SIA_ALLOW_UNSEALED). Off, it is
+	// skipped like a cleartext leg: the shards of an unsealed object would
+	// reach s3d and the Sia hosts readable.
+	AllowSiaLeg bool
 
 	// The reconcile pass: a shard folder no row names is erased once it has
 	// been a candidate on two passes OrphanGrace apart; at most
@@ -323,6 +327,9 @@ func (p *VaultParity) Leg() (string, engine.Driver, bool) {
 	for _, name := range legs {
 		if d, ok := p.eng.GetDriver(name); ok {
 			if engine.IsCleartextTransport(d) && !p.AllowCleartextLegs {
+				continue
+			}
+			if name == "sia" && !p.AllowSiaLeg {
 				continue
 			}
 			return name, d, true
