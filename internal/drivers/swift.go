@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- Swift's ETag of an object or piece IS the MD5 of its bytes; compared, never a security primitive
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -839,7 +839,7 @@ func (d *SwiftDriver) putOne(ctx context.Context, name, contentType string, req 
 	if contentType != "" {
 		req.header.Set("Content-Type", contentType)
 	}
-	h := md5.New()
+	h := md5.New() // #nosec G401 -- see the import
 	cr := &countingReader{Reader: req.body}
 	if req.body != nil {
 		req.body = io.TeeReader(cr, h)
@@ -902,7 +902,7 @@ func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, bo
 			segLen = size - total
 		}
 		segName := fmt.Sprintf("%s%08d", segPrefix, n)
-		h := md5.New()
+		h := md5.New() // #nosec G401 -- see the import
 		cr := &countingReader{Reader: io.LimitReader(br, segLen)}
 		req := swiftRequest{method: http.MethodPut, name: segName, body: io.TeeReader(cr, h), size: segLen}
 		if size < 0 {
