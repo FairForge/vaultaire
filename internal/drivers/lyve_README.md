@@ -1110,6 +1110,48 @@ nobody, and the CLI's own retry succeed in 0.6 s on deduplicated chunks —
 the floor came that evening.) Watch the counter after a deploy: a rising
 `lyve` series is the region stalling again.
 
+## HEAD 200 / GET 500: the read fault of 2026-10-21 (us-east-1)
+
+**What happened.** At 13:48:55–13:49:39 UTC prod's chunked GETs of three bench objects
+(tenant `tenant-14a623b16b3f7012`, bucket `tuning-bench`) failed on chunk blobs
+deduplicated onto Lyve a week earlier (`t-_global/_global/_chunks/<hash>` in
+`stored-us-east-1`, written 2026-10-12 and 10-14): every GET — the SDK's two attempts,
+then the engine's failover walk — answered `500 InternalError` ("We encountered an
+internal error, please try again"), six GETs of five distinct chunks, while HEAD kept
+answering 200 with the right size, ETag, one version id and `ServerSideEncryption:
+AES256`. A hand probe right after found 23 of the 778 referenced chunks in that state,
+whole or 100-byte range, retried twice, and ~4 % of random 1-byte GETs answering a
+transient 502. Request ids: `b29178525edc044b7147b4787223d17f`,
+`91dba094d95c1b6647eb45d0e1c0fa1d`, `b3f74cc2599fc2fec0670a923ec1bc60`,
+`7d898143ccbc027ba2f3011a6cd22715` (and the failover's: `17761e1abedb5095056307e1b1e02f65`,
+`2d8a63b3a3f900ecb5964c7d6bdc69fa`, `b5864f505f94629d08bac40c364fe763`,
+`f6a02f030f6c4d0bf85a1695394a362f`, `4e7186560c26df06c80b940b884ed58d`,
+`db5981f6a7aa7507e988e990f16b878f`, `a6434b0e1310d8431bb3fa79a8f3ad80`,
+`be057479d7aaa8c85ed5e727f3aaef07`, `a5ad53534311fe99b4e814530ecfd269`,
+`a54dcf4ea897b85990be7b8255b436be`, `5e6e2f7fcd13803bbedcb7ab12618336`,
+`9eaefbf312d39d5bf3619cff636d4cb9`, `09d8149df9b9a4686119b641dbba49d4`,
+`ebffeee2ab770ab0628087a04619ea30`).
+
+**What was found** (`bench-results/LYVE-READ-FAULT-2026-10-21.md`): at 14:21–14:35 UTC
+every one of the 34,041 chunk blobs on the account (70 GB), every other key of
+`stored-us-east-1` (2,072), `stored-us-west-1` (403) and `vaultaire-bench-2026` (1,610)
+read back end to end with MD5 = ETag, zero transient failures, with the root key and
+(for the named keys, through both endpoints) with prod's scoped key. Nothing is
+unreadable any more; the vendor's status pages (Seagate's and Wasabi's, who bought Lyve
+Cloud in April 2026) list no incident. **Verdict: a transient read-side fault of the
+region, not data loss, not the key, not SSE, not our GC** (every row live, refs intact,
+no delete anywhere near those keys since 2026-10-06). Fresh objects written at 14:40 UTC
+into `vbench-lyve-us-east-1` and `-us-west-1` read back clean at once (§ 3 of the note).
+
+**What it means.** A HEAD is not a read: `routing_truth` said "present" for every one of
+those blobs (it asked HEAD only) and would have said so through the fault. Since
+#837 the job reads the first 4 KiB of every sampled row and chunk and reports
+`unreadable` apart from `missing` (`RoutingTruthUnreadable`). A parity leg that holds
+shards it cannot serve is no copy: `docs/reviews/WP-VAULT-2.md` designs the scrub. For
+the verdict on Lyve as a leg and as a primary, and the Seagate ticket draft, see the
+note. Re-measure any day with `cmd/tools/blob-verify` (every blob of a prefix, full GET,
+MD5 vs ETag, every failure's request id).
+
 ## The lock guard (WP-R7-7, 2026-10-17)
 
 Lyve is the only general-purpose fail-over leg: a fail-over PUT lands in
