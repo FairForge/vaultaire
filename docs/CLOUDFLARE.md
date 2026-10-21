@@ -147,6 +147,38 @@ was torn down the same hour: Worker `vt-sia` + custom domain
   cached body. It is a no-op on `workers.dev`.
 - **wrangler errors on `delete` with the zone token.** It reports `User->Memberships->Read` missing. The script was deleted anyway (API 404 afterwards); check with `GET /workers/scripts/<name>/settings`.
 
+## Findings 2026-10-21 (Blomp behind Vaultaire, bench account, everything deleted after)
+
+Blomp (OpenStack Swift, `blomp` driver, #826) has no usable S3 of its own; through
+Vaultaire a `blomp`-tier bucket is plain S3, so the S3-source products now work on it.
+
+- **Sippy** with source `https://s3.stored.ge/blomp-bench` (path style): first read of
+  4 KiB / 64 MiB / 256 MiB pulled from Vaultaire→Blomp (1.8 s, 16.5 MB/s, 75 MB/s),
+  sha256 match, then served by R2. R2 → SLC reads stay slow (15–75 MB/s).
+- **Super Slurper** (`POST /accounts/{id}/slurper/jobs`) — two settings, neither a
+  Vaultaire bug:
+  1. the source `endpoint` must NAME THE BUCKET (`https://s3.stored.ge/blomp-bench/`):
+     given `https://s3.stored.ge/` Slurper treats the endpoint as the bucket's URL and
+     sends `GET /?list-type=2…`, which Vaultaire answers as ListBuckets → "Preconnectivity
+     failed, check source tokens". `pathStyle` is not an accepted field.
+  2. the target must NOT carry `"jurisdiction": "default"` — with it the target
+     pre-check fails ("check target tokens") even with a key that reads and writes the
+     bucket; without it it passes (`PUT …/slurper/{source,target}/connectivity-precheck`
+     test each side alone).
+  With both: 4 KiB and 64 MiB copied in < 1 min, MD5 match. The 256 MiB object never
+  came: Slurper opened an R2 multipart upload for it right after its HEAD (200 from us)
+  and asked Vaultaire for no range in 50 min (HAProxy shows none); the job sat `running`
+  2/3 until aborted (the multipart had to be aborted before the bucket could go). Not
+  diagnosed further — a Slurper-side stall on large objects from this source.
+- **A Worker reading Blomp directly** (plain HTTP on :8080 works from Workers):
+  cache hits 16–34 ms TTFB, up to 447 MB/s from SLC; misses inherit Blomp's 5–10 s
+  first-byte stalls. **Smart Placement** never moved the Worker (`local-SLC`,
+  `local-EWR`) and changed nothing.
+- **Presigned GET through `stored.ge`**: `cf-cache-status: DYNAMIC` (our
+  `private, no-cache`) — never cached, as the zone rules intend.
+- **rclone from Hostbrr NYC, 256 MiB**: through Cloudflare 12.6 MB/s up / 49 down,
+  direct `s3.stored.ge` 26.3 up / 36 down — uploads belong on the DNS-only S3 host.
+
 ## Open
 
 2FA on both logins and rotation of everything pasted on 2026-10-04; an **Email Sending: Edit** token + stored.ge onboarded for Email Sending (item 7 above); the R2 Data Access Logs loss-rate count (dashboard toggle, item 6); the `/admin` Access gate; R2 event notifications → Queue → `direct-uploads/complete` so direct uploads register themselves; Workflows around Vault restores; a load balancer once a second origin exists; Workers for Platforms when a customer Worker must run; the stale NS records.
