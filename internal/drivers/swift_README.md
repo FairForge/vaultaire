@@ -14,7 +14,7 @@ a boot Fatal), never a fall-over destination.
 | Auth | Keystone **v2**, `https://authenticate.blomp.com/v2.0/tokens` (also `authenticate.ain.net`), tenant `storage`, user = the account e-mail, password. A token lives **1 hour** |
 | Storage URL | from the catalog: `http://swiftproxy.acs.ai.net:8080/v1/AUTH_<id>` — **plain HTTP**, no TLS on any port |
 | Containers | ONE, named after the e-mail. Account HEAD/listing 403, creating another container 403, container metadata POST 403 (so no TempURL key, no public ACL) |
-| Quota | `x-container-meta-quota-bytes` on a container HEAD: 40 GiB on the free account |
+| Quota | `x-container-meta-quota-bytes` on a container HEAD: 40 GiB on the free account. Enforced late: on 2026-10-21 it accepted 41.7 GiB (667 × 64 MiB at 273 MB/s) before answering `413 Upload exceeds quota.` — keep ~5 % headroom. The driver returns `engine.ErrBackendFull` for a 413/507 (`SwiftError.Unwrap`): the client gets 507 `InsufficientStorage` (never 503 "retry"), no breaker charge, alert `BackendStorageFull` |
 | Cluster | Swift 2.17.1; `max_file_size` 5 GiB, `max_object_name_length` 1024, listing limit 10,000; `slo`, `bulk_delete`, `ratelimit`, `swift3`, `tempurl` enabled |
 | Large objects | **SLO and DLO work with the pieces in the SAME container.** The community docs' "Permission denied" is rclone writing pieces to `<container>_segments`, which Blomp refuses |
 | S3 (swift3) | unusable: SigV4 → `SignatureDoesNotMatch`, and the bucket name has an `@` |

@@ -42,6 +42,9 @@ type fakeSwift struct {
 	// fail[method] = statuses answered (in order) before the call is served.
 	fail        map[string][]int
 	ignoreRange bool
+	// quotaBytes > 0: a PUT that would take the container past it answers
+	// 413 "Upload exceeds quota." (Swift's container_quotas; Blomp's 40 GiB).
+	quotaBytes int64
 	// putDelay holds every segment PUT this long; inflight/maxInflight count
 	// the segment PUTs being served at once.
 	putDelay    time.Duration
@@ -111,6 +114,24 @@ func (f *fakeSwift) names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// overQuota: would a PUT of n bytes at name take the container past
+// quotaBytes (the object it replaces is not counted; a manifest's bytes
+// are its pieces', already stored)?
+func (f *fakeSwift) overQuota(name string, n int64) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.quotaBytes <= 0 {
+		return false
+	}
+	var used int64
+	for k, o := range f.objects {
+		if k != name && o.manifest == nil {
+			used += int64(len(o.data))
+		}
+	}
+	return used+n > f.quotaBytes
 }
 
 func (f *fakeSwift) object(name string) (fakeSwiftObject, bool) {
@@ -265,6 +286,11 @@ func (f *fakeSwift) serveObject(w http.ResponseWriter, r *http.Request, name str
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if f.overQuota(name, int64(len(body))) {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = io.WriteString(w, "Upload exceeds quota.")
 			return
 		}
 		if mm == "put" {

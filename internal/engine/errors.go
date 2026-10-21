@@ -39,6 +39,15 @@ var (
 	ErrTimeout                = fmt.Errorf("operation timeout")
 	ErrAllBackendsUnavailable = fmt.Errorf("all backends unavailable")
 
+	// ErrBackendFull: the backend refused a write because its account or
+	// container is full (Blomp's Swift answered 413 "Upload exceeds quota"
+	// past its 40 GiB on 2026-10-21). Not a health failure — reads and
+	// deletes still work, so the breaker is never charged — and not the
+	// caller's to retry: FailoverManager.Execute stops on it (another
+	// backend would store the bytes off the tier the bucket promises) and
+	// the API answers 507 InsufficientStorage, never 503 "please retry".
+	ErrBackendFull = fmt.Errorf("backend storage full")
+
 	// ErrNoFailover marks a failure after which no further backend may be
 	// attempted: the request body is a non-rewindable stream that has already
 	// been partially consumed, so any retry would receive a drained reader —

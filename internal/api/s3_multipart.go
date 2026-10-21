@@ -1291,6 +1291,9 @@ func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request,
 		WriteS3ErrorWithContext(w, ErrSlowDown, r.URL.Path, generateRequestID(),
 			WithMessage("Please reduce your request rate: the server cannot take another large upload right now."),
 			WithSuggestion("Retry the complete in 30 seconds."))
+	case errors.Is(err, engine.ErrBackendFull):
+		writeBackendFull(w, r, s.logger, "CompleteMultipartUpload", err,
+			zap.String("bucket", bucket), zap.String("key", object))
 	case errors.Is(err, engine.ErrAllBackendsUnavailable):
 		// A 503 the client retries: Warn, no stack trace (Prompt 2b.3 D1.7).
 		s.logger.Warn("multipart complete: the backend is unavailable — 503",

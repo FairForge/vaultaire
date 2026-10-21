@@ -172,6 +172,18 @@ groups:
           summary: "Durable backend write failures (sustained)"
           description: "{{ $value | printf \"%.0f\" }} PUTs rejected in the last 10 minutes — the primary backend is effectively down for writes."
 
+      # A backend refused writes because its storage is full (Blomp's Swift
+      # 413 "Upload exceeds quota" past 40 GiB, prod 2026-10-21): never a
+      # breaker charge, so nothing else fires — and every write to that
+      # tier answers 507 until the account grows. Pages at once.
+      - alert: BackendStorageFull
+        expr: increase(vaultaire_engine_backend_full_total[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} is full — writes refused"
+          description: "{{ $value | printf \"%.0f\" }} write(s) to {{ $labels.backend }} were refused in 15 min because its account or container is full (clients get 507 InsufficientStorage). Free space or raise the plan; reads still work."
+
       # A breaker that stays open means the engine is routing around a
       # backend; usually accompanied by one of the above, but not always
       # (reads-only failures).

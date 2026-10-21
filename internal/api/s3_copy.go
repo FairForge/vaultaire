@@ -551,6 +551,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			w.Header().Set("Retry-After", "300")
 			WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 				WithSuggestion("This bucket's region is not enabled on this deployment."))
+		case errors.Is(err, engine.ErrBackendFull):
+			writeBackendFull(w, r, s.logger, "CopyObject", err,
+				zap.String("bucket", destBucket), zap.String("key", destKey))
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")
 			WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
