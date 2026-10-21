@@ -34,6 +34,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/idrive"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/sitestats"
 	"github.com/go-chi/chi/v5"
@@ -140,6 +141,9 @@ type Server struct {
 	// entitlementLapse is the entitlement_lapse job (WP-PAY-1,
 	// entitlement_lapse.go); nil without a database.
 	entitlementLapse *EntitlementLapseRunner
+	// backendCapacity is the backend_capacity job (WP-CAP-1,
+	// backend_capacity.go); nil without a database.
+	backendCapacity *BackendCapacityRunner
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -413,6 +417,23 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.payments = payments.NewRegistry(s.db, s.flags, grace, logger)
 	if s.entitlementLapse != nil {
 		s.entitlementLapse.Ready = s.payments
+	}
+
+	// The vendor capacity job (WP-CAP-1): what each backend holds by our
+	// tables, daily at 08:30 UTC, beside the operator's backend_plans row.
+	// The reseller key is read like the master key (credential, _FILE, env;
+	// set-but-unusable = a refused boot, never "vendor view off").
+	s.backendCapacity = NewBackendCapacityRunner(s.db, s.engine, logger)
+	if s.backendCapacity != nil {
+		key, err := idrive.LoadResellerKey(os.Getenv, os.ReadFile)
+		if err != nil {
+			logger.Fatal("iDrive reseller key: refusing to start", zap.Error(err))
+		}
+		if user := os.Getenv("IDRIVE_RESELLER_USER"); key != "" && user != "" {
+			s.backendCapacity.Reseller = idrive.NewResellerClient("", key)
+			s.backendCapacity.ResellerUser = user
+			logger.Info("iDrive reseller vendor view on", zap.String("user", user))
+		}
 	}
 
 	// Smart-tier demotion job (5.15.8): keeps ≤15% of a Standard tenant's
@@ -1095,6 +1116,7 @@ func (s *Server) registerComplianceRoutes() {
 		// payment, a paid_through / house adjustment, a refund — every
 		// call audited with the actor and a required reason.
 		s.registerAdminPaymentRoutes(r)
+		s.registerAdminBackendPlanRoutes(r)
 	})
 }
 

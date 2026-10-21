@@ -79,6 +79,9 @@ func (s *Server) registerJobs() {
 	if s.entitlementLapse != nil {
 		s.jobs.Register(s.entitlementLapse.spec())
 	}
+	if s.backendCapacity != nil {
+		s.jobs.Register(s.backendCapacity.spec())
+	}
 	if s.smartDemotion != nil {
 		// The job needs both backends. Without them (a local or CI build, a
 		// deployment with no archive) it is not a job of this process: it

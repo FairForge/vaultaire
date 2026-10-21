@@ -1,0 +1,131 @@
+# Vendor capacity alerts (WP-CAP-1 C, docs/IMPLEMENTATION_PLAN.md § WP-CAP).
+#
+# Why: the original iDrive reseller account died on 2026-09-07 because its
+# free year ended on 08-27 with no card, no renewal e-mail and nothing on
+# our side that knew a renewal date existed — 12 days unnoticed. These rules
+# read the backend_plans row (what we bought, when it renews, whether a card
+# is on file) against the daily backend_capacity job's sums (what our tables
+# say each backend holds) and the vendor's own meter (the iDrive reseller
+# API). The gauges are exported from the tables on scrape
+# (internal/api/metrics_capacity.go): no stored/vendor series before the
+# first run, no plan series without a row — BackendPlanUnknown fires from
+# exactly that absence.
+#
+# Install: see deploy/monitoring/README.md. Unit tests:
+# deploy/monitoring/tests/vaultaire-capacity_test.yml (promtool test rules).
+
+groups:
+  - name: vaultaire-capacity
+    rules:
+      - alert: BackendCapacity80
+        expr: >
+          (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
+          or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} is at 80% of its plan"
+          description: "The larger of our stored bytes and the vendor's own meter is at or past 80% of the plan's capacity_bytes. The owner's rule of record (plan § WP-CAP): buy the next block on a rising slope, otherwise ride the overage and right-size at renewal. GET /api/v1/admin/backends/{{ $labels.backend }}/plan; the sums are in job_runs.result of backend_capacity."
+
+      - alert: BackendCapacity90
+        expr: >
+          (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
+          or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} is at 90% of its plan"
+          description: "At 100% the vendor bills overage (iDrive: $5.12/TB-month, billed, never blocked) — nothing breaks, but the bill climbs. Buy the next block or move data."
+
+      - alert: BackendCapacityForecast30d
+        expr: >
+          predict_linear(sum by (backend) (vaultaire_backend_stored_bytes)[14d:1h], 30 * 24 * 3600)
+          >= on (backend) vaultaire_backend_plan_bytes
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} will outgrow its plan within ~30 days"
+          description: "A linear fit over the last 14 days of stored bytes crosses capacity_bytes within 30 days. Time to decide on the next block before the overage starts."
+
+      - alert: BackendEgressFree80
+        expr: >
+          vaultaire_backend_vendor_egress_month_bytes
+          >= on (backend) (0.8 * vaultaire_backend_egress_free_bytes)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} has used 80% of its free egress this month"
+          description: "The vendor's month-to-date downloads are at 80% of the free allowance (the plan row's egress_free_multiple x stored bytes; iDrive: 3x stored, then $0.01/GB). One benchmark run can spend it — keep benchmarks against iDrive small."
+
+      - alert: BackendPlanRenewal30d
+        expr: (vaultaire_backend_plan_term_end_timestamp_seconds - time()) < 30 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }}'s plan renews within 30 days"
+          description: "term_end is less than 30 days out. Check the card, the renewal intent and the right-sizing (the owner's rule of record in the plan § WP-CAP)."
+
+      - alert: BackendPlanRenewal14d
+        expr: (vaultaire_backend_plan_term_end_timestamp_seconds - time()) < 14 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }}'s plan renews within 14 days"
+          description: "term_end is less than 14 days out and the 30-day warning has been up for two weeks."
+
+      - alert: BackendPlanRenewal7d
+        expr: (vaultaire_backend_plan_term_end_timestamp_seconds - time()) < 7 * 86400
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }}'s plan renews within 7 days"
+          description: "The 2026-08-27 shape: the iDrive account lapsed with nothing watching and prod lost its primary for 12 days before anyone noticed. If this fires the renewal is nearly due (or already past — the value goes negative). Act today."
+
+      - alert: BackendPlanNoPayment
+        expr: >
+          ((vaultaire_backend_plan_term_end_timestamp_seconds - time()) < 30 * 86400)
+          and on (backend) (vaultaire_backend_plan_payment_on_file == 0)
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} renews within 30 days with NO payment on file"
+          description: "The plan row says payment_on_file = false inside the renewal window. Put a card on the vendor account, then PUT the plan row with payment_on_file = true."
+
+      - alert: BackendPlanUnknown
+        expr: >
+          vaultaire_backend_health{backend=~"idrive|lyve|geyser|wasabi|r2"}
+          unless on (backend) vaultaire_backend_plan_bytes
+        for: 6h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} is registered but has no plan row"
+          description: "A paid backend without a backend_plans row has no capacity, renewal or payment watch — the exact hole the 2026-09 iDrive lapse fell through. Enter it: PUT /api/v1/admin/backends/{{ $labels.backend }}/plan (F-31 names the five rows)."
+
+      - alert: BackendVendorDrift
+        expr: >
+          vaultaire_backend_vendor_used_bytes
+          > on (backend) (1.2 * sum by (backend) (vaultaire_backend_stored_bytes) + 1073741824)
+        for: 3d
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }}: the vendor holds 20% more than our tables say"
+          description: "vendor_used > 1.2 x our stored total + 1 GiB for three days: bytes the erasure sweep and chunk_orphans cannot see from inside — orphan blobs, another product on the account, or a unit misread (the run's note says whether the GB interpretation was checked). Compare job_runs.result of backend_capacity with the vendor console."
+
+      - alert: BackendCapacityStale
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name="backend_capacity"}) > 26 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "backend_capacity has not succeeded in 26 hours"
+          description: "The capacity sums and the vendor view are stale; every rule above is reading old numbers. GET /api/v1/admin/jobs shows the last outcome and error; run it now with POST /api/v1/admin/jobs/backend_capacity/run."

@@ -41,7 +41,7 @@ groups:
   - name: vaultaire-jobs
     rules:
       - alert: JobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"inventory|chunk_orphans|dedup_gc|retention|account_deletion|routing_truth|smart_demotion|entitlement_lapse"}) > 36 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"inventory|chunk_orphans|dedup_gc|retention|account_deletion|routing_truth|smart_demotion|entitlement_lapse|backend_capacity"}) > 36 * 3600
         for: 30m
         labels:
           severity: warning

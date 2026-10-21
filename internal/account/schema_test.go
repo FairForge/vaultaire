@@ -59,7 +59,9 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 
 	// Tables with no tenant/user column are not in the walk and need no
 	// rule: payment_provider_readiness (098) is infrastructure — when a
-	// payment provider was last up or down — not tenant data.
+	// payment provider was last up or down — not tenant data; backend_plans
+	// (099, WP-CAP-1) the same — what WE bought from a storage vendor and
+	// when it renews, keyed by backend, no customer in it.
 
 	// Every rule names a table that exists (a typo would silently skip).
 	exists := map[string]bool{}
