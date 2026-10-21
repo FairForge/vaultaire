@@ -63,6 +63,11 @@ type SwiftDriver struct {
 	// cleanups counts the background removals of a deleted large object's
 	// pieces (waitCleanups, for tests).
 	cleanups sync.WaitGroup
+	// hedgeAfter (DRIVER_HEDGE_AFTER, 0 = none) and fresh (keep-alives off):
+	// a HEAD, a listing page or a GET's headers with no answer by then is
+	// sent once more on a connection opened for it (swift_hedge.go).
+	hedgeAfter time.Duration
+	fresh      *http.Client
 
 	mu         sync.Mutex
 	token      string
@@ -275,9 +280,12 @@ func NewSwiftDriver(name string, cfg SwiftConfig, logger *zap.Logger) (*SwiftDri
 		}
 	}
 	InitTenantlessSeries(name)
+	initSwiftHedgeSeries(name)
 	return &SwiftDriver{name: name, cfg: cfg, logger: logger, now: time.Now, listPageSize: swiftListPage,
 		putBudget: semaphore.NewWeighted(cfg.PutBudget), segmentBackoff: swiftSegmentBackoff,
-		client: TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only())}, nil
+		client:     TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only()),
+		fresh:      TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only(), WithFreshConnections()),
+		hedgeAfter: driverHedgeAfterFromEnv(logger)}, nil
 }
 
 // Name is the registration name.
@@ -460,7 +468,7 @@ func (d *SwiftDriver) do(ctx context.Context, req swiftRequest) (*http.Response,
 		if err != nil {
 			return nil, err
 		}
-		resp, err := d.client.Do(hreq)
+		resp, err := d.roundTrip(ctx, req, hreq)
 		switch {
 		case err != nil:
 			swiftRequests.WithLabelValues(d.name, req.method, "transport").Inc()

@@ -47,7 +47,7 @@ const driverHedgeAfterDefault = 2 * time.Second
 var (
 	driverHedges = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_driver_hedges_total",
-		Help: "Small idempotent driver calls (head_bucket = the probe, head_object, list, delete) sent a second time on a fresh connection because the first had not answered after DRIVER_HEDGE_AFTER, by driver and op.",
+		Help: "Small idempotent driver calls (head_bucket = the probe, head_object, list, delete; get = a Swift GET's headers) sent a second time on a fresh connection because the first had not answered after DRIVER_HEDGE_AFTER, by driver and op.",
 	}, []string{"driver", "op"})
 	driverHedgesWon = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_driver_hedges_won_total",

@@ -135,7 +135,7 @@ var boundSites = map[string]string{
 	"TunedHTTPClient s3.go:NewS3Driver":                    "s3OpTimeouts (checked above)",
 	"TunedHTTPClient geyser.go:NewGeyserDriver":            "geyserOpTimeouts: tape 5 min for GET/PUT (checked above)",
 	"TunedHTTPClient webdav.go:NewWebDAVDriver":            "the Sync bridge exception: 5 min answer, its own watchdogs",
-	"TunedHTTPClient swift.go:NewSwiftDriver":              "Blomp/Swift: 25 s to the first byte after the body (ResponseHeaderTimeout); metadata 15 s via meta",
+	"TunedHTTPClient swift.go:NewSwiftDriver":              "Blomp/Swift: 25 s to the first byte after the body (ResponseHeaderTimeout); metadata 15 s via meta; the hedge's fresh client the same bound, keep-alives off",
 	"TunedHTTPClient lyve_console.go:NewLyveConsoleClient": "management plane (the root-key console probe), bounded by the probe's 45 s context",
 	// context.WithTimeout
 	"WithTimeout put_deadline.go:attempt":            "the per-size PUT deadline (s3PutDeadline)",
