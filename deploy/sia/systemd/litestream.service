@@ -1,0 +1,15 @@
+# Litestream replication of the s3d catalogues (deploy/sia/litestream.yml).
+[Unit]
+Description=Litestream replication of s3d.db catalogues
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/stored-sia/litestream.env
+ExecStart=%h/bin/litestream replicate -config %h/.config/stored-sia/litestream.yml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

@@ -17,10 +17,17 @@
 groups:
   - name: vaultaire-capacity
     rules:
+      # A backend whose vendor reports its own hard limit (Blomp's container
+      # quota: a full account refuses writes, 507) is watched against THAT
+      # by the BackendVendorQuota rules below, which need no plan row — so
+      # the plan rules leave it out instead of paging twice with the
+      # overage wording.
       - alert: BackendCapacity80
         expr: >
-          (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
-          or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
+          (
+            (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
+            or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.8 * vaultaire_backend_plan_bytes))
+          ) unless on (backend) vaultaire_backend_vendor_limit_bytes
         for: 1h
         labels:
           severity: warning
@@ -30,14 +37,43 @@ groups:
 
       - alert: BackendCapacity90
         expr: >
-          (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
-          or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
+          (
+            (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
+            or (vaultaire_backend_vendor_used_bytes >= on (backend) (0.9 * vaultaire_backend_plan_bytes))
+          ) unless on (backend) vaultaire_backend_vendor_limit_bytes
         for: 1h
         labels:
           severity: critical
         annotations:
           summary: "Backend {{ $labels.backend }} is at 90% of its plan"
           description: "At 100% the vendor bills overage (iDrive: $5.12/TB-month, billed, never blocked) — nothing breaks, but the bill climbs. Buy the next block or move data."
+
+      # The vendor's own hard limit (vaultaire_backend_vendor_limit_bytes,
+      # Blomp's container quota read from its HEAD by the daily
+      # backend_capacity job). At 100% writes are refused — 507
+      # InsufficientStorage and BackendStorageFull — so there is no overage
+      # to ride. Read once a day: a burst can still outrun it.
+      - alert: BackendVendorQuota80
+        expr: >
+          (vaultaire_backend_vendor_used_bytes >= on (backend) (0.8 * vaultaire_backend_vendor_limit_bytes))
+          or (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.8 * vaultaire_backend_vendor_limit_bytes))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Backend {{ $labels.backend }} is at 80% of the vendor's own quota"
+          description: "The vendor's meter (or our stored bytes) is at or past 80% of the hard limit the vendor itself reports. At 100% it refuses writes (507 InsufficientStorage). Buy a larger plan, free space, or stop placing new buckets there; the numbers are in job_runs.result of backend_capacity (vendor.{{ $labels.backend }})."
+
+      - alert: BackendVendorQuota90
+        expr: >
+          (vaultaire_backend_vendor_used_bytes >= on (backend) (0.9 * vaultaire_backend_vendor_limit_bytes))
+          or (sum by (backend) (vaultaire_backend_stored_bytes) >= on (backend) (0.9 * vaultaire_backend_vendor_limit_bytes))
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend {{ $labels.backend }} is at 90% of the vendor's own quota"
+          description: "At 100% the vendor refuses every write: customers of that tier get 507 InsufficientStorage. The vendor's counter lags deletes by minutes and lets a write in flight overshoot (Blomp took 41.7 GiB of 40) — act now, not at the wall."
 
       - alert: BackendCapacityForecast30d
         expr: >

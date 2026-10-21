@@ -37,12 +37,13 @@ var flagInfos = map[string]flagInfo{
 	"vault_parity":    {2, "The Vault parity second copy: the vault_parity job writes RS 4+4 parity shards of every vault-floor object to the parity leg (sync, else permafrost, else lyve — VAULT_PARITY_LEGS) and a read whose tape backend fails is rebuilt from them. Off = no shards are written and none are read."},
 	"sync_backend":    {2, "Lets this tenant's buckets with tier_preference 'sync' (operator-set, SQL only) store on the Sync.com WebDAV bridge. Per tenant only, never a global row: Sync's terms forbid reselling the service without its written consent — our own data, or a customer Sync agreed to in writing."},
 	"blomp_backend":   {2, "Lets this tenant's buckets with tier_preference 'blomp' (operator-set, SQL only) store on Blomp's Swift storage (one container, ~3 writes/s, plain HTTP). Writes are sealed with SSE-S3 unless BLOMP_ALLOW_UNSEALED is set (testing). Per tenant first."},
+	"sia_backend":     {2, "Lets this tenant's buckets with tier_preference 'sia' (operator-set, SQL only) store whole objects on Sia through the s3d gateway. Writes are sealed with SSE-S3 unless SIA_ALLOW_UNSEALED is set. Per tenant first."},
 	"parallel_get":    {2, "Large whole-object downloads (64 MiB and up) on iDrive/Wasabi are read as 8 parallel 16 MiB ranges with hedging behind the one client stream (2–4× a single backend connection). Off = one backend GET per client GET. Per tenant first, then global."},
 	"egress_throttle": {2, "The egress allowance as a rate cap: a tenant past its monthly allowance has GetObject and /cdn bodies paced (never billed). Off = nothing is slowed, the decision is only counted (vaultaire_egress_would_throttle_total). With the global row on, a tenant row with the flag off exempts that tenant."},
 }
 
 // flagOrder puts the launch levers first.
-var flagOrder = []string{"signups", "quota_checkout", "house_overview", "egress_throttle", "chunking", "smart_demotion", "vault_parity", "sync_backend", "blomp_backend", "parallel_get"}
+var flagOrder = []string{"signups", "quota_checkout", "house_overview", "egress_throttle", "chunking", "smart_demotion", "vault_parity", "sync_backend", "blomp_backend", "sia_backend", "parallel_get"}
 
 // FlagView is a resolved flag plus what the page says about it.
 type FlagView struct {

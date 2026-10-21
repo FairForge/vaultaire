@@ -183,6 +183,55 @@ func TestBackendCapacity_VendorFailureIsANote(t *testing.T) {
 	assert.Contains(t, v.Note, "unit unverified")
 }
 
+// usageDriver is a driver that reports its own usage (Blomp's container
+// HEAD shape): a fixed answer, or an error.
+type usageDriver struct {
+	engine.Driver
+	usage engine.VendorUsage
+	err   error
+}
+
+func (d *usageDriver) VendorUsage(context.Context) (engine.VendorUsage, error) { return d.usage, d.err }
+
+// Every registered driver that reports its own usage gets a vendor view —
+// bytes and limit, no egress meter; one that fails is a note on an ok run,
+// and a driver that does not report is not asked.
+func TestBackendCapacity_DriverVendorViews(t *testing.T) {
+	f := setupCapFixture(t)
+	good := "capvu-" + uuid.New().String()[:8]
+	bad := "capvf-" + uuid.New().String()[:8]
+	plain := "capvp-" + uuid.New().String()[:8]
+	eng := engine.NewEngine(nil, zap.NewNop(), nil)
+	local := drivers.NewLocalDriver(t.TempDir(), zap.NewNop())
+	eng.AddDriver(good, &usageDriver{Driver: local, usage: engine.VendorUsage{UsedBytes: 33 << 30, LimitBytes: 40 << 30}})
+	eng.AddDriver(bad, &usageDriver{Driver: local, err: fmt.Errorf("HEAD container: 503")})
+	eng.AddDriver(plain, local)
+	r := NewBackendCapacityRunner(f.db, eng, zap.NewNop())
+
+	res, err := r.RunOnce(context.Background())
+
+	require.NoError(t, err, "a driver's failed report is a note, never a failed run")
+	v, ok := res.Vendor[good]
+	require.True(t, ok)
+	assert.Equal(t, VendorView{UsedBytes: 33 << 30, LimitBytes: 40 << 30, EgressUnmetered: true, UnitChecked: true}, v)
+	assert.NotContains(t, res.Vendor, bad)
+	assert.NotContains(t, res.Vendor, plain, "a driver that reports nothing is not in the vendor view")
+	assert.Contains(t, res.summary(), bad+" vendor view failed: HEAD container: 503")
+	assert.Contains(t, res.Notes[0], "vendor view off", "the iDrive note is still first and still a note")
+
+	// The gauges: used and limit, no egress series for a meter that is not there.
+	jobName := "test_cap_vu_" + uuid.New().String()[:8]
+	raw, err := json.Marshal(res)
+	require.NoError(t, err)
+	_, err = f.db.Exec(`INSERT INTO job_runs (job, last_outcome, result) VALUES ($1, 'ok', $2)`, jobName, raw)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, jobName) })
+	series := collectCapacity(t, newCapacityCollector(f.db, jobName, zap.NewNop()))
+	assert.Equal(t, float64(33<<30), series[`vaultaire_backend_vendor_used_bytes{backend="`+good+`"}`])
+	assert.Equal(t, float64(40<<30), series[`vaultaire_backend_vendor_limit_bytes{backend="`+good+`"}`])
+	assert.NotContains(t, series, `vaultaire_backend_vendor_egress_month_bytes{backend="`+good+`"}`)
+}
+
 // The gauges are read from job_runs.result and backend_plans on scrape —
 // right after a fresh Server with no run in process memory (the R13 lesson).
 func TestBackendCapacity_GaugesReadFromJobRuns(t *testing.T) {

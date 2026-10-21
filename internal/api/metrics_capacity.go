@@ -24,7 +24,10 @@ var (
 		"Bytes our tables say the backend holds, by kind (objects, versions, chunks, multipart, parity, packs) — the last backend_capacity run, read from job_runs.result on scrape.",
 		[]string{"backend", "kind"}, nil)
 	backendVendorUsedDesc = prometheus.NewDesc("vaultaire_backend_vendor_used_bytes",
-		"Bytes the VENDOR's own API says the backend holds (iDrive reseller /users storage_used) — the last backend_capacity run.",
+		"Bytes the VENDOR's own API says the backend holds (iDrive reseller /users storage_used; a driver's own report — blomp's container HEAD) — the last backend_capacity run.",
+		[]string{"backend"}, nil)
+	backendVendorLimitDesc = prometheus.NewDesc("vaultaire_backend_vendor_limit_bytes",
+		"The most the VENDOR itself holds before it refuses a write (Blomp's container quota, from its HEAD) — the last backend_capacity run. No series where the vendor reports no limit.",
 		[]string{"backend"}, nil)
 	backendVendorEgressDesc = prometheus.NewDesc("vaultaire_backend_vendor_egress_month_bytes",
 		"Egress this UTC month to date by the vendor's own meter (iDrive reseller usage_stats downloads) — the last backend_capacity run.",
@@ -69,7 +72,7 @@ func newCapacityCollector(db *sql.DB, jobName string, logger *zap.Logger) *capac
 }
 
 func (c *capacityCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{backendStoredDesc, backendVendorUsedDesc, backendVendorEgressDesc,
+	for _, d := range []*prometheus.Desc{backendStoredDesc, backendVendorUsedDesc, backendVendorLimitDesc, backendVendorEgressDesc,
 		backendPlanBytesDesc, backendPlanTermEndDesc, backendPlanPaymentDesc, backendEgressFreeDesc} {
 		ch <- d
 	}
@@ -88,7 +91,12 @@ func (c *capacityCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for backend, v := range snap.vendor {
 		ch <- prometheus.MustNewConstMetric(backendVendorUsedDesc, prometheus.GaugeValue, float64(v.UsedBytes), backend)
-		ch <- prometheus.MustNewConstMetric(backendVendorEgressDesc, prometheus.GaugeValue, float64(v.EgressMonthBytes), backend)
+		if v.LimitBytes > 0 {
+			ch <- prometheus.MustNewConstMetric(backendVendorLimitDesc, prometheus.GaugeValue, float64(v.LimitBytes), backend)
+		}
+		if !v.EgressUnmetered {
+			ch <- prometheus.MustNewConstMetric(backendVendorEgressDesc, prometheus.GaugeValue, float64(v.EgressMonthBytes), backend)
+		}
 	}
 	for _, p := range snap.plans {
 		ch <- prometheus.MustNewConstMetric(backendPlanBytesDesc, prometheus.GaugeValue, float64(p.CapacityBytes), p.Backend)

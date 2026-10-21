@@ -458,6 +458,43 @@ func TestSwift_FullAccountIsBackendFull(t *testing.T) {
 	assert.Len(t, readAll(t, rc, err), 3000, "reads still work on a full account")
 }
 
+// The vendor view (the backend_capacity job): what the container HEAD says
+// it holds and its quota. Blomp answers the account HEAD 403, so the
+// container's counters are the meter.
+func TestSwift_VendorUsageFromTheContainerHead(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			var _ engine.VendorUsageReporter = tg.drv
+
+			u, err := tg.drv.VendorUsage(context.Background())
+
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, u.UsedBytes, int64(0))
+			if tg.live {
+				assert.Equal(t, int64(40<<30), u.LimitBytes, "Blomp's free account: 40 GiB quota on the container")
+				t.Logf("blomp container: %d bytes used of %d", u.UsedBytes, u.LimitBytes)
+			} else {
+				assert.Zero(t, u.LimitBytes, "no quota set = no limit reported")
+			}
+		})
+	}
+
+	// Fake only: bytes and quota as Swift reports them.
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	require.NoError(t, d.Put(swiftCtx("t1"), "b1", "k", bytes.NewReader(make([]byte, 700))))
+	f.quotaBytes = 4000
+	u, err := d.VendorUsage(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, engine.VendorUsage{UsedBytes: 700, LimitBytes: 4000}, u)
+
+	// A HEAD without the counter is an error, never "0 bytes used".
+	f.dropUsageHeaders = true
+	_, err = d.VendorUsage(context.Background())
+	assert.ErrorContains(t, err, "X-Container-Bytes-Used")
+}
+
 func TestSwift_StoreIDAndCleartext(t *testing.T) {
 	f := newFakeSwift(t)
 	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
@@ -733,4 +770,21 @@ func TestSwift_GetRangeInfoWhenTheRangeIsIgnored(t *testing.T) {
 	assert.Equal(t, []byte("3456"), readAll(t, rc, err))
 	assert.Equal(t, int64(10), info.Size)
 	assert.Equal(t, md5hex([]byte("0123456789")), info.ETag)
+}
+
+func TestSwift_PreferredRangeBytesIsTheSegmentSize(t *testing.T) {
+	// Arrange
+	cfg, ok, err := BlompConfigFromEnv(func(k string) string {
+		return map[string]string{"BLOMP_USER": "u@example.com", "BLOMP_PASSWORD": "pw", "BLOMP_SEGMENT_SIZE": "33554432"}[k]
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	drv, err := NewSwiftDriver("blomp", cfg, zap.NewNop())
+	require.NoError(t, err)
+
+	// Act
+	var sizer engine.RangePartSizer = drv
+
+	// Assert
+	assert.Equal(t, int64(32<<20), sizer.PreferredRangeBytes())
 }

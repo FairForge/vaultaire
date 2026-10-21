@@ -1,0 +1,7 @@
+[Unit]
+Description=Sia read canary (deploy/sia/sia-canary.py)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I %h/stored-sia/sia-canary.py
+TimeoutStartSec=1h

@@ -104,6 +104,24 @@ type PageLister interface {
 	ListPage(ctx context.Context, container, prefix, startAfter string, limit int) (objs []ListedObject, more bool, err error)
 }
 
+// VendorUsage is what a backend itself reports about its account: the
+// bytes it holds and the most it will take before it refuses a write
+// (LimitBytes 0 = it reports none).
+type VendorUsage struct {
+	UsedBytes  int64
+	LimitBytes int64
+}
+
+// VendorUsageReporter is an optional interface for drivers whose backend
+// answers what it holds with one cheap metadata call — the daily
+// backend_capacity job (internal/api) records it as the vendor view beside
+// our own sums. Today: the Swift driver (blomp: the container HEAD's
+// bytes-used and quota). The iDrive vendor view goes through the Reseller
+// API, not a driver.
+type VendorUsageReporter interface {
+	VendorUsage(ctx context.Context) (VendorUsage, error)
+}
+
 // RangeGetter is an optional interface for drivers that support byte-range
 // reads directly (avoiding full-object download + discard). Drivers that
 // implement this will be used for range GETs, dramatically improving download

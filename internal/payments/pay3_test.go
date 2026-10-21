@@ -342,8 +342,9 @@ func TestRefund_CountedByTheChargesProvider(t *testing.T) {
 	before := testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeSettled))
 	manualBefore := testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderManual, KindRefund, OutcomeSettled))
 
+	// (RP28-1: an operator records a Stripe refund under its re_ id.)
 	_, err := RecordRefund(ctx, f.db, Refund{TenantID: f.tenantID, PaymentID: chargeID,
-		AmountCents: 400, Actor: "admin-1", Reason: "partial refund"})
+		AmountCents: 400, ProviderRef: "re_rp243_" + f.tenantID, Actor: "admin-1", Reason: "partial refund"})
 	require.NoError(t, err)
 
 	assert.Equal(t, before+1, testutil.ToFloat64(paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeSettled)),

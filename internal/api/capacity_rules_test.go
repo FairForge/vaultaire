@@ -25,10 +25,12 @@ func TestCapacityRules_ParseAndNameExportedSeries(t *testing.T) {
 		rules[r.Alert] = struct{ expr, forDur, severity string }{r.Expr, r.For, r.Labels["severity"]}
 	}
 
-	// The eleven alerts and their severities: capacity at 90, the 7-day
-	// renewal (the 2026-08-27 shape) and a missing card page; the rest warn.
+	// The thirteen alerts and their severities: capacity at 90 (of the plan
+	// or of the vendor's own quota), the 7-day renewal (the 2026-08-27
+	// shape) and a missing card page; the rest warn.
 	for name, sev := range map[string]string{
 		"BackendCapacity80": "warning", "BackendCapacity90": "critical",
+		"BackendVendorQuota80": "warning", "BackendVendorQuota90": "critical",
 		"BackendCapacityForecast30d": "warning", "BackendEgressFree80": "warning",
 		"BackendPlanRenewal30d": "warning", "BackendPlanRenewal14d": "warning", "BackendPlanRenewal7d": "critical",
 		"BackendPlanNoPayment": "critical", "BackendPlanUnknown": "warning",
@@ -37,7 +39,7 @@ func TestCapacityRules_ParseAndNameExportedSeries(t *testing.T) {
 		require.Contains(t, rules, name)
 		assert.Equal(t, sev, rules[name].severity, name)
 	}
-	assert.Len(t, rules, 11, "every rule in the file is one the test names")
+	assert.Len(t, rules, 13, "every rule in the file is one the test names")
 
 	// Every metric an expression reads is one of the exported names — the
 	// capacity collector's (metrics_capacity.go), the backend probe's, or
@@ -45,6 +47,7 @@ func TestCapacityRules_ParseAndNameExportedSeries(t *testing.T) {
 	exported := map[string]bool{
 		"vaultaire_backend_stored_bytes":                    true,
 		"vaultaire_backend_vendor_used_bytes":               true,
+		"vaultaire_backend_vendor_limit_bytes":              true,
 		"vaultaire_backend_vendor_egress_month_bytes":       true,
 		"vaultaire_backend_plan_bytes":                      true,
 		"vaultaire_backend_plan_term_end_timestamp_seconds": true,
@@ -64,6 +67,13 @@ func TestCapacityRules_ParseAndNameExportedSeries(t *testing.T) {
 	assert.Contains(t, rules["BackendCapacity80"].expr, "0.8 * vaultaire_backend_plan_bytes")
 	assert.Contains(t, rules["BackendCapacity80"].expr, "vaultaire_backend_vendor_used_bytes",
 		"the larger of stored and vendor_used decides")
+	for _, a := range []string{"BackendCapacity80", "BackendCapacity90"} {
+		assert.Contains(t, rules[a].expr, "unless on (backend) vaultaire_backend_vendor_limit_bytes",
+			"a backend with its own hard quota is watched by BackendVendorQuota*, never paged twice")
+	}
+	assert.Contains(t, rules["BackendVendorQuota80"].expr, "0.8 * vaultaire_backend_vendor_limit_bytes")
+	assert.Contains(t, rules["BackendVendorQuota90"].expr, "0.9 * vaultaire_backend_vendor_limit_bytes")
+	assert.NotContains(t, rules["BackendVendorQuota90"].expr, "plan_bytes", "no plan row needed for a hard quota")
 	assert.Contains(t, rules["BackendCapacityForecast30d"].expr, "predict_linear")
 	assert.Contains(t, rules["BackendCapacityForecast30d"].expr, "[14d:1h]")
 	assert.Contains(t, rules["BackendEgressFree80"].expr, "0.8 * vaultaire_backend_egress_free_bytes")
@@ -90,7 +100,7 @@ func readRuleTestFile(t *testing.T) (string, error) {
 		return "", err
 	}
 	assert.Contains(t, string(raw), "vaultaire-capacity.yml")
-	for _, alert := range []string{"BackendCapacity80", "BackendPlanRenewal7d", "BackendPlanUnknown"} {
+	for _, alert := range []string{"BackendCapacity80", "BackendPlanRenewal7d", "BackendPlanUnknown", "BackendVendorQuota80"} {
 		assert.Contains(t, string(raw), alert, "the promtool test covers %s", alert)
 	}
 	return string(raw), nil

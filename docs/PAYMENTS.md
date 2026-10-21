@@ -410,30 +410,82 @@ handling (none exists — § 3.4).
   cancreateinvoice`, `btcpay.store.canviewinvoices`, `btcpay.store.
   canmodifyinvoices` (mark + refund). Never the server admin key.
 
+
+**Verified on a real BTCPay (the WP-PAY-4 lab, 2026-10-21 — BTCPay 2.4.5,
+NBXplorer 2.6.19, bitcoind 31.1 on regtest; 84 deliveries captured into
+`internal/payments/btcpay/testdata/`, every one's signature verified).**
+Where the lab and the text above differ, the lab wins:
+
+- **Signature**: exactly `BTCPay-Sig: sha256=<64 lowercase hex>` of
+  HMAC-SHA256(secret, the raw body); no timestamp header; bodies are
+  pretty-printed JSON — verify over the raw bytes.
+- **Dedup**: `originalDeliveryId` is **always** set — equal to `deliveryId`
+  on a first delivery, the original's id on a redelivery (`isRedelivery:
+  true`, same `timestamp`). The dedup key is `originalDeliveryId`
+  (`COALESCE` kept, harmless).
+- **Payment method id** is `BTC-CHAIN` (2.x), not `BTC`; a payment's `id`
+  is `<txid>-<vout>` (the ledger keeps the txid).
+- **Mark**: `POST /api/v1/stores/{storeId}/invoices/{id}/status` (the store
+  path — the key is store-scoped; `/api/v1/invoices/{id}/status` also
+  works); a transition not in `availableStatusesForManualMarking` is 422.
+- **No 404 for an unknown invoice**: `GET …/invoices/<unknown>` answers
+  **403 `missing-permission` (canviewinvoices)**, even to an unrestricted
+  key; a wrong key is 401. The handler reads that 403 as "no such invoice"
+  (200 + Warn); a key that really lost the permission is caught by the
+  readiness check below.
+- **The scoped key cannot read the store** (`GET /api/v1/stores/{s}` → 403,
+  `canviewstoresettings`): readiness reads `GET …/invoices?take=1`
+  (canviewinvoices) instead. `GET /api/v1/health` answers **200
+  `{"synchronized":false}`** while the node is down — the body decides.
+- **Refund** needs a **fourth** permission,
+  `btcpay.store.cancreatenonapprovedpullpayments` (the three above → 403);
+  it creates a pull payment and sends `InvoiceRefund {pullPaymentId}`. The
+  provider never calls it today (refunds are recorded by hand, § 7); the
+  owner adds the permission only to open refunds through the API.
+- **Event types not in the design**: `InvoiceExpiredPaidPartial` (right
+  after `InvoiceExpired{partiallyPaid}`), `InvoicePaidAfterExpiration` (a
+  late payment that covers the invoice), `InvoiceRefund`.
+- **`paidAmount`** (invoice, USD at the invoice rate) is the money input:
+  15.00 on a 1.5× payment, 5.00 on a half. The crypto `due` grows by a
+  network fee once a first partial payment arrived (`networkFeeMode
+  MultiplePaymentsOnly`), so "paid in full" and credits are computed from
+  `paidAmount`, never from `totalPaid ≥ due`.
+- **SSRF**: BTCPay 2.4 refuses to deliver to a private address
+  (`BTCPAY_SSRFEXCEPTIONS` lifts it) — prod's public URL is unaffected.
+
 ### 3.3 Invoice states → `paid_through`
 
 | BTCPay event (fetched status / flags) | Ledger row | Entitlement |
 |---|---|---|
 | `InvoiceCreated` | `pending` (already) | — |
-| `InvoiceReceivedPayment` (`afterExpiration=false`) | `processing` once `totalPaid ≥ due`, else stays `pending` with the partial recorded | — (no grant on an unconfirmed payment) |
+| `InvoiceReceivedPayment` (`afterExpiration=false`) | `processing` once the fetched invoice is `Processing` (BTCPay's own "paid in full, unconfirmed"), else stays `pending` | — (no grant on an unconfirmed payment) |
 | `InvoiceProcessing` (`overPaid` recorded) | `processing` | — |
 | **`InvoiceSettled`** (`manuallyMarked`, `overPaid` recorded) | `settled`, `settled_at`, `rate`, `crypto_amount`, `invoice_number` assigned | **Grant/Extend**: `paid_through = GREATEST(paid_through, now()) + period`; `provider = 'btcpay'`, `renewal = 'prepaid'`, `pending_provider` cleared; a resize applies `Order`; `overPaid` → `credit_cents` = the excess at the invoice rate (§ 3.4) |
 | `InvoiceExpired` (`partiallyPaid=false`) | `expired` | — (nothing was paid; the customer may start again — a new invoice at a new rate) |
 | `InvoiceExpired` (`partiallyPaid=true`) | `expired_partial`, `credit_cents` = what arrived at the invoice rate | — ; e-mail: "we received $X of $Y; it is a credit on your next invoice, or ask for a refund" (§ 3.4) |
-| `InvoiceReceivedPayment` with `afterExpiration=true` ("paid late") | the payment recorded on the expired row | **automation**: when the fetched `totalPaid ≥ due` (at the then-rate), we `POST …/status Settled` (audit `billing.invoice_marked`, reason `paid_late_in_full`) → BTCPay sends `InvoiceSettled (manuallyMarked)` → the grant above. Less than due → credit, as a partial |
+| `InvoiceReceivedPayment` with `afterExpiration=true` ("paid late") | the payment recorded on the expired row | **automation**: when the fetched `paidAmount ≥ amount` (the lab: the fetched invoice is `Expired/PaidLate`; departure: the crypto amount at the invoice's rate, not a then-rate — BTCPay records none), we `POST …/status Settled` (audit `billing.invoice_marked`, reason `paid_late_in_full`) → BTCPay sends `InvoiceSettled (manuallyMarked)` → the grant above. Less than due → credit, as a partial |
 | `InvoiceInvalid` (`manuallyMarked`, or the monitoring window of 24 h passed without confirmation: a double-spend, an RBF replacement, a dropped transaction) | `invalid` | — ; if a grant had been made from this invoice (impossible in the table above: we grant on `Settled` only) nothing to undo |
+| **Lab:** `InvoiceSettled` with `manuallyMarked` and `paidAmount` < `amount` (an operator marked an UNPAID invoice Settled — BTCPay sends it with `paidAmount` 0) | unchanged | **no grant**, an Error line (an operator who means it records a manual payment) |
+| **Lab:** a double spend / RBF replacement **before** confirmation | the invoice silently returns `Processing → New` (no event), then `InvoiceExpired{partiallyPaid:false}` → `expired` | — (it never becomes `Invalid`: Processing is not monotonic, nothing acts on it) |
+| **Lab:** `InvoiceInvalid` after a hand-marked `Settled` (an operator's act) | stays `settled` | the grant stands, a Warn; the operator adjusts by hand |
 | `InvoicePaymentSettled` | the `payments[]` entry marked confirmed | — |
 | Any event for an invoice our `payments` table does not know, or whose `metadata.tenant_id` ≠ the row's tenant | 200, Warn, counted `foreign` | — |
 
 **Confirmation policy** (`checkout.speedPolicy` per invoice): `MediumSpeed`
-(1 confirmation) for invoices under $200, `LowMediumSpeed` (2) at or above
-(the BTCPay `SpeedPolicy` enum also has `HighSpeed` 0-conf and `LowSpeed`
-6 — enum names from BTCPay's model; **verify in the lab, the stores OpenAPI
-template did not define them**). BTCPay waits for 1 confirmation on an RBF-
-flagged payment regardless. Lightning (later, § 3.6) is final at once.
+(1 confirmation) for invoices under $200, `LowMediumSpeed` (2) at or above.
+**Verified in the lab:** the enum is `HighSpeed` / `MediumSpeed` /
+`LowMediumSpeed` / `LowSpeed` (case-insensitive; an unknown name → 422;
+omitted = the store default, `MediumSpeed`), settling at **0 / 1 / 2 / 6**
+confirmations; `HighSpeed` waited for 1 confirmation on an RBF-signalling
+payment (bitcoind 31's default). Lightning (later, § 3.6) is final at once.
 
 **Reorg after `Settled`**: BTCPay does not revert a `Settled` invoice; a
 reorg deeper than the chosen confirmation count after settle is our loss.
+**Verified in the lab:** `invalidateblock` on the settling block, the
+payment double-spent and the new chain mined 3 blocks (the payment at −2
+confirmations, conflicted) — the invoice and the payment stay `Settled`,
+`paidAmount` 10.00, and **no webhook is sent**: the loss is invisible to
+the handler.
 At 1–2 confirmations this is a documented, accepted risk for payments of
 tens of dollars; the two-conf tier above $200 is the mitigation. The ledger
 keeps the txid, so an operator can audit a suspected case by hand.
@@ -796,6 +848,14 @@ does not pay anyone loses the **house** (quota) after grace, never a byte.
 | A real bitcoin payment landing in the owner's wallet | | mainnet, one invoice, the owner's own money, before the flag flips for anyone else |
 
 ## 9. Lab spike, honestly
+
+**Done 2026-10-21 (Stage 1a Prompt 24):** BTCPay 2.4.5 / NBXplorer 2.6.19 /
+bitcoind 31.1 on regtest in colima, the compose assembled by hand from
+btcpayserver-docker's fragments (`a561533`); every § 3.3 row driven with
+`bitcoin-cli`; the facts are in § 3.2's "Verified" block and the § 3.3
+rows marked **Lab**; the containers, volumes, images and the clone were
+deleted after (`docs/reviews/WP-P24.md`). The paragraph below is the
+planning session's, kept for the record.
 
 No BTCPay was run during this planning session: the Mac's Docker daemon
 (colima) was not running and the deliverable is the design. Every protocol

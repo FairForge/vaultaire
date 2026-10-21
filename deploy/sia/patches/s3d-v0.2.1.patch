@@ -1,0 +1,20 @@
+--- a/cmd/s3d/main.go
++++ b/cmd/s3d/main.go
+@@ -305,7 +305,16 @@
+ 		checkFatalError("failed to create SDK client", err)
+ 	}
+
+-	indexdSDK := sia.NewSDK(sdkClient, sia.WithUploadOptions(sdk.WithRedundancy(cfg.Sia.DataShards, cfg.Sia.ParityShards)))
++	sdkOpts := []sia.SDKOption{sia.WithUploadOptions(sdk.WithRedundancy(cfg.Sia.DataShards, cfg.Sia.ParityShards))}
++	if v := os.Getenv("S3D_DOWNLOAD_HOST_TIMEOUT"); v != "" {
++		d, err := time.ParseDuration(v)
++		if err != nil || d <= 0 {
++			checkFatalError("invalid S3D_DOWNLOAD_HOST_TIMEOUT", fmt.Errorf("%q: must be a positive Go duration: %v", v, err))
++		}
++		log.Info("download host timeout overridden", zap.Duration("timeout", d))
++		sdkOpts = append(sdkOpts, sia.WithDownloadOptions(sdk.WithDownloadHostTimeout(d)))
++	}
++	indexdSDK := sia.NewSDK(sdkClient, sdkOpts...)
+
+ 	backend, err := sia.New(ctx, indexdSDK, store, cfg.Directory,
+ 		sia.WithDiskUsageLimit(cfg.Sia.DiskUsageLimit),
