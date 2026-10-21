@@ -76,9 +76,14 @@ func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, 
 
 func queryRecentUsers(ctx context.Context, db *sql.DB, logger *zap.Logger) []recentUser {
 	rows, err := db.QueryContext(ctx, `
-		SELECT u.email, COALESCE(u.company, ''), COALESCE(t.plan, 'free'), u.created_at
+		SELECT u.email, COALESCE(u.company, ''),
+		       CASE WHEN e.tenant_id IS NOT NULL AND e.lapsed_at IS NULL THEN 'house'
+		            WHEN t.plan = 'house' THEN 'starter'
+		            ELSE COALESCE(t.plan, 'free') END,
+		       u.created_at
 		FROM users u
 		LEFT JOIN tenants t ON t.email = u.email
+		LEFT JOIN entitlements e ON e.tenant_id = t.id
 		ORDER BY u.created_at DESC
 		LIMIT 10
 	`)

@@ -146,7 +146,6 @@ var Deleted = []Rule{
 	{"billing_credits", `DELETE FROM billing_credits WHERE tenant_id = $1`, ByTenant}, // no writer (R10-14); cascades from tenant_quotas anyway
 	{"invoices", `DELETE FROM invoices WHERE tenant_id = $1`, ByTenant},               // no writer (R10-14); cascades from tenant_quotas anyway
 	{"tenant_quotas", `DELETE FROM tenant_quotas WHERE tenant_id = $1`, ByTenant},
-	{"subscriptions", `DELETE FROM subscriptions WHERE tenant_id = $1`, ByTenant}, // no writer (R10-14)
 
 	// --- the entitlement record (WP-PAY-1, 097) ---
 	// What the tenant bought goes with it. The payments ledger is an
@@ -280,6 +279,9 @@ var Kept = []Rule{
 	// Financial ledgers (no PII beyond the tenant id; a dispute needs them).
 	{"billing_charges", "", ByTenant},
 	{"metered_usage_reports", "", ByTenant},
+	// No writer (R10-14), 0 rows on prod: nothing to erase, and the build
+	// that runs while migration 100 drops it must not name it (WP-PAY-7).
+	{"subscriptions", "", ByTenant},
 	// Abuse reports name the reporter and the URL, not the tenant's PII;
 	// the moderation record outlives the account.
 	{"abuse_reports", "", ByTenant},

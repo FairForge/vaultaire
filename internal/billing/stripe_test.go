@@ -21,15 +21,9 @@ func TestGetCustomerID_NoDB(t *testing.T) {
 	assert.Contains(t, err.Error(), "no database")
 }
 
-func TestGetSubscription_NoDB(t *testing.T) {
+func TestCancel_NoDB(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
-	_, err := svc.GetSubscription(t.Context(), "tenant-1")
-	assert.Error(t, err)
-}
-
-func TestCancelSubscription_NoDB(t *testing.T) {
-	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
-	err := svc.CancelSubscription(t.Context(), "tenant-1")
+	err := svc.Cancel(t.Context(), "tenant-1")
 	assert.Error(t, err)
 }
 

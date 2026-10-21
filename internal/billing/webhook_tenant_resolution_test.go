@@ -40,7 +40,7 @@ func (f *houseFixture) eventRecorded(t *testing.T, suffix string) bool {
 func TestWebhook_UnknownCustomerIsAcknowledgedNotRetried(t *testing.T) {
 	f := setupHouseFixture(t)
 	cus := "cus_nobody_" + f.tenantID
-	planBefore, statusBefore, _, _ := f.tenantRow(t)
+	planBefore, stateBefore, _, _ := f.record(t)
 
 	for _, tc := range []struct {
 		suffix, typ string
@@ -58,8 +58,8 @@ func TestWebhook_UnknownCustomerIsAcknowledgedNotRetried(t *testing.T) {
 		assert.Equal(t, http.StatusOK, f.postCode(t, tc.suffix, tc.typ, tc.obj), tc.typ)
 		assert.True(t, f.eventRecorded(t, tc.suffix), "%s recorded so Stripe stops retrying", tc.typ)
 	}
-	plan, status, _, _ := f.tenantRow(t)
-	assert.Equal(t, planBefore+"/"+statusBefore, plan+"/"+status, "the fixture tenant was not touched")
+	plan, state, _, _ := f.record(t)
+	assert.Equal(t, planBefore+"/"+stateBefore, plan+"/"+state, "the fixture tenant was not touched")
 }
 
 func TestWebhook_CheckoutResolvesTenantFromClientReferenceID(t *testing.T) {

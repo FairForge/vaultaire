@@ -192,7 +192,7 @@ cookieless public-site statistics (`internal/sitestats` → `site_stats_daily`, 
 read back as a 30-day table (views, landing views, distinct visitors, beacon events, waitlist
 signups and tenants created per day), top-N tables (pages, referrers, countries, devices,
 utm_source, utm_campaign, events, waitlist by country) and the all-time funnel waitlist →
-accounts → with a bucket → with an object → paying (a granted entitlement, `payments.LiveHouseTenantsSQL` — WP-PAY-7).
+accounts → with a bucket → with an object → paying (a granted entitlement, `entitlements.lapsed_at IS NULL` — WP-PAY-7).
 Every literal is static so the R9 schema audit prepares it. Nil DB renders the empty page;
 no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixtures`
 (`make dash-shots`). Template: `templates/admin/stats.html`.

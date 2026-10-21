@@ -10,7 +10,6 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
-	"github.com/FairForge/vaultaire/internal/payments"
 	"go.uber.org/zap"
 )
 
@@ -262,7 +261,9 @@ func populateCosts(ctx context.Context, db *sql.DB, data map[string]any, logger 
 		agg.storageBytes += t.storageBytes
 		agg.costCents += storageCostCents
 
-		displayPlan := t.plan
+		// Every row is a granted house (queryTenantCostData): the record
+		// says so, whatever the plan label (WP-PAY-7).
+		displayPlan := houseActive.plan(t.plan)
 		if t.tier == "standard" || t.tier == "performance" {
 			displayPlan = t.tier
 		}
@@ -368,7 +369,7 @@ func queryTenantCostData(ctx context.Context, db *sql.DB, logger *zap.Logger) []
 			WHERE date >= date_trunc('month', NOW() AT TIME ZONE 'UTC')::date
 			GROUP BY tenant_id
 		) bw ON bw.tenant_id = t.id
-		WHERE t.id IN (`+payments.LiveHouseTenantsSQL+`)
+		WHERE EXISTS (SELECT 1 FROM entitlements e WHERE e.tenant_id = t.id AND e.lapsed_at IS NULL)
 		ORDER BY tq.storage_used_bytes DESC NULLS LAST`)
 	if err != nil {
 		logger.Debug("costs: query tenant data", zap.Error(err))

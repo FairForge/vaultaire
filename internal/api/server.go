@@ -613,9 +613,6 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		if hq := houseQuotas(s.quotaManager, s.db); hq != nil && s.webhookHandler != nil {
 			s.webhookHandler.SetHouseQuotas(hq)
 		}
-		if s.entitlementLapse != nil {
-			s.entitlementLapse.Stripe = s.stripe
-		}
 		if s.webhookHandler != nil {
 			// entitlement_lapse decides per tenant whether a terminal
 			// Stripe status clears or only stops the renewal.

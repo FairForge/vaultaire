@@ -113,57 +113,6 @@ func (s *StripeService) GetCustomerID(ctx context.Context, tenantID string) (str
 
 // --- Subscriptions ---
 
-// GetSubscription retrieves the current subscription for a tenant.
-func (s *StripeService) GetSubscription(ctx context.Context, tenantID string) (*stripe.Subscription, error) {
-	if s.db == nil {
-		return nil, fmt.Errorf("no database")
-	}
-
-	var subID sql.NullString
-	err := s.db.QueryRowContext(ctx,
-		`SELECT stripe_subscription_id FROM tenants WHERE id = $1`, tenantID).Scan(&subID)
-	if err != nil {
-		return nil, fmt.Errorf("get subscription id: %w", err)
-	}
-	if !subID.Valid || subID.String == "" {
-		return nil, nil // no subscription
-	}
-
-	sub, err := subscription.Get(subID.String, nil)
-	if err != nil {
-		return nil, fmt.Errorf("get stripe subscription: %w", err)
-	}
-	return sub, nil
-}
-
-// CancelSubscription cancels a tenant's current subscription immediately
-// (CancelRef on currentSubscription) and records the status on the tenant.
-func (s *StripeService) CancelSubscription(ctx context.Context, tenantID string) error {
-	if s.db == nil {
-		return fmt.Errorf("no database")
-	}
-
-	ref, err := s.currentSubscription(ctx, tenantID)
-	if err != nil {
-		return fmt.Errorf("get subscription id: %w", err)
-	}
-	if ref == "" {
-		return fmt.Errorf("no subscription for tenant %s", tenantID)
-	}
-	if err := s.cancelRef(ctx, tenantID, ref); err != nil {
-		return err
-	}
-
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE tenants SET subscription_status = 'canceled' WHERE id = $1`, tenantID)
-	if err != nil {
-		s.logger.Error("update subscription status after cancel",
-			zap.String("tenant", tenantID), zap.Error(err))
-	}
-
-	return nil
-}
-
 // cancelRef cancels subscription subID immediately (`subscription.Cancel` —
 // the DELETE, not cancel_at_period_end). Idempotent for the account-deletion
 // runner (WP-R10-3): the subscription is fetched first and one that is
@@ -252,27 +201,6 @@ func (s *StripeService) CreateBillingPortalSession(ctx context.Context, tenantID
 	}
 
 	return sess.URL, nil
-}
-
-// --- DB Persistence (called from webhook handler) ---
-
-// SaveSubscription persists subscription state to the tenants table.
-func (s *StripeService) SaveSubscription(ctx context.Context, tenantID, subscriptionID, status, plan string) error {
-	if s.db == nil {
-		return fmt.Errorf("no database")
-	}
-
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE tenants
-		 SET stripe_subscription_id = $1,
-		     subscription_status = $2,
-		     plan = $3
-		 WHERE id = $4`,
-		subscriptionID, status, plan, tenantID)
-	if err != nil {
-		return fmt.Errorf("save subscription: %w", err)
-	}
-	return nil
 }
 
 // LookupTenantByCustomer finds the tenant_id for a Stripe customer ID.

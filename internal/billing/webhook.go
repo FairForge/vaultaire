@@ -55,6 +55,8 @@ type WebhookHandler struct {
 	// subs overrides the subscription source (tests); nil = the Stripe API.
 	quotas HouseQuotas
 	subs   subscriptionFetcher
+	// refunds overrides the refund source of charge.refunded (tests).
+	refunds refundLister
 	// flags answers entitlement_lapse per tenant (nil = off).
 	flags payments.FlagSource
 	// receipts mails the receipt of a NEWLY settled invoice (nil = none).
@@ -281,6 +283,8 @@ func (h *WebhookHandler) handle(ctx context.Context, event stripe.Event) (string
 		return h.handleSubscriptionUpdated(ctx, event)
 	case "customer.subscription.deleted":
 		return h.handleSubscriptionDeleted(ctx, event)
+	case "charge.refunded":
+		return h.handleChargeRefunded(ctx, event)
 	default:
 		h.logger.Debug("unhandled webhook event", zap.String("type", string(event.Type)))
 	}
@@ -410,22 +414,12 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 		return tenantID, err
 	}
 
-	// Determine plan from checkout metadata or default to "standard".
-	plan := "standard"
-	if session.Metadata != nil {
-		if p, ok := session.Metadata["plan"]; ok {
-			plan = p
-		}
-	}
-
-	if err := h.stripe.SaveSubscription(ctx, tenantID, subscriptionID, "active", plan); err != nil {
-		return tenantID, fmt.Errorf("save subscription after checkout: %w", err)
-	}
-
-	h.logger.Info("subscription activated",
-		zap.String("tenant", tenantID),
-		zap.String("subscription", subscriptionID),
-		zap.String("plan", plan))
+	// Not a house: the pack checkout is gone (WP-PAY-0) and the entitlement
+	// record holds houses only, so nothing is applied (WP-PAY-7: the tenants
+	// subscription columns are dropped). Stripe bills it all the same — the
+	// operator is told.
+	h.logger.Warn("stripe webhook: checkout completed for a subscription that is no house — acknowledged, nothing applied",
+		zap.String("id", event.ID), zap.String("tenant", tenantID), zap.String("subscription", subscriptionID))
 	return tenantID, nil
 }
 
@@ -451,11 +445,6 @@ func (h *WebhookHandler) handlePaymentSucceeded(ctx context.Context, event strip
 		return tenantID, nil
 	}
 
-	// The subscription is active again after a successful payment — when it
-	// is the tenant's current one (RP11-1).
-	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "active"); err != nil {
-		return tenantID, err
-	}
 	// The ledger row, and the house extended to the subscription's period
 	// end (WP-PAY-1).
 	if err := h.recordInvoicePaid(ctx, event, tenantID, &inv); err != nil {
@@ -493,9 +482,6 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 	// past_due is the grace period: the house is kept (applyHouse grants
 	// for past_due) while Stripe's Smart Retries run; the dashboard's
 	// "after retries" setting then delivers canceled/unpaid, which clears it.
-	if err := h.writeInvoiceStatus(ctx, event, tenantID, &inv, "past_due"); err != nil {
-		return tenantID, err
-	}
 	if err := h.recordInvoiceFailed(ctx, tenantID, &inv); err != nil {
 		return tenantID, err
 	}
@@ -504,37 +490,6 @@ func (h *WebhookHandler) handlePaymentFailed(ctx context.Context, event stripe.E
 		zap.String("tenant", tenantID),
 		zap.String("invoice", inv.ID))
 	return tenantID, nil
-}
-
-// writeInvoiceStatus writes an invoice event's status onto the tenant when
-// the invoice's subscription is the tenant's current one (RP11-1): an
-// invoice of a deleted or replaced subscription, delivered late, must not
-// mark a starter tenant active or the current subscription past_due. An
-// invoice never adopts a subscription (checkout and the subscription events
-// do), and one with no subscription (a one-off invoice) writes nothing.
-func (h *WebhookHandler) writeInvoiceStatus(ctx context.Context, event stripe.Event, tenantID string, inv *stripe.Invoice, status string) error {
-	if h.stripe.db == nil {
-		return nil
-	}
-	subID := ""
-	if inv.Subscription != nil {
-		subID = inv.Subscription.ID
-	}
-	if subID == "" {
-		return nil
-	}
-	res, err := h.stripe.db.ExecContext(ctx,
-		`UPDATE tenants SET subscription_status = $1 WHERE id = $2 AND stripe_subscription_id = $3`,
-		status, tenantID, subID)
-	if err != nil {
-		return fmt.Errorf("mark tenant %s %s: %w", tenantID, status, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		h.logger.Info("invoice status not written: not the tenant's current subscription",
-			zap.String("id", event.ID), zap.String("tenant", tenantID),
-			zap.String("subscription", subID), zap.String("status", status))
-	}
-	return nil
 }
 
 // handleSubscriptionUpdated applies customer.subscription.created/updated
@@ -575,47 +530,14 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		return tenantID, fmt.Errorf("fetch subscription %s for %s: %w", payload.ID, event.Type, err)
 	}
 
-	status := string(sub.Status)
-
-	// Determine plan from subscription metadata if available.
-	plan := ""
-	if sub.Metadata != nil {
-		plan = sub.Metadata["plan"]
+	handled, err := h.applyHouse(ctx, tenantID, sub)
+	if !handled && err == nil {
+		// Not a house (a legacy pack): the record holds houses only and the
+		// tenants subscription columns are dropped (WP-PAY-7) — nothing to write.
+		h.logger.Info("subscription event for a subscription that is no house — nothing applied",
+			zap.String("id", event.ID), zap.String("tenant", tenantID),
+			zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
 	}
-
-	// The status (and plan) are the tenant's only for its current
-	// subscription (RP11-1b): a stale event of an old subscription is not
-	// written over the current one's. A tenant with none recorded adopts a
-	// subscription that is not over (a created delivered before
-	// checkout.session.completed); a canceled or incomplete_expired one is
-	// never adopted. A stale event writes neither status nor plan.
-	if h.stripe.db != nil {
-		adopt := sub.Status != stripe.SubscriptionStatusCanceled &&
-			sub.Status != stripe.SubscriptionStatusIncompleteExpired
-		res, execErr := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants
-			    SET subscription_status = $1,
-			        plan = CASE WHEN $2 = '' THEN plan ELSE $2 END,
-			        stripe_subscription_id = $3
-			  WHERE id = $4
-			    AND (stripe_subscription_id = $3
-			         OR ($5 AND (stripe_subscription_id IS NULL OR stripe_subscription_id = '')))`,
-			status, plan, sub.ID, tenantID, adopt)
-		if execErr != nil {
-			return tenantID, fmt.Errorf("save subscription status for tenant %s: %w", tenantID, execErr)
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			h.logger.Info("subscription status not written: not the tenant's current subscription",
-				zap.String("id", event.ID), zap.String("tenant", tenantID),
-				zap.String("subscription", sub.ID), zap.String("status", status))
-		} else {
-			h.logger.Info("subscription updated",
-				zap.String("tenant", tenantID),
-				zap.String("status", status))
-		}
-	}
-
-	_, err = h.applyHouse(ctx, tenantID, sub)
 	return tenantID, err
 }
 
@@ -670,15 +592,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		var granted payments.Granted
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			g, err := payments.GrantRecorded(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
-			if err != nil {
-				return err
-			}
 			granted = g
-			_, err = tx.ExecContext(ctx,
-				`UPDATE tenants
-				    SET stripe_subscription_id = $1, subscription_status = $2, plan = 'house', house_period = $3
-				  WHERE id = $4`,
-				sub.ID, string(sub.Status), string(order.Period), tenantID)
 			return err
 		}); errors.Is(err, payments.ErrInvalidOrder) {
 			h.houseInvalid(ctx, tenantID, sub, order, err)
@@ -707,11 +621,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			var stopped bool
 			if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 				var err error
-				if stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID); err != nil {
-					return err
-				}
-				_, err = tx.ExecContext(ctx,
-					`UPDATE tenants SET subscription_status = $1 WHERE id = $2`, string(sub.Status), tenantID)
+				stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID)
 				return err
 			}); err != nil {
 				return true, fmt.Errorf("stop renewal for tenant %s: %w", tenantID, err)
@@ -726,17 +636,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		var ended payments.Ended
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			var err error
-			if ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now()); err != nil {
-				return err
-			}
-			if ended.Kept {
-				_, err = tx.ExecContext(ctx,
-					`UPDATE tenants SET subscription_status = $1 WHERE id = $2`, string(sub.Status), tenantID)
-				return err
-			}
-			_, err = tx.ExecContext(ctx,
-				`UPDATE tenants SET subscription_status = $1, house_period = '' WHERE id = $2`,
-				string(sub.Status), tenantID)
+			ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now())
 			return err
 		}); err != nil {
 			return true, fmt.Errorf("clear house for tenant %s: %w", tenantID, err)
@@ -819,16 +719,18 @@ func (h *WebhookHandler) paidThrough(sub *stripe.Subscription) time.Time {
 }
 
 // isCurrentSubscription reports whether subID is the tenant's current
-// subscription: the entitlement row's provider_ref (a Stripe row), else
-// tenants.stripe_subscription_id for a tenant with no row (RP20-A3), or
-// the tenant has none recorded. A lookup error is returned, not treated as
+// subscription: the entitlement row's provider_ref (a Stripe row) and
+// nothing else (WP-PAY-7). A tenant with no Stripe row fails the guard
+// CLOSED — rows exist for every granted house since 097, so a clearing
+// event with no row to name it has nothing of ours to clear (the callers
+// ignore it with an Info line). A lookup error is returned, not treated as
 // "current" — clearing a house on a DB hiccup is the wrong default.
 func (h *WebhookHandler) isCurrentSubscription(ctx context.Context, tenantID, subID string) (bool, error) {
 	current, err := h.stripe.currentSubscription(ctx, tenantID)
 	if err != nil {
 		return false, fmt.Errorf("read current subscription for tenant %s: %w", tenantID, err)
 	}
-	return current == "" || current == subID, nil
+	return current != "" && current == subID, nil
 }
 
 // handleSubscriptionDeleted applies customer.subscription.deleted from the
@@ -857,34 +759,33 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 		return tenantID, nil
 	}
 
-	// A deleted subscription that is not the tenant's current one (an old
-	// pack, a replaced house) must not downgrade anything.
-	if h.stripe.db != nil {
-		current, err := h.isCurrentSubscription(ctx, tenantID, sub.ID)
-		if err != nil {
-			return tenantID, err
-		}
-		if !current {
-			h.logger.Info("ignoring deletion of a stale subscription",
-				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
-			return tenantID, nil
-		}
+	// A deleted subscription that is not the tenant's current one — the
+	// entitlement's provider_ref (an old pack, a replaced house, a tenant
+	// with no row: fails closed) — must not touch anything.
+	if h.stripe.db == nil {
+		return tenantID, nil
+	}
+	current, err := h.isCurrentSubscription(ctx, tenantID, sub.ID)
+	if err != nil {
+		return tenantID, err
+	}
+	if !current {
+		h.logger.Info("ignoring deletion of a subscription the entitlement does not name",
+			zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
+		return tenantID, nil
 	}
 
-	// entitlement_lapse ON, for a HOUSE: nobody renews it any more, the
-	// house runs to paid_through + grace and the lapse job clears it
-	// (WP-PAY-2). A non-house subscription (a legacy pack) keeps today's
-	// downgrade below, flag or no flag (RP22-2).
-	_, isHouse := h.stripe.HouseFromSubscription(&sub)
-	if isHouse && h.dateDecides(tenantID) && h.stripe.db != nil {
+	// The entitlement's subscription is gone: nobody renews the house.
+	// entitlement_lapse ON: the house runs to paid_through + grace and the
+	// lapse job clears it (WP-PAY-2). OFF: payments.EndByStatus — kept the
+	// same way while paid into the future (RP26-1), else cleared (data
+	// untouched, the row marked lapsed). The tenants row is not written
+	// (WP-PAY-7: the record is the entitlement).
+	if h.dateDecides(tenantID) {
 		var stopped bool
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			var err error
-			if stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID); err != nil {
-				return err
-			}
-			_, err = tx.ExecContext(ctx,
-				`UPDATE tenants SET subscription_status = 'canceled', stripe_subscription_id = NULL WHERE id = $1`, tenantID)
+			stopped, err = payments.StopRenewalChanged(ctx, tx, tenantID)
 			return err
 		}); err != nil {
 			return tenantID, fmt.Errorf("stop renewal on delete for tenant %s: %w", tenantID, err)
@@ -896,44 +797,20 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 			zap.String("tenant", tenantID))
 		return tenantID, nil
 	}
-
-	// A house: floor quotas go, data stays; the entitlement is marked lapsed
-	// and nobody renews it (WP-PAY-1) — unless it is paid into the future,
-	// which only stops the renewal (RP26-1).
-	if isHouse && h.quotas != nil && h.stripe.db != nil {
-		var ended payments.Ended
-		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			var err error
-			if ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now()); err != nil || !ended.Kept {
-				return err
-			}
-			_, err = tx.ExecContext(ctx,
-				`UPDATE tenants SET subscription_status = 'canceled', stripe_subscription_id = NULL WHERE id = $1`, tenantID)
-			return err
-		}); err != nil {
-			return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
-		}
-		if ended.Kept {
-			h.keptByDate(ctx, tenantID, &sub, "deleted", ended)
-			return tenantID, nil
-		}
+	var ended payments.Ended
+	if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
+		var err error
+		ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now())
+		return err
+	}); err != nil {
+		return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
 	}
-
-	// Downgrade to starter — clear subscription ID, reset plan.
-	if h.stripe.db != nil {
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants
-			 SET subscription_status = 'canceled',
-			     stripe_subscription_id = NULL,
-			     plan = 'starter',
-			     house_period = ''
-			 WHERE id = $1`, tenantID); err != nil {
-			return tenantID, fmt.Errorf("downgrade tenant %s after subscription delete: %w", tenantID, err)
-		}
+	if ended.Kept {
+		h.keptByDate(ctx, tenantID, &sub, "deleted", ended)
+		return tenantID, nil
 	}
-
-	h.logger.Info("subscription deleted — downgraded to starter",
-		zap.String("tenant", tenantID))
+	h.logger.Warn("subscription deleted — house cleared, back to the free tier, data untouched",
+		zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
 	return tenantID, nil
 }
 
