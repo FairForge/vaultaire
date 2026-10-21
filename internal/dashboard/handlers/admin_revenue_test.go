@@ -39,7 +39,7 @@ func testRevenueTemplate(t *testing.T) *template.Template {
 // the houses, the live count, then the month's new / lapsed / live at start.
 func revenueQueries(mock sqlmock.Sqlmock, houses *mockHouses, active, newN, churned, atStart int) {
 	houses.expect(mock)
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM \(SELECT tenant_id FROM entitlements WHERE lapsed_at IS NULL\)`).
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM entitlements WHERE lapsed_at IS NULL`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(active))
 	mock.ExpectQuery(`FROM entitlements e, b`).
 		WillReturnRows(sqlmock.NewRows([]string{"new", "lapsed", "at_start"}).AddRow(newN, churned, atStart))
