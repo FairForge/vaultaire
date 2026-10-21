@@ -269,3 +269,18 @@ func TestBuildBackendProbes_R2UsesSignedDriverCheck(t *testing.T) {
 		assert.NotEqual(t, "r2", c.name)
 	}
 }
+
+// Blomp gets the driver's authenticated check (a Keystone token, then a
+// HEAD of the account's container) gated on its password, never a dial.
+func TestBuildBackendProbes_BlompUsesAuthenticatedDriverCheck(t *testing.T) {
+	eng := &fakeDriverChecker{drivers: map[string]error{"blomp": nil}}
+	got := buildBackendProbes(envOf(map[string]string{"BLOMP_PASSWORD": "pw"}), eng)
+	c := findCheck(t, got, "blomp")
+	require.NotNil(t, c.probe)
+	require.NoError(t, c.probe(context.Background()))
+	assert.Equal(t, []string{"blomp"}, eng.calls)
+
+	for _, c := range buildBackendProbes(envOf(nil), &fakeDriverChecker{drivers: map[string]error{"blomp": nil}}) {
+		assert.NotEqual(t, "blomp", c.name, "blomp is probed only when BLOMP_PASSWORD is set")
+	}
+}

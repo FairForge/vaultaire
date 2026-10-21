@@ -449,6 +449,27 @@ func main() {
 		}
 	}
 
+	// 7c. Blomp's OpenStack Swift storage (internal/drivers/swift_README.md):
+	// target-only and strict like sync — placed on only for a bucket with
+	// tier_preference 'blomp' of a tenant with the blomp_backend flag. Its
+	// storage URL is plain HTTP: writes there are sealed unless
+	// BLOMP_ALLOW_UNSEALED (testing). The password is never logged.
+	blompCfg, blompOK, blompErr := drivers.BlompConfigFromEnv(os.Getenv)
+	switch {
+	case blompErr != nil:
+		logger.Error("failed to add Blomp driver: bad configuration", zap.Error(blompErr))
+	case blompOK:
+		blompDriver, err := drivers.NewSwiftDriver("blomp", blompCfg, logger)
+		if err != nil {
+			logger.Error("failed to add Blomp driver", zap.Error(err))
+		} else {
+			addDriver("blomp", blompDriver)
+			logger.Info("Blomp (Swift) driver added (target-only; blomp_backend flag)",
+				zap.String("user", blompCfg.User), zap.String("container", blompCfg.Container),
+				zap.Int64("segment_size", blompCfg.SegmentSize))
+		}
+	}
+
 	registerLabDrivers(eng, logger) // a -tags lab build only (lab_on.go)
 
 	// 8. Set primary backend: STORAGE_MODE, else the first configured of
@@ -526,6 +547,9 @@ func main() {
 func refusedPrimary(mode string, drv engine.Driver) error {
 	if mode == "sync" {
 		return fmt.Errorf("%q is a target-only backend (Sync.com: customer data only for flagged tenants)", mode)
+	}
+	if mode == "blomp" {
+		return fmt.Errorf("%q is a target-only backend (Blomp: one container, ~3 writes/s, plain HTTP — flagged tenants' blomp buckets only)", mode)
 	}
 	if drv != nil && engine.IsDeclaredTargetOnly(drv) {
 		return fmt.Errorf("%q declares itself target-only: its bucket has Object Lock enabled or a default retention, so every object written there would be undeletable until the retention lapsed (WP-R7-7; R7-16) — remove the lock or choose another primary", mode)

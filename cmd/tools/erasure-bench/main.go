@@ -654,6 +654,14 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 		d, err := drivers.NewMultiWebDAVDriver("sync", cfg, logger)
 		add("sync", d, err)
 	}
+	// Blomp (OpenStack Swift): BLOMP_USER + BLOMP_PASSWORD, the server's vars
+	// (internal/drivers/swift_README.md). Shards land under t-ecbench/.
+	if cfg, ok, err := drivers.BlompConfigFromEnv(os.Getenv); err != nil {
+		add("blomp", nil, err)
+	} else if ok {
+		d, err := drivers.NewSwiftDriver("blomp", cfg, logger)
+		add("blomp", d, err)
+	}
 	names := make([]string, 0, len(bes))
 	for n := range bes {
 		names = append(names, n)

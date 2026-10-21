@@ -260,6 +260,11 @@ type VaultParity struct {
 	// Legs is the parity-leg preference order (VAULT_PARITY_LEGS, else
 	// vaultParityLegs).
 	Legs []string
+	// AllowCleartextLegs lets a cleartext-transport driver (blomp) be the
+	// leg (BLOMP_ALLOW_UNSEALED). Off, such a leg is skipped: the four
+	// parity shards of an unsealed object rebuild it, and they would cross
+	// the network readable.
+	AllowCleartextLegs bool
 
 	// The reconcile pass: a shard folder no row names is erased once it has
 	// been a candidate on two passes OrphanGrace apart; at most
@@ -317,6 +322,9 @@ func (p *VaultParity) Leg() (string, engine.Driver, bool) {
 	}
 	for _, name := range legs {
 		if d, ok := p.eng.GetDriver(name); ok {
+			if engine.IsCleartextTransport(d) && !p.AllowCleartextLegs {
+				continue
+			}
 			return name, d, true
 		}
 	}

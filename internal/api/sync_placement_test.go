@@ -28,12 +28,12 @@ func syncPlacementEngine(t *testing.T) *engine.CoreEngine {
 	return eng
 }
 
-func syncGateFor(tenants ...string) func(string) bool {
+func syncGateFor(tenants ...string) tierGate {
 	on := map[string]bool{}
 	for _, t := range tenants {
 		on[t] = true
 	}
-	return func(tenantID string) bool { return on[tenantID] }
+	return func(class, tenantID string) bool { return class == "SYNC" && on[tenantID] }
 }
 
 func TestResolvePutStorageClass_SyncNeedsTheFlag(t *testing.T) {
@@ -112,8 +112,8 @@ func TestSyncBackendFlag_RegisteredDefaultOff(t *testing.T) {
 	assert.Equal(t, "sync_backend", flagSyncBackend)
 	assert.True(t, fl.Registered(flagSyncBackend))
 	assert.False(t, fl.Enabled(flagSyncBackend, "any-tenant"))
-	assert.False(t, syncPlacementGate(fl)("any-tenant"))
-	assert.Nil(t, syncPlacementGate(nil), "no flag service = no gate = never sync")
+	assert.False(t, tierPlacementGate(fl)("SYNC", "any-tenant"))
+	assert.Nil(t, tierPlacementGate(nil), "no flag service = no gate = never sync")
 }
 
 func TestSyncTier_NotSettableByCustomers(t *testing.T) {

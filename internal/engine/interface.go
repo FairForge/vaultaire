@@ -250,3 +250,19 @@ func IsDeclaredTargetOnly(d Driver) bool {
 	t, ok := d.(TargetOnlyDeclarer)
 	return ok && t.TargetOnly()
 }
+
+// CleartextTransportDeclarer is an optional driver interface: a backend
+// reached over plain HTTP (Blomp's Swift storage URL is http://…:8080).
+// Whatever is sent there crosses the network readable, so callers send it
+// only bytes that are already sealed under the tenant key hierarchy
+// (api.decidePlacement requires SSE-S3 for its class; the Vault parity job
+// never makes it a leg, since shards of an unsealed object rebuild it).
+type CleartextTransportDeclarer interface {
+	CleartextTransport() bool
+}
+
+// IsCleartextTransport reports whether d declares a cleartext transport.
+func IsCleartextTransport(d Driver) bool {
+	c, ok := d.(CleartextTransportDeclarer)
+	return ok && c.CleartextTransport()
+}

@@ -108,6 +108,7 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		{"r2", "R2_ACCESS_KEY"},
 		{"permafrost", "TENANT_1_ID"},
 		{"sync", "SYNC_WEBDAV_PASSWORD|SYNC_WEBDAV_PASSWORDS"},
+		{"blomp", "BLOMP_PASSWORD"},
 	} {
 		if !anyEnvSet(getenv, d.envKey) || !registered[d.name] {
 			continue

@@ -17,6 +17,7 @@ import (
 // without written consent, and the primary takes every tenant's objects.
 func TestRefusedPrimary(t *testing.T) {
 	assert.Error(t, refusedPrimary("sync", nil))
+	assert.Error(t, refusedPrimary("blomp", nil))
 	for _, ok := range []string{"local", "idrive", "wasabi", "quotaless", "s3", "geyser", "permafrost"} {
 		assert.NoError(t, refusedPrimary(ok, nil), ok)
 	}

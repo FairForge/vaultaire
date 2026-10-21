@@ -61,6 +61,14 @@ var storageClassToBackend = map[string]string{
 	// strict target, and with no `sync` driver the write is a 503
 	// (Prompt 2b.6 G1 — see ResolveStorageClass).
 	"SYNC": "sync",
+
+	// BLOMP is OUR internal class for Blomp's Swift storage (never sent by
+	// clients): set by api.resolvePutStorageClass only for a bucket whose
+	// tier_preference is `blomp` AND whose tenant has the `blomp_backend`
+	// flag. A strict target like SYNC (never the primary in its place), and
+	// written only sealed: Blomp's storage URL is plain HTTP
+	// (api.decidePlacement, drivers/swift_README.md).
+	"BLOMP": "blomp",
 }
 
 var backendToStorageClass = map[string]string{
@@ -75,6 +83,7 @@ var backendToStorageClass = map[string]string{
 	"s3":    "STANDARD",
 	"r2":    "STANDARD",
 	"sync":  "STANDARD",
+	"blomp": "STANDARD",
 }
 
 // ResolveStorageClass maps a class onto the backend that stores it. An

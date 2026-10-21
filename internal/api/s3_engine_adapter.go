@@ -47,14 +47,16 @@ const chunkContainer = engine.ChunkContainer
 
 // S3ToEngine adapts S3 requests to engine operations.
 type S3ToEngine struct {
-	engine            engine.Engine
-	db                *sql.DB
-	logger            *zap.Logger
-	notifySvc         *NotificationDispatcher
-	sseService        *crypto.SSEService
-	chunkEncSvc       *crypto.ChunkEncryptionService
-	gci               *crypto.GlobalContentIndex
-	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
+	engine     engine.Engine
+	db         *sql.DB
+	logger     *zap.Logger
+	notifySvc  *NotificationDispatcher
+	sseService *crypto.SSEService
+	// allowUnsealedCleartext: see Server.allowUnsealedCleartext.
+	allowUnsealedCleartext bool
+	chunkEncSvc            *crypto.ChunkEncryptionService
+	gci                    *crypto.GlobalContentIndex
+	chunkingThreshold      int64 // minimum object size for chunking (default 64 MB)
 
 	// chunkStoreConcurrency bounds the parallel chunk-store workers of one
 	// chunked PUT (default defaultChunkStoreConcurrency; env
@@ -1121,7 +1123,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// once, the bucket's encryption setting strictly (R8-03, R8-04).
 	resolvedStorageClass := a.storageClass
 	if !a.storageClassResolved {
-		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, syncPlacementGate(a.flags), t.ID, bucket,
+		resolvedStorageClass = resolvePutStorageClass(r.Context(), a.db, a.engine, tierPlacementGate(a.flags), t.ID, bucket,
 			r.Header.Get("x-amz-storage-class"))
 	}
 	placement := a.decidePlacement(r.Context(), placementRequest{
@@ -2155,6 +2157,9 @@ var tierPreferenceToStorageClass = map[string]string{
 	// → the Sync.com WebDAV bridge, and only for a tenant with the
 	// sync_backend flag (resolvePutStorageClass); operator-set only.
 	"sync": "SYNC",
+	// → Blomp's Swift storage, only for a tenant with the blomp_backend
+	// flag and only sealed (decidePlacement); operator-set only.
+	"blomp": "BLOMP",
 }
 
 func bucketTierStorageClass(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
@@ -2214,13 +2219,14 @@ func publicBucketStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine
 // (DEEP_ARCHIVE) but never hotter, and a resilient bucket never moves.
 //
 // A `sync` bucket tier resolves to SYNC (→ the Sync.com WebDAV bridge) only
-// when allowSync says the tenant has the `sync_backend` flag; otherwise the
-// bucket places as an `auto` one (Sync's terms: no customer data without its
-// written consent). nil allowSync = never.
-func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, allowSync func(tenantID string) bool, tenantID, bucket, header string) string {
+// when allowTier says the tenant has the `sync_backend` flag, a `blomp` one
+// to BLOMP only with `blomp_backend`; otherwise the bucket places as an
+// `auto` one (Sync's terms: no customer data without its written consent).
+// nil allowTier = never.
+func resolvePutStorageClass(ctx context.Context, db *sql.DB, eng engine.Engine, allowTier tierGate, tenantID, bucket, header string) string {
 	requested := clientStorageClass(header)
 	class := bucketTierStorageClass(ctx, db, tenantID, bucket)
-	if class == "SYNC" && (allowSync == nil || !allowSync(tenantID)) {
+	if (class == "SYNC" || class == "BLOMP") && (allowTier == nil || !allowTier(class, tenantID)) {
 		class = ""
 	}
 	if class != "" && class != "STANDARD" {
@@ -2262,7 +2268,7 @@ func clientStorageClass(header string) string {
 // must be addressable as one R2 key for the CDN / direct-serve path.
 func storageClassDisablesChunking(class string) bool {
 	switch class {
-	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC", "SYNC":
+	case "RESILIENT", "GLACIER", "DEEP_ARCHIVE", "PUBLIC", "SYNC", "BLOMP":
 		return true
 	}
 	return false
