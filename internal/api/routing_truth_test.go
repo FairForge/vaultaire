@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -37,12 +38,16 @@ import (
 // rtDriver is a backend whose Exists answers whatever the test says.
 type rtDriver struct {
 	exists func(ctx context.Context, container, artifact string) (bool, error)
+	get    func(ctx context.Context, container, artifact string) (io.ReadCloser, error) // nil = ten readable bytes
 	calls  atomic.Int32
 }
 
 func (d *rtDriver) Name() string { return "rt" }
-func (d *rtDriver) Get(context.Context, string, string) (io.ReadCloser, error) {
-	return nil, errors.New("rt: connection refused")
+func (d *rtDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	if d.get != nil {
+		return d.get(ctx, container, artifact)
+	}
+	return io.NopCloser(strings.NewReader("0123456789")), nil
 }
 func (d *rtDriver) Put(context.Context, string, string, io.Reader, ...engine.PutOption) error {
 	return nil
@@ -282,6 +287,9 @@ func TestRoutingTruth_Run_AnOpenBreakerSkipsTheBackend(t *testing.T) {
 	// Arrange: a backend whose breaker is open (five failures), with rows.
 	f := setupRoutingTruthFixture(t)
 	down := &rtDriver{exists: func(context.Context, string, string) (bool, error) { return false, nil }}
+	down.get = func(context.Context, string, string) (io.ReadCloser, error) {
+		return nil, errors.New("rt: connection refused")
+	}
 	name := "rt-down-" + uuid.New().String()[:8]
 	f.eng.AddDriver(name, down)
 	for i := 0; i < 5; i++ {

@@ -21,6 +21,12 @@
 #   vaultaire_routing_truth_last_run_rows{backend}             head rows naming the backend at that run
 #   vaultaire_routing_truth_last_run_verdicts{backend}         sampled rows it decided on (present + missing)
 #   vaultaire_routing_truth_last_run_errors{backend}           sampled rows the backend could not be asked about
+#   vaultaire_routing_truth_last_run_unreadable{backend}       sampled rows the backend HAS (HEAD 200) and could not
+#                                                              serve: the read of their first bytes failed (a 5xx, a
+#                                                              body cut after the status line). 2026-10-21: Lyve
+#                                                              us-east-1 answered HEAD 200 / GET 500 for ~45 s on
+#                                                              week-old chunk blobs; a HEAD-only job saw nothing
+#   vaultaire_routing_truth_last_run_chunks_unreadable         the same for the chunk blobs of the sampled chunked objects
 #   vaultaire_routing_truth_last_run_timestamp_seconds         when that run finished (from job_runs)
 #   vaultaire_routing_unknown_backend_rows{table,backend}      rows whose backend no driver is registered under,
 #                                                              per table (backend="" = NULL; the NULL count of the two
@@ -51,6 +57,31 @@ groups:
         annotations:
           summary: "Head rows on {{ $labels.backend }} point at bytes the backend does not have"
           description: "The routing_truth job's last run found {{ $value | humanizePercentage }} of its sample of {{ $labels.backend }} rows missing on the backend (a row with the backend's bytes gone, not a backend error — those count separately). HEAD answers 200 and GET 404 for those objects. GET /api/v1/admin/routing-truth has the counts; the Warn log line 'head row points at bytes the backend does not have' names tenant, bucket and key. The plan: docs/reviews/WP-R7-5.md."
+
+      # The backend has the bytes and cannot serve them: HEAD 200, GET 5xx
+      # (or a body cut after the status line). For the customer that object
+      # is down however healthy the probe, the breaker and the HEAD are.
+      # Lyve us-east-1, 2026-10-21 13:48 UTC: chunk blobs written a week
+      # before answered 500 InternalError to every GET for ~45 s, then read
+      # back clean (bench-results/LYVE-READ-FAULT-2026-10-21.md). One run's
+      # verdict is a point in time: re-run the job before a vendor ticket.
+      - alert: RoutingTruthUnreadable
+        expr: vaultaire_routing_truth_last_run_unreadable > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.backend }} has bytes it cannot serve: {{ $value | humanize }} sampled row(s) answered HEAD 200 and failed the read"
+          description: "The routing_truth job's last run read the first bytes of every sampled row {{ $labels.backend }} said it holds, and {{ $value | humanize }} of them failed (a 5xx, a cut body). The bytes are not known to be gone — the backend cannot serve them. The Warn line 'head row points at bytes the backend has but cannot serve' names tenant, bucket, key and the error. Re-run (POST /api/v1/admin/jobs/routing_truth/run): a transient vendor fault clears, a lasting one is a vendor ticket with those keys and request ids; cmd/tools/blob-verify reads every blob of a prefix end to end."
+
+      - alert: RoutingTruthChunksUnreadable
+        expr: vaultaire_routing_truth_last_run_chunks_unreadable > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | humanize }} chunk blob(s) of the sampled chunked objects answered HEAD 200 and failed the read"
+          description: "Every chunked object sharing those chunks is cut mid-body on GET (vaultaire_chunked_get_truncated_total{reason=\"fetch\"}). The Warn line 'chunk blob is at the one address and cannot be read' names the backend, key and hash. Re-run the job; a lasting fault is a vendor ticket (the chunk address is t-_global/_global/_chunks/<hash> on the recorded backend)."
 
       # A jump: today's run found a tenth more of a backend's sample missing
       # than yesterday's. A lost disk, a wiped bucket, a dead account (prod,

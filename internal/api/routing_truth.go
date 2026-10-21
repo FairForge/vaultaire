@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -75,14 +76,25 @@ const routingErrorCutoff = 10
 // routingChunkCap bounds the chunk HEADs of one run.
 const routingChunkCap = 2000
 
+// routingReadBytes is how much of an object the job READS after its HEAD
+// said present: the first bytes, through the driver's ranged read where it
+// has one (the S3-class drivers, Geyser), else a Get closed after them.
+// 2026-10-21, Lyve us-east-1: HEAD 200 with the right size and ETag for
+// chunk blobs whose every GET was a 500 InternalError for ~45 s — a HEAD
+// alone cannot see that, and the job said "present" for every one of them
+// (bench-results/LYVE-READ-FAULT-2026-10-21.md). A present row whose bytes
+// cannot be read is "unreadable": its own verdict, never present, never
+// missing.
+const routingReadBytes = 4096
+
 var (
 	routingTruthChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_routing_truth_checks_total",
-		Help: "Head rows the routing_truth job classified, by recorded backend and result: present, missing (bytes gone), changed (row changed mid-check), error (backend could not be asked), unknown_backend (no driver has the name; counted, never asked).",
+		Help: "Head rows the routing_truth job classified, by recorded backend and result: present (HEAD and a read of the first bytes), unreadable (HEAD 200, the read failed), missing (bytes gone), changed (row changed mid-check), error (backend could not be asked), unknown_backend (no driver has the name; counted, never asked).",
 	}, []string{"backend", "result"})
 	routingChunkChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_routing_truth_chunk_checks_total",
-		Help: "Chunks of sampled chunked objects the routing_truth job checked at the one address, by backend and result: present, legacy (found only under the uploader's prefix — run the chunk move), missing, error, unknown_backend.",
+		Help: "Chunks of sampled chunked objects the routing_truth job checked at the one address, by backend and result: present (HEAD and a read of the first bytes), unreadable (HEAD 200, the read failed), legacy (found only under the uploader's prefix — run the chunk move), missing, error, unknown_backend.",
 	}, []string{"backend", "result"})
 	routingUnknownReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_routing_unknown_backend_reads_total",
@@ -91,7 +103,7 @@ var (
 )
 
 // routingResults are the counter's result labels, created at 0 per backend.
-var routingResults = []string{"present", "missing", "changed", "error"}
+var routingResults = []string{"present", "unreadable", "missing", "changed", "error"}
 
 // RoutingTruthChecker is the boot check and the sampled job.
 type RoutingTruthChecker struct {
@@ -142,6 +154,7 @@ func NewRoutingTruthChecker(db *sql.DB, eng *engine.CoreEngine, gci *crypto.Glob
 // headRef names one whole-object head row.
 type headRef struct {
 	tenantID, bucket, key, etag string
+	size                        int64  // size_bytes: what the read probe may read (0 = nothing to read)
 	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
 	manifest                    string // a chunked row's manifest (WP-VM-1: its address, or the key)
 }
@@ -154,7 +167,11 @@ type BackendTruth struct {
 	Rows int64 `json:"rows"`
 	// Sampled is how many of them were asked.
 	Sampled int `json:"sampled"`
+	// Present: the backend has the bytes and served their first ones.
 	Present int `json:"present"`
+	// Unreadable: the backend says the bytes are there (HEAD 200) and
+	// could not serve them (the read failed; 2026-10-21 Lyve). A verdict.
+	Unreadable int `json:"unreadable"`
 	// Missing: the backend says the bytes are not there and the row is
 	// still exactly as read (same backend, same etag).
 	Missing int `json:"missing"`
@@ -165,8 +182,10 @@ type BackendTruth struct {
 	// deadline). Never a miss.
 	Errors int `json:"errors"`
 	// MissingRatio is Missing over the rows with a verdict (present +
-	// missing); 0 when none.
-	MissingRatio float64 `json:"missing_ratio"`
+	// unreadable + missing); 0 when none. UnreadableRatio the same for
+	// Unreadable.
+	MissingRatio    float64 `json:"missing_ratio"`
+	UnreadableRatio float64 `json:"unreadable_ratio"`
 	// Skipped says why the backend was not (fully) sampled: an open breaker,
 	// too many consecutive errors.
 	Skipped string `json:"skipped,omitempty"`
@@ -177,6 +196,8 @@ type ChunkTruth struct {
 	Objects int `json:"objects"`
 	Chunks  int `json:"chunks"`
 	Present int `json:"present"`
+	// Unreadable: at the one address by HEAD, and its read failed.
+	Unreadable int `json:"unreadable"`
 	// Legacy chunks are present — under the uploader's prefix, where blobs
 	// were written before WP-R8-7; the chunk move brings them over.
 	Legacy  int `json:"legacy"`
@@ -412,7 +433,7 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 	if bt.Rows > int64(n) {
 		offset = rand.Int64N(bt.Rows - int64(n) + 1) // #nosec G404 — a sampling window, not a secret
 	}
-	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, ''), COALESCE(storage_key, '') FROM object_head_cache
+	rows, err := c.db.QueryContext(ctx, `SELECT tenant_id, bucket, object_key, COALESCE(etag, ''), COALESCE(storage_key, ''), size_bytes FROM object_head_cache
 		WHERE backend_name = $1 AND NOT is_chunked AND ($2 = '' OR tenant_id = $2)
 		ORDER BY tenant_id, bucket, object_key OFFSET $3 LIMIT $4`, backend, c.scopeTenant, offset, n)
 	if err != nil {
@@ -421,7 +442,7 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 	var refs []headRef
 	for rows.Next() {
 		var h headRef
-		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag, &h.storageKey); err != nil {
+		if err := rows.Scan(&h.tenantID, &h.bucket, &h.key, &h.etag, &h.storageKey, &h.size); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("routing truth: scan %s: %w", backend, err)
 		}
@@ -453,6 +474,9 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 		case "present":
 			bt.Present++
 			consecutive = 0
+		case "unreadable":
+			bt.Unreadable++
+			consecutive = 0
 		case "missing":
 			bt.Missing++
 			consecutive = 0
@@ -464,8 +488,9 @@ func (c *RoutingTruthChecker) sampleBackend(ctx context.Context, backend string,
 			consecutive++
 		}
 	}
-	if verdicts := bt.Present + bt.Missing; verdicts > 0 {
+	if verdicts := bt.Present + bt.Unreadable + bt.Missing; verdicts > 0 {
 		bt.MissingRatio = float64(bt.Missing) / float64(verdicts)
+		bt.UnreadableRatio = float64(bt.Unreadable) / float64(verdicts)
 	}
 	return nil
 }
@@ -512,7 +537,21 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 		return "error"
 	}
 	if ok {
-		return "present"
+		verdict, rerr := readProbe(cctx, d, container, blob, h.size)
+		switch verdict {
+		case "present":
+			return verdict
+		case "unreadable":
+			c.logger.Warn("routing truth: head row points at bytes the backend has but cannot serve",
+				zap.String("backend", backend), zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key), zap.Error(rerr))
+			return verdict
+		case "error":
+			c.logger.Warn("routing truth: backend could not be read", zap.String("backend", backend),
+				zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key), zap.Error(rerr))
+			return verdict
+		}
+		// "missing": the read answered a miss right after the HEAD — the
+		// miss branch below tells a deleted/overwritten row from drift.
 	}
 	// A miss: is the row still what we read? An overwrite, a demotion, a
 	// delete or an erasure that landed meanwhile is not drift.
@@ -531,6 +570,56 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 	c.logger.Warn("routing truth: head row points at bytes the backend does not have",
 		zap.String("backend", backend), zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key))
 	return "missing"
+}
+
+// readProbe reads the first routingReadBytes of an object the backend has
+// just said it holds — through the driver's ranged read where it has one
+// (one request; a Geyser object on tape answers ErrArchived: present), else
+// a Get closed after those bytes. The driver is called directly: the probe
+// never charges a breaker. Verdicts: present (bytes served; an empty object
+// has none to read), unreadable (the backend answered the HEAD and not the
+// read: a 5xx, a body cut after the status line, an empty body), error (no
+// answer within the deadline), missing (a miss right after the HEAD — the
+// caller re-reads the row).
+func readProbe(ctx context.Context, d engine.Driver, container, blob string, size int64) (string, error) {
+	if size == 0 {
+		return "present", nil
+	}
+	n := int64(routingReadBytes)
+	if size > 0 && size < n {
+		n = size
+	}
+	var rc io.ReadCloser
+	var err error
+	if rg, ok := d.(engine.RangeGetter); ok {
+		rc, err = rg.GetRange(ctx, container, blob, 0, n)
+	} else {
+		rc, err = d.Get(ctx, container, blob)
+	}
+	if err != nil {
+		return classifyReadError(err), err
+	}
+	defer func() { _ = rc.Close() }()
+	got, rerr := io.CopyN(io.Discard, rc, n)
+	if rerr != nil && !errors.Is(rerr, io.EOF) {
+		return classifyReadError(rerr), rerr
+	}
+	if got == 0 {
+		return "unreadable", errors.New("empty body for an object of recorded size")
+	}
+	return "present", nil
+}
+
+func classifyReadError(err error) string {
+	switch {
+	case errors.Is(err, engine.ErrArchived):
+		return "present"
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, engine.ErrTimeout):
+		return "error"
+	case isObjectMissingErr(err):
+		return "missing"
+	}
+	return "unreadable"
 }
 
 // chunkedManifestsSQL lists every manifest a row names (tenant $1, the
@@ -646,6 +735,10 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 			case "present":
 				ct.Present++
 				consecutive = 0
+			case "unreadable":
+				ct.Unreadable++
+				consecutive = 0
+				c.logger.Warn("routing truth: chunk blob is at the one address and cannot be read", zap.String("backend", backend), zap.String("key", h.key), zap.String("hash", shortHash(ref.PlaintextHash)))
 			case "legacy":
 				ct.Present++
 				ct.Legacy++
@@ -681,7 +774,10 @@ func (c *RoutingTruthChecker) checkChunk(ctx context.Context, a chunkAddr) strin
 		return "error"
 	}
 	if present {
-		return "present"
+		verdict, _ := readProbe(engine.ChunkContext(cctx), d, chunkContainer, a.key, -1)
+		if verdict != "missing" {
+			return verdict
+		}
 	}
 	tenants, err := c.chunks.legacyTenants(cctx, a)
 	if err != nil {
@@ -712,7 +808,7 @@ func summarizeRoutingTruth(res *RoutingTruthResult) string {
 		if bt.Rows == 0 {
 			continue
 		}
-		p := fmt.Sprintf("%s: %d of %d rows sampled, %d present, %d missing", b, bt.Sampled, bt.Rows, bt.Present, bt.Missing)
+		p := fmt.Sprintf("%s: %d of %d rows sampled, %d present, %d missing, %d unreadable", b, bt.Sampled, bt.Rows, bt.Present, bt.Missing, bt.Unreadable)
 		if bt.Changed > 0 {
 			p += fmt.Sprintf(", %d changed", bt.Changed)
 		}
@@ -745,7 +841,7 @@ func summarizeRoutingTruth(res *RoutingTruthResult) string {
 		if ct.Legacy > 0 {
 			p += fmt.Sprintf(" (%d at a legacy address: run the chunk move)", ct.Legacy)
 		}
-		p += fmt.Sprintf(", %d missing", ct.Missing)
+		p += fmt.Sprintf(", %d missing, %d unreadable", ct.Missing, ct.Unreadable)
 		if ct.Errors > 0 {
 			p += fmt.Sprintf(", %d error", ct.Errors)
 		}
@@ -767,6 +863,7 @@ func summarizeRoutingTruth(res *RoutingTruthResult) string {
 type routingLastRun struct {
 	finishedAt time.Time
 	backends   map[string]BackendTruth
+	chunks     ChunkTruth
 }
 
 // lastRunGauges reads the last run from job_runs.result. Nothing in memory:
@@ -783,6 +880,7 @@ func (c *RoutingTruthChecker) lastRunGauges(ctx context.Context) routingLastRun 
 		return out
 	}
 	out.finishedAt = res.FinishedAt
+	out.chunks = res.Chunks
 	for b, bt := range res.Backends {
 		if bt != nil {
 			out.backends[b] = *bt
@@ -818,6 +916,7 @@ type routingCollector struct {
 	c *RoutingTruthChecker
 
 	unknownDesc, sharedDesc, ratioDesc, rowsDesc, verdictsDesc, errorsDesc, lastDesc *prometheus.Desc
+	unreadableDesc, chunksUnreadableDesc                                             *prometheus.Desc
 
 	mu      sync.Mutex
 	readAt  time.Time
@@ -841,6 +940,10 @@ func newRoutingCollector(c *RoutingTruthChecker) *routingCollector {
 			"The routing_truth job's last run: sampled rows it reached a verdict on (present + missing), per backend; 0 with rows > 0 means the backend could not be checked; read from job_runs.", []string{"backend"}, nil),
 		errorsDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_errors",
 			"The routing_truth job's last run: sampled rows the backend could not be asked about (driver error, open breaker, deadline), per backend; read from job_runs.", []string{"backend"}, nil),
+		unreadableDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_unreadable",
+			"The routing_truth job's last run: sampled head rows the backend has (HEAD 200) and could not serve (the read of their first bytes failed), per backend; read from job_runs.", []string{"backend"}, nil),
+		chunksUnreadableDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_chunks_unreadable",
+			"The routing_truth job's last run: chunk blobs at the one address (HEAD 200) whose read failed; read from job_runs.", nil, nil),
 		lastDesc: prometheus.NewDesc("vaultaire_routing_truth_last_run_timestamp_seconds",
 			"When the routing_truth job's last recorded run finished; read from job_runs.", nil, nil),
 	}
@@ -853,6 +956,8 @@ func (r *routingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- r.rowsDesc
 	ch <- r.verdictsDesc
 	ch <- r.errorsDesc
+	ch <- r.unreadableDesc
+	ch <- r.chunksUnreadableDesc
 	ch <- r.lastDesc
 }
 
@@ -905,11 +1010,13 @@ func (r *routingCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(r.lastDesc, prometheus.GaugeValue, float64(last.finishedAt.Unix()))
+	ch <- prometheus.MustNewConstMetric(r.chunksUnreadableDesc, prometheus.GaugeValue, float64(last.chunks.Unreadable))
 	for b, bt := range last.backends {
 		ch <- prometheus.MustNewConstMetric(r.ratioDesc, prometheus.GaugeValue, bt.MissingRatio, b)
 		ch <- prometheus.MustNewConstMetric(r.rowsDesc, prometheus.GaugeValue, float64(bt.Rows), b)
-		ch <- prometheus.MustNewConstMetric(r.verdictsDesc, prometheus.GaugeValue, float64(bt.Present+bt.Missing), b)
+		ch <- prometheus.MustNewConstMetric(r.verdictsDesc, prometheus.GaugeValue, float64(bt.Present+bt.Unreadable+bt.Missing), b)
 		ch <- prometheus.MustNewConstMetric(r.errorsDesc, prometheus.GaugeValue, float64(bt.Errors), b)
+		ch <- prometheus.MustNewConstMetric(r.unreadableDesc, prometheus.GaugeValue, float64(bt.Unreadable), b)
 	}
 }
 

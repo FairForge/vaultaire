@@ -193,6 +193,7 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	for name, sev := range map[string]string{
 		"RoutingTruthMissing": "warning", "RoutingTruthMissingJump": "critical", "RoutingTruthNoVerdict": "warning",
 		"RoutingUnknownBackendRows": "info", "RoutingSharedStore": "critical", "RoutingUnknownBackendReads": "warning",
+		"RoutingTruthUnreadable": "warning", "RoutingTruthChunksUnreadable": "warning",
 	} {
 		require.Contains(t, rules, name)
 		assert.Equal(t, sev, rules[name].severity, name)
@@ -203,6 +204,8 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	assert.Contains(t, rules["RoutingUnknownBackendRows"].expr, "vaultaire_routing_unknown_backend_rows")
 	assert.Contains(t, rules["RoutingSharedStore"].expr, "vaultaire_routing_shared_store_backends > 0")
 	assert.Contains(t, rules["RoutingUnknownBackendReads"].expr, "increase(vaultaire_routing_unknown_backend_reads_total[")
+	assert.Contains(t, rules["RoutingTruthUnreadable"].expr, "vaultaire_routing_truth_last_run_unreadable > 0", "HEAD 200 and the read failed (Lyve 2026-10-21)")
+	assert.Contains(t, rules["RoutingTruthChunksUnreadable"].expr, "vaultaire_routing_truth_last_run_chunks_unreadable > 0")
 
 	// The series at boot, before any run.
 	w := httptest.NewRecorder()
@@ -210,6 +213,8 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	body := w.Body.String()
 	for _, series := range []string{
 		`vaultaire_routing_truth_checks_total{backend="idrive",result="missing"} 0`,
+		`vaultaire_routing_truth_checks_total{backend="idrive",result="unreadable"} 0`,
+		`vaultaire_routing_truth_chunk_checks_total{backend="geyser",result="unreadable"} 0`,
 		`vaultaire_routing_truth_checks_total{backend="geyser",result="error"} 0`,
 		`vaultaire_routing_truth_chunk_checks_total{backend="idrive",result="legacy"} 0`,
 		`vaultaire_routing_shared_store_backends 0`,
@@ -221,6 +226,7 @@ func TestRoutingRuleFile_MatchesTheExportedSeries(t *testing.T) {
 	for _, series := range []string{"vaultaire_routing_truth_checks_total", "vaultaire_routing_truth_chunk_checks_total",
 		"vaultaire_routing_truth_last_run_missing_ratio", "vaultaire_routing_truth_last_run_rows",
 		"vaultaire_routing_truth_last_run_verdicts", "vaultaire_routing_truth_last_run_errors",
+		"vaultaire_routing_truth_last_run_unreadable", "vaultaire_routing_truth_last_run_chunks_unreadable",
 		"vaultaire_routing_unknown_backend_rows",
 		"vaultaire_routing_shared_store_backends", "vaultaire_routing_unknown_backend_reads_total"} {
 		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
