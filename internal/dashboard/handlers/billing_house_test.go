@@ -58,6 +58,7 @@ type fakeHouseBilling struct {
 	gotPurpose string
 	gotSuccess string
 	gotCancel  string
+	gotStartAt time.Time
 	resizeErr  error
 }
 
@@ -91,7 +92,7 @@ func (f *fakeHouseBilling) StartCheckout(_ context.Context, c payments.Checkout)
 	if f.live {
 		return "", payments.ErrLiveSubscription
 	}
-	f.gotOrder, f.gotPurpose, f.gotSuccess, f.gotCancel = c.Order, c.Purpose, c.ReturnURL, c.CancelURL
+	f.gotOrder, f.gotPurpose, f.gotSuccess, f.gotCancel, f.gotStartAt = c.Order, c.Purpose, c.ReturnURL, c.CancelURL, c.StartAt
 	return f.checkout, nil
 }
 func (f *fakeHouseBilling) Resize(_ context.Context, _ string, o payments.Order) (payments.ResizeOutcome, error) {

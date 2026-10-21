@@ -165,7 +165,8 @@ func TestHouseCheckoutParams(t *testing.T) {
 	svc := NewStripeService("sk_test_fake", nil, zap.NewNop())
 	svc.ConfigureHouse(testIDs, goodPrices())
 	params := svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Std: 6, Vault: 1, PinHot: 2, Period: PeriodMonthly},
-		payments.PurposeNew, "https://stored.ge/dashboard/billing?upgraded=1", "https://stored.ge/dashboard/billing")
+		payments.PurposeNew, time.Time{}, "https://stored.ge/dashboard/billing?upgraded=1", "https://stored.ge/dashboard/billing")
+	assert.Nil(t, params.SubscriptionData.TrialEnd, "no StartAt: the subscription starts now")
 
 	require.Len(t, params.LineItems, 3)
 	assert.Equal(t, "price_std_m", *params.LineItems[0].Price)
@@ -184,7 +185,7 @@ func TestHouseCheckoutParams(t *testing.T) {
 	assert.Equal(t, "https://stored.ge/dashboard/billing?upgraded=1", *params.SuccessURL)
 
 	// Attic-only: one line.
-	params = svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Vault: 2, Period: PeriodAnnual}, "", "https://x/ok", "https://x/no")
+	params = svc.houseCheckoutParams("cus_1", "tenant-1", HouseOrder{Vault: 2, Period: PeriodAnnual}, "", time.Time{}, "https://x/ok", "https://x/no")
 	require.Len(t, params.LineItems, 1)
 	assert.Equal(t, "price_vault_y", *params.LineItems[0].Price)
 }

@@ -625,7 +625,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		if s.entitlementLapse != nil {
 			s.entitlementLapse.Mailer = mailer
 		}
-		s.paymentReminders = NewPaymentRemindersRunner(s.db, logger, grace, mailer)
+		s.paymentReminders = NewPaymentRemindersRunner(s.db, logger, grace, mailer, s.flags)
 	}
 	s.bandwidthAlerter.SetEmailSender(s.emailSender)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {

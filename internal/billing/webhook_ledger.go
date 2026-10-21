@@ -88,6 +88,11 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		return nil
 	}
 	p := invoicePayment(tenantID, inv, inv.AmountPaid)
+	// A $0 invoice (the subscription_create invoice of a trialing
+	// subscription — a renew deferred with trial_end, RP24-1) is settled
+	// for the record but spends no gapless receipt number and mails no
+	// receipt: nothing was paid yet.
+	p.Unnumbered = inv.AmountPaid == 0
 
 	// The house the payment extends: the subscription as Stripe has it now.
 	// An invalid house (RP20-4) is not granted; the ledger row is settled
@@ -156,9 +161,10 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		outcome = payments.OutcomeReplayed
 	}
 	payments.CountPayment(payments.ProviderStripe, payments.KindCharge, outcome)
-	// The receipt of a NEWLY settled row (a replay sends nothing): after
-	// the commit, best effort — a mail that fails is one Warn, never a 500.
-	if settled.Newly && h.receipts != nil {
+	// The receipt of a NEWLY settled, NUMBERED row (a replay or a $0 trial
+	// invoice sends nothing): after the commit, best effort — a mail that
+	// fails is one Warn, never a 500.
+	if settled.Newly && settled.InvoiceNumber != "" && h.receipts != nil {
 		mctx, cancel := payments.Detached(ctx)
 		if err := h.receipts.SendReceipt(mctx, tenantID, settled.ID); err != nil {
 			h.logger.Warn("stripe webhook: receipt not sent", zap.String("tenant", tenantID),

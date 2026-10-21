@@ -110,7 +110,9 @@ func RecordManualPayment(ctx context.Context, db *sql.DB, p ManualPayment) (Manu
 			if err != nil {
 				return err
 			}
-			granted = Granted{Changed: true, PaidThrough: end, Order: order, Provider: ProviderManual, Renewal: RenewalPrepaid, Previous: &e}
+			// The audit reports what the row IS (RP24-3): a wire recorded on
+			// a Stripe `auto` row extends that row, it does not re-provider it.
+			granted = Granted{Changed: true, PaidThrough: end, Order: order, Provider: e.Provider, Renewal: e.Renewal, Previous: &e}
 		}
 		res.PaidThrough = end
 		o := order
@@ -156,9 +158,10 @@ type Adjustment struct {
 	Reason      string
 }
 
-// AdjustEntitlement is THE ONE WRITER THAT MAY SHORTEN A DATE (every grant
-// takes the later date; a refund shortens only through RecordRefund, which
-// calls here). It sets paid_through as given and/or the house's lines
+// AdjustEntitlement is one of the two writers that may SHORTEN a date
+// (every grant takes the later date; the other is RecordRefund, whose
+// proportional shortening is its own guarded UPDATE under the same
+// entitlement lock — RP24-4). It sets paid_through as given and/or the house's lines
 // (floors written in the same transaction); a lapsed row given a future
 // date is granted again. Audits billing.paid_through_adjusted.
 func AdjustEntitlement(ctx context.Context, db *sql.DB, a Adjustment) (Entitlement, error) {
@@ -264,11 +267,12 @@ func RecordRefund(ctx context.Context, db *sql.DB, r Refund) (RefundResult, erro
 		return res, errors.New("refund: the amount must be positive")
 	}
 	now := time.Now().UTC()
+	var provider string
 	err := InTx(ctx, db, func(tx *sql.Tx) error {
 		if err := Lock(ctx, tx, r.TenantID); err != nil {
 			return err
 		}
-		var provider, providerID string
+		var providerID string
 		var amount int64
 		var start, end sql.NullTime
 		err := tx.QueryRowContext(ctx, `
@@ -336,7 +340,9 @@ func RecordRefund(ctx context.Context, db *sql.DB, r Refund) (RefundResult, erro
 	if err != nil {
 		return res, err
 	}
-	CountPayment(ProviderManual, KindRefund, OutcomeSettled)
+	// Labelled by the CHARGE's provider (RP24-3): a refund of a Stripe
+	// charge recorded here by hand is still Stripe money.
+	CountPayment(provider, KindRefund, OutcomeSettled)
 	meta := map[string]any{"tenant": r.TenantID, "actor": r.Actor, "refund_of": r.PaymentID, "payment_id": res.PaymentID, "invoice_number": res.InvoiceNumber,
 		"amount_cents": r.AmountCents, "provider_ref": r.ProviderRef, "reason": r.Reason, "note": r.Note, "fully_refunded": res.FullyRefunded}
 	if r.ShortenPaidThrough {

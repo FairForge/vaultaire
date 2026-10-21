@@ -32,6 +32,13 @@ func sentHas(doc []byte, key string) bool {
 // job (internal/api/payment_reminders.go) asks DueReminders, sends, and
 // MarkReminderSent inside a transaction of its own.
 
+// ReminderLead is how far before paid_through the first reminder goes —
+// and the window inside which the billing page offers Renew by hand
+// (RP24-1: "Add a year" by card on a freshly paid row is WP-PAY-5's
+// switch, not a renew). The SQL of DueReminders carries the same 14 days
+// as INTERVAL '14 days'.
+const ReminderLead = 14 * 24 * time.Hour
+
 // ReminderStep names a step.
 type ReminderStep string
 
@@ -70,7 +77,7 @@ func ReminderKey(step ReminderStep, paidThrough time.Time) string {
 func stepAt(now, pt time.Time, grace time.Duration) ReminderStep {
 	const day = 24 * time.Hour
 	switch {
-	case now.Before(pt.Add(-14 * day)):
+	case now.Before(pt.Add(-ReminderLead)):
 		return ""
 	case now.Before(pt.Add(-3 * day)):
 		return StepBefore14d

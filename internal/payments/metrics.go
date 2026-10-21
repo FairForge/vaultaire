@@ -90,6 +90,11 @@ func init() {
 	for _, o := range []string{OutcomeSettled, OutcomeFailed, OutcomeReplayed} {
 		paymentsTotal.WithLabelValues(ProviderStripe, KindCharge, o)
 	}
+	// A refund is labelled by the CHARGE's provider (RP24-3), so both
+	// providers' refund series exist at 0 too.
+	for _, p := range []string{ProviderStripe, ProviderManual} {
+		paymentsTotal.WithLabelValues(p, KindRefund, OutcomeSettled)
+	}
 	for _, s := range ReminderSteps {
 		for _, o := range []string{OutcomeSent, OutcomeFailed} {
 			remindersTotal.WithLabelValues(string(s), o)
