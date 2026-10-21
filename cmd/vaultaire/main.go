@@ -246,6 +246,30 @@ func main() {
 		}
 	}
 
+	// 4b. Add Sia (the s3d gateway) if credentials available. Registered,
+	// never auto-selected as primary; a lab selects it with STORAGE_MODE=sia.
+	if accessKey := os.Getenv("SIA_ACCESS_KEY"); accessKey != "" {
+		secretKey := os.Getenv("SIA_SECRET_KEY")
+		endpoint, bucket := drivers.SiaConfigFromEnv(os.Getenv)
+		siaDriver, err := drivers.NewSiaDriver(accessKey, secretKey, endpoint, bucket, logger)
+		if err != nil {
+			logger.Error("failed to add Sia driver", zap.Error(err))
+		} else {
+			bootCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			created, ensureErr := siaDriver.EnsureBucket(bootCtx)
+			cancel()
+			if ensureErr != nil {
+				// Registered anyway: s3d may still be starting; the probe
+				// keeps reporting it.
+				logger.Error("Sia bucket not confirmed at boot", zap.String("bucket", bucket), zap.Error(ensureErr))
+			}
+			addDriver("sia", siaDriver)
+			logger.Info("Sia driver added",
+				zap.String("endpoint", endpoint), zap.String("bucket", bucket),
+				zap.Bool("bucket_created", created))
+		}
+	}
+
 	// 5. Add Geyser if credentials available
 	if accessKey := os.Getenv("GEYSER_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("GEYSER_SECRET_KEY")

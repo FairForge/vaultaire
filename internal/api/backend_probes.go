@@ -103,6 +103,7 @@ func buildBackendProbes(getenv func(string) string, eng driverChecker) []backend
 		{"local", ""},
 		{"idrive", "IDRIVE_ACCESS_KEY"},
 		{"wasabi", "WASABI_ACCESS_KEY"},
+		{"sia", "SIA_ACCESS_KEY"},
 		{"geyser", "GEYSER_ACCESS_KEY"},
 		{"r2", "R2_ACCESS_KEY"},
 		{"permafrost", "TENANT_1_ID"},
