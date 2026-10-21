@@ -1,0 +1,10 @@
+[Unit]
+Description=s3d flush %i every 10 min
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

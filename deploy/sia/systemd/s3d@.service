@@ -1,0 +1,26 @@
+# s3d gateway <instance> (Stored's patched build, deploy/sia/build-s3d.sh).
+# A user unit of the account that owns ~/<instance>/ (its s3d.yml + data/).
+# One instance per app key AND data directory (s3d README): never start two
+# units on the same directory. The binary and extra env (S3D_BIN,
+# S3D_READ_OVERDRIVE, …) come from ~/.config/stored-sia/<instance>.env.
+[Unit]
+Description=s3d gateway %i
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/%i
+Environment=S3D_CONFIG_FILE=%h/%i/s3d.yml
+EnvironmentFile=%h/.config/stored-sia/%i.env
+ExecStart=/bin/sh -c 'exec "$S3D_BIN"'
+Restart=on-failure
+RestartSec=5
+# graceful stop has no deadline upstream (it drains an in-flight flush); a
+# SIGKILL after 120 s is safe — buffered objects survive and re-upload whole
+# (SIA-BENCH-2 Test B, 32/32)
+TimeoutStopSec=120
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
