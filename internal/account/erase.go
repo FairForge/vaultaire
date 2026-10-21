@@ -103,6 +103,9 @@ var Deleted = []Rule{
 	{"object_locks", `DELETE FROM object_locks WHERE tenant_id = $1`, ByTenant},
 	{"object_locations", `DELETE FROM object_locations WHERE tenant_id = $1`, ByTenant},
 	{"smart_demotions", `DELETE FROM smart_demotions WHERE tenant_id = $1`, ByTenant},
+	// Promoted copies of Sia objects (101): the copies are under the
+	// tenant's prefix on the primary — the sweep removes them.
+	{"sia_promotions", `DELETE FROM sia_promotions WHERE tenant_id = $1`, ByTenant},
 	{"multipart_uploads", `DELETE FROM multipart_uploads WHERE tenant_id = $1`, ByTenant}, // parts cascade
 	{"artifacts", `DELETE FROM artifacts WHERE tenant_id = $1`, ByTenant},
 	{"bucket_notifications", `DELETE FROM bucket_notifications WHERE tenant_id = $1`, ByTenant},

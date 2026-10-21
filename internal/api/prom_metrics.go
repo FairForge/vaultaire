@@ -96,6 +96,8 @@ func (s *Server) initMetrics() {
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))
+		// Hydrate-before-serve of large Sia objects (sia_promotion.go).
+		reg.MustRegister(siaPromotions, siaPromotionSeconds, newSiaPromotedBytesCollector(s.db, s.log()))
 		if s.tenantKeys != nil {
 			reg.MustRegister(newKeyRotationPendingCollector(s.db, s.log()))
 		}

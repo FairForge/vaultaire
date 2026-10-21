@@ -141,8 +141,9 @@ type queryRower interface {
 }
 
 // blobNaming is who still names a blob: a committed row (head row, a version
-// that keeps bytes, an open demotion ledger row, the newest version behind a
-// delete marker for a blob at <key>), or only an ACTIVE multipart upload
+// that keeps bytes, an open demotion ledger row, a Sia promotion row naming
+// it as its copy, the newest version behind a delete marker for a blob at
+// <key>), or only an ACTIVE multipart upload
 // that chose the address for its complete (087) — whose head row may be
 // about to commit it.
 type blobNaming int
@@ -175,7 +176,11 @@ func blobNamedBy(ctx context.Context, q queryRower, tenantID, bucket, key, artif
 		                  AND is_latest AND is_delete_marker))
 		    OR EXISTS (SELECT 1 FROM smart_demotions
 		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
-		                  AND COALESCE(storage_key, object_key) = $4 AND hot_outcome IN ('', 'delete_failed')),
+		                  AND COALESCE(storage_key, object_key) = $4 AND hot_outcome IN ('', 'delete_failed'))
+		    -- a promoted copy of a Sia object (sia_promotion.go): its row is
+		    -- deleted before the copy is queued, so a named one is live
+		    OR EXISTS (SELECT 1 FROM sia_promotions
+		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND promoted_key = $4),
 		       EXISTS (SELECT 1 FROM multipart_uploads
 		                WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		                  AND storage_key = $4 AND status = 'active')`,

@@ -1092,6 +1092,7 @@ func (s *Server) readAdapter() *S3ToEngine {
 	a.chunkEncSvc = s.chunkEncSvc
 	a.gci = s.gci
 	a.smartPromoter = s.smartPromoter
+	a.siaPromoter = s.siaPromoter
 	a.vaultParity = s.vaultParity
 	if s.chunkGetPrefetch > 0 {
 		a.chunkGetPrefetch = s.chunkGetPrefetch
@@ -1230,6 +1231,7 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req 
 	// Smart-demoted object's second copy (it was missing here until the
 	// 2026-10-07 review; only the batch path had it).
 	adapter.smartPromoter = s.smartPromoter
+	adapter.siaPromoter = s.siaPromoter
 	adapter.HandleDelete(w, r, req.Bucket, req.Object)
 }
 

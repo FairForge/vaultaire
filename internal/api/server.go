@@ -137,6 +137,7 @@ type Server struct {
 	vaultParity        *VaultParity
 	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
 	smartPromoter      *SmartPromoter
+	siaPromoter        *SiaPromoter // nil without the sia backend (sia_promotion.go, migration 101)
 	multipartReaper    *MultipartReaper
 	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
 	chunkMover         *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
@@ -460,6 +461,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.smartDemotion = NewSmartDemotionRunner(s.db, s.engine, fc, logger)
 	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
+	// Hydrate-before-serve of large Sia objects (SIA_PROMOTE_*): nil
+	// without the sia backend.
+	s.siaPromoter = NewSiaPromoter(s.db, s.engine, siaPromoteConfigFromEnv(os.Getenv, logger), logger)
 	// The Vault parity second copy (WP-VAULT-1): the job and the read
 	// fallback, flag-gated per tenant (vault_parity, default OFF).
 	s.vaultParity = NewVaultParity(s.db, s.engine, fc, logger)

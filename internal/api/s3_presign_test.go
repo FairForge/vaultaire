@@ -413,6 +413,10 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"is_chunked", "storage_key", "floor", "size_bytes", "encryption_algorithm"}).AddRow(false, objectKey+"@"+zeroID, "standard", len(testContent), ""))
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
 		WillReturnError(sql.ErrNoRows)
+	// The flip retires promoted copies of older objects of the key
+	// (sia_promotion.go): none here.
+	mock.ExpectExec(`WITH gone AS \(\s*DELETE FROM sia_promotions`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
 	// HandleGet internals: versioning check, the head row (naming the
