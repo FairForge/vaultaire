@@ -42,13 +42,13 @@ func grantedHouseVia(t *testing.T, db *sql.DB, tenantID string, o payments.Order
 	})
 }
 
-// columnsOnlyHouse is the shape the record replaced: tenants columns that
-// say 'house'/'active' and floors, with no entitlement row.
+// columnsOnlyHouse is the shape the record replaced: a tenants row that
+// says 'house' (the status / subscription / period columns beside it were
+// dropped by migration 100) and floors, with no entitlement row.
 func columnsOnlyHouse(t *testing.T, db *sql.DB, tenantID string) {
 	t.Helper()
 	require.NoError(t, usage.NewQuotaManager(db).SetHouse(context.Background(), tenantID, usage.HouseFromTB(50, 0, 0)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', stripe_subscription_id = 'sub_cols',
-	                   house_period = 'annual' WHERE id = $1`, tenantID)
+	_, err := db.Exec(`UPDATE tenants SET plan = 'house' WHERE id = $1`, tenantID)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID) })
 }
@@ -143,8 +143,7 @@ func TestBillingPage_LapsedHouseNotLive(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	id := houseTenant(t, db, 0, 0)
 	grantedHouse(t, db, id, payments.Order{Std: 2, Period: payments.PeriodMonthly}, time.Now().Add(-30*24*time.Hour))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', stripe_subscription_id = 'sub_1',
-	                   house_period = 'monthly' WHERE id = $1`, id)
+	_, err := db.Exec(`UPDATE tenants SET plan = 'house' WHERE id = $1`, id)
 	require.NoError(t, err)
 	require.NoError(t, payments.InTx(context.Background(), db, func(tx *sql.Tx) error {
 		return payments.Revoke(context.Background(), tx, id)

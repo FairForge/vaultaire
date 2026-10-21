@@ -39,19 +39,6 @@ func (f fakeReady) UnreadyWithin(_ context.Context, provider string, _ time.Dura
 	return f[provider]
 }
 
-type fakePeriodEnds map[string]time.Time
-
-// stopped: subscriptions whose renewal was stopped (cancel_at_period_end).
-var stopped = map[string]bool{}
-
-func (f fakePeriodEnds) SubscriptionPeriodEnd(_ context.Context, id string) (time.Time, bool, error) {
-	end, ok := f[id]
-	if !ok {
-		return time.Time{}, false, fmt.Errorf("no such subscription %s", id)
-	}
-	return end, stopped[id], nil
-}
-
 func setupLapseFixture(t *testing.T) *lapseFixture {
 	t.Helper()
 	db, err := sql.Open("postgres", dbtestutil.DSN())
@@ -71,11 +58,10 @@ func setupLapseFixture(t *testing.T) *lapseFixture {
 }
 
 // tenant creates a tenant of the fixture's own with a free-tier quota row.
-func (f *lapseFixture) tenant(subscriptionID string) string {
+func (f *lapseFixture) tenant() string {
 	f.t.Helper()
 	id := "lapse-" + uuid.New().String()[:12]
-	_, err := f.db.Exec(`INSERT INTO tenants (id, name, email, stripe_subscription_id, house_period) VALUES ($1, 'L', $2, NULLIF($3, ''), 'monthly')`,
-		id, id+"@test.local", subscriptionID)
+	_, err := f.db.Exec(`INSERT INTO tenants (id, name, email) VALUES ($1, 'L', $2)`, id, id+"@test.local")
 	require.NoError(f.t, err)
 	require.NoError(f.t, f.qm.CreateTenant(context.Background(), id, "free", usage.FreeTierLimits.StorageBytes))
 	f.mine[id] = true
@@ -124,7 +110,7 @@ func TestLapseJob_FlagOff_CountsOnly(t *testing.T) {
 	// Arrange: a house paid through 20 days ago (grace 14 d), flag at its
 	// default (off).
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(-20*24*time.Hour), payments.ProviderStripe)
 
 	// Act
@@ -142,7 +128,7 @@ func TestLapseJob_FlagOff_CountsOnly(t *testing.T) {
 func TestLapseJob_ClearsPastGrace_UsedBytesUntouched(t *testing.T) {
 	// Arrange: one tenant past grace, one inside it; the flag on for both.
 	f := setupLapseFixture(t)
-	past, inside := f.tenant(""), f.tenant("")
+	past, inside := f.tenant(), f.tenant()
 	f.granted(past, time.Now().Add(-15*24*time.Hour), payments.ProviderBTCPay)
 	f.granted(inside, time.Now().Add(-5*24*time.Hour), payments.ProviderBTCPay)
 	_, err := f.db.Exec(`UPDATE tenant_quotas SET storage_used_bytes = 7777 WHERE tenant_id = $1`, past)
@@ -178,7 +164,7 @@ func TestLapseJob_ClearsPastGrace_UsedBytesUntouched(t *testing.T) {
 
 func TestLapseJob_SkipsUnreadyProvider(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(-30*24*time.Hour), payments.ProviderStripe)
 	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
 	f.runner.Ready = fakeReady{payments.ProviderStripe: true}
@@ -196,7 +182,7 @@ func TestLapseJob_ReconcileHealsFloors(t *testing.T) {
 	// Arrange: a granted house whose floors drifted (one deleted, the total
 	// edited by hand).
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(20*24*time.Hour), payments.ProviderStripe)
 	_, err := f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1 AND floor = 'vault'`, id)
 	require.NoError(t, err)
@@ -218,81 +204,28 @@ func TestLapseJob_ReconcileHealsFloors(t *testing.T) {
 	assert.Equal(t, 0, f.run().Healed, "nothing left to heal")
 }
 
-func TestLapseJob_Backfill_FromFloorRows(t *testing.T) {
-	// Arrange: two houses granted before 097 (floor rows, no entitlement):
-	// one with a Stripe subscription, one by hand.
+// WP-PAY-7: the pre-097 backfill is gone (ahead of migration 100) — floors with no
+// entitlement row (a state prod never had) are neither backfilled nor
+// touched; only granted rows are the job's.
+func TestLapseJob_FloorsWithoutRow_Untouched(t *testing.T) {
 	f := setupLapseFixture(t)
-	viaStripe, manual := f.tenant("sub_bf_"+uuid.New().String()[:8]), f.tenant("")
-	var sub string
-	require.NoError(t, f.db.QueryRow(`SELECT stripe_subscription_id FROM tenants WHERE id = $1`, viaStripe).Scan(&sub))
-	end := time.Now().Add(17 * 24 * time.Hour).UTC().Truncate(time.Second)
-	f.runner.Stripe = fakePeriodEnds{sub: end}
-	ctx := context.Background()
-	require.NoError(t, f.qm.SetHouse(ctx, viaStripe, usage.HouseFromTB(3, 0, 1)))
-	require.NoError(t, f.qm.SetHouse(ctx, manual, usage.HouseFromTB(0, 4, 0)))
-
-	// Act
-	res := f.run()
-
-	// Assert
-	assert.Equal(t, 2, res.Backfilled)
-	e := f.entitlement(viaStripe)
-	assert.Equal(t, payments.Order{Std: 3, PinHot: 1, Period: payments.PeriodMonthly}, e.Order)
-	assert.Equal(t, payments.ProviderStripe, e.Provider)
-	assert.Equal(t, sub, e.ProviderRef)
-	assert.Equal(t, payments.RenewalAuto, e.Renewal)
-	assert.True(t, end.Equal(e.PaidThrough), "paid through Stripe's current period end")
-	m := f.entitlement(manual)
-	assert.Equal(t, payments.ProviderManual, m.Provider)
-	assert.Equal(t, payments.RenewalPrepaid, m.Renewal)
-	assert.WithinDuration(t, time.Now().Add(14*24*time.Hour), m.PaidThrough, time.Minute, "now + grace")
-	assert.Equal(t, 0, res.Healed, "a backfilled row matches its floors")
-
-	assert.Equal(t, 0, f.run().Backfilled, "idempotent")
-}
-
-// RP20-5: a pre-097 Stripe house whose renewal was stopped at Stripe
-// (cancel_at_period_end) is backfilled prepaid — nobody will extend it.
-func TestLapseJob_Backfill_CancelAtPeriodEnd_IsPrepaid(t *testing.T) {
-	// Arrange
-	f := setupLapseFixture(t)
-	sub := "sub_cape_" + uuid.New().String()[:8]
-	id := f.tenant(sub)
-	end := time.Now().Add(9 * 24 * time.Hour).UTC().Truncate(time.Second)
-	f.runner.Stripe = fakePeriodEnds{sub: end}
-	stopped[sub] = true
-	t.Cleanup(func() { delete(stopped, sub) })
+	id := f.tenant()
 	require.NoError(t, f.qm.SetHouse(context.Background(), id, usage.HouseFromTB(1, 1, 0)))
 
-	// Act
 	res := f.run()
 
-	// Assert
-	assert.Equal(t, 1, res.Backfilled)
-	e := f.entitlement(id)
-	assert.Equal(t, payments.ProviderStripe, e.Provider)
-	assert.Equal(t, payments.RenewalPrepaid, e.Renewal)
-	assert.True(t, end.Equal(e.PaidThrough))
-}
-
-// Without Stripe configured a Stripe house is backfilled at now + grace.
-func TestLapseJob_Backfill_StripeNotConfigured(t *testing.T) {
-	f := setupLapseFixture(t)
-	id := f.tenant("sub_nc_" + uuid.New().String()[:8])
-	require.NoError(t, f.qm.SetHouse(context.Background(), id, usage.HouseFromTB(1, 0, 0)))
-
-	res := f.run()
-
-	assert.Equal(t, 1, res.Backfilled)
-	e := f.entitlement(id)
-	assert.Equal(t, payments.ProviderStripe, e.Provider)
-	assert.WithinDuration(t, time.Now().Add(14*24*time.Hour), e.PaidThrough, time.Minute)
+	_, err := payments.Get(context.Background(), f.db, id)
+	assert.ErrorIs(t, err, payments.ErrNoEntitlement, "no row is invented")
+	h, ok := f.house(id)
+	assert.True(t, ok)
+	assert.Equal(t, usage.HouseFromTB(1, 1, 0), h)
+	assert.Zero(t, res.Healed)
 }
 
 // Through the scheduler: the result lands in job_runs.result.
 func TestLapseJob_ThroughTheScheduler_RecordsTheResult(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(-20*24*time.Hour), payments.ProviderStripe)
 	jf := setupJobsFixture(t)
 	f.runner.JobName = jf.name("entitlement_lapse")
@@ -309,7 +242,7 @@ func TestLapseJob_ThroughTheScheduler_RecordsTheResult(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT result FROM job_runs WHERE job = $1`, f.runner.JobName).Scan(&raw))
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got))
-	for _, k := range []string{"backfilled", "candidates", "would_clear", "cleared", "skipped_unready", "healed"} {
+	for _, k := range []string{"candidates", "would_clear", "cleared", "skipped_unready", "healed"} {
 		assert.Contains(t, got, k)
 	}
 	assert.EqualValues(t, 1, got["would_clear"])
@@ -337,7 +270,7 @@ func TestEntitlementMetrics_OnTheEndpoint(t *testing.T) {
 // paged (WP-PAY-1; TestExportSectionsCoverSchema pins the schema side).
 func TestExport_CarriesTheEntitlementAndThePayments(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(10*24*time.Hour), payments.ProviderStripe)
 	ctx := context.Background()
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM payments WHERE tenant_id = $1`, id) })
@@ -369,7 +302,7 @@ func TestExport_CarriesTheEntitlementAndThePayments(t *testing.T) {
 func TestLapseJob_ReadsProviderReadyHistory(t *testing.T) {
 	// Arrange
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(-30*24*time.Hour), payments.ProviderStripe)
 	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
 	reg := payments.NewRegistry(f.db, f.fl, 14*24*time.Hour, nil)

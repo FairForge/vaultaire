@@ -76,7 +76,7 @@ func (f *lapseFixture) reminders(sender *recordingSender, now func() time.Time) 
 func TestReminders_EachStepOnce(t *testing.T) {
 	// Arrange: a prepaid house paid through 13 days from now.
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	pt := time.Now().Add(13 * 24 * time.Hour).Truncate(time.Second)
 	f.prepaid(id, pt)
 	// The grace steps go out only where the lapse job would act (RP24-2).
@@ -120,7 +120,7 @@ func TestReminders_EachStepOnce(t *testing.T) {
 
 func TestReminders_PrepaidOnly(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("sub_auto")
+	id := f.tenant()
 	f.granted(id, time.Now().Add(10*24*time.Hour), payments.ProviderStripe) // renewal auto
 	sender := &recordingSender{}
 	r := f.reminders(sender, nil)
@@ -134,7 +134,7 @@ func TestReminders_PrepaidOnly(t *testing.T) {
 
 func TestReminders_NotAfterLapse(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.prepaid(id, time.Now().Add(10*24*time.Hour))
 	_, err := f.db.Exec(`UPDATE entitlements SET lapsed_at = NOW() WHERE tenant_id = $1`, id)
 	require.NoError(t, err)
@@ -149,7 +149,7 @@ func TestReminders_NotAfterLapse(t *testing.T) {
 
 func TestReminders_NewPeriodResets(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	pt := time.Now().Add(10 * 24 * time.Hour).Truncate(time.Second)
 	f.prepaid(id, pt)
 	sender := &recordingSender{}
@@ -178,8 +178,8 @@ func TestReminders_NewPeriodResets(t *testing.T) {
 // regardless. A withheld step is counted, not marked sent.
 func TestReminders_GraceStepsOnlyWhereTheLapseJobWouldAct(t *testing.T) {
 	f := setupLapseFixture(t)
-	flagOff := f.tenant("")
-	flagOn := f.tenant("")
+	flagOff := f.tenant()
+	flagOn := f.tenant()
 	pt := time.Now().Add(-36 * time.Hour).Truncate(time.Second) // the second day of grace: t+1d is due
 	f.prepaid(flagOff, pt)
 	f.prepaid(flagOn, pt)
@@ -205,7 +205,7 @@ func TestReminders_GraceStepsOnlyWhereTheLapseJobWouldAct(t *testing.T) {
 
 	// A before-step goes out whatever the flag: a third tenant, flag off,
 	// 10 days ahead.
-	before := f.tenant("")
+	before := f.tenant()
 	f.prepaid(before, time.Now().Add(10*24*time.Hour))
 	res, err = r.RunOnce(context.Background())
 	require.NoError(t, err)
@@ -216,7 +216,7 @@ func TestReminders_GraceStepsOnlyWhereTheLapseJobWouldAct(t *testing.T) {
 // A send that fails is counted, noted on an ok run, and retried next hour.
 func TestReminders_FailedSendIsRetried(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.prepaid(id, time.Now().Add(10*24*time.Hour))
 	sender := &recordingSender{err: fmt.Errorf("smtp down")}
 	r := f.reminders(sender, nil)
@@ -263,7 +263,7 @@ func TestRemindersJob_RegisteredAndMetricPrecreated(t *testing.T) {
 // The lapse job mails the customer after its Revoke committed.
 func TestLapseJob_SendsHouseLapsedMail(t *testing.T) {
 	f := setupLapseFixture(t)
-	id := f.tenant("")
+	id := f.tenant()
 	f.prepaid(id, time.Now().Add(-30*24*time.Hour))
 	require.NoError(t, f.fl.Set(context.Background(), flagEntitlementLapse, id, true, "test"))
 	sender := &recordingSender{}

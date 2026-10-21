@@ -21,11 +21,9 @@ import (
 // the drop migrates must not touch them.
 var droppedTenantsColumns = regexp.MustCompile(`\b(stripe_subscription_id|subscription_status|house_period|deletion_stripe_cancelled_at)\b`)
 
-// droppedColumnsExempt are the files allowed to name them until the drop
-// PR removes their last use.
-var droppedColumnsExempt = map[string]bool{
-	"internal/api/entitlement_lapse.go": true, // the pre-097 backfill; removed with migration 100
-}
+// droppedColumnsExempt are the files allowed to name them (none: the
+// pre-097 backfill went before the drop, so this build runs on either schema).
+var droppedColumnsExempt = map[string]bool{}
 
 func TestNoSQLNamesTheDroppedTenantsColumns(t *testing.T) {
 	root := filepath.Join("..", "..")

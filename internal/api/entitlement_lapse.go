@@ -19,18 +19,11 @@ import (
 
 // The entitlement_lapse job (WP-PAY-1, docs/PAYMENTS.md § 1.3): the calendar
 // is what ends a house. Daily 07:30 UTC (+5 m boot catch-up, 10 min
-// ceiling), three passes:
+// ceiling), two passes (the pre-097 backfill was removed ahead of migration 100 —
+// WP-PAY-7: it read the tenants columns 100 drops, and prod never had a house
+// to backfill):
 //
-//	(a) backfill   a tenant with floor rows and no entitlement row (a house
-//	               granted before migration 097) gets one: provider stripe
-//	               when tenants.stripe_subscription_id is set — paid through
-//	               the subscription's current_period_end fetched from Stripe
-//	               when Stripe is configured (renewal prepaid when its
-//	               cancel_at_period_end is set, RP20-5), else now + grace
-//	               with a Warn —
-//	               else provider manual, renewal prepaid, now + grace with a
-//	               Warn. The floors are not touched.
-//	(b) lapse      rows with lapsed_at NULL and paid_through + grace in the
+//	(a) lapse      rows with lapsed_at NULL and paid_through + grace in the
 //	               past. A tenant whose provider was unready at any time in
 //	               the last 24 h is skipped (payments.ReadyHistory; every
 //	               provider counts as ready until WP-PAY-2 feeds one). With
@@ -39,7 +32,7 @@ import (
 //	               line per run); ON: payments.Revoke — the floors cleared,
 //	               used bytes untouched, lapsed_at = now — and an audit row
 //	               billing.house_lapsed.
-//	(c) reconcile  every granted row's floors must equal its house; a
+//	(b) reconcile  every granted row's floors must equal its house; a
 //	               tenant whose floors drifted is healed (usage.SetHouseTx)
 //	               with one Error line — the two tables cannot drift
 //	               silently. It heals whatever the flag: every writer writes
@@ -63,12 +56,6 @@ var entitlementsLapsed = prometheus.NewCounter(prometheus.CounterOpts{
 	Help: "Houses the entitlement_lapse job cleared (paid_through + grace passed, flag entitlement_lapse on for the tenant).",
 })
 
-// subscriptionPeriodEnds is the Stripe read the backfill needs: the
-// current period's end and whether the renewal was stopped there.
-type subscriptionPeriodEnds interface {
-	SubscriptionPeriodEnd(ctx context.Context, subscriptionID string) (end time.Time, cancelAtPeriodEnd bool, err error)
-}
-
 // EntitlementLapseRunner is the job.
 type EntitlementLapseRunner struct {
 	db     *sql.DB
@@ -78,8 +65,6 @@ type EntitlementLapseRunner struct {
 	Grace time.Duration
 	// Ready: which providers could take a payment (payments.AlwaysReady).
 	Ready payments.ReadyHistory
-	// Stripe: nil when Stripe is not configured.
-	Stripe subscriptionPeriodEnds
 	// Mailer sends house_lapsed.html after a Revoke committed (WP-PAY-3;
 	// nil = no mail).
 	Mailer *payments.Mailer
@@ -95,7 +80,6 @@ type EntitlementLapseRunner struct {
 
 // EntitlementLapseResult is one run's outcome (job_runs.result).
 type EntitlementLapseResult struct {
-	Backfilled     int      `json:"backfilled"`
 	Candidates     int      `json:"candidates"`
 	WouldClear     int      `json:"would_clear"`
 	Cleared        int      `json:"cleared"`
@@ -125,7 +109,7 @@ func (r *EntitlementLapseRunner) spec() jobSpec {
 		Name: r.JobName, Hour: 7, Minute: 30, BootDelay: 5 * time.Minute, MaxRunTime: r.MaxRunTime,
 		Run: func(ctx context.Context) (jobReport, error) {
 			res, err := r.RunOnce(ctx)
-			rep := jobReport{Rows: int64(res.Backfilled + res.Cleared + res.Healed), Result: res}
+			rep := jobReport{Rows: int64(res.Cleared + res.Healed), Result: res}
 			if len(res.Errors) > 0 {
 				rep.Note = strings.Join(res.Errors, "; ")
 			}
@@ -150,9 +134,6 @@ func (r *EntitlementLapseRunner) RunOnce(ctx context.Context) (EntitlementLapseR
 	if r == nil || r.db == nil {
 		return res, errors.New("entitlement lapse: not configured")
 	}
-	if err := r.backfill(ctx, &res); err != nil {
-		return res, err
-	}
 	if err := r.lapse(ctx, &res); err != nil {
 		return res, err
 	}
@@ -160,106 +141,14 @@ func (r *EntitlementLapseRunner) RunOnce(ctx context.Context) (EntitlementLapseR
 		return res, err
 	}
 	r.logger.Info("entitlement lapse run",
-		zap.Int("backfilled", res.Backfilled), zap.Int("candidates", res.Candidates),
+		zap.Int("candidates", res.Candidates),
 		zap.Int("would_clear", res.WouldClear), zap.Int("cleared", res.Cleared),
 		zap.Int("skipped_unready", res.SkippedUnready), zap.Int("healed", res.Healed),
 		zap.Duration("grace", r.Grace), zap.Int("errors", len(res.Errors)))
 	return res, ctx.Err()
 }
 
-// --- (a) backfill ---------------------------------------------------------
-
-type backfillRow struct {
-	tenantID, subscriptionID, period string
-	stdBytes, vaultBytes, pinBytes   int64
-}
-
-func (r *EntitlementLapseRunner) backfill(ctx context.Context, res *EntitlementLapseResult) error {
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT t.id, COALESCE(t.stripe_subscription_id, ''), COALESCE(t.house_period, ''),
-		       COALESCE(SUM(f.storage_limit_bytes) FILTER (WHERE f.floor = 'standard'), 0),
-		       COALESCE(SUM(f.storage_limit_bytes) FILTER (WHERE f.floor = 'vault'), 0),
-		       COALESCE(MAX(q.pin_hot_bytes), 0)
-		  FROM tenant_floor_quotas f
-		  JOIN tenants t ON t.id = f.tenant_id
-		  LEFT JOIN tenant_quotas q ON q.tenant_id = f.tenant_id
-		 WHERE NOT EXISTS (SELECT 1 FROM entitlements e WHERE e.tenant_id = f.tenant_id)
-		 GROUP BY t.id, t.stripe_subscription_id, t.house_period
-		 ORDER BY t.id`)
-	if err != nil {
-		return fmt.Errorf("entitlement backfill: list: %w", err)
-	}
-	var todo []backfillRow
-	for rows.Next() {
-		var b backfillRow
-		if err := rows.Scan(&b.tenantID, &b.subscriptionID, &b.period, &b.stdBytes, &b.vaultBytes, &b.pinBytes); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("entitlement backfill: scan: %w", err)
-		}
-		if r.scoped(b.tenantID) {
-			todo = append(todo, b)
-		}
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("entitlement backfill: list: %w", err)
-	}
-	for _, b := range todo {
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err := r.backfillOne(ctx, b); err != nil {
-			res.Errors = append(res.Errors, fmt.Sprintf("backfill %s: %v", b.tenantID, err))
-			r.logger.Warn("entitlement backfill: tenant not backfilled", zap.String("tenant", b.tenantID), zap.Error(err))
-			continue
-		}
-		res.Backfilled++
-	}
-	return nil
-}
-
-func (r *EntitlementLapseRunner) backfillOne(ctx context.Context, b backfillRow) error {
-	period := payments.Period(b.period)
-	if !period.Valid() {
-		period = payments.PeriodMonthly
-	}
-	o := payments.Order{Std: int(b.stdBytes / usage.TB), Vault: int(b.vaultBytes / usage.TB), PinHot: int(b.pinBytes / usage.TB), Period: period}
-	provider, renewal, ref := payments.ProviderManual, payments.RenewalPrepaid, ""
-	paidThrough := r.now().Add(r.Grace)
-	why := "no Stripe subscription on the tenant: a manual house"
-	if b.subscriptionID != "" {
-		provider, renewal, ref = payments.ProviderStripe, payments.RenewalAuto, b.subscriptionID
-		why = "Stripe is not configured on this process"
-		if r.Stripe != nil {
-			end, stopped, err := r.Stripe.SubscriptionPeriodEnd(ctx, b.subscriptionID)
-			if err != nil {
-				return fmt.Errorf("fetch subscription %s: %w", b.subscriptionID, err)
-			}
-			paidThrough, why = end, ""
-			if stopped {
-				renewal = payments.RenewalPrepaid // nobody will extend it (RP20-5)
-			}
-		}
-	}
-	if why != "" {
-		r.logger.Warn("entitlement backfill: paid_through set to now + grace",
-			zap.String("tenant", b.tenantID), zap.String("provider", provider),
-			zap.Time("paid_through", paidThrough), zap.String("why", why))
-	}
-	return payments.InTx(ctx, r.db, func(tx *sql.Tx) error {
-		if err := payments.Lock(ctx, tx, b.tenantID); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO entitlements (tenant_id, std_tb, vault_tb, pin_hot_tb, period, paid_through, renewal, provider, provider_ref)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9, ''))
-			ON CONFLICT (tenant_id) DO NOTHING`,
-			b.tenantID, o.Std, o.Vault, o.PinHot, string(o.Period), paidThrough.UTC(), string(renewal), provider, ref)
-		return err
-	})
-}
-
-// --- (b) lapse ------------------------------------------------------------
+// --- (a) lapse ------------------------------------------------------------
 
 type lapseCandidate struct {
 	tenantID, provider string
@@ -414,7 +303,7 @@ func (c *lapseSkippedCollector) read() (float64, bool) {
 	return c.val, c.ok
 }
 
-// --- (c) reconcile --------------------------------------------------------
+// --- (b) reconcile --------------------------------------------------------
 
 func (r *EntitlementLapseRunner) reconcile(ctx context.Context, res *EntitlementLapseResult) error {
 	rows, err := r.db.QueryContext(ctx, `
