@@ -71,7 +71,7 @@ func (a *S3ToEngine) startChunkStream(ctx context.Context, tenantID string, plan
 	for i, p := range plan {
 		sizes[i] = p.desc.size
 	}
-	return parfetch.Start(ctx, a.chunkStreamConfig(), sizes, func(fctx context.Context, i int) ([]byte, error) {
+	return parfetch.Start(ctx, a.chunkStreamConfig(plan), sizes, func(fctx context.Context, i int) ([]byte, error) {
 		data, ferr := a.fetchAndVerifyChunk(fctx, plan[i].desc, tenantID)
 		if ferr != nil {
 			return nil, ferr

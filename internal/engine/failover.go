@@ -139,8 +139,9 @@ func isBackendFailure(err error) bool {
 	// The body source failed (the client dropped mid-body before the
 	// context was cancelled, or trickled below the minimum rate), or the
 	// backend says only the part holding THIS object is out (one bridge of
-	// several): neither is the backend's health (Prompt 2b.2 C1).
-	if errors.Is(err, ErrCallerAborted) || errors.Is(err, ErrPartiallyUnavailable) {
+	// several): neither is the backend's health (Prompt 2b.2 C1). Nor is
+	// an object that changed under a resumed read (ErrObjectChanged).
+	if errors.Is(err, ErrCallerAborted) || errors.Is(err, ErrPartiallyUnavailable) || errors.Is(err, ErrObjectChanged) {
 		return false
 	}
 	// Other client-level engine errors. Archived-on-tape is an object state,

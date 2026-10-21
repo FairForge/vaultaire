@@ -300,8 +300,43 @@ func (a *S3ToEngine) resolveChunkDescs(ctx context.Context, refs []crypto.Tenant
 	return descs, nil
 }
 
-// chunkStreamConfig is the parfetch shape of one chunked GET.
-func (a *S3ToEngine) chunkStreamConfig() parfetch.Config {
+// noHedgeBackend reports whether any of these backends declares that its
+// reads are never requested twice (engine.NoHedgeDeclarer — the `sia`
+// driver: a hedge spends the Sia account's read budget twice and starves the
+// read, SIA-BENCH-3/5; the driver resumes a cut body itself). An engine that
+// cannot name its drivers keeps the hedge.
+func (a *S3ToEngine) noHedgeBackend(backends ...string) bool {
+	ge, ok := a.engine.(interface {
+		GetDriver(string) (engine.Driver, bool)
+	})
+	if !ok {
+		return false
+	}
+	for _, b := range backends {
+		if d, ok := ge.GetDriver(b); ok && engine.IsNoHedge(d) {
+			return true
+		}
+	}
+	return false
+}
+
+// chunkStreamConfig is the parfetch shape of one chunked GET of plan: no
+// hedge (and no retry of a failed chunk) when a chunk of it is on a backend
+// that is never hedged.
+func (a *S3ToEngine) chunkStreamConfig(plan []chunkSlice) parfetch.Config {
+	hedgeAfter := a.largeGet.chunkHedgeAfter
+	if hedgeAfter > 0 {
+		seen := map[string]bool{}
+		for _, p := range plan {
+			if b := p.desc.backendID; b != "" && !seen[b] {
+				seen[b] = true
+				if a.noHedgeBackend(b) {
+					hedgeAfter = 0
+					break
+				}
+			}
+		}
+	}
 	maxParts := a.chunkGetPrefetch
 	if maxParts < 1 {
 		maxParts = 1
@@ -313,7 +348,7 @@ func (a *S3ToEngine) chunkStreamConfig() parfetch.Config {
 	return parfetch.Config{
 		Window:     a.largeGet.chunkWindowBytes,
 		MaxParts:   maxParts,
-		HedgeAfter: a.largeGet.chunkHedgeAfter,
+		HedgeAfter: hedgeAfter,
 		Budget:     a.largeGet.budget,
 		FreeParts:  free,
 		Hooks:      largeGetHooks("chunked"),
@@ -433,11 +468,17 @@ func (a *S3ToEngine) startParallel(ctx context.Context, path string, ce *engine.
 	for _, sz := range sizes {
 		part = max(part, sz)
 	}
+	// A backend that is never hedged (the `sia` driver) gets one request per
+	// range: no hedge, no second try of a failed range.
+	hedgeAfter := cfg.hedgeAfter
+	if d, ok := ce.GetDriver(backend); ok && engine.IsNoHedge(d) {
+		hedgeAfter = 0
+	}
 	start := time.Now()
 	stream := parfetch.Start(ctx, parfetch.Config{
 		Window:     int64(cfg.parallelParts) * part,
 		MaxParts:   cfg.parallelParts,
-		HedgeAfter: cfg.hedgeAfter,
+		HedgeAfter: hedgeAfter,
 		Budget:     cfg.budget,
 		FreeParts:  1,
 		Hooks:      largeGetHooks(path),

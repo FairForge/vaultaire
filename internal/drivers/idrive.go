@@ -88,6 +88,10 @@ type IDriveDriver struct {
 	// that differs from name (a regional driver is "idrive" to itself and
 	// `idrive-<region>` to the engine): the label of its put-retry series.
 	backendName string
+	// sia is the read behaviour of the `sia` driver (sia_read.go): a cut
+	// body resumed, reads never hedged by the API, optional pacing. nil on
+	// every other fixed-bucket driver — their reads are unchanged.
+	sia *siaReads
 }
 
 // NewIDriveDriver creates a new iDrive E2 storage driver.
@@ -240,19 +244,21 @@ func (d *IDriveDriver) Get(ctx context.Context, container, artifact string) (io.
 		return nil, fmt.Errorf("%s get %s/%s: %w", d.name, container, artifact, err)
 	}
 
+	body := d.wrapBody(ctx, key, 0, result)
+
 	// Track egress if we have a tracker and tenant ID
 	if d.egressTracker != nil {
 		if tenantID, ok := ctx.Value(TenantIDKey).(string); ok && tenantID != "" {
 			// Wrap the reader to track bytes read
 			return &egressTrackingReader{
-				ReadCloser: result.Body,
+				ReadCloser: body,
 				tracker:    d.egressTracker,
 				tenantID:   tenantID,
 			}, nil
 		}
 	}
 
-	return result.Body, nil
+	return body, nil
 }
 
 // egressTrackingReader wraps a reader to track bytes read
@@ -333,7 +339,7 @@ func (d *IDriveDriver) GetRange(ctx context.Context, container, artifact string,
 		return nil, fmt.Errorf("%s get stream %s/%s: %w", d.name, container, artifact, err)
 	}
 
-	return result.Body, nil
+	return d.wrapBody(ctx, key, offset, result), nil
 }
 
 // GetRangeInfo reads bytes [offset, offset+length) and reports the object's
@@ -364,7 +370,7 @@ func (d *IDriveDriver) GetRangeInfo(ctx context.Context, container, artifact str
 			}
 		}
 	}
-	return result.Body, info, nil
+	return d.wrapBody(ctx, key, offset, result), info, nil
 }
 
 // Delete removes an artifact from iDrive
