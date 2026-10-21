@@ -1374,6 +1374,25 @@ func generateAdminPaths() map[string]*PathItem {
 				}),
 				queryParam("dry_run", "`smart_demotion` only: report, move nothing", &Schema{Type: "boolean", Default: false}))),
 		},
+		"/api/v1/admin/backends/{backend}/plan": {
+			Parameters: []Parameter{pathParam("backend", "A registered backend driver name (idrive, lyve, geyser, wasabi, r2, ...)")},
+			Get: admin(jsonOp("Admin", "A backend's vendor plan row", "AdminGetBackendPlan",
+				"The backend_plans row (WP-CAP-1): what we bought from the vendor — capacity before overage, the term, the overage and egress rates, whether a card is on file. "+
+					"404 for an unregistered backend or a registered one with no row yet. The daily backend_capacity job and the capacity/renewal alerts read it.",
+				map[string]Response{
+					"200": jsonResp("The plan row", ref("BackendPlan")),
+					"404": textResp("`backend %q is not registered` / `backend %q has no plan row yet`"),
+				})),
+			Put: admin(withBody(jsonOp("Admin", "Set a backend's vendor plan row", "AdminPutBackendPlan",
+				"Writes the backend_plans row (one per backend, upsert). Validated: the backend must be registered, `capacity_bytes` > 0, `term_end` after `term_start`. "+
+					"Audited `backend.plan_set` with the admin as actor. The owner's iDrive row (invoice 105170): 1 TB, 2026-10-20 to 2027-10-20, egress_free_multiple 3, "+
+					"overage $5.12/TB-month, egress $0.01/GB, payment on file.",
+				map[string]Response{
+					"200": jsonResp("The stored row", ref("BackendPlan")),
+					"400": textResp("`capacity_bytes must be > 0` / `term_end must be after term_start (both RFC 3339)` / `invalid JSON`"),
+					"404": textResp("`backend %q is not registered`"),
+				}), jsonBody("The plan row (backend and updated_by come from the path and the session)", ref("BackendPlan")))),
+		},
 		"/api/v1/admin/tenants/{tenant_id}/payments": {
 			Parameters: []Parameter{pathParam("tenant_id", "Tenant id")},
 			Get: admin(jsonOp("Admin", "A tenant's entitlement and payment ledger", "AdminTenantPayments",
@@ -2255,6 +2274,15 @@ func generateJSONSchemas() map[string]Schema {
 			"pin_hot_tb": {Type: "integer", Description: "TB pinned hot (at most std_tb)"},
 			"period":     strEnum("Optional; the payment's period when absent", "annual", "monthly"),
 		}),
+		"BackendPlan": object("A backend's vendor plan row (WP-CAP-1): what we bought, when it renews", map[string]*Schema{
+			"backend": str("The registered driver name"), "vendor": str(""), "plan_name": str(""),
+			"capacity_bytes":           {Type: "integer", Description: "What the plan includes before overage"},
+			"egress_free_multiple":     {Type: "number", Description: "Free egress per month as a multiple of stored bytes (iDrive: 3); null = the vendor does not meter egress"},
+			"overage_usd_per_tb_month": {Type: "number"}, "egress_usd_per_gb": {Type: "number"},
+			"term_start": dateTime(""), "term_end": dateTime("The renewal alerts count down to it"),
+			"auto_renew": {Type: "boolean"}, "payment_on_file": {Type: "boolean", Description: "BackendPlanNoPayment pages near term_end without one"},
+			"invoice_ref": str(""), "note": str(""), "updated_at": dateTime(""), "updated_by": str("The admin who last wrote the row"),
+		}, "backend", "capacity_bytes", "term_start", "term_end"),
 		"Entitlement": object("The entitlement record (WP-PAY-1): what the tenant bought and until when", map[string]*Schema{
 			"tenant_id": str(""), "std_tb": {Type: "integer"}, "vault_tb": {Type: "integer"}, "pin_hot_tb": {Type: "integer"},
 			"period": strEnum("", "annual", "monthly"), "paid_through": dateTime("Grace is added at read time"),

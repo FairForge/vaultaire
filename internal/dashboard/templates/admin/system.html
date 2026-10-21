@@ -91,7 +91,34 @@
             </tbody>
         </table>
     </div>
-    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30, each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes, account_export every minute, vault_parity every 2 minutes when a parity leg is registered). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+    <div class="card-detail">Daily (UTC): inventory 00:30, dedup_gc 02:30, retention 03:30, account_deletion 04:30, routing_truth 05:30, smart_demotion 06:30, entitlement_lapse 07:30, backend_capacity 08:30, each catches up a few minutes after a restart. The others run hourly (access_log_delivery every 5 minutes, account_export every minute, vault_parity every 2 minutes when a parity leg is registered). Schedule and next run: <code>GET /api/v1/admin/jobs</code>.</div>
+</div>
+{{end}}
+
+{{if .Capacity}}
+<div class="card">
+    <div class="card-title">Vendor Capacity</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Backend</th><th>Bought</th><th>Held (our rows)</th><th>Held (vendor)</th><th>Free egress left</th><th>Renews in</th><th>Overage</th></tr>
+            </thead>
+            <tbody>
+                {{range .Capacity}}
+                <tr>
+                    <td>{{.Backend}}</td>
+                    <td>{{.PlanFmt}}</td>
+                    <td>{{.StoredFmt}}</td>
+                    <td>{{.VendorFmt}}</td>
+                    <td>{{if .EgressFreeFmt}}{{.EgressFreeFmt}}{{else}}—{{end}}</td>
+                    <td>{{if .HasPlan}}{{.RenewsInDays}} d{{if not .PaymentOnFile}} <span class="badge badge-danger">no card</span>{{end}}{{else}}<span class="badge badge-warning">no plan row</span>{{end}}</td>
+                    <td>{{if .OverageFmt}}{{.OverageFmt}}{{else}}—{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-detail">The plan rows (what we bought, when they renew — <code>PUT /api/v1/admin/backends/{backend}/plan</code>) beside the daily <code>backend_capacity</code> sums of what our tables say each backend holds, and the vendor's own meter where its API answers (WP-CAP-1). A backend with no plan row has no renewal watch: enter it.</div>
 </div>
 {{end}}
 

@@ -120,6 +120,11 @@ func (s *Server) initMetrics() {
 		if s.entitlementLapse != nil && s.db != nil {
 			reg.MustRegister(newLapseSkippedCollector(s.db, s.entitlementLapse.JobName, s.logger))
 		}
+		// WP-CAP-1: the vendor capacity gauges — the last backend_capacity
+		// run from job_runs.result and the backend_plans rows, on scrape.
+		if s.backendCapacity != nil && s.db != nil {
+			reg.MustRegister(newCapacityCollector(s.db, s.backendCapacity.JobName, s.logger))
+		}
 		// Invalid houses from Stripe, acknowledged not retried (RP20-4).
 		reg.MustRegister(billing.Collectors()...)
 		reg.MustRegister(entitlementsLapsed)

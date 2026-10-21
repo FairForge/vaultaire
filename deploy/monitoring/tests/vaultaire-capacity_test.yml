@@ -1,0 +1,92 @@
+# promtool unit test of vaultaire-capacity.yml (WP-CAP-1 C, Stage 1a Prompt 21).
+# Run on the box (promtool is there; rule file and test in ONE directory):
+#   scp deploy/monitoring/vaultaire-capacity.yml deploy/monitoring/tests/vaultaire-capacity_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-capacity_test.yml'
+rule_files:
+  - vaultaire-capacity.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A 1 TB plan at 0.85 TB stored fires the 80% warning after its hour;
+  # prod today (~2 MB of 1 TB) stays silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backend_stored_bytes{backend="idrive",kind="objects"}'
+        values: '850000000000x200'
+      - series: 'vaultaire_backend_plan_bytes{backend="idrive"}'
+        values: '1000000000000x200'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: BackendCapacity80
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: BackendCapacity80
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              backend: idrive
+            exp_annotations:
+              summary: "Backend idrive is at 80% of its plan"
+              description: "The larger of our stored bytes and the vendor's own meter is at or past 80% of the plan's capacity_bytes. The owner's rule of record (plan § WP-CAP): buy the next block on a rising slope, otherwise ride the overage and right-size at renewal. GET /api/v1/admin/backends/idrive/plan; the sums are in job_runs.result of backend_capacity."
+      - eval_time: 90m
+        alertname: BackendCapacity90
+        exp_alerts: []
+
+  # The vendor's meter alone can cross the line (drift we cannot see).
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backend_stored_bytes{backend="idrive",kind="objects"}'
+        values: '2000000x200'
+      - series: 'vaultaire_backend_vendor_used_bytes{backend="idrive"}'
+        values: '950000000000x200'
+      - series: 'vaultaire_backend_plan_bytes{backend="idrive"}'
+        values: '1000000000000x200'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: BackendCapacity90
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              backend: idrive
+            exp_annotations:
+              summary: "Backend idrive is at 90% of its plan"
+              description: "At 100% the vendor bills overage (iDrive: $5.12/TB-month, billed, never blocked) — nothing breaks, but the bill climbs. Buy the next block or move data."
+
+  # Seven days before term_end the renewal pages (the 2026-08-27 shape).
+  # term_end = eval start + 5 days => inside 7 d from the first sample.
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_backend_plan_term_end_timestamp_seconds{backend="idrive"}'
+        values: '432000x80'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: BackendPlanRenewal7d
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              backend: idrive
+            exp_annotations:
+              summary: "Backend idrive's plan renews within 7 days"
+              description: "The 2026-08-27 shape: the iDrive account lapsed with nothing watching and prod lost its primary for 12 days before anyone noticed. If this fires the renewal is nearly due (or already past — the value goes negative). Act today."
+
+  # A registered paid backend with no plan row warns after 6 h — the point
+  # of shipping dark; one with a row is silent.
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_backend_health{backend="lyve"}'
+        values: '1x10'
+      - series: 'vaultaire_backend_health{backend="idrive"}'
+        values: '1x10'
+      - series: 'vaultaire_backend_plan_bytes{backend="idrive"}'
+        values: '1000000000000x10'
+    alert_rule_test:
+      - eval_time: 7h
+        alertname: BackendPlanUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              backend: lyve
+            exp_annotations:
+              summary: "Backend lyve is registered but has no plan row"
+              description: "A paid backend without a backend_plans row has no capacity, renewal or payment watch — the exact hole the 2026-09 iDrive lapse fell through. Enter it: PUT /api/v1/admin/backends/lyve/plan (F-31 names the five rows)."

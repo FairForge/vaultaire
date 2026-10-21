@@ -53,6 +53,7 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			data["DBStatus"] = "connected"
 			data["Jobs"] = loadJobRuns(r.Context(), db, logger)
 			data["Routing"] = loadRoutingTruth(r.Context(), db, logger)
+			data["Capacity"] = loadBackendCapacity(r.Context(), db, logger)
 		} else {
 			data["DBStatus"] = "not connected"
 		}
@@ -116,6 +117,109 @@ func loadRoutingTruth(ctx context.Context, db *sql.DB, logger *zap.Logger) *Rout
 		row.Unknown = strings.Join(parts, ", ")
 	}
 	return row
+}
+
+// CapacityRow is one backend's line of the System page's Capacity card
+// (WP-CAP-1): the plan row (what we bought, when it renews) beside the last
+// backend_capacity run's sums (what our tables say it holds) and, where the
+// vendor's API answers, the vendor's own numbers.
+type CapacityRow struct {
+	Backend   string
+	HasPlan   bool
+	PlanFmt   string // capacity_bytes, human
+	StoredFmt string // our stored total, human ("—" before the first run)
+	VendorFmt string // the vendor's own meter ("—" without a reseller view)
+	// EgressFreeFmt: free egress left this month (multiple × stored −
+	// vendor month-to-date), "" while the vendor does not meter egress.
+	EgressFreeFmt string
+	RenewsInDays  int
+	PaymentOnFile bool
+	OverageFmt    string // "$5.12/TB-mo", "" when the row records none
+}
+
+// loadBackendCapacity joins backend_plans with the last backend_capacity
+// run in job_runs.result. Nil when neither exists yet (the card hides).
+func loadBackendCapacity(ctx context.Context, db *sql.DB, logger *zap.Logger) []CapacityRow {
+	type bytesByKind struct {
+		Total int64 `json:"total"`
+	}
+	var res struct {
+		Backends map[string]*bytesByKind `json:"backends"`
+		Vendor   map[string]struct {
+			UsedBytes        int64 `json:"used_bytes"`
+			EgressMonthBytes int64 `json:"egress_month_bytes"`
+		} `json:"vendor"`
+	}
+	var raw []byte
+	err := db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = 'backend_capacity'`).Scan(&raw)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logger.Warn("admin system: read backend_capacity", zap.Error(err))
+	}
+	hasRun := len(raw) > 0 && json.Unmarshal(raw, &res) == nil && res.Backends != nil
+	rows, err := db.QueryContext(ctx, `
+		SELECT backend, capacity_bytes, egress_free_multiple, overage_usd_per_tb_month, term_end, payment_on_file
+		  FROM backend_plans ORDER BY backend`)
+	if err != nil {
+		logger.Warn("admin system: read backend_plans", zap.Error(err))
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []CapacityRow
+	seen := map[string]bool{}
+	for rows.Next() {
+		var row CapacityRow
+		var capacity int64
+		var mult, overage sql.NullFloat64
+		var termEnd time.Time
+		if err := rows.Scan(&row.Backend, &capacity, &mult, &overage, &termEnd, &row.PaymentOnFile); err != nil {
+			logger.Warn("admin system: scan backend_plans", zap.Error(err))
+			return nil
+		}
+		row.HasPlan = true
+		row.PlanFmt = formatBytes(capacity)
+		row.RenewsInDays = int(time.Until(termEnd).Hours() / 24)
+		if overage.Valid {
+			row.OverageFmt = fmt.Sprintf("$%.2f/TB-mo", overage.Float64)
+		}
+		row.StoredFmt, row.VendorFmt = "—", "—"
+		if hasRun {
+			var stored int64
+			if b := res.Backends[row.Backend]; b != nil {
+				stored = b.Total
+			}
+			row.StoredFmt = formatBytes(stored)
+			if v, ok := res.Vendor[row.Backend]; ok {
+				row.VendorFmt = formatBytes(v.UsedBytes)
+				if mult.Valid {
+					left := int64(mult.Float64*float64(stored)) - v.EgressMonthBytes
+					if left < 0 {
+						left = 0
+					}
+					row.EgressFreeFmt = formatBytes(left)
+				}
+			}
+		}
+		seen[row.Backend] = true
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("admin system: read backend_plans", zap.Error(err))
+		return nil
+	}
+	// Backends the run saw that have no plan row (BackendPlanUnknown's).
+	if hasRun {
+		names := make([]string, 0, len(res.Backends))
+		for n := range res.Backends {
+			if !seen[n] {
+				names = append(names, n)
+			}
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			out = append(out, CapacityRow{Backend: n, StoredFmt: formatBytes(res.Backends[n].Total), PlanFmt: "—", VendorFmt: "—"})
+		}
+	}
+	return out
 }
 
 // JobRunRow is one background job as the System page shows it: the job_runs
