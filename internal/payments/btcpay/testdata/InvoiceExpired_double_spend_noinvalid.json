@@ -1,0 +1,24 @@
+{
+ "headers": {
+  "Host": "capture:8080",
+  "User-Agent": "BTCPayServer/2.4.5",
+  "Content-Type": "application/json",
+  "BTCPay-Sig": "sha256=0a52d46c114623c35c83e11dd46177763134a02948d1186fabf198c60a647092",
+  "Content-Length": "389"
+ },
+ "body_b64": "ewogICJwYXJ0aWFsbHlQYWlkIjogZmFsc2UsCiAgImRlbGl2ZXJ5SWQiOiAiSjEzVGdUclVpQkhNUHo2WGFXZjJyWSIsCiAgIndlYmhvb2tJZCI6ICJQQXBmMm9rNGhWdVl3a1JURlFGV21RIiwKICAib3JpZ2luYWxEZWxpdmVyeUlkIjogIkoxM1RnVHJVaUJITVB6NlhhV2YyclkiLAogICJpc1JlZGVsaXZlcnkiOiBmYWxzZSwKICAidHlwZSI6ICJJbnZvaWNlRXhwaXJlZCIsCiAgInRpbWVzdGFtcCI6IDE3OTI2MTgxMjAsCiAgInN0b3JlSWQiOiAiQ2NvNlFCdFl1YllOdGYzVFdvOGozVHROZHdWaW85dHlCWFNtRkNEb0pwazkiLAogICJpbnZvaWNlSWQiOiAiNGtVMndWQkNMOGZNZkZraFdoZlhtayIsCiAgIm1ldGFkYXRhIjogewogICAgInRlbmFudF9pZCI6ICJ0LWxhYiIKICB9Cn0=",
+ "body": {
+  "partiallyPaid": false,
+  "deliveryId": "J13TgTrUiBHMPz6XaWf2rY",
+  "webhookId": "PApf2ok4hVuYwkRTFQFWmQ",
+  "originalDeliveryId": "J13TgTrUiBHMPz6XaWf2rY",
+  "isRedelivery": false,
+  "type": "InvoiceExpired",
+  "timestamp": 1792618120,
+  "storeId": "Cco6QBtYubYNtf3TWo8j3TtNdwVio9tyBXSmFCDoJpk9",
+  "invoiceId": "4kU2wVBCL8fMfFkhWhfXmk",
+  "metadata": {
+   "tenant_id": "t-lab"
+  }
+ }
+}
