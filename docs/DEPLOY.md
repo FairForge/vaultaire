@@ -92,9 +92,11 @@ wiped by `systemd-tmpfiles` at every boot, and shared with the Sync stripe
 staging and the pack store. `MULTIPART_STAGING_MIN_FREE` refuses a part there
 below 30 GiB free (503 SlowDown).
 
-**The prod choice (owner, not set yet):** the NVMe data disk, with the same
-`MULTIPART_STAGING_MIN_FREE` rule (10 % of the 3.6 TB filesystem ≈ 360 GiB
-kept free).
+**Prod: the NVMe data disk since 2026-10-21 14:26 UTC** (`.env` backup
+`.env.bak-staging-20261021T1426`; boot line `"dir":"/opt/vaultaire/data/multipart",
+"default":false`, 3.67 TB free), with the same `MULTIPART_STAGING_MIN_FREE`
+rule (10 % of the 3.6 TB filesystem ≈ 360 GiB kept free). No upload was
+active at the switch.
 
 1. Add `MULTIPART_STAGING_DIR=/opt/vaultaire/data/multipart` to
    `/opt/vaultaire/configs/.env`.
@@ -125,7 +127,7 @@ The deploy user's passwordless sudo is pinned to four exact invocations
 `restart`, `rollback` and `status`. sudo matches arguments literally, so no
 other file or verb is reachable.
 
-### Memory (owner item, Stage 1a Prompt 14 Part C)
+### Memory (Stage 1a Prompt 14 Part C — installed 2026-10-21)
 
 Read on the box on 2026-10-19 (`systemctl cat vaultaire@8001`, `free -g`): the
 unit sets **no `MemoryHigh=`, no `MemoryMax=` and no `GOMEMLIMIT`**; the box
@@ -135,8 +137,9 @@ has 121 GiB with ~4 GiB used. The process now bounds what the large GETs
 2 GiB) may hold, but with no `GOMEMLIMIT` the Go runtime only collects at
 `GOGC`'s pace and the kernel's OOM killer is the only ceiling. Two slots
 overlap during a switch, so each gets under half the box. Recommended, in
-`deploy/systemd/vaultaire@.service` (`[Service]`) — **not installed; the
-owner's sudo**:
+`deploy/systemd/vaultaire@.service` (`[Service]`) — **installed 2026-10-21
+14:26 UTC** (unit backup `/etc/systemd/system/vaultaire@.service.bak-20261021T1426`;
+`systemctl show vaultaire@8001 -p MemoryHigh -p MemoryMax -p Environment`):
 
 ```ini
 Environment=GOMEMLIMIT=40GiB
@@ -152,6 +155,46 @@ writes at the typical 48 MiB reserve; `CHUNK_PUT_BUDGET_BYTES` overrides);
 `systemctl daemon-reload` and a `vaultaire-switch restart` (the running slot
 keeps its old limits until it is restarted). Note `EnvironmentFile=` overrides
 `Environment=`, so `GOMEMLIMIT` can equally go in `.env`.
+
+### Host tuning (applied 2026-10-21)
+
+Measured and applied on slc-vaultaire-01 (Ryzen 9 9950X, 32 threads, 121 GiB,
+ixgbe 10 GbE `enp1s0f0`, NVMe). Files in `deploy/host/`:
+
+| What | Before | After | How (persistent) |
+|---|---|---|---|
+| CPU governor / EPP | `powersave` / `balance_performance` (cores at ~58 %) | `performance` / `performance` (~4.4 GHz) | `vaultaire-host-tuning.service` → `/usr/local/sbin/vaultaire-host-tuning.sh` at boot |
+| NIC rings | RX/TX 512 of 8192 (`rx_missed_errors` 1,156, `rx_dropped` 476k in 11 days) | 4096 | same script (resizing resets the link ~1 s; only when not already 4096) |
+| NIC IRQ affinity | every queue on every CPU, irqbalance off (CPU 16 had 110 M interrupts, most 2–27 M) | queue `TxRx-n` → CPU n (busiest CPU 5 % of an ingest's interrupts, all 32 used) | same script |
+| TCP | `tcp_mtu_probing=0`, `tcp_notsent_lowat` unlimited | 1, 131072 | `/etc/sysctl.d/91-vaultaire-tcp.conf` (the 2026-04-20 buffers/BBR stay in `99-vaultaire.conf`) |
+| PostgreSQL 18 | `shared_buffers` 160 MB, `effective_cache_size` 5 GB, `random_page_cost` 4, `effective_io_concurrency` 16, `max_wal_size` 1 GB, `wal_compression` off, `jit` on | 2 GB, 64 GB, 1.1, 200, 8 GB, zstd, off | `postgresql-tuning.sql` (ALTER SYSTEM; backup `postgresql.auto.conf.bak-tuning-20261021T1426`; restart took 2.3 s, no app errors). DB is 381 MB with a 99.6 % hit ratio, so this is headroom, not a fix |
+| App memory | none | `GOMEMLIMIT=40GiB`, `MemoryHigh=48G`, `MemoryMax=56G` | the unit (§ Memory) |
+| Multipart staging | `/tmp` tmpfs (RAM) | NVMe | `.env` (§ Multipart staging) |
+
+**Kept as is:** HAProxy `tune.bufsize 10485760`. A/B on 2026-10-21: 1 MB cut
+32 × 4 MiB PUTs through HAProxy from 1,007–1,070 to 595–761 MB/s (p90 157 →
+340–424 ms); 64 MiB bodies were unchanged. Reverted (backup
+`/etc/haproxy/haproxy.cfg.bak-bufsize-20261021T1428`). It holds up to ~20 MB per
+active connection — watch it if concurrent transfers reach the thousands.
+
+**Before → after** (`tierbench`/`ingestbench`, bench tenant, a bucket on the
+iDrive primary; L1 = localhost, L2 = `s3.stored.ge` through HAProxy; one run
+each, so ±20 % is noise):
+
+| | before L1 / L2 | after L1 / L2 |
+|---|---|---|
+| 4 KiB PUT / GET / DELETE p50 | 34/30/32 · 34/31/32 ms | 35/31/31 · 34/29/31 ms |
+| single PUT 8 MiB | 36 · 64 MB/s | 61 · 70 MB/s |
+| single PUT 64 MiB | 86 · 147 MB/s | 189 · 217 MB/s |
+| single GET 64 MiB | 157 · 162 MB/s | 172 · 180 MB/s |
+| 32 × 4 MiB ingest | 1,078 · 974 MB/s | 708 · 1,108 MB/s |
+| 16 × 64 MiB ingest | 1,040 · 1,051 MB/s | 1,058 · 1,097 MB/s |
+
+Small operations are bound by the backend (~30 ms to iDrive), not the box.
+Single-stream uploads gained the most (the governor: one core hashes and
+seals a stream). The large-GET failures of the "before" run were Lyve answering
+`500 InternalError` to chunk blobs written 2026-10-12/14 (HEAD 200, GET 500 —
+a vendor fault under investigation), not the host.
 
 ## The pipeline: push to `main`
 

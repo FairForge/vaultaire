@@ -38,6 +38,15 @@ ExecStart=/bin/sh -c 'PORT=%i exec /opt/vaultaire/bin/vaultaire-%i'
 Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+# Memory (docs/DEPLOY.md "Memory", installed 2026-10-21): the runtime collects
+# harder near 40 GiB (and the chunked-PUT budget defaults to a quarter of
+# it), the slot is throttled above 48 GiB and killed above 56 GiB. Two slots
+# overlap during a switch, so each gets under half of the box's 121 GiB.
+# Multipart parts stage on the NVMe (MULTIPART_STAGING_DIR in .env), never on
+# the /tmp tmpfs, whose pages would count against these limits.
+Environment=GOMEMLIMIT=40GiB
+MemoryHigh=48G
+MemoryMax=56G
 # On SIGTERM the process drains HTTP (30 s, cmd/vaultaire/main.go
 # shutdownTimeout), then waits for the long S3 operations it has detached
 # from their clients — up to 15 min from each one's start (internal/api
