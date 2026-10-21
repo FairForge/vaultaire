@@ -84,12 +84,13 @@ func HandleTenantList(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap.Logger) []tenantRow {
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.name, t.email, COALESCE(t.plan, 'starter'),
-		       t.subscription_status, t.suspended_at,
+		       e.paid_through, e.lapsed_at IS NOT NULL, t.suspended_at,
 		       COALESCE(q.storage_used_bytes, 0), COALESCE(q.storage_limit_bytes, 1099511627776),
 		       COALESCE((SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = t.id AND floor = 'standard'), 0),
 		       COALESCE((SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = t.id AND floor = 'vault'), 0)
 		FROM tenants t
 		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
+		LEFT JOIN entitlements e ON e.tenant_id = t.id
 		WHERE ($1 = '' OR t.name ILIKE '%' || $1 || '%' OR t.email ILIKE '%' || $1 || '%')
 		ORDER BY t.created_at DESC
 		LIMIT 100
@@ -103,13 +104,15 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 	var tenants []tenantRow
 	for rows.Next() {
 		var tr tenantRow
-		var subStatus string
-		var suspendedAt sql.NullTime
+		var paidThrough, suspendedAt sql.NullTime
+		var lapsed sql.NullBool
 		var usedBytes, limitBytes, stdBytes, vaultBytes int64
 		if err := rows.Scan(&tr.ID, &tr.Name, &tr.Email, &tr.Plan,
-			&subStatus, &suspendedAt, &usedBytes, &limitBytes, &stdBytes, &vaultBytes); err != nil {
+			&paidThrough, &lapsed, &suspendedAt, &usedBytes, &limitBytes, &stdBytes, &vaultBytes); err != nil {
 			continue
 		}
+		hs := houseStateOf(paidThrough, lapsed.Bool, time.Now())
+		tr.Plan = hs.plan(tr.Plan)
 		tr.House = houseSummary(stdBytes, vaultBytes)
 		tr.StorageUsedFmt = formatBytes(usedBytes)
 		tr.StorageLimitFmt = formatBytes(limitBytes)
@@ -117,7 +120,7 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 			tr.UsagePercent = int(usedBytes * 100 / limitBytes)
 		}
 		tr.UsageBarClass = usageBarClass(tr.UsagePercent)
-		tr.Status, tr.StatusClass = tenantStatus(subStatus, suspendedAt.Valid)
+		tr.Status, tr.StatusClass = hs.badge(suspendedAt.Valid)
 		tenants = append(tenants, tr)
 	}
 	if err := rows.Err(); err != nil {
@@ -126,20 +129,62 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 	return tenants
 }
 
-func tenantStatus(subStatus string, isSuspended bool) (string, string) {
+// houseState is a tenant's house as the entitlement record says it (WP-PAY-7):
+// the admin lists read it instead of tenants.subscription_status, which
+// said what a provider last reported, not what the tenant holds.
+type houseState int
+
+const (
+	houseNone    houseState = iota // no entitlement row: the free tier
+	houseActive                    // granted, paid_through ahead
+	houseInGrace                   // granted, paid_through passed: the lapse job's grace runs
+	houseLapsed                    // lapsed_at set: the house was cleared
+)
+
+// houseStateOf reads an entitlements row's paid_through (NULL = no row) and
+// whether lapsed_at is set.
+func houseStateOf(paidThrough sql.NullTime, lapsed bool, now time.Time) houseState {
+	switch {
+	case !paidThrough.Valid:
+		return houseNone
+	case lapsed:
+		return houseLapsed
+	case now.After(paidThrough.Time):
+		return houseInGrace
+	}
+	return houseActive
+}
+
+// granted: the house is in force (active or in grace).
+func (s houseState) granted() bool { return s == houseActive || s == houseInGrace }
+
+// plan is the plan label to show: 'house' only while one is granted
+// (tenants.plan keeps saying 'house' after a lapse — RP21-3); a legacy
+// pack label stays what it is.
+func (s houseState) plan(label string) string {
+	switch {
+	case s.granted():
+		return "house"
+	case label == "house" || label == "":
+		return "starter"
+	}
+	return label
+}
+
+// badge is the list's status badge.
+func (s houseState) badge(isSuspended bool) (string, string) {
 	if isSuspended {
 		return "suspended", "danger"
 	}
-	switch subStatus {
-	case "active":
+	switch s {
+	case houseActive:
 		return "active", "success"
-	case "past_due":
-		return "past due", "warning"
-	case "canceled":
-		return "canceled", "default"
-	default:
-		return "free", "default"
+	case houseInGrace:
+		return "in grace", "warning"
+	case houseLapsed:
+		return "lapsed", "default"
 	}
+	return "free", "default"
 }
 
 func usageBarClass(pct int) string {
@@ -202,17 +247,16 @@ var availableTiers = []tierOption{
 }
 
 func loadTenantDetail(ctx context.Context, db *sql.DB, eg usage.EgressStatusReader, tenantID string, data map[string]any, logger *zap.Logger) bool {
-	var name, email, plan, subStatus string
-	var stripeCustomerID, stripeSubID sql.NullString
-	var suspendedAt sql.NullTime
+	var name, email, plan string
+	var paidThrough, suspendedAt sql.NullTime
+	var lapsed sql.NullBool
 	var createdAt sql.NullTime
 
 	err := db.QueryRowContext(ctx, `
-		SELECT t.name, t.email, COALESCE(t.plan, 'starter'), t.subscription_status,
-		       t.stripe_customer_id, t.stripe_subscription_id, t.suspended_at, t.created_at
-		FROM tenants t WHERE t.id = $1
-	`, tenantID).Scan(&name, &email, &plan, &subStatus,
-		&stripeCustomerID, &stripeSubID, &suspendedAt, &createdAt)
+		SELECT t.name, t.email, COALESCE(t.plan, 'starter'), e.paid_through, e.lapsed_at IS NOT NULL,
+		       t.suspended_at, t.created_at
+		FROM tenants t LEFT JOIN entitlements e ON e.tenant_id = t.id WHERE t.id = $1
+	`, tenantID).Scan(&name, &email, &plan, &paidThrough, &lapsed, &suspendedAt, &createdAt)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			logger.Debug("admin: tenant detail", zap.Error(err))
@@ -223,16 +267,18 @@ func loadTenantDetail(ctx context.Context, db *sql.DB, eg usage.EgressStatusRead
 	data["TenantID"] = tenantID
 	data["TenantName"] = name
 	data["TenantEmail"] = email
-	data["Plan"] = plan
+	hs := houseStateOf(paidThrough, lapsed.Bool, time.Now())
+	data["Plan"] = hs.plan(plan)
 	data["IsSuspended"] = suspendedAt.Valid
 
-	status, statusClass := tenantStatus(subStatus, suspendedAt.Valid)
+	status, statusClass := hs.badge(suspendedAt.Valid)
 	data["Status"] = status
 	data["StatusClass"] = statusClass
 
-	subLabel, subClass := subStatusDisplay(subStatus)
-	data["SubStatusLabel"] = subLabel
-	data["SubStatusClass"] = subClass
+	// The house card: the record's state; the sentence is the Billing panel's.
+	houseLabel, houseClass := hs.badge(false)
+	data["HouseStateLabel"] = houseLabel
+	data["HouseStateClass"] = houseClass
 
 	if createdAt.Valid {
 		data["CreatedFmt"] = createdAt.Time.Format("Jan 2, 2006")
@@ -295,19 +341,6 @@ func loadTenantDetail(ctx context.Context, db *sql.DB, eg usage.EgressStatusRead
 	}
 
 	return true
-}
-
-func subStatusDisplay(s string) (string, string) {
-	switch s {
-	case "active":
-		return "Active", "success"
-	case "past_due":
-		return "Past Due", "warning"
-	case "canceled":
-		return "Canceled", "default"
-	default:
-		return "None", "default"
-	}
 }
 
 // HandleSuspendTenant sets suspended_at on a tenant and returns an htmx fragment.

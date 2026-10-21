@@ -85,9 +85,9 @@ func TestStripeWebhook_PaidInvoiceOfInvalidHouse_SettlesLedgerOnly(t *testing.T)
 	assert.True(t, end.Equal(e.PaidThrough), "the date did not move, got %s", e.PaidThrough)
 }
 
-// RP22-3: the subscription acknowledged as an invalid house is recorded on
-// the tenant (outside the rolled-back grant) so the deletion runner finds
-// it and cancels it — never over a different live id.
+// RP22-3: the subscription acknowledged as an invalid house is recorded
+// (outside the rolled-back grant) so the deletion runner finds it and
+// cancels it — a payment_events row since WP-PAY-7, one per subscription.
 func TestInvalidHouse_SubscriptionRecordedForRunner(t *testing.T) {
 	// Arrange
 	f := setupHouseFixture(t)
@@ -101,17 +101,10 @@ func TestInvalidHouse_SubscriptionRecordedForRunner(t *testing.T) {
 		assert.Equal(t, http.StatusOK, f.postCode(t, fmt.Sprintf("invalid-%d", i), "customer.subscription.updated", sub))
 	}
 
-	// Assert: no entitlement, the id and status on the row.
+	// Assert: no entitlement, the subscription recorded once for the runner.
 	_, err := payments.Get(context.Background(), f.db, f.tenantID)
 	assert.ErrorIs(t, err, payments.ErrNoEntitlement)
-	_, status, subID, _ := f.tenantRow(t)
-	assert.Equal(t, sub.ID, subID, "recorded for the deletion runner")
-	assert.Equal(t, "active", status)
-
-	// A different live subscription on the row is never overwritten.
-	_, err = f.db.Exec(`UPDATE tenants SET stripe_subscription_id = 'sub_live_other' WHERE id = $1`, f.tenantID)
+	refs, err := payments.InvalidHouseRefs(context.Background(), f.db, f.tenantID)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, f.postCode(t, "invalid-again", "customer.subscription.updated", sub))
-	_, _, subID, _ = f.tenantRow(t)
-	assert.Equal(t, "sub_live_other", subID)
+	assert.Equal(t, []string{sub.ID}, refs, "recorded for the deletion runner, once")
 }

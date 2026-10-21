@@ -35,18 +35,14 @@ func testRevenueTemplate(t *testing.T) *template.Template {
 	return tmpl
 }
 
-// revenueQueries expects populateRevenue's queries (WP-PAY-0: houses only):
-// the houses, the active count, then new / churned / active at start.
-func revenueQueries(mock sqlmock.Sqlmock, houses *sqlmock.Rows, active, newN, churned, atStart int) {
-	mock.ExpectQuery(`SELECT t.id, t.email, t.house_period, f.floor`).WillReturnRows(houses)
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenants WHERE subscription_status = 'active'`).
+// revenueQueries expects populateRevenue's queries (WP-PAY-7: the record):
+// the houses, the live count, then the month's new / lapsed / live at start.
+func revenueQueries(mock sqlmock.Sqlmock, houses *mockHouses, active, newN, churned, atStart int) {
+	houses.expect(mock)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM \(SELECT tenant_id FROM entitlements WHERE lapsed_at IS NULL\)`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(active))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM subscriptions WHERE created_at`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(newN))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM subscriptions WHERE canceled_at`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(churned))
-	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM subscriptions`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(atStart))
+	mock.ExpectQuery(`FROM entitlements e, b`).
+		WillReturnRows(sqlmock.NewRows([]string{"new", "lapsed", "at_start"}).AddRow(newN, churned, atStart))
 }
 
 func renderRevenue(t *testing.T, db *sql.DB) string {

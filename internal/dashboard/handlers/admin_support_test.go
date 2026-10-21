@@ -70,8 +70,8 @@ func TestHandleAdminSupport_SearchByEmail(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT t.id, t.name, t.email`).
 		WithArgs("%alice%", "alice").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "subscription_status", "suspended_at"}).
-			AddRow("t-1", "Alice Corp", "alice@example.com", "vault3", "active", nil))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "paid_through", "lapsed", "suspended_at"}).
+			AddRow("t-1", "Alice Corp", "alice@example.com", "vault3", nil, nil, nil))
 
 	h := HandleAdminSupport(testSupportTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/support?q=alice", nil).WithContext(adminCtx(t))
@@ -93,8 +93,8 @@ func TestHandleAdminSupport_SearchByTenantID(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT t.id, t.name, t.email`).
 		WithArgs("%t-exact-123%", "t-exact-123").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "subscription_status", "suspended_at"}).
-			AddRow("t-exact-123", "Exact Match", "exact@example.com", "starter", "", nil))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "paid_through", "lapsed", "suspended_at"}).
+			AddRow("t-exact-123", "Exact Match", "exact@example.com", "starter", nil, nil, nil))
 
 	h := HandleAdminSupport(testSupportTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/support?q=t-exact-123", nil).WithContext(adminCtx(t))
@@ -115,7 +115,7 @@ func TestHandleAdminSupport_NoResults(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT t.id, t.name, t.email`).
 		WithArgs("%nobody%", "nobody").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "subscription_status", "suspended_at"}))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "name", "email", "plan", "paid_through", "lapsed", "suspended_at"}))
 
 	h := HandleAdminSupport(testSupportTemplate(t), db, zap.NewNop())
 	req := httptest.NewRequest("GET", "/admin/support?q=nobody", nil).WithContext(adminCtx(t))
@@ -132,8 +132,8 @@ func TestHandleAdminSupport_NoResults(t *testing.T) {
 func mockTenantDetailQueries(mock sqlmock.Sqlmock, tenantID string) {
 	mock.ExpectQuery(`SELECT t.name, t.email`).
 		WithArgs(tenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"name", "email", "plan", "subscription_status", "stripe_customer_id", "stripe_subscription_id", "suspended_at", "created_at"}).
-			AddRow("Test Tenant", "test@example.com", "vault3", "active", nil, nil, nil, time.Now()))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "email", "plan", "paid_through", "lapsed", "suspended_at", "created_at"}).
+			AddRow("Test Tenant", "test@example.com", "vault3", nil, nil, nil, time.Now()))
 
 	mock.ExpectQuery(`SELECT COALESCE\(storage_used_bytes`).
 		WithArgs(tenantID).
@@ -166,7 +166,7 @@ func TestHandleCustomerDetail_NotFound(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT t.name, t.email`).
 		WithArgs("t-bad").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "email", "plan", "subscription_status", "stripe_customer_id", "stripe_subscription_id", "suspended_at", "created_at"}))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "email", "plan", "paid_through", "lapsed", "suspended_at", "created_at"}))
 
 	h := HandleCustomerDetail(testCustomerDetailTemplate(t), db, zap.NewNop(), nil)
 	ctx := withChiParam(adminCtx(t), "id", "t-bad")

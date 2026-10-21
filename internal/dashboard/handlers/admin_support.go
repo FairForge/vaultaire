@@ -80,8 +80,9 @@ func HandleAdminSupport(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logger) []supportResult {
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.name, t.email, COALESCE(t.plan, 'starter'),
-		       t.subscription_status, t.suspended_at
+		       e.paid_through, e.lapsed_at IS NOT NULL, t.suspended_at
 		FROM tenants t
+		LEFT JOIN entitlements e ON e.tenant_id = t.id
 		WHERE t.email ILIKE $1 OR t.id = $2
 		      OR EXISTS (SELECT 1 FROM api_keys ak WHERE ak.tenant_id = t.id AND ak.key_id = $2)
 		      OR t.stripe_customer_id = $2
@@ -95,13 +96,16 @@ func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logg
 
 	var results []supportResult
 	for rows.Next() {
-		var id, name, email, plan, subStatus string
-		var suspendedAt sql.NullTime
-		if err := rows.Scan(&id, &name, &email, &plan, &subStatus, &suspendedAt); err != nil {
+		var id, name, email, plan string
+		var paidThrough, suspendedAt sql.NullTime
+		var lapsed sql.NullBool
+		if err := rows.Scan(&id, &name, &email, &plan, &paidThrough, &lapsed, &suspendedAt); err != nil {
 			logger.Error("support search scan", zap.Error(err))
 			continue
 		}
-		status, statusClass := tenantStatus(subStatus, suspendedAt.Valid)
+		hs := houseStateOf(paidThrough, lapsed.Bool, time.Now())
+		plan = hs.plan(plan)
+		status, statusClass := hs.badge(suspendedAt.Valid)
 		results = append(results, supportResult{
 			ID: id, Name: name, Email: email, Plan: plan,
 			Status: status, StatusClass: statusClass,

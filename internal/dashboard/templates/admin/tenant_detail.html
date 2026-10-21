@@ -39,10 +39,11 @@
         <div class="card-value" style="font-size:1rem">{{.CreatedFmt}}</div>
     </div>
     <div class="card">
-        <div class="card-title">Subscription</div>
+        <div class="card-title">House</div>
         <div class="card-value" style="font-size:1rem">
-            <span class="badge badge-{{.SubStatusClass}}">{{.SubStatusLabel}}</span>
+            <span class="badge badge-{{.HouseStateClass}}">{{.HouseStateLabel}}</span>
         </div>
+        {{if .BillingSentence}}<div class="card-detail">{{.BillingSentence}}</div>{{end}}
     </div>
 </div>
 

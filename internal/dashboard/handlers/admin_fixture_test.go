@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"html/template"
 	"net/http/httptest"
@@ -12,7 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
@@ -78,8 +77,8 @@ func TestAdmin_WriteScreenshotFixtures(t *testing.T) {
 	write("stats", w)
 
 	id := houseTenant(t, db, 0, 0)
-	require.NoError(t, usage.NewQuotaManager(db).SetHouse(context.Background(), id, usage.HouseFromTB(6, 1, 0)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', house_period = 'annual', name = 'Casa' WHERE id = $1`, id)
+	grantedHouse(t, db, id, payments.Order{Std: 6, Vault: 1, Period: payments.PeriodAnnual}, time.Now().Add(200*24*time.Hour))
+	_, err := db.Exec(`UPDATE tenants SET plan = 'house', name = 'Casa' WHERE id = $1`, id)
 	require.NoError(t, err)
 	w = httptest.NewRecorder()
 	HandleTenantList(page("tenants.html"), db, zap.NewNop()).ServeHTTP(w, httptest.NewRequest("GET", "/admin/tenants?q="+id, nil).WithContext(adminCtx(t)))

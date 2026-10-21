@@ -289,6 +289,7 @@ func setupHouseFixture(t *testing.T) *houseFixture {
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM stripe_events WHERE event_id LIKE $1`, "evt_"+tenantID+"%")
 		_, _ = db.Exec(`DELETE FROM payments WHERE tenant_id = $1`, tenantID)
+		_, _ = db.Exec(`DELETE FROM payment_events WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM audit_logs WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenantID)
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)

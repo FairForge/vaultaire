@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"go.uber.org/zap"
 )
 
@@ -59,10 +60,10 @@ func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, 
 		logger.Debug("admin: sum storage", zap.Error(err))
 	}
 
-	var activeSubCount int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tenants WHERE subscription_status = 'active'`).Scan(&activeSubCount); err != nil {
-		logger.Debug("admin: count active subs", zap.Error(err))
+	// Active = granted entitlements (WP-PAY-7: the record, not a status).
+	activeSubCount, err := payments.CountLiveHouses(ctx, db)
+	if err != nil {
+		logger.Debug("admin: count live houses", zap.Error(err))
 	}
 
 	// Revenue = the live houses at payments.QuoteHouse (WP-PAY-0: one

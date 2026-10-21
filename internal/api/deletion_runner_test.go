@@ -141,6 +141,7 @@ func setupDeletionFixture(t *testing.T) *deletionFixture {
 		}
 		_, _ = db.ExecContext(ctx, `DELETE FROM audit_logs WHERE tenant_id = $1`, f.tenantID)
 		_, _ = db.ExecContext(ctx, `DELETE FROM stripe_events WHERE event_id = $1`, "evt_runner_"+f.suffix)
+		_, _ = db.ExecContext(ctx, `DELETE FROM payment_events WHERE event_id LIKE $1`, "%"+f.suffix+"%")
 		_, _ = db.ExecContext(ctx, `DELETE FROM global_content_index WHERE plaintext_hash = $1`, f.hash)
 		_, _ = db.ExecContext(ctx, `DELETE FROM job_runs WHERE job = $1`, f.runner.JobName)
 		_, _ = db.ExecContext(ctx, `DELETE FROM audit_logs WHERE action = $1`, "admin."+f.runner.JobName)
@@ -178,10 +179,12 @@ func (f *deletionFixture) seed(scheduledAt time.Time) {
 	u, tn, b := f.userID, f.tenantID, f.bucket
 	f.exec(`INSERT INTO users (id, email, password_hash, company, status, deletion_scheduled_at, deletion_reason, created_at, updated_at)
 	        VALUES ($1, $2, 'x', 'Runner Co', 'pending_deletion', $3, 'runner test', NOW(), NOW())`, u, f.email, scheduledAt)
-	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, stripe_customer_id, stripe_subscription_id, subscription_status, plan)
-	        VALUES ($1, 'Runner Co', $2, $3, $4, $5, $6, 'active', 'house')`, tn, f.email, "VKRN"+f.suffix, "SKRN"+f.suffix, "cus_runner_"+f.suffix, "sub_runner_"+f.suffix)
+	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, stripe_customer_id, plan)
+	        VALUES ($1, 'Runner Co', $2, $3, $4, $5, 'house')`, tn, f.email, "VKRN"+f.suffix, "SKRN"+f.suffix, "cus_runner_"+f.suffix)
 	f.exec(`INSERT INTO api_keys (id, user_id, name, key_id, secret_hash) VALUES ($1, $2, 'primary', $3, 'hash')`, uuid.New().String(), u, "VLT_RN"+f.suffix)
 	f.exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier) VALUES ($1, 1000000, 4096, 'standard')`, tn)
+	// The house Stripe renews, in the record (WP-PAY-7: the runner reads nothing else).
+	f.grant("sub_runner_"+f.suffix, payments.RenewalAuto)
 	f.exec(`INSERT INTO buckets (tenant_id, name) VALUES ($1, $2)`, tn, b)
 	for _, o := range []struct{ key, backend, dir string }{
 		{"a/one.txt", "local", f.primary}, {"a/two.txt", "local", f.primary}, {"b/three.txt", "second", f.secDir},
@@ -214,6 +217,25 @@ func (f *deletionFixture) seed(scheduledAt time.Time) {
 	f.exec(`INSERT INTO stripe_events (event_id, event_type, tenant_id, data) VALUES ($1, 'invoice.paid', $2, '{}')`, "evt_runner_"+f.suffix, tn)
 	f.exec(`INSERT INTO audit_logs (user_id, tenant_id, event_type, action, result, ip, user_agent, performed_by) VALUES ($1, $2, 'key', 'key.created', 'success', '203.0.113.5', 'curl', $1)`, u, tn)
 	f.exec(`INSERT INTO audit_logs (tenant_id, event_type, action, result, ip, user_agent) VALUES ($1, 'admin', 'admin.tenant_suspended', 'success', '203.0.113.9', 'Mozilla')`, tn)
+}
+
+// grant records a Stripe house paid ten days ahead under ref.
+func (f *deletionFixture) grant(ref string, renewal payments.Renewal) {
+	f.t.Helper()
+	require.NoError(f.t, payments.InTx(context.Background(), f.db, func(tx *sql.Tx) error {
+		return payments.Grant(context.Background(), tx, f.tenantID, payments.Order{Std: 1, Period: payments.PeriodMonthly},
+			time.Now().Add(10*24*time.Hour), payments.ProviderStripe, ref, renewal)
+	}))
+	f.t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM entitlements WHERE tenant_id = $1`, f.tenantID)
+		_, _ = f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, f.tenantID)
+	})
+}
+
+// stamps counts the deletion_cancel rows of ref.
+func (f *deletionFixture) stamps(ref string) int {
+	f.t.Helper()
+	return f.count(`SELECT COUNT(*) FROM payment_events WHERE event_type = 'deletion_cancel' AND event_id = $1`, "deletion_cancel:"+ref)
 }
 
 func fileExists(p string) bool {
@@ -338,9 +360,7 @@ func TestAccountDeletionRunner_StripeFailureDefersTheTenantAndTouchesNoObject(t 
 	assert.True(t, fileExists(filepath.Join(f.primary, f.container(), "a/one.txt")), "no object touched before billing is settled")
 	assert.Equal(t, 5, f.count(`SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1`, f.tenantID))
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID))
-	var cancelled sql.NullTime
-	require.NoError(t, f.db.QueryRow(`SELECT deletion_stripe_cancelled_at FROM tenants WHERE id = $1`, f.tenantID).Scan(&cancelled))
-	assert.False(t, cancelled.Valid)
+	assert.Zero(t, f.stamps("sub_runner_"+f.suffix), "no stamp before Stripe answered")
 
 	// Tomorrow Stripe answers: the cancel is retried once, the stamp set, the
 	// tenant erased.
@@ -382,13 +402,9 @@ func TestAccountDeletionRunner_BackendFailureLeavesTheRowAndResumesNextRun(t *te
 	assert.True(t, fileExists(filepath.Join(f.secDir, f.container(), "b/three.txt")), "bytes untouched on the failing backend")
 	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id::text = $1`, f.userID), "rows not erased while an object remains")
 	assert.Equal(t, int32(1), f.stripe.calls.Load())
-	var cancelled sql.NullTime
-	require.NoError(t, f.db.QueryRow(`SELECT deletion_stripe_cancelled_at FROM tenants WHERE id = $1`, f.tenantID).Scan(&cancelled))
-	assert.True(t, cancelled.Valid, "the Stripe stamp records the cancel")
+	assert.Equal(t, 1, f.stamps("sub_runner_"+f.suffix), "the stamp records the cancel of that subscription")
 
-	// Stripe's customer.subscription.deleted delivery clears the id, so
-	// tomorrow's run has nothing left to cancel.
-	f.exec(`UPDATE tenants SET stripe_subscription_id = NULL, subscription_status = 'canceled' WHERE id = $1`, f.tenantID)
+	// The stamp names the reference: tomorrow's run has nothing left to cancel.
 	f.second.fail.Store(false)
 	res, err = f.runner.RunOnce(ctx)
 	require.NoError(t, err)
@@ -418,12 +434,12 @@ func TestAccountDeletionRunner_StaleStripeStampDoesNotSkipANewSubscription(t *te
 	require.Len(t, res.Tenants, 1)
 	require.Equal(t, outcomeDeferred, res.Tenants[0].Outcome)
 	require.Equal(t, int32(1), f.stripe.calls.Load())
-	require.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1 AND deletion_stripe_cancelled_at IS NOT NULL`, f.tenantID), "fixture: the stamp is set")
+	require.Equal(t, 1, f.stamps("sub_runner_"+f.suffix), "fixture: the stamp is set")
 
 	// The customer changes their mind, the webhook clears the cancelled
 	// subscription, they check out again, and later schedule a new deletion.
 	require.NoError(t, account.NewService(f.db, zap.NewNop()).Cancel(ctx, f.userID))
-	f.exec(`UPDATE tenants SET stripe_subscription_id = $2, subscription_status = 'active' WHERE id = $1`, f.tenantID, "sub_again_"+f.suffix)
+	f.grant("sub_again_"+f.suffix, payments.RenewalAuto)
 	f.exec(`UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() - INTERVAL '1 hour' WHERE id::text = $1`, f.userID)
 
 	f.second.fail.Store(false)
@@ -584,18 +600,69 @@ func TestDeletionRunner_ConfiguredProvider_CancelsTheRowsProvider(t *testing.T) 
 	assert.True(t, res.Tenants[0].StripeCancelled)
 }
 
-// RP22-3: a subscription the webhook acknowledged as an invalid house sits
-// on tenants.stripe_subscription_id with no entitlement row; the runner
-// treats it as Stripe's, renewed by itself, and cancels it once per run.
+// RP22-3: a subscription the webhook acknowledged as an invalid house is
+// recorded in payment_events with no entitlement row (WP-PAY-7: was
+// tenants.stripe_subscription_id); the runner treats it as Stripe's,
+// renewed by itself, and cancels it once.
 func TestCancelSubscription_RecordedInvalidHouse_CancelsOnce(t *testing.T) {
 	f := setupDeletionFixture(t)
 	f.seed(time.Now().Add(-time.Hour))
-	f.exec(`UPDATE tenants SET stripe_subscription_id = 'sub_invalid_house', subscription_status = 'active' WHERE id = $1`, f.tenantID)
 	f.exec(`DELETE FROM entitlements WHERE tenant_id = $1`, f.tenantID)
+	ref := "sub_invalid_" + f.suffix
+	require.NoError(t, payments.RecordInvalidHouse(context.Background(), f.db, f.tenantID, ref, "active"))
 
 	var te TenantErasure
 	require.NoError(t, f.runner.cancelSubscription(context.Background(), f.tenantID, &te))
+	require.NoError(t, f.runner.cancelSubscription(context.Background(), f.tenantID, &te))
 
-	assert.Equal(t, int32(1), f.stripe.calls.Load())
+	assert.Equal(t, int32(1), f.stripe.calls.Load(), "once: the second pass finds the stamp")
 	assert.True(t, te.StripeCancelled)
+	assert.Equal(t, 1, f.stamps(ref))
+}
+
+// WP-PAY-7 item 6: the cancel reads the entitlement's provider_ref — no
+// tenants column is set — and its stamp is a payment_events row written only
+// after the provider answered. A crash between the answer and the stamp
+// (the stamp missing on the next run) repeats one idempotent cancel; a
+// stamped reference is never called again.
+func TestDeletionRunner_CancelsFromEntitlement_StampIdempotent(t *testing.T) {
+	// Arrange: the seeded house is the entitlement's alone.
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	ref := "sub_runner_" + f.suffix
+	ctx := context.Background()
+
+	// Act 1: the provider answers, the stamp lands.
+	var te TenantErasure
+	require.NoError(t, f.runner.cancelSubscription(ctx, f.tenantID, &te))
+	require.Equal(t, int32(1), f.stripe.calls.Load())
+	require.Equal(t, 1, f.stamps(ref))
+	assert.True(t, te.StripeCancelled)
+
+	// Act 2: the crash — the answer came, the stamp did not.
+	f.exec(`DELETE FROM payment_events WHERE event_id = $1`, "deletion_cancel:"+ref)
+	te = TenantErasure{}
+	require.NoError(t, f.runner.cancelSubscription(ctx, f.tenantID, &te))
+
+	// Assert: called again (Stripe answers an already-cancelled one with
+	// success), stamped once; a third pass calls nobody.
+	assert.Equal(t, int32(2), f.stripe.calls.Load())
+	assert.Equal(t, 1, f.stamps(ref))
+	require.NoError(t, f.runner.cancelSubscription(ctx, f.tenantID, &te))
+	assert.Equal(t, int32(2), f.stripe.calls.Load())
+	assert.True(t, te.StripeCancelled)
+}
+
+// The provider failing writes no stamp (the tenant is deferred).
+func TestDeletionRunner_ProviderErrorWritesNoStamp(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.stripe.err = errors.New("stripe: 503")
+
+	var te TenantErasure
+	err := f.runner.cancelSubscription(context.Background(), f.tenantID, &te)
+
+	require.Error(t, err)
+	assert.Zero(t, f.stamps("sub_runner_"+f.suffix))
+	assert.False(t, te.StripeCancelled)
 }

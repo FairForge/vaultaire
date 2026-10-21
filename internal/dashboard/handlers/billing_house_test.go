@@ -176,12 +176,9 @@ func TestHouse_ExistingHousePreselectsItsFloors(t *testing.T) {
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 6, 1)
-	qm := usage.NewQuotaManager(db)
-	require.NoError(t, qm.SetHouse(context.Background(), id, usage.HouseFromTB(3, 2, 1)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', stripe_subscription_id = 'sub_1', house_period = 'monthly' WHERE id = $1`, id)
-	require.NoError(t, err)
+	grantedHouse(t, db, id, payments.Order{Std: 3, Vault: 2, PinHot: 1, Period: payments.PeriodMonthly}, time.Now().Add(20*24*time.Hour))
 	// 1.5 TB used downstairs: the stepper cannot go below 2.
-	_, err = db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = $1 WHERE tenant_id = $2 AND floor = 'standard'`, 3*usage.TB/2, id)
+	_, err := db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = $1 WHERE tenant_id = $2 AND floor = 'standard'`, 3*usage.TB/2, id)
 	require.NoError(t, err)
 
 	h := HandleBilling(houseTemplate(t), newFakeHouseBilling().registry(db, true), db, houseFlags(true), zap.NewNop())
@@ -289,27 +286,18 @@ func TestHandleHouseCheckout_RefusesASecondSubscription(t *testing.T) {
 	assert.Equal(t, "error", cat)
 	assert.Equal(t, payments.Order{}, fb.gotOrder)
 
-	// 3. A legacy pack the local row knows about, still billing: refused
-	//    before Stripe is even asked.
+	// 3. A legacy pack label (a pack bought before, still billing or not —
+	//    the local row no longer says; WP-PAY-7): one product (WP-PAY-0),
+	//    support moves it, refused before Stripe is even asked.
 	fb.liveErr = nil
 	asked := fb.liveAsked
-	_, err := db.Exec(`UPDATE tenants SET plan = 'vault18', subscription_status = 'active', stripe_subscription_id = 'sub_pack' WHERE id = $1`, id)
-	require.NoError(t, err)
-	w = postHouse(t, h, id, order)
-	cat, msg = flashOf(t, w)
-	assert.Equal(t, "error", cat)
-	assert.Contains(t, msg, "bill you twice")
-	assert.Equal(t, asked, fb.liveAsked, "refused from the local row")
-	assert.Equal(t, payments.Order{}, fb.gotOrder)
-
-	// 4. That old subscription is over (canceled) but the row still says
-	//    vault18: one product (WP-PAY-0) — support moves it, no checkout.
-	_, err = db.Exec(`UPDATE tenants SET subscription_status = 'canceled' WHERE id = $1`, id)
+	_, err := db.Exec(`UPDATE tenants SET plan = 'vault18' WHERE id = $1`, id)
 	require.NoError(t, err)
 	w = postHouse(t, h, id, order)
 	cat, msg = flashOf(t, w)
 	assert.Equal(t, "error", cat)
 	assert.Contains(t, msg, "legacy plan")
+	assert.Equal(t, asked, fb.liveAsked, "refused from the local row")
 	assert.Equal(t, payments.Order{}, fb.gotOrder)
 
 	// 5. Downgraded to starter (what customer.subscription.deleted writes):
@@ -327,10 +315,9 @@ func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() }) // registered first = runs last, after the tenant cleanup
 	id := houseTenant(t, db, 0, 0)
 	qm := usage.NewQuotaManager(db)
-	require.NoError(t, qm.SetHouse(context.Background(), id, usage.HouseFromTB(3, 2, 0)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', stripe_subscription_id = 'sub_1', house_period = 'annual' WHERE id = $1`, id)
-	require.NoError(t, err)
-	_, err = db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = $1 WHERE tenant_id = $2 AND floor = 'vault'`, usage.TB+1, id)
+	grantedHouseVia(t, db, id, payments.Order{Std: 3, Vault: 2, Period: payments.PeriodAnnual}, time.Now().Add(200*24*time.Hour),
+		payments.ProviderStripe, "sub_1", payments.RenewalAuto)
+	_, err := db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = $1 WHERE tenant_id = $2 AND floor = 'vault'`, usage.TB+1, id)
 	require.NoError(t, err)
 
 	fb := newFakeHouseBilling()
@@ -374,8 +361,7 @@ func TestOnboarding_PlanWaitingStep(t *testing.T) {
 	assert.True(t, st.PlanWaiting, "a house was built on the site and nothing is bought yet")
 	assert.Equal(t, "2 TB downstairs", st.PlanSummary)
 
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active' WHERE id = $1`, id)
-	require.NoError(t, err)
+	grantedHouse(t, db, id, payments.Order{Std: 2, Period: payments.PeriodMonthly}, time.Now().Add(20*24*time.Hour))
 	data = map[string]any{}
 	populateOnboarding(context.Background(), db, id, req, data)
 	st = data["Onboarding"].(*OnboardingStatus)

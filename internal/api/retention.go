@@ -80,7 +80,11 @@ func defaultRetentionPolicies() []retentionPolicy {
 		// Every other provider's webhook bodies (WP-PAY-1): the privacy
 		// policy's "payment-provider event records, 90 days". The payments
 		// ledger itself is an accounting record and is never pruned.
-		{Table: "payment_events", Column: "received_at", MaxAge: retentionStripeEvents},
+		// An invalid house's subscription (payments.EventInvalidHouse) is
+		// kept until the account's erasure anonymises it: the deletion
+		// runner cancels it from that row (RP22-3, WP-PAY-7).
+		{Table: "payment_events", Column: "received_at", MaxAge: retentionStripeEvents,
+			Extra: "(event_type <> 'invalid_house' OR tenant_id IS NULL)"},
 		{Table: "cdn_access_log", Column: "accessed_at", MaxAge: retentionCDNAccessLog},
 		{Table: "webhook_deliveries", Column: "created_at", MaxAge: retentionWebhookDeliv},
 		// The outbox (WP-R11-3): a row is terminal within ~3 minutes of its

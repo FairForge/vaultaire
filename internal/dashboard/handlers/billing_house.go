@@ -67,8 +67,6 @@ type HouseView struct {
 	Std, Vault, PinHot int    // stepper starting values
 	Period             string // "annual" | "monthly"
 	HasHouse           bool   // a granted house → resize mode
-	Status             string
-	SubscriptionID     string
 	// Providers: the ways this tenant may pay now (flag on, ready).
 	Providers []string
 	// CanRenew: a prepaid or lapsed house a provider can take money for
@@ -92,8 +90,8 @@ type HouseView struct {
 // flag off the section is disabled (the sentence still shows). add is the
 // overview's "add a box" nudge: "downstairs" or "attic" pre-increments that
 // floor's stepper by one. The house comes from the entitlement record
-// (payments.Status); a house granted before migration 097 without a row
-// falls back to the tenants columns.
+// (payments.Status) and nothing else (WP-PAY-7: the tenants columns are
+// no longer read — a house without a row is no house).
 func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.Service, data map[string]any, tenantID, add string) {
 	v := HouseView{Period: string(payments.PeriodAnnual), Prices: landing.Get()}
 	data["House"] = v
@@ -130,12 +128,8 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 		data["House"] = v
 		return
 	}
-	v.HasHouse, v.Status, v.SubscriptionID = h.active, h.status, h.subID
-	order, period := h.order(), h.period
-	if st.Found {
-		v.HasHouse = st.Granted
-		order, period = st.Entitlement.Order, string(st.Entitlement.Order.Period)
-	}
+	v.HasHouse = st.Granted
+	order, period := st.Entitlement.Order, string(st.Entitlement.Order.Period)
 	v.RoomURL = landing.HouseIntent{Room: h.intent.Room}.RoomURL()
 	v.UsedStd, v.UsedVault = h.usedStd, h.usedVault
 	v.UsedStdFmt, v.UsedVaultFmt = formatBytes(h.usedStd), formatBytes(h.usedVault)
@@ -223,43 +217,36 @@ func houseSentence(st payments.Status) string {
 	return s
 }
 
-// tenantHouse is what the billing page and the checkout handler read.
+// tenantHouse is what the billing page and the checkout handler read
+// beside the entitlement record: the house the customer built on the site,
+// the plan label and what each floor holds.
 type tenantHouse struct {
 	intent             landing.HouseIntent
-	plan, status       string
-	subID, period      string
-	active             bool
-	liveOther          bool // a non-house subscription Stripe is still billing, or a legacy plan
+	plan               string
 	legacy             bool // tenants.plan is a legacy pack id (legacyPlan)
 	house              usage.House
 	usedStd, usedVault int64
 }
 
+// loadHouse reads the tenant's intent, plan label and floors. Whether a
+// house is granted is the entitlement record's (payments.Status), never a
+// tenants column (WP-PAY-7). A subscription a provider still bills beside
+// no granted house (an incomplete 3-D Secure checkout) is the provider's
+// guard to refuse — payments.ErrLiveSubscription (R10-05).
 func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, error) {
 	var h tenantHouse
-	var sub sql.NullString
 	var std, vault int
 	var room string
 	if err := db.QueryRowContext(ctx,
-		`SELECT intent_std_tb, intent_vault_tb, intent_room, plan, subscription_status,
-		        stripe_subscription_id, house_period
-		   FROM tenants WHERE id = $1`, tenantID).
-		Scan(&std, &vault, &room, &h.plan, &h.status, &sub, &h.period); err != nil {
+		`SELECT intent_std_tb, intent_vault_tb, intent_room, COALESCE(plan, '') FROM tenants WHERE id = $1`, tenantID).
+		Scan(&std, &vault, &room, &h.plan); err != nil {
 		return h, fmt.Errorf("load house for %s: %w", tenantID, err)
 	}
 	h.intent = landing.HouseIntent{StdTB: std, VaultTB: vault, Room: room}
-	h.subID = sub.String
-	h.active = h.plan == "house" && h.subID != "" &&
-		(h.status == "active" || h.status == "past_due" || h.status == "trialing")
-	// Anything else with a subscription id that Stripe is still billing
-	// (a legacy pack, an incomplete 3-D Secure checkout, a past-due pack)
-	// must not be joined by a second subscription (Review R10-05).
-	h.liveOther = !h.active && h.subID != "" && !terminalSubscriptionStatus(h.status)
 	// A legacy pack plan (WP-PAY-0) is moved to a house by support, never
 	// by a checkout beside it: its quota is the label's, and a pack bought
 	// before may still bill.
-	h.legacy = !h.active && legacyPlan(h.plan)
-	h.liveOther = h.liveOther || h.legacy
+	h.legacy = legacyPlan(h.plan)
 
 	qm := usage.NewQuotaManager(db)
 	house, ok, err := qm.GetHouse(ctx, tenantID)
@@ -284,12 +271,6 @@ func loadHouse(ctx context.Context, db *sql.DB, tenantID string) (tenantHouse, e
 	return h, nil
 }
 
-// legacyOnly: refused for the legacy label alone — no subscription that
-// Stripe is still billing.
-func (h tenantHouse) legacyOnly() bool {
-	return h.legacy && (h.subID == "" || terminalSubscriptionStatus(h.status))
-}
-
 // legacyPlan reports a tenants.plan that is neither the free tier nor a
 // house: a legacy pack id ('vault3' … 'vault100', 'standard') — after
 // WP-PAY-0 only an admin tier label (Bench2 on prod: 'vault100') or a pack
@@ -301,21 +282,6 @@ func legacyPlan(plan string) bool {
 		return false
 	}
 	return true
-}
-
-// order is the house the tenants columns describe (the pre-097 fallback).
-func (h tenantHouse) order() payments.Order {
-	return payments.Order{Std: h.house.StdTB(), Vault: h.house.VaultTB(), PinHot: h.house.PinHotTB(), Period: payments.Period(h.period)}
-}
-
-// terminalSubscriptionStatus is a Stripe subscription status that no
-// longer bills: a new subscription may be opened next to it.
-func terminalSubscriptionStatus(status string) bool {
-	switch status {
-	case "", "canceled", "incomplete_expired":
-		return true
-	}
-	return false
 }
 
 // wholeTBUp is the smallest whole-TB quota that still holds n bytes.
@@ -390,10 +356,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			back(w, r, "error", "Something went wrong reading your account. Please try again.")
 			return
 		}
-		active, period := h.active, h.period
-		if st.Found {
-			active, period = st.Granted, string(st.Entitlement.Order.Period)
-		}
+		active, period := st.Granted, string(st.Entitlement.Order.Period)
 		quote := payments.QuoteHouse(order.Std, order.Vault, order.PinHot, order.Period)
 
 		if active {
@@ -432,10 +395,6 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			return
 		}
 
-		if h.liveOther && !h.legacyOnly() {
-			back(w, r, "error", fmt.Sprintf("This account already has a subscription (%s). Email %s and we will move it to a house — a second checkout would bill you twice.", h.status, hosts.Get().SupportEmail()))
-			return
-		}
 		if h.legacy {
 			back(w, r, "error", fmt.Sprintf("This account is on a legacy plan (%s). Email %s and we will move it to a house — nothing changes until we do.", h.plan, hosts.Get().SupportEmail()))
 			return

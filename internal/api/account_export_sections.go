@@ -370,14 +370,16 @@ const (
 	sqlExportTenant    = `
 		SELECT id, name, email,
 		       (SELECT key_id FROM api_keys WHERE tenant_id = tenants.id AND is_primary AND revoked_at IS NULL) AS primary_access_key_id,
-		       plan, subscription_status, created_at, suspended_at,
-		       slug, house_period, deletion_stripe_cancelled_at
+		       plan, created_at, suspended_at, slug
 		  FROM tenants WHERE id = $1`
 	sqlExportQuotaTotals = `
 		SELECT storage_limit_bytes, storage_used_bytes, bandwidth_limit_bytes, bandwidth_used_bytes, tier, pin_hot_bytes, updated_at
 		  FROM tenant_quotas WHERE tenant_id = $1`
 	sqlExportQuotaFloors = `SELECT floor, storage_limit_bytes, storage_used_bytes, updated_at FROM tenant_floor_quotas WHERE tenant_id = $1 ORDER BY floor`
-	sqlExportHouse       = `SELECT intent_std_tb AS standard_tb, intent_vault_tb AS vault_tb, intent_room AS room, house_period AS period FROM tenants WHERE id = $1`
+	// The house built on the site (the intent); what was bought, its
+	// period and date, is the entitlement section (WP-PAY-7: the tenants
+	// billing columns are dropped).
+	sqlExportHouse = `SELECT intent_std_tb AS standard_tb, intent_vault_tb AS vault_tb, intent_room AS room FROM tenants WHERE id = $1`
 	// The entitlement record (WP-PAY-1): what the tenant bought and until
 	// when, and every money event of the ledger (the operator's actor column
 	// is not the customer's).

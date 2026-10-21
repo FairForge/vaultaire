@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +10,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/flags"
-	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -65,20 +66,17 @@ func TestWaitlistExport_LaunchListFilters(t *testing.T) {
 func TestRevenue_HouseMRRByFloor(t *testing.T) {
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() })
-	qm := usage.NewQuotaManager(db)
+	soon := time.Now().Add(30 * 24 * time.Hour)
 	annual := houseTenant(t, db, 0, 0)
 	monthly := houseTenant(t, db, 0, 0)
-	require.NoError(t, qm.SetHouse(context.Background(), annual, usage.HouseFromTB(6, 1, 0)))
-	require.NoError(t, qm.SetHouse(context.Background(), monthly, usage.HouseFromTB(0, 2, 0)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', house_period = 'annual' WHERE id = $1`, annual)
-	require.NoError(t, err)
-	_, err = db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', house_period = 'monthly' WHERE id = $1`, monthly)
-	require.NoError(t, err)
-	// A cancelled house earns nothing.
+	grantedHouse(t, db, annual, payments.Order{Std: 6, Vault: 1, Period: payments.PeriodAnnual}, soon)
+	grantedHouse(t, db, monthly, payments.Order{Vault: 2, Period: payments.PeriodMonthly}, soon)
+	// A lapsed house earns nothing.
 	gone := houseTenant(t, db, 0, 0)
-	require.NoError(t, qm.SetHouse(context.Background(), gone, usage.HouseFromTB(50, 0, 0)))
-	_, err = db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'canceled', house_period = 'annual' WHERE id = $1`, gone)
-	require.NoError(t, err)
+	grantedHouse(t, db, gone, payments.Order{Std: 50, Period: payments.PeriodAnnual}, soon)
+	require.NoError(t, payments.InTx(context.Background(), db, func(tx *sql.Tx) error {
+		return payments.Revoke(context.Background(), tx, gone)
+	}))
 
 	houses := queryHouses(context.Background(), db, zap.NewNop())
 	total, lines := housesMRR(houses), houseRevenueLines(houses)
