@@ -173,6 +173,7 @@ func TestSwift_LargeObject(t *testing.T) {
 			ok, err := tg.drv.Exists(ctx, "b1", "big")
 			require.NoError(t, err)
 			assert.False(t, ok)
+			tg.drv.waitCleanups()
 			if !tg.live {
 				assert.Equal(t, 0, countWalk(t, tg.drv, tenant, "_segments"), "the pieces went with the manifest")
 			}
@@ -403,6 +404,31 @@ func TestSwift_DeleteIsOneWrite(t *testing.T) {
 	require.NoError(t, d.Delete(ctx, "b1", "k"))
 	assert.Equal(t, 1, f.count("DELETE object"))
 	assert.Equal(t, 0, f.count("DELETE manifest-delete"))
+}
+
+// A large object's delete is the manifest alone (one write) and its pieces
+// go in the background: Blomp deletes ~3 objects a second, so the
+// manifest-delete of a 6 GiB object in 64 MiB pieces (97 writes) outran the
+// 15 s bound on prod 2026-10-21 and every DELETE answered 503.
+func TestSwift_LargeDeleteRemovesThePiecesInTheBackground(t *testing.T) {
+	f := newFakeSwift(t)
+	cfg := f.config()
+	cfg.SegmentSize = 1 << 10
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 10<<10)
+	require.NoError(t, d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+	require.NoError(t, d.Put(ctx, "b1", "other", strings.NewReader("keep")))
+
+	require.NoError(t, d.Delete(ctx, "b1", "big"))
+	d.waitCleanups()
+
+	assert.Equal(t, 0, f.count("DELETE manifest-delete"), "never Swift's piece-by-piece manifest delete")
+	assert.Equal(t, 1, f.count("GET manifest-get"))
+	assert.Equal(t, 1, f.count("DELETE object"), "the manifest alone")
+	assert.Equal(t, 1, f.count("POST bulk-delete"), "every piece in one request")
+	assert.Equal(t, []string{"t-t1/b1/other"}, f.names())
 }
 
 func TestSwift_StoreIDAndCleartext(t *testing.T) {

@@ -70,9 +70,15 @@ pieces of an overwritten large object are not a product case.
   memory) — 5 for a piece of a large object; a streamed body (a known size
   between 8 MiB and the segment size) is sent once
   (`vaultaire_swift_retries_total`).
-- **Delete**: HEAD first (a HEAD is not rate-limited), then ONE write — a
-  plain DELETE, or `?multipart-manifest=delete` for a large object (its pieces
-  go with it). A miss is `engine.NotFoundError`.
+- **Delete**: HEAD first (a HEAD is not rate-limited), then ONE write in the
+  caller's time — a plain DELETE; for a large object its manifest is read
+  (`?multipart-manifest=get`), deleted alone, and its pieces go by one bulk
+  delete in the background (bounded 2 min + 0.5 s a piece, ≤ 15 min; a
+  failure is a Warn and the erasure walk lists them under `_segments`).
+  Never Swift's `?multipart-manifest=delete`: it removes the pieces one by
+  one inside the request, and at Blomp's ~3 writes a second a 6 GiB object
+  of 96 pieces outran the 15 s bound — every DELETE of it answered 503
+  (prod 2026-10-21). A miss is `engine.NotFoundError`.
 - **Range**: 206 served as is; a 200 to a Range is skipped to the offset and
   cut.
 - **Bounds** (the bound invariant, `CLAUDE.md`): 25 s to the first byte after
