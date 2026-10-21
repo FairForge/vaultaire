@@ -1,0 +1,21 @@
+# Self-hosted indexd <instance> (lab: zen). Config ~/indexd-<instance>/indexd.yml
+# holds the recovery phrase (it controls the wallet): 0600, never in the repo.
+# The binary comes from ~/.config/stored-sia/indexd-<instance>.env (INDEXD_BIN).
+[Unit]
+Description=indexd %i
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/indexd-%i
+Environment=INDEXD_CONFIG_FILE=%h/indexd-%i/indexd.yml
+EnvironmentFile=%h/.config/stored-sia/indexd-%i.env
+ExecStart=/bin/sh -c 'exec "$INDEXD_BIN" -instant'
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+LimitNOFILE=1048576
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

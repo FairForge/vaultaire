@@ -1,0 +1,6 @@
+[Unit]
+Description=Daily backup of indexd %i (deploy/sia/indexd-backup.sh)
+
+[Service]
+Type=oneshot
+ExecStart=%h/stored-sia/indexd-backup.sh %i
