@@ -119,6 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_events_tenant ON payment_events (tenant_i
 CREATE TABLE IF NOT EXISTS invoice_counters (year INT PRIMARY KEY, last INT NOT NULL DEFAULT 0);
 ```
 
+**Done (WP-PAY-7, 2026-10-21, migration 100):** the four columns below and the three tables are dropped; `stripe_customer_id` stays (the Stripe customer of the tenant). As designed:
 `tenants.stripe_customer_id / stripe_subscription_id / subscription_status /
 house_period / deletion_stripe_cancelled_at` stay for two releases: the
 previous build writes them during the two-slot switch, and the admin pages
@@ -181,8 +182,16 @@ all applied from the FETCHED subscription as #752 requires:
 | `invoice.payment_failed` | `subscription_status = 'past_due'` | ledger row `charge … failed` (informational); no entitlement change |
 
 `isCurrentSubscription` (stale-subscription guard) becomes "the subscription
-named in `entitlements.provider_ref`". The old `tenants.subscription_status`
-keeps being written for one release (the admin pages read it).
+named in `entitlements.provider_ref`" — and nothing else since WP-PAY-7 (a
+tenant with no row fails it closed). The webhook writes no tenants column
+but `stripe_customer_id` (D-P23-3).
+
+**As built (WP-PAY-7):** a terminal status on a granted row whose
+`paid_through` is still ahead only stops the renewal, `entitlement_lapse` ON
+or OFF (D-P23-1 — a $0 trialing Renew cancelled in the portal must not take
+a manually-paid year). `charge.refunded` records each succeeded refund in the
+ledger, keyed by the refund id, counted under the charge's provider, and does
+not shorten `paid_through` (D-P23-4).
 
 What becomes of Stripe's own machine: Smart Retries, `past_due`, `paused`,
 "pause collection" are all **inside our grace** and change nothing by
@@ -213,6 +222,11 @@ fails and the date passes.
    branch on the flag).
 4. **Contract** (WP-PAY-7, two deploys later): readers move to
    `entitlements`/`payments`, columns and the three dead tables drop (D-12).
+   **Done 2026-10-21** (#834, #836, #839; `docs/reviews/WP-P23.md`). Two
+   lessons for the next contract: the deploy re-applies every file, so the
+   statements that CREATE a dropped object are emptied in the same change
+   (D-P23-5); and the build that serves during the drop is tested against
+   the post-drop schema first (D-P23-6).
 
 ## 2. The provider interface (Part B)
 

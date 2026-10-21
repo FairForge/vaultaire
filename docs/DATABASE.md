@@ -116,10 +116,10 @@ Legend: **W** written by, **R** read by (packages), **Ret** retention/cleanup,
 | tenant_quotas | 056 (+034/043/066) | auth (register), usage, api/quota, dashboard/admin, billing | api (every PUT), billing/metered, dashboard | deletion | PK |
 | tenant_floor_quotas | 066 | usage only (`floor.go`, `quota_manager.go`: reserve/release per floor, `SetHouse`/`ClearHouse` — the Stripe webhook's `applyHouse` calls these) | api (PUT enforcement per floor, through usage), api/smart_demotion, billing/metered, dashboard | cascade tenant_quotas | PK (tenant_id, floor) |
 | quota_usage_events | 056 | usage (one row per reserve) | usage (history), dashboard/overview | **none** (WP-R9-2) | yes |
-| subscriptions | 018 | billing/webhook | dashboard/billing | cascade tenants | yes |
+| subscriptions | 018 | — | — | — | **dropped by 100** (WP-PAY-7 / D-12) |
 | stripe_events | 019 | billing/webhook | billing (dedup), dashboard/admin_support | — (ledger) | yes |
-| billing_charges | 019 | — | — | — | orphan (ledger by design) |
-| metered_usage_reports | 043 | billing/metered | billing/metered (UNIQUE guard) | — (ledger) | yes |
+| billing_charges | 019 | — | — | — | **dropped by 100** (WP-PAY-7 / D-12) |
+| metered_usage_reports | 043 | — | — | — | **dropped by 100** (WP-PAY-7 / D-12) |
 | bandwidth_usage_daily | 018 | api/bandwidth (flush upsert) | dashboard, billing/metered, api/alerts | cascade tenants | yes |
 | backend_bandwidth_daily | 060 | api/bandwidth | dashboard/admin_costs | — | no (per backend) |
 | bandwidth_alerts | 020 | api/bandwidth_alerts | api/bandwidth_alerts | — | yes |
