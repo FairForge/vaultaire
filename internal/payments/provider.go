@@ -110,6 +110,18 @@ type Provider interface {
 	Webhook() http.Handler
 }
 
+// LockedCheckout is a Provider whose checkout may write the record itself
+// (BTCPay: an order the tenant's ledger credit covers in full is granted at
+// once, no invoice — docs/PAYMENTS.md § 3.4): StartCheckout (the guard)
+// calls StartCheckoutTx with ITS transaction, which holds the tenant's
+// entitlement lock — a provider that took the lock on another connection
+// would wait on itself. Writes that must be durable before an external call
+// (a pending ledger row before an invoice exists) still go through the
+// provider's own transactions.
+type LockedCheckout interface {
+	StartCheckoutTx(ctx context.Context, tx *sql.Tx, c Checkout) (redirectURL string, err error)
+}
+
 // RefCanceller is a Provider that can cancel one named reference now (a
 // Stripe subscription id) — the deletion runner cancels every reference the
 // record names, each exactly once (payments.MarkDeletionCancelled). A
@@ -317,7 +329,12 @@ func StartCheckout(ctx context.Context, r *Registry, tenantID, provider string, 
 		case other != provider && Renewal(renewal) == RenewalAuto:
 			return fmt.Errorf("tenant %s is renewed by %s: %w", tenantID, other, ErrOtherProviderLive)
 		}
-		u, err := p.StartCheckout(ctx, c)
+		var u string
+		if lc, ok := p.(LockedCheckout); ok {
+			u, err = lc.StartCheckoutTx(ctx, tx, c)
+		} else {
+			u, err = p.StartCheckout(ctx, c)
+		}
 		url = u
 		return err
 	})

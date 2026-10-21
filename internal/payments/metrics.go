@@ -39,6 +39,10 @@ const (
 	WebhookDuplicate = "duplicate"
 	WebhookRejected  = "rejected" // a bad signature, a body over the cap
 	WebhookError     = "error"    // 500: left for the provider to retry
+	// WebhookForeign: verified, but for an invoice our ledger does not know
+	// or whose metadata names another tenant — 200, never applied (BTCPay,
+	// docs/PAYMENTS.md § 3.3).
+	WebhookForeign = "foreign"
 )
 
 // webhookTotal counts provider webhook deliveries by outcome: the series
@@ -103,6 +107,24 @@ func init() {
 	for _, o := range []string{WebhookOK, WebhookDuplicate, WebhookRejected, WebhookError} {
 		webhookTotal.WithLabelValues(ProviderStripe, o)
 	}
+	// BTCPay (WP-PAY-4): its webhook outcomes (foreign included), its
+	// charge outcomes, the credits it keeps (an overpayment, a partial
+	// payment of an expired invoice) and the refunds of its charges an
+	// operator records — every pair at 0 from boot, registered or not.
+	for _, o := range []string{WebhookOK, WebhookDuplicate, WebhookRejected, WebhookError, WebhookForeign} {
+		webhookTotal.WithLabelValues(ProviderBTCPay, o)
+	}
+	for _, o := range []string{OutcomeSettled, OutcomeReplayed} {
+		paymentsTotal.WithLabelValues(ProviderBTCPay, KindCharge, o)
+	}
+	paymentsTotal.WithLabelValues(ProviderBTCPay, KindCredit, OutcomeSettled)
+	paymentsTotal.WithLabelValues(ProviderBTCPay, KindRefund, OutcomeSettled)
+	// Its readiness series exists at 0 even with the provider unregistered
+	// (no BTCPAY_* secrets): Register sets it from the first check.
+	// PaymentProviderDown ANDs it with vaultaire_payment_provider_enabled,
+	// which lists registered providers only, so an unregistered BTCPay never
+	// pages.
+	providerReady.WithLabelValues(ProviderBTCPay).Set(0)
 }
 
 // CountReminder counts one reminder outcome.
