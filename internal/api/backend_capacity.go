@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -280,7 +281,7 @@ func (r *BackendCapacityRunner) vendorView(ctx context.Context, res *BackendCapa
 	}
 	var found *idrive.User
 	for i := range users {
-		if users[i].Email == r.ResellerUser {
+		if strings.EqualFold(users[i].Email, r.ResellerUser) {
 			found = &users[i]
 			break
 		}
