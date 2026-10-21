@@ -3,6 +3,9 @@ package api
 import (
 	"os"
 	"strconv"
+	"strings"
+
+	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/flags"
@@ -62,8 +65,15 @@ const (
 	// Default OFF and never a global row: Sync's terms forbid reselling the
 	// service without its written consent, so customer data lands there
 	// only for tenants named one by one (our own, or with that consent).
-	// Checked in resolvePutStorageClass via syncPlacementGate.
+	// Checked in resolvePutStorageClass via tierPlacementGate.
 	flagSyncBackend = "sync_backend"
+
+	// flagBlompBackend lets a tenant's buckets whose tier_preference is
+	// `blomp` (operator-set, like `sync`) place their objects on Blomp's
+	// Swift storage ("blomp" driver, drivers/swift_README.md) — sealed only:
+	// its storage URL is plain HTTP, so without ENCRYPTION_MASTER_KEY such a
+	// write is refused (decidePlacement). Default OFF, per tenant first.
+	flagBlompBackend = "blomp_backend"
 
 	// flagVersionedChunking lets a chunked write (PUT, CompleteMultipartUpload,
 	// the copy's manifest branch) go into an Enabled or Suspended bucket
@@ -99,6 +109,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEgressThrottle, false)
 	fl.Register(flagVaultParity, false)
 	fl.Register(flagSyncBackend, false)
+	fl.Register(flagBlompBackend, false)
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
@@ -106,13 +117,26 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagPayBTCPay, false)
 }
 
-// syncPlacementGate is resolvePutStorageClass's `sync_backend` check; nil
+// tierGate says whether a tenant may place on a flag-gated tier class
+// (SYNC, BLOMP); nil = never.
+type tierGate func(class, tenantID string) bool
+
+// tierPlacementGate is resolvePutStorageClass's per-tenant check of the
+// flag-gated tiers: SYNC needs `sync_backend`, BLOMP `blomp_backend`; nil
 // (no flag service) = never.
-func syncPlacementGate(fl *flags.Service) func(tenantID string) bool {
+func tierPlacementGate(fl *flags.Service) tierGate {
 	if fl == nil {
 		return nil
 	}
-	return func(tenantID string) bool { return fl.Enabled(flagSyncBackend, tenantID) }
+	return func(class, tenantID string) bool {
+		switch class {
+		case "SYNC":
+			return fl.Enabled(flagSyncBackend, tenantID)
+		case "BLOMP":
+			return fl.Enabled(flagBlompBackend, tenantID)
+		}
+		return false
+	}
 }
 
 // signupsDefaultFromEnv is the `signups` flag's in-code default: the
@@ -126,4 +150,19 @@ func signupsDefaultFromEnv() bool {
 		}
 	}
 	return true
+}
+
+// allowUnsealedCleartextFromEnv reads BLOMP_ALLOW_UNSEALED (`true`/`1`):
+// the owner's switch for testing (2026-10-21) that lets a cleartext-
+// transport backend take unsealed bytes. Set = one Warn line at boot.
+func allowUnsealedCleartextFromEnv(getenv func(string) string, logger *zap.Logger) bool {
+	v := strings.TrimSpace(getenv("BLOMP_ALLOW_UNSEALED"))
+	on := v == "true" || v == "1"
+	if v != "" && !on && v != "false" && v != "0" {
+		logger.Warn("BLOMP_ALLOW_UNSEALED: not true/false — unsealed writes stay refused", zap.String("value", v))
+	}
+	if on {
+		logger.Warn("BLOMP_ALLOW_UNSEALED is set: objects of blomp-tier buckets and Vault parity shards may cross Blomp's plain-HTTP link unsealed (testing only)")
+	}
+	return on
 }

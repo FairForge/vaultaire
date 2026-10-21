@@ -125,6 +125,8 @@ var (
 	refuseUnreadableEncryption = &placementRefusal{Status: http.StatusInternalServerError, Code: ErrInternalError}
 	refuseNoMasterKey          = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket encrypts objects at rest and the server's encryption key is not available right now. Nothing was stored; retry later."}
+	refuseCleartextTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
+		Suggestion: "This bucket stores on a backend reached without TLS, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseNoMasterKeyRequested = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "The request asks for server-side encryption (x-amz-server-side-encryption: AES256) and the server's encryption key is not available right now. Nothing was stored; retry later."}
 )
@@ -195,7 +197,18 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		return writePlacement{Refusal: refuseNoMasterKeyRequested}
 	}
 
-	encryptionRequired := (req.SSERequested || bucketSSE) && !req.SSEC
+	// A tier on a cleartext transport (BLOMP: Blomp's storage URL is plain
+	// HTTP) takes only sealed bytes — SSE-S3 whatever the bucket says, or
+	// the customer's own key; with no master key the write is refused.
+	// BLOMP_ALLOW_UNSEALED lifts it (testing; the bucket's own rules stay).
+	cleartextTier := req.Class == "BLOMP" && !req.SSEC && !a.allowUnsealedCleartext
+	if cleartextTier && a.sseService == nil && req.Size > 0 {
+		a.logger.Error("write onto a cleartext-transport tier refused: ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", req.Bucket), zap.String("class", req.Class))
+		return writePlacement{Refusal: refuseCleartextTierNoKey}
+	}
+
+	encryptionRequired := (req.SSERequested || bucketSSE || cleartextTier) && !req.SSEC
 	if a.sseService != nil && encryptionRequired && !chunkEncrypt && req.Size > 0 {
 		return writePlacement{Kind: placeWholeSealed}
 	}

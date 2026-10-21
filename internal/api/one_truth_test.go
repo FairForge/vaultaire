@@ -117,7 +117,7 @@ func TestPlaceObject_RegionDriver_BreakerAndStrictRules(t *testing.T) {
 
 func TestGeneratedObject_SyncTierBucket_FollowsTheSyncGate(t *testing.T) {
 	// Before (#677): generatedObjectWriter resolved the class with
-	// allowSync = nil, so an access log or inventory report into a sync-tier
+	// allowTier = nil, so an access log or inventory report into a sync-tier
 	// bucket of a tenant with the sync_backend flag landed on the primary —
 	// off the tier the bucket promises — while a PUT there landed on sync.
 	db := cdnTestDB(t)
@@ -132,14 +132,14 @@ func TestGeneratedObject_SyncTierBucket_FollowsTheSyncGate(t *testing.T) {
 	w := newGeneratedObjectWriter(db, eng, nil, nil, zap.NewNop())
 	body := func(wr io.Writer) error { _, err := wr.Write([]byte("a report line\n")); return err }
 
-	// The server wires the PUT's gate (server.go: syncPlacementGate).
-	w.allowSync = syncGateFor(tenantID)
+	// The server wires the PUT's gate (server.go: tierPlacementGate).
+	w.allowTier = syncGateFor(tenantID)
 	got, err := w.write(context.Background(), generatedKindAccessLog, tenantID, "mine", "logs/a.log", "text/plain", body)
 	require.NoError(t, err)
 	assert.Equal(t, "sync", got.Backend, "where a PUT into this bucket lands")
 
 	// The flag off for the tenant: the primary, as for a PUT.
-	w.allowSync = syncGateFor("someone-else")
+	w.allowTier = syncGateFor("someone-else")
 	got, err = w.write(context.Background(), generatedKindAccessLog, tenantID, "mine", "logs/b.log", "text/plain", body)
 	require.NoError(t, err)
 	assert.Equal(t, "local", got.Backend)

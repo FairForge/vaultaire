@@ -51,7 +51,8 @@ are re-exported from `dashboard/handlers`); the `Register` calls are in
 | `egress_throttle` | false | the egress allowance as a rate cap (WP-R10-9; `api/egress_throttle.go`) |
 | `vault_parity` | false | per tenant inside `VaultParity.RunOnce` (the job writes shards) and `VaultParity.Open` (the read fallback) — `api/vault_parity.go`, WP-VAULT-1 |
 | `parallel_get` | false | per tenant in `api.S3ToEngine.openParallelGet` (`api/s3_large_get.go`): a whole object ≥ `LARGE_GET_PARALLEL_MIN_BYTES` on a fixed-bucket S3 backend is read as parallel hedged ranges behind one client stream. Canary per tenant, then global |
-| `sync_backend` | false | per tenant in `api.resolvePutStorageClass` (`syncPlacementGate`): a bucket with `tier_preference = 'sync'` (operator-set) places on the Sync.com WebDAV bridge (`sync` driver) only for a tenant with the flag. **Never a global row** — Sync's terms forbid reselling the service without its written consent |
+| `sync_backend` | false | per tenant in `api.resolvePutStorageClass` (`tierPlacementGate`): a bucket with `tier_preference = 'sync'` (operator-set) places on the Sync.com WebDAV bridge (`sync` driver) only for a tenant with the flag. **Never a global row** — Sync's terms forbid reselling the service without its written consent |
+| `blomp_backend` | false | per tenant in `api.resolvePutStorageClass` (`tierPlacementGate`): a bucket with `tier_preference = 'blomp'` (operator-set) places on Blomp's Swift storage (`blomp` driver) only for a tenant with the flag; written sealed unless `BLOMP_ALLOW_UNSEALED` (`internal/drivers/swift_README.md`) |
 
 Adding a flag = key constant + `Register` call + call site (+ a `flagInfos`
 entry in `dashboard/handlers/admin_flags.go`). No schema change.

@@ -614,6 +614,8 @@ func (e *CoreEngine) buildCandidateList(v view, preferred string) []string {
 //   - sync: the Sync.com WebDAV bridge. Sync's terms forbid reselling the
 //     service without its written consent: customer data lands there only
 //     for a flagged tenant's `sync` bucket (api.resolvePutStorageClass).
+//   - blomp: Blomp's Swift storage — plain HTTP, ~3 writes/s per account:
+//     only a flagged tenant's `blomp` bucket, sealed (api.decidePlacement).
 //
 // Failover for a general-purpose write is therefore between the target, the
 // primary and the remaining general-purpose durable backends (idrive, lyve,
@@ -625,6 +627,7 @@ var targetOnlyBackends = map[string]bool{
 	"geyser":     true,
 	"permafrost": true,
 	"sync":       true,
+	"blomp":      true,
 	"onedrive":   true, // legacy registration key (tools now use "permafrost", R7-10); keep for old head rows
 }
 
@@ -662,7 +665,8 @@ func writeOnlyWhenTargeted(name string) bool {
 // backends only. The other target-only backends keep the fall-over: tape,
 // the second-copy fleet and region pins are decisions not taken here.
 var strictTargetBackends = map[string]bool{
-	"sync": true,
+	"sync":  true,
+	"blomp": true, // a fall-over would land an object off the tier its bucket promises, as for sync
 }
 
 // ErrStrictTargetUnregistered is the cause, wrapped in

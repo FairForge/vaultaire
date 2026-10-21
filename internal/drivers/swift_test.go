@@ -1,0 +1,455 @@
+package drivers
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/engine"
+)
+
+// The Swift driver's behaviour is tested twice with the same functions:
+// against the real Blomp account when BLOMP_USER / BLOMP_PASSWORD are set
+// (`swift_README.md` § Live tests: ~50 objects, cleaned up), and against
+// fakeSwift always (CI has no Blomp credentials). The failure shapes Blomp
+// cannot be made to produce on demand — a revoked token, a 503 — run on the
+// fake only.
+
+type swiftTarget struct {
+	name string
+	drv  *SwiftDriver
+	live bool
+}
+
+// swiftTargets is the fake, plus Blomp when its credentials are set. Each
+// gets a fresh tenant id so runs never meet.
+func swiftTargets(t *testing.T) []swiftTarget {
+	t.Helper()
+	f := newFakeSwift(t)
+	fake, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	out := []swiftTarget{{name: "fake", drv: fake}}
+	if cfg, ok, err := BlompConfigFromEnv(os.Getenv); ok && err == nil {
+		cfg.SegmentSize = 1 << 20 // Swift 2.17's min_segment_size: every piece but the last ≥ 1 MiB
+		live, lerr := NewSwiftDriver("blomp-test", cfg, zap.NewNop())
+		require.NoError(t, lerr)
+		out = append(out, swiftTarget{name: "blomp", drv: live, live: true})
+	} else if err != nil {
+		t.Fatalf("BLOMP_* set but invalid: %v", err)
+	}
+	return out
+}
+
+func swiftTenant(t *testing.T) string {
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("_test-%x", b)
+}
+
+func swiftCtx(tenant string) context.Context {
+	return common.WithTenantID(context.Background(), tenant)
+}
+
+func randomBytes(t *testing.T, n int) []byte {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+	require.NoError(t, err)
+	return b
+}
+
+// cleanupTenant removes everything a test left under its tenant.
+func cleanupTenant(t *testing.T, d *SwiftDriver, tenant string) {
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = d.WalkTenant(ctx, tenant, func(o engine.TenantObject) error { return o.Remove(ctx) })
+	})
+}
+
+func readAll(t *testing.T, rc io.ReadCloser, err error) []byte {
+	t.Helper()
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	b, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	return b
+}
+
+func TestSwift_RoundTrip(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			tenant := swiftTenant(t)
+			cleanupTenant(t, tg.drv, tenant)
+			ctx := swiftCtx(tenant)
+			body := randomBytes(t, 4096)
+
+			require.NoError(t, tg.drv.Put(ctx, "b1", "dir/hello world.bin", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+
+			ok, err := tg.drv.Exists(ctx, "b1", "dir/hello world.bin")
+			require.NoError(t, err)
+			assert.True(t, ok)
+			rc, err := tg.drv.Get(ctx, "b1", "dir/hello world.bin")
+			assert.Equal(t, body, readAll(t, rc, err))
+
+			rc, err = tg.drv.GetRange(ctx, "b1", "dir/hello world.bin", 100, 50)
+			assert.Equal(t, body[100:150], readAll(t, rc, err))
+
+			require.NoError(t, tg.drv.Delete(ctx, "b1", "dir/hello world.bin"))
+			ok, err = tg.drv.Exists(ctx, "b1", "dir/hello world.bin")
+			require.NoError(t, err)
+			assert.False(t, ok)
+		})
+	}
+}
+
+func TestSwift_MissesAreTypedMisses(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			ctx := swiftCtx(swiftTenant(t))
+			_, err := tg.drv.Get(ctx, "b1", "nope")
+			assert.True(t, engine.IsObjectMiss(err), "Get: %v", err)
+			_, err = tg.drv.GetRange(ctx, "b1", "nope", 0, 10)
+			assert.True(t, engine.IsObjectMiss(err), "GetRange: %v", err)
+			err = tg.drv.Delete(ctx, "b1", "nope")
+			assert.True(t, engine.IsObjectMiss(err), "Delete: %v", err)
+		})
+	}
+}
+
+func TestSwift_RefusesACallWithoutATenant(t *testing.T) {
+	tg := swiftTargets(t)[0]
+	err := tg.drv.Put(context.Background(), "b1", "k", strings.NewReader("x"))
+	assert.ErrorIs(t, err, ErrNoTenant)
+	assert.ErrorIs(t, err, engine.ErrInvalidInput)
+}
+
+func TestSwift_RefusesNamesSwiftCannotHold(t *testing.T) {
+	tg := swiftTargets(t)[0]
+	ctx := swiftCtx("t1")
+	assert.ErrorIs(t, tg.drv.Put(ctx, "b1", "a/../b", strings.NewReader("x")), engine.ErrInvalidInput)
+	assert.ErrorIs(t, tg.drv.Put(ctx, "b1", strings.Repeat("k", 1020), strings.NewReader("x")), engine.ErrInvalidInput)
+}
+
+// A body larger than a segment is a static large object: pieces in the same
+// container, read back whole and by range, deleted with its pieces.
+func TestSwift_LargeObject(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			tenant := swiftTenant(t)
+			cleanupTenant(t, tg.drv, tenant)
+			ctx := swiftCtx(tenant)
+			seg := int(tg.drv.cfg.SegmentSize)
+			body := randomBytes(t, seg*2+seg/2)
+
+			require.NoError(t, tg.drv.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body)))))
+
+			rc, err := tg.drv.Get(ctx, "b1", "big")
+			assert.Equal(t, body, readAll(t, rc, err))
+			rc, err = tg.drv.GetRange(ctx, "b1", "big", int64(seg-10), 20) // across a piece boundary
+			assert.Equal(t, body[seg-10:seg+10], readAll(t, rc, err))
+
+			if !tg.live { // a container listing lags on Blomp
+				assert.Equal(t, 3, countWalk(t, tg.drv, tenant, "_segments"), "three pieces under _segments")
+				keys, err := tg.drv.List(ctx, "b1", "")
+				require.NoError(t, err)
+				assert.Equal(t, []string{"big"}, keys, "the pieces are not in the object's container")
+			}
+
+			require.NoError(t, tg.drv.Delete(ctx, "b1", "big"))
+			ok, err := tg.drv.Exists(ctx, "b1", "big")
+			require.NoError(t, err)
+			assert.False(t, ok)
+			if !tg.live {
+				assert.Equal(t, 0, countWalk(t, tg.drv, tenant, "_segments"), "the pieces went with the manifest")
+			}
+		})
+	}
+}
+
+// A body of unknown length: one PUT when it ends within the peek, a large
+// object when it does not.
+func TestSwift_UnknownLength(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			tenant := swiftTenant(t)
+			cleanupTenant(t, tg.drv, tenant)
+			ctx := swiftCtx(tenant)
+
+			small := randomBytes(t, 300)
+			require.NoError(t, tg.drv.Put(ctx, "b1", "small", io.NopCloser(bytes.NewReader(small))))
+			rc, err := tg.drv.Get(ctx, "b1", "small")
+			assert.Equal(t, small, readAll(t, rc, err))
+
+			empty := []byte{}
+			require.NoError(t, tg.drv.Put(ctx, "b1", "empty", bytes.NewReader(empty)))
+			rc, err = tg.drv.Get(ctx, "b1", "empty")
+			assert.Empty(t, readAll(t, rc, err))
+		})
+	}
+}
+
+func TestSwift_UnknownLengthPastThePeekIsALargeObject(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, swiftPeekBytes+1500)
+
+	require.NoError(t, d.Put(ctx, "b1", "k", struct{ io.Reader }{bytes.NewReader(body)}))
+
+	o, ok := f.object("t-t1/b1/k")
+	require.True(t, ok)
+	assert.NotNil(t, o.manifest)
+	assert.Equal(t, body, o.data)
+}
+
+func TestSwift_ShortOrLongBodyIsRefused(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+
+	err = d.Put(ctx, "b1", "short", bytes.NewReader(make([]byte, 100)), engine.WithContentLength(200))
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	err = d.Put(ctx, "b1", "long", bytes.NewReader(make([]byte, 300)), engine.WithContentLength(200))
+	assert.ErrorIs(t, err, engine.ErrInvalidInput)
+	err = d.Put(ctx, "b1", "shortbig", bytes.NewReader(make([]byte, 2000)), engine.WithContentLength(3000))
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Empty(t, f.names(), "nothing stored, the pieces of the large one removed")
+}
+
+func TestSwift_FailedManifestRemovesItsPieces(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	body := randomBytes(t, 2500)
+	// three segment PUTs pass, the manifest PUT (and its two retries) 503
+	d.client.Transport = &failNthPut{rt: d.client.Transport, n: 4, f: f}
+
+	err = d.Put(ctx, "b1", "k", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
+	require.Error(t, err)
+	assert.Empty(t, f.names(), "the pieces were bulk-deleted")
+	assert.Equal(t, 1, f.count("POST bulk-delete"))
+}
+
+// failNthPut makes the n-th PUT and every later one answer 503.
+type failNthPut struct {
+	rt   http.RoundTripper
+	n    int
+	puts int
+	f    *fakeSwift
+}
+
+func (p *failNthPut) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPut {
+		p.puts++
+		if p.puts >= p.n {
+			p.f.failNext(http.MethodPut, http.StatusServiceUnavailable)
+		}
+	}
+	return p.rt.RoundTrip(r)
+}
+
+func TestSwift_ListAndWalk(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			if tg.live {
+				t.Skip("a Blomp container listing lags writes by tens of seconds (measured 2026-10-21)")
+			}
+			tg.drv.listPageSize = 2
+			ab := swiftTenant(t)
+			abc := ab + "c" // shares ab's prefix
+			for _, k := range []string{"a", "b/c", "d"} {
+				require.NoError(t, tg.drv.Put(swiftCtx(ab), "b1", k, strings.NewReader(k)))
+			}
+			require.NoError(t, tg.drv.Put(swiftCtx(ab), "b2", "x", strings.NewReader("x")))
+			require.NoError(t, tg.drv.Put(swiftCtx(abc), "b1", "neighbour", strings.NewReader("n")))
+
+			keys, err := tg.drv.List(swiftCtx(ab), "b1", "")
+			require.NoError(t, err)
+			assert.Equal(t, []string{"a", "b/c", "d"}, keys)
+			keys, err = tg.drv.List(swiftCtx(ab), "b1", "b/")
+			require.NoError(t, err)
+			assert.Equal(t, []string{"b/c"}, keys)
+
+			var seen []string
+			require.NoError(t, tg.drv.WalkTenant(context.Background(), ab, func(o engine.TenantObject) error {
+				seen = append(seen, o.Container+"|"+o.Artifact)
+				return o.Remove(context.Background())
+			}))
+			sort.Strings(seen)
+			assert.Equal(t, []string{"b1|a", "b1|b/c", "b1|d", "b2|x"}, seen, "never the neighbour tenant")
+			ok, err := tg.drv.Exists(swiftCtx(abc), "b1", "neighbour")
+			require.NoError(t, err)
+			assert.True(t, ok)
+
+			assert.ErrorIs(t, tg.drv.WalkTenant(context.Background(), "", nil), ErrWalkTenantID)
+			assert.ErrorIs(t, tg.drv.WalkTenant(context.Background(), "a/b", nil), ErrWalkTenantID)
+		})
+	}
+}
+
+func TestSwift_HealthCheck(t *testing.T) {
+	for _, tg := range swiftTargets(t) {
+		t.Run(tg.name, func(t *testing.T) {
+			require.NoError(t, tg.drv.HealthCheck(context.Background()))
+			cfg := tg.drv.cfg
+			cfg.Password = "wrong"
+			bad, err := NewSwiftDriver("swift-bad", cfg, zap.NewNop())
+			require.NoError(t, err)
+			err = bad.HealthCheck(context.Background())
+			var se *SwiftError
+			require.ErrorAs(t, err, &se)
+			assert.Equal(t, http.StatusUnauthorized, se.Status)
+		})
+	}
+}
+
+func TestSwift_ReauthenticatesOnceOnA401(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "k", strings.NewReader("v")))
+
+	f.revokeTokens()
+	rc, err := d.Get(ctx, "b1", "k")
+	assert.Equal(t, []byte("v"), readAll(t, rc, err))
+	assert.Equal(t, 2, f.authCalls)
+
+	f.password = "rotated" // the account's password changed: one re-auth, then the error
+	f.revokeTokens()
+	_, err = d.Get(ctx, "b1", "k")
+	var se *SwiftError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusUnauthorized, se.Status)
+}
+
+func TestSwift_RefreshesTheTokenBeforeItExpires(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	now := time.Now()
+	d.now = func() time.Time { return now }
+	ctx := swiftCtx("t1")
+	_, _ = d.Exists(ctx, "b1", "k")
+	_, _ = d.Exists(ctx, "b1", "k")
+	assert.Equal(t, 1, f.authCalls)
+
+	now = now.Add(56 * time.Minute) // inside the 5 min margin of the hour
+	_, _ = d.Exists(ctx, "b1", "k")
+	assert.Equal(t, 2, f.authCalls)
+}
+
+func TestSwift_RetriesA5xxWhenTheBodyCanBeResent(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+
+	f.failNext(http.MethodPut, http.StatusServiceUnavailable)
+	require.NoError(t, d.Put(ctx, "b1", "k", strings.NewReader("small")))
+	f.failNext(http.MethodGet, http.StatusServiceUnavailable, http.StatusBadGateway)
+	rc, err := d.Get(ctx, "b1", "k")
+	assert.Equal(t, []byte("small"), readAll(t, rc, err))
+
+	f.failNext(http.MethodGet, 503, 503, 503)
+	_, err = d.Get(ctx, "b1", "k")
+	var se *SwiftError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, 503, se.Status)
+	assert.False(t, engine.IsObjectMiss(err))
+}
+
+func TestSwift_RangeIgnoredByTheBackendIsCut(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "k", strings.NewReader("0123456789")))
+	f.ignoreRange = true
+	rc, err := d.GetRange(ctx, "b1", "k", 3, 4)
+	assert.Equal(t, []byte("3456"), readAll(t, rc, err))
+}
+
+// A delete of a plain object is ONE write (Blomp rate-limits writes per
+// container): a HEAD, then the DELETE that fits.
+func TestSwift_DeleteIsOneWrite(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "k", strings.NewReader("v")))
+	require.NoError(t, d.Delete(ctx, "b1", "k"))
+	assert.Equal(t, 1, f.count("DELETE object"))
+	assert.Equal(t, 0, f.count("DELETE manifest-delete"))
+}
+
+func TestSwift_StoreIDAndCleartext(t *testing.T) {
+	f := newFakeSwift(t)
+	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())
+	require.NoError(t, err)
+	assert.Contains(t, d.StoreID(), "swift://")
+	assert.Contains(t, d.StoreID(), "/storage/u@example.com/u@example.com")
+	assert.True(t, d.CleartextTransport(), "unknown before the first token = cleartext")
+	require.NoError(t, d.HealthCheck(context.Background()))
+	assert.True(t, d.CleartextTransport(), "the fake's storage URL is http://")
+	assert.True(t, engine.IsCleartextTransport(d))
+}
+
+func TestBlompConfigFromEnv(t *testing.T) {
+	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
+
+	_, ok, err := BlompConfigFromEnv(env(nil))
+	assert.False(t, ok)
+	assert.NoError(t, err)
+
+	cfg, ok, err := BlompConfigFromEnv(env(map[string]string{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p"}))
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, SwiftConfig{AuthURL: BlompDefaultAuthURL, User: "a@b.c", Password: "p", Tenant: "storage",
+		Container: "a@b.c", SegmentSize: 1 << 30}, cfg)
+
+	cfg, _, err = BlompConfigFromEnv(env(map[string]string{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "256MiB"}))
+	require.NoError(t, err)
+	assert.Equal(t, int64(256<<20), cfg.SegmentSize)
+
+	for _, bad := range []map[string]string{
+		{"BLOMP_PASSWORD": "p"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "6GiB"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "512KiB"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_SEGMENT_SIZE": "lots"},
+		{"BLOMP_USER": "a@b.c", "BLOMP_PASSWORD": "p", "BLOMP_AUTH_URL": "ftp://x"},
+	} {
+		_, ok, err := BlompConfigFromEnv(env(bad))
+		assert.Error(t, err, "%v", bad)
+		assert.False(t, ok)
+	}
+}
+
+func countWalk(t *testing.T, d *SwiftDriver, tenant, container string) int {
+	t.Helper()
+	n := 0
+	err := d.WalkTenant(context.Background(), tenant, func(o engine.TenantObject) error {
+		if o.Container == container {
+			n++
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return n
+}

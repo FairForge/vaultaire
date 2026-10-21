@@ -1110,6 +1110,7 @@ func (s *Server) readAdapter() *S3ToEngine {
 func (s *Server) writeAdapter() *S3ToEngine {
 	a := NewS3ToEngine(s.engine, s.db, s.logger)
 	a.sseService = s.sseService
+	a.allowUnsealedCleartext = s.allowUnsealedCleartext
 	a.chunkEncSvc = s.chunkEncSvc
 	a.gci = s.gci
 	a.flags = s.flags
@@ -1149,7 +1150,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	// (header, then bucket tier, then public-bucket placement); resolve it
 	// once here, reserve on it, and hand it to the adapter so placement and
 	// billing can never disagree.
-	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), req.TenantID, req.Bucket,
+	storageClass := resolvePutStorageClass(r.Context(), s.db, s.engine, tierPlacementGate(s.flags), req.TenantID, req.Bucket,
 		r.Header.Get("x-amz-storage-class"))
 	floor := usage.FloorOf(storageClass)
 	var bill *writeBill

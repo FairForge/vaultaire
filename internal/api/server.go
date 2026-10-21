@@ -99,45 +99,50 @@ type Server struct {
 	healthChecker      *BackendHealthChecker
 	// regionBreakers reads the breaker states the region gate consults
 	// (nil = the engine's GetFailoverStatus); tests set it.
-	regionBreakers     func() map[string]string
-	certMonitor        *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
-	securityTxt        string             // rendered once at boot (security_txt.go)
-	sessionStore       dashauth.SessionStore
-	bandwidthTracker   *BandwidthTracker
-	bandwidthAlerter   *BandwidthAlerter
-	egress             *egressMeter // per-tenant month egress counter + throttle (WP-R10-9)
-	googleOAuth        *oauth2.Config
-	githubOAuth        *oauth2.Config
-	mfaService         *auth.MFAService
-	mfaPendingStore    *dashboard.MFAPendingStore
-	sseService         *crypto.SSEService
-	tenantKeys         *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
-	chunkEncSvc        *crypto.ChunkEncryptionService
-	gci                *crypto.GlobalContentIndex
-	cdnRateLimiter     *RateLimiter
-	cdnAnalytics       *CDNAnalyticsTracker
-	accessLogTracker   *S3AccessLogTracker
-	inventoryRunner    *InventoryRunner
-	dedupGCRunner      *DedupGCRunner
-	keyReencrypt       *KeyReencryptRunner   // nil without ENCRYPTION_MASTER_KEY (WP-R8-1)
-	retiredBlobs       *RetiredBlobCollector // nil without a database (WP-R2-1 Part C)
-	smartDemotion      *SmartDemotionRunner
-	vaultParity        *VaultParity
-	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
-	smartPromoter      *SmartPromoter
-	multipartReaper    *MultipartReaper
-	quotaReconcileGate jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
-	chunkMover         *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
-	routingTruth       *RoutingTruthChecker   // boot check + the routing_truth job (WP-R7-5, routing_truth.go)
-	chunkMoveGate      jobGate                // one chunk move at a time
-	chunkOrphans       *ChunkOrphanSweeper    // the chunk_orphans job (WP-R8-2 B.2) + its dry run (POST /admin/chunk-orphans)
-	chunkOrphansGate   jobGate                // one dry run at a time
-	jobs               *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
-	retention          *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
-	webhookRetry       *WebhookRetrier        // the webhook outbox's retry job (WP-R11-3); nil without a database
-	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
-	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
-	synthetic          *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
+	regionBreakers   func() map[string]string
+	certMonitor      *certExpiryMonitor // TLS_CERT_PROBE_TARGETS; nil = off
+	securityTxt      string             // rendered once at boot (security_txt.go)
+	sessionStore     dashauth.SessionStore
+	bandwidthTracker *BandwidthTracker
+	bandwidthAlerter *BandwidthAlerter
+	egress           *egressMeter // per-tenant month egress counter + throttle (WP-R10-9)
+	googleOAuth      *oauth2.Config
+	githubOAuth      *oauth2.Config
+	mfaService       *auth.MFAService
+	mfaPendingStore  *dashboard.MFAPendingStore
+	sseService       *crypto.SSEService
+	// allowUnsealedCleartext (BLOMP_ALLOW_UNSEALED, owner's testing decision
+	// 2026-10-21): a cleartext-transport backend (blomp) may take bytes that
+	// are not sealed — the BLOMP tier and the Vault parity leg. Off by
+	// default: then a write there is SSE-S3 or refused.
+	allowUnsealedCleartext bool
+	tenantKeys             *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
+	chunkEncSvc            *crypto.ChunkEncryptionService
+	gci                    *crypto.GlobalContentIndex
+	cdnRateLimiter         *RateLimiter
+	cdnAnalytics           *CDNAnalyticsTracker
+	accessLogTracker       *S3AccessLogTracker
+	inventoryRunner        *InventoryRunner
+	dedupGCRunner          *DedupGCRunner
+	keyReencrypt           *KeyReencryptRunner   // nil without ENCRYPTION_MASTER_KEY (WP-R8-1)
+	retiredBlobs           *RetiredBlobCollector // nil without a database (WP-R2-1 Part C)
+	smartDemotion          *SmartDemotionRunner
+	vaultParity            *VaultParity
+	packGC                 *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
+	smartPromoter          *SmartPromoter
+	multipartReaper        *MultipartReaper
+	quotaReconcileGate     jobGate                // single-flight for POST /admin/quota-reconcile (Review R13-05)
+	chunkMover             *ChunkMover            // chunk blobs written before WP-R8-7 → the one address (POST /admin/chunk-move)
+	routingTruth           *RoutingTruthChecker   // boot check + the routing_truth job (WP-R7-5, routing_truth.go)
+	chunkMoveGate          jobGate                // one chunk move at a time
+	chunkOrphans           *ChunkOrphanSweeper    // the chunk_orphans job (WP-R8-2 B.2) + its dry run (POST /admin/chunk-orphans)
+	chunkOrphansGate       jobGate                // one dry run at a time
+	jobs                   *jobScheduler          // the one background-job scheduler (WP-R13-3, jobs.go)
+	retention              *RetentionJob          // nightly log-table pruner (Review R13-14, checklist item 5)
+	webhookRetry           *WebhookRetrier        // the webhook outbox's retry job (WP-R11-3); nil without a database
+	accountSvc             *account.Service       // the one deletion state machine (WP-R10-3)
+	accountDeletion        *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
+	synthetic              *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
 	// entitlementLapse is the entitlement_lapse job (WP-PAY-1,
 	// entitlement_lapse.go); nil without a database.
 	entitlementLapse *EntitlementLapseRunner
@@ -316,6 +321,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 
+	s.allowUnsealedCleartext = allowUnsealedCleartextFromEnv(os.Getenv, logger)
+
 	if s.db != nil {
 		s.gci = crypto.NewGlobalContentIndex(s.db)
 		logger.Info("global content index initialized (chunking + dedup)")
@@ -355,7 +362,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	reportWriter := newGeneratedObjectWriter(s.db, s.engine, s.quotaManager, s.gci, logger)
 	if reportWriter != nil {
 		reportWriter.sse = s.sseService                     // an sse_enabled target bucket gets SSE-S3, as a PUT does
-		reportWriter.allowSync = syncPlacementGate(s.flags) // and a sync-tier bucket what a PUT gets
+		reportWriter.allowTier = tierPlacementGate(s.flags) // and a sync-tier bucket what a PUT gets
 	}
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)
@@ -448,6 +455,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The Vault parity second copy (WP-VAULT-1): the job and the read
 	// fallback, flag-gated per tenant (vault_parity, default OFF).
 	s.vaultParity = NewVaultParity(s.db, s.engine, fc, logger)
+	if s.vaultParity != nil {
+		s.vaultParity.AllowCleartextLegs = s.allowUnsealedCleartext
+	}
 	if s.vaultParity != nil {
 		s.vaultParity.SSE = s.sseService
 	}

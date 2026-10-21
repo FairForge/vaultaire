@@ -202,7 +202,7 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 		// placement resolves from the same header and the bucket's tier
 		// (WP-R10-8 Part C). A tier changed before Complete moves the bill
 		// at Complete (the settle releases here, charges there).
-		reservedFloor := usage.FloorOf(resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, storageClass))
+		reservedFloor := usage.FloorOf(resolvePutStorageClass(r.Context(), s.db, s.engine, tierPlacementGate(s.flags), t.ID, bucket, storageClass))
 		_, err := s.db.ExecContext(r.Context(), `
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
@@ -946,7 +946,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// like PUT's (R10-24: it used to be dropped, so a GLACIER multipart
 	// landed downstairs), then the bucket's tier — aws-cli's default
 	// multipart uploads must not ignore tier placement. The floor follows.
-	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, syncPlacementGate(s.flags), t.ID, bucket, requestedClass)
+	tierClass := resolvePutStorageClass(r.Context(), s.db, s.engine, tierPlacementGate(s.flags), t.ID, bucket, requestedClass)
 	floor := usage.FloorOf(tierClass)
 
 	// Placed exactly as a single PUT of the same bytes, class and SSE header
