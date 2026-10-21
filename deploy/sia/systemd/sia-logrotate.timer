@@ -1,0 +1,9 @@
+[Unit]
+Description=Rotate the s3d gateway logs hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

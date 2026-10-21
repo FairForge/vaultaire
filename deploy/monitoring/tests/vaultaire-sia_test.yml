@@ -1,0 +1,109 @@
+# promtool unit test of vaultaire-sia.yml.
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-sia.yml deploy/monitoring/tests/vaultaire-sia_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-sia_test.yml'
+rule_files:
+  - vaultaire-sia.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A healthy gateway beside a down one: only the down one fires.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_sia_gateway_up{gateway="s3d-lab"}'
+        values: '1x10'
+      - series: 'vaultaire_sia_status_ok{gateway="s3d-lab"}'
+        values: '1x10'
+      - series: 'vaultaire_sia_gateway_up{gateway="s3d-lab2"}'
+        values: '0x10'
+      - series: 'vaultaire_sia_status_ok{gateway="s3d-lab2"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: SiaGatewayDown
+        exp_alerts:
+          - exp_labels:
+              gateway: s3d-lab2
+              severity: warning
+            exp_annotations:
+              summary: "Sia gateway s3d-lab2 is down"
+              description: "The s3d@s3d-lab2 unit is not active or `s3d status` does not answer. Vaultaire's sia breaker answers 503 meanwhile. systemctl --user status s3d@s3d-lab2."
+
+  # An object buffered 40 min fires; one buffered 5 min does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_sia_oldest_pending_seconds{gateway="s3d-lab"}'
+        values: '2400x15'
+      - series: 'vaultaire_sia_oldest_pending_seconds{gateway="s3d-lab2"}'
+        values: '300x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SiaPendingTooOld
+        exp_alerts:
+          - exp_labels:
+              gateway: s3d-lab
+              severity: warning
+            exp_annotations:
+              summary: "Sia gateway s3d-lab holds an object not uploaded for 40m 0s"
+              description: "Objects answered 200 are only on the gateway's local disk until uploaded; s3d-flush@s3d-lab.timer flushes every 10 min. Check the flush unit and failed uploads: systemctl --user status s3d-flush@s3d-lab."
+
+  # Replication: syncs advancing = quiet; syncs frozen = critical.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_sia_litestream_up'
+        values: '1x40'
+      - series: 'vaultaire_sia_litestream_syncs_total{gateway="s3d-lab"}'
+        values: '0+60x40'
+      - series: 'vaultaire_sia_litestream_sync_errors_total{gateway="s3d-lab"}'
+        values: '0x40'
+      - series: 'vaultaire_sia_litestream_syncs_total{gateway="s3d-lab2"}'
+        values: '500x40'
+      - series: 'vaultaire_sia_litestream_sync_errors_total{gateway="s3d-lab2"}'
+        values: '0x40'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: SiaCatalogueNotReplicating
+        exp_alerts:
+          - exp_labels:
+              gateway: s3d-lab2
+              severity: critical
+            exp_annotations:
+              summary: "s3d.db catalogue replication (Litestream) is down or failing"
+              description: "s3d.db is the only map from keys to Sia objects; while Litestream is not replicating it, losing the gateway's disk loses every object it holds. systemctl --user status litestream; journalctl --user -u litestream."
+
+  # A read that gave up fires at once; refill waits alone never do.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_sia_log_events_total{gateway="s3d-lab2",event="chunk_giveup"}'
+        values: '3 3 3 4 4 4'
+      - series: 'vaultaire_sia_log_events_total{gateway="s3d-lab2",event="refill_wait"}'
+        values: '0+100x5'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SiaReadsGivingUp
+        exp_alerts:
+          - exp_labels:
+              gateway: s3d-lab2
+              event: chunk_giveup
+              severity: warning
+            exp_annotations:
+              summary: "Sia gateway s3d-lab2 failed a read (chunk_giveup)"
+              description: "A chunk exhausted its refill waits and retries, or a body was cut. Clients saw a failed GET. grep -E 'giving up|failed to write object body' ~/s3d-lab2/data/s3d.log."
+
+  # Canary: a failing read fires after 15 min.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_sia_canary_success{gateway="s3d-lab",size="4m"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: SiaCanaryFailing
+        exp_alerts:
+          - exp_labels:
+              gateway: s3d-lab
+              size: 4m
+              severity: warning
+            exp_annotations:
+              summary: "Sia read canary failing on s3d-lab (4m)"
+              description: "The canary object no longer reads back byte-exact. journalctl --user -u sia-canary."

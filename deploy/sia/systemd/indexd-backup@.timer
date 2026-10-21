@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily backup of indexd %i
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

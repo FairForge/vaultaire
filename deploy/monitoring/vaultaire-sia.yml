@@ -1,0 +1,116 @@
+# Sia gateways (s3d) — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from node_exporter's textfile collector, written by the
+# gateways' owner (deploy/sia/README.md) into /opt/vaultaire/metrics/ and
+# exposed through root-owned symlinks — the backup-metrics layout:
+#   vaultaire_sia_gateway_up{gateway}                 1/0, the s3d@<gateway> user unit is active
+#   vaultaire_sia_status_ok{gateway}                  1/0, `s3d status` answered
+#   vaultaire_sia_pending_objects / _pending_bytes{gateway}
+#   vaultaire_sia_oldest_pending_seconds{gateway}     age of the oldest buffered (not yet on Sia) object
+#   vaultaire_sia_failed_uploads{gateway}             s3d's failed-upload count
+#   vaultaire_sia_buffer_used_bytes / _buffer_limit_bytes{gateway}
+#   vaultaire_sia_log_events_total{gateway,event}     funds_refusal | refill_wait | chunk_giveup | body_cut | shard_write_failed
+#   vaultaire_sia_litestream_up, vaultaire_sia_litestream_syncs_total{gateway}, _sync_errors_total{gateway}
+#   vaultaire_sia_metrics_last_run_timestamp_seconds  (sia-metrics.timer, every minute)
+#   vaultaire_sia_canary_success / _seconds / _last_success_timestamp_seconds{gateway,size}  (sia-canary.timer)
+#   vaultaire_sia_indexd_backup_last_success_timestamp_seconds{instance}  (indexd-backup@.timer)
+#
+# A PUT's 200 on a Sia gateway is local disk only until s3d uploads it
+# (SiaPendingTooOld). A `funds_refusal` is a host refusing a read or write for
+# lack of account funds — the plan's read budget, which our build waits out
+# instead of failing (bench-results/SIA-S3D-2026-10.md SIA-BENCH-3..5): a
+# sustained rate is the budget spent, a `chunk_giveup` is a read that failed
+# even so. Triage: systemctl --user status 's3d@*' litestream; journalctl
+# --user -u s3d@<gateway>; ~/<gateway>/data/s3d.log.
+groups:
+  - name: vaultaire-sia
+    rules:
+      - alert: SiaGatewayDown
+        expr: vaultaire_sia_gateway_up == 0 or vaultaire_sia_status_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} is down"
+          description: "The s3d@{{ $labels.gateway }} unit is not active or `s3d status` does not answer. Vaultaire's sia breaker answers 503 meanwhile. systemctl --user status s3d@{{ $labels.gateway }}."
+
+      - alert: SiaMetricsStale
+        expr: (time() - vaultaire_sia_metrics_last_run_timestamp_seconds) > 10 * 60
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia metrics have not been refreshed in 10 minutes"
+          description: "sia-metrics.timer (user1) is not running — every other Sia rule is blind. systemctl --user status sia-metrics.timer sia-metrics.service."
+
+      - alert: SiaPendingTooOld
+        expr: vaultaire_sia_oldest_pending_seconds > 30 * 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} holds an object not uploaded for {{ $value | humanizeDuration }}"
+          description: "Objects answered 200 are only on the gateway's local disk until uploaded; s3d-flush@{{ $labels.gateway }}.timer flushes every 10 min. Check the flush unit and failed uploads: systemctl --user status s3d-flush@{{ $labels.gateway }}."
+
+      - alert: SiaUploadsFailing
+        expr: vaultaire_sia_failed_uploads > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} reports {{ $value }} failed uploads"
+          description: "s3d keeps failed objects and retries them on the next upload loop or flush; a count that stays means Sia hosts refuse the writes (out of funds, out of storage). grep 'shard write failed' ~/{{ $labels.gateway }}/data/s3d.log."
+
+      - alert: SiaBufferFilling
+        expr: vaultaire_sia_buffer_used_bytes / vaultaire_sia_buffer_limit_bytes > 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} local buffer above 80 %"
+          description: "Writes are accepted faster than they reach Sia; at the limit s3d refuses PUTs. The write budget may be spent (funds_refusal rising) or uploads failing."
+
+      - alert: SiaReadBudgetSpent
+        expr: rate(vaultaire_sia_log_events_total{event="funds_refusal"}[15m]) > 50
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} has been on an empty budget for 30 minutes"
+          description: "Hosts keep refusing for lack of account funds: reads and writes run at the plan's (or fundTargetBytes') refill rate. Not an outage — a capacity signal: a bigger plan / fund target, or pace the workload."
+
+      - alert: SiaReadsGivingUp
+        expr: increase(vaultaire_sia_log_events_total{event=~"chunk_giveup|body_cut"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia gateway {{ $labels.gateway }} failed a read ({{ $labels.event }})"
+          description: "A chunk exhausted its refill waits and retries, or a body was cut. Clients saw a failed GET. grep -E 'giving up|failed to write object body' ~/{{ $labels.gateway }}/data/s3d.log."
+
+      - alert: SiaCanaryFailing
+        expr: vaultaire_sia_canary_success == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sia read canary failing on {{ $labels.gateway }} ({{ $labels.size }})"
+          description: "The canary object no longer reads back byte-exact. journalctl --user -u sia-canary."
+
+      - alert: SiaCatalogueNotReplicating
+        expr: vaultaire_sia_litestream_up == 0 or increase(vaultaire_sia_litestream_syncs_total[15m]) == 0 or increase(vaultaire_sia_litestream_sync_errors_total[15m]) > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "s3d.db catalogue replication (Litestream) is down or failing"
+          description: "s3d.db is the only map from keys to Sia objects; while Litestream is not replicating it, losing the gateway's disk loses every object it holds. systemctl --user status litestream; journalctl --user -u litestream."
+
+      - alert: SiaIndexdBackupStale
+        expr: (time() - vaultaire_sia_indexd_backup_last_success_timestamp_seconds) > 26 * 3600
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "indexd {{ $labels.instance }} has no backup in 26 h"
+          description: "indexd-backup@{{ $labels.instance }}.timer has not succeeded; its Postgres holds every pinned object's metadata. journalctl --user -u indexd-backup@{{ $labels.instance }}."

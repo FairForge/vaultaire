@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate the s3d gateway logs (deploy/sia/logrotate.conf)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate -s %h/.config/stored-sia/logrotate.state %h/stored-sia/logrotate.conf
