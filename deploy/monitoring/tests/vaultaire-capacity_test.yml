@@ -55,10 +55,12 @@ tests:
 
   # Seven days before term_end the renewal pages (the 2026-08-27 shape).
   # term_end = eval start + 5 days => inside 7 d from the first sample.
-  - interval: 1h
+  # (1m samples: Prometheus's 5m staleness window forgets a series between
+  # 1h-spaced points, so a sparser series never goes pending.)
+  - interval: 1m
     input_series:
       - series: 'vaultaire_backend_plan_term_end_timestamp_seconds{backend="idrive"}'
-        values: '432000x80'
+        values: '432000x200'
     alert_rule_test:
       - eval_time: 2h
         alertname: BackendPlanRenewal7d
@@ -72,16 +74,16 @@ tests:
 
   # A registered paid backend with no plan row warns after 6 h — the point
   # of shipping dark; one with a row is silent.
-  - interval: 1h
+  - interval: 1m
     input_series:
       - series: 'vaultaire_backend_health{backend="lyve"}'
-        values: '1x10'
+        values: '1x400'
       - series: 'vaultaire_backend_health{backend="idrive"}'
-        values: '1x10'
+        values: '1x400'
       - series: 'vaultaire_backend_plan_bytes{backend="idrive"}'
-        values: '1000000000000x10'
+        values: '1000000000000x400'
     alert_rule_test:
-      - eval_time: 7h
+      - eval_time: 6h30m
         alertname: BackendPlanUnknown
         exp_alerts:
           - exp_labels:
