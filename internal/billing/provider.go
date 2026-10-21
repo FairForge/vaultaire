@@ -179,6 +179,16 @@ func (s *StripeService) Cancel(ctx context.Context, tenantID string) error {
 	return s.CancelSubscription(ctx, tenantID)
 }
 
+// CancelRef cancels the named subscription now (payments.RefCanceller —
+// the deletion runner names every subscription the record knows: the
+// entitlement's and an invalid house's). Idempotent.
+func (s *StripeService) CancelRef(ctx context.Context, tenantID, ref string) error {
+	if !s.configured {
+		return payments.ErrProviderUnconfigured
+	}
+	return s.cancelRef(ctx, tenantID, ref)
+}
+
 // ManageURL is a Billing Portal session.
 func (s *StripeService) ManageURL(ctx context.Context, tenantID, returnURL string) (string, error) {
 	if !s.configured {

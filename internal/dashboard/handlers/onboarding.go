@@ -43,13 +43,16 @@ func populateOnboarding(ctx context.Context, db *sql.DB, tenantID string, r *htt
 
 	var accessKey sql.NullString
 	var intentStd, intentVault int
-	var subStatus string
+	var housed bool
 	// The access key shown is the live primary ROW (WP-R5-14), the same one
-	// the keys page calls primary and a rotation replaces.
+	// the keys page calls primary and a rotation replaces. A plan is waiting
+	// while no house is granted in the entitlement record (WP-PAY-7).
 	_ = db.QueryRowContext(ctx,
 		`SELECT (SELECT key_id FROM api_keys WHERE tenant_id = tenants.id AND is_primary AND revoked_at IS NULL),
-		        intent_std_tb, intent_vault_tb, subscription_status FROM tenants WHERE id = $1`, tenantID).
-		Scan(&accessKey, &intentStd, &intentVault, &subStatus)
+		        intent_std_tb, intent_vault_tb,
+		        EXISTS (SELECT 1 FROM entitlements e WHERE e.tenant_id = tenants.id AND e.lapsed_at IS NULL)
+		   FROM tenants WHERE id = $1`, tenantID).
+		Scan(&accessKey, &intentStd, &intentVault, &housed)
 
 	status := &OnboardingStatus{
 		HasBucket:  bucketCount > 0,
@@ -57,7 +60,7 @@ func populateOnboarding(ctx context.Context, db *sql.DB, tenantID string, r *htt
 		HasWebhook: webhookCount > 0,
 		AccessKey:  accessKey.String,
 	}
-	if (intentStd > 0 || intentVault > 0) && subStatus != "active" && subStatus != "past_due" && subStatus != "trialing" {
+	if (intentStd > 0 || intentVault > 0) && !housed {
 		status.PlanWaiting = true
 		status.PlanSummary = houseWords(payments.Order{Std: intentStd, Vault: intentVault})
 	}

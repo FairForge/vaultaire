@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -97,6 +99,12 @@ func HandleManageBilling(p payments.Provider, baseURL string, logger *zap.Logger
 	}
 }
 
+// populateBillingPlan fills the plan card from the entitlement record
+// (WP-PAY-7): the plan label is 'house' only while one is granted —
+// tenants.plan keeps saying 'house' after a lapse (RP21-3) — and the status
+// is the record's, not a provider's last report. "past_due" (the card
+// alert) is a house a provider renews whose date has passed: its retries
+// run inside our grace.
 func populateBillingPlan(ctx context.Context, db *sql.DB, data map[string]any, tenantID string) {
 	data["Plan"] = "starter"
 	data["SubscriptionStatus"] = "none"
@@ -108,46 +116,39 @@ func populateBillingPlan(ctx context.Context, db *sql.DB, data map[string]any, t
 		return
 	}
 
-	var plan, status sql.NullString
-	err := db.QueryRowContext(ctx,
-		`SELECT plan, subscription_status FROM tenants WHERE id = $1`, tenantID).
-		Scan(&plan, &status)
+	var plan sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT plan FROM tenants WHERE id = $1`, tenantID).Scan(&plan); err != nil {
+		return
+	}
+	st, err := payments.StatusOf(ctx, db, tenantID, payments.GraceFromEnv(os.Getenv, nil), time.Now())
 	if err != nil {
 		return
 	}
-
-	if plan.Valid && plan.String != "" {
-		data["Plan"] = plan.String
+	var paidThrough sql.NullTime
+	if st.Found {
+		paidThrough = sql.NullTime{Time: st.Entitlement.PaidThrough, Valid: true}
 	}
+	hs := houseStateOf(paidThrough, st.Found && !st.Granted, time.Now())
+	label := hs.plan(plan.String)
+	data["Plan"] = label
 	// A tenant still labelled with a legacy pack plan (an admin tier
 	// label, or a pack bought before WP-PAY-0) is told to ask support:
 	// one product, and never a second subscription beside a first.
-	if legacyPlan(plan.String) {
-		data["LegacyPlan"] = plan.String
+	if legacyPlan(label) {
+		data["LegacyPlan"] = label
 	}
-	if status.Valid && status.String != "" {
-		data["SubscriptionStatus"] = status.String
-		data["HasSubscription"] = status.String == "active" || status.String == "past_due"
-	}
-
-	// Status display helpers.
-	st := "none"
-	if status.Valid {
-		st = status.String
-	}
-	switch st {
-	case "active":
-		data["StatusClass"] = "success"
-		data["StatusLabel"] = "Active"
-	case "past_due":
-		data["StatusClass"] = "warning"
-		data["StatusLabel"] = "Past Due"
-	case "canceled":
-		data["StatusClass"] = "danger"
-		data["StatusLabel"] = "Canceled"
-	default:
-		data["StatusClass"] = "default"
-		data["StatusLabel"] = "Free"
+	data["HasSubscription"] = hs.granted()
+	switch hs {
+	case houseActive:
+		data["SubscriptionStatus"], data["StatusClass"], data["StatusLabel"] = "active", "success", "Active"
+	case houseInGrace:
+		if st.Entitlement.Renewal == payments.RenewalAuto {
+			data["SubscriptionStatus"], data["StatusClass"], data["StatusLabel"] = "past_due", "warning", "Past Due"
+		} else {
+			data["SubscriptionStatus"], data["StatusClass"], data["StatusLabel"] = "grace", "warning", "In grace"
+		}
+	case houseLapsed:
+		data["SubscriptionStatus"], data["StatusClass"], data["StatusLabel"] = "lapsed", "danger", "Ended"
 	}
 }
 

@@ -110,6 +110,14 @@ type Provider interface {
 	Webhook() http.Handler
 }
 
+// RefCanceller is a Provider that can cancel one named reference now (a
+// Stripe subscription id) — the deletion runner cancels every reference the
+// record names, each exactly once (payments.MarkDeletionCancelled). A
+// provider without it is asked Cancel(tenant).
+type RefCanceller interface {
+	CancelRef(ctx context.Context, tenantID, ref string) error
+}
+
 var (
 	// ErrUnknownProvider: no provider of that name is registered.
 	ErrUnknownProvider = errors.New("unknown payment provider")

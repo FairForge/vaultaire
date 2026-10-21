@@ -778,15 +778,12 @@ func (h *WebhookHandler) houseInvalid(ctx context.Context, tenantID string, sub 
 		Resource: sub.ID, Severity: "error", Metadata: map[string]any{
 			"tenant": tenantID, "subscription": sub.ID, "std": o.Std, "vault": o.Vault, "pin_hot": o.PinHot,
 			"period": string(o.Period)}})
-	// The subscription is Stripe's and still bills: record it on the tenant
-	// — outside the rolled-back grant — so the deletion runner cancels it
-	// (RP22-3). Never over a different live id.
+	// The subscription is Stripe's and still bills: record it — outside the
+	// rolled-back grant — so the deletion runner cancels it (RP22-3; a
+	// payment_events row since WP-PAY-7, the tenants columns are dropped).
 	if h.stripe.db != nil {
-		if _, err := h.stripe.db.ExecContext(ctx,
-			`UPDATE tenants SET stripe_subscription_id = $1, subscription_status = $2
-			  WHERE id = $3 AND (stripe_subscription_id IS NULL OR stripe_subscription_id = '' OR stripe_subscription_id = $1)`,
-			sub.ID, string(sub.Status), tenantID); err != nil {
-			h.logger.Error("stripe webhook: could not record the invalid house's subscription on the tenant",
+		if err := payments.RecordInvalidHouse(ctx, h.stripe.db, tenantID, sub.ID, string(sub.Status)); err != nil {
+			h.logger.Error("stripe webhook: could not record the invalid house's subscription",
 				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.Error(err))
 		}
 	}

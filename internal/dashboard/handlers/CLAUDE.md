@@ -192,7 +192,7 @@ cookieless public-site statistics (`internal/sitestats` → `site_stats_daily`, 
 read back as a 30-day table (views, landing views, distinct visitors, beacon events, waitlist
 signups and tenants created per day), top-N tables (pages, referrers, countries, devices,
 utm_source, utm_campaign, events, waitlist by country) and the all-time funnel waitlist →
-accounts → with a bucket → with an object → paying (`subscription_status = 'active'`).
+accounts → with a bucket → with an object → paying (a granted entitlement, `payments.LiveHouseTenantsSQL` — WP-PAY-7).
 Every literal is static so the R9 schema audit prepares it. Nil DB renders the empty page;
 no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixtures`
 (`make dash-shots`). Template: `templates/admin/stats.html`.
@@ -200,16 +200,21 @@ no session redirects to `/login`. Photographed by `TestAdmin_WriteScreenshotFixt
 ## Admin Revenue Dashboard (`admin_revenue.go`)
 
 `HandleAdminRevenue(tmpl, db, logger)` — GET `/admin/revenue`: **houses only**
-(WP-PAY-0): `queryHouses` reads every live house (`plan = 'house'`, status
-active/past_due/trialing, its `tenant_floor_quotas` and pin-hot) and prices it
-with `payments.QuoteHouse` at the tenant's `house_period` — the sheet the
-customer saw. MRR = `housesMRR`; the by-tier table is one line per floor/add-on
+(WP-PAY-0), **read from the entitlement record only (WP-PAY-7)**:
+`queryHouses` = `payments.LiveHouses` (every granted row: its lines and period
+as bought) + the owners' e-mail and stored bytes, priced with
+`payments.QuoteHouse` — the sheet the customer saw; tenants columns alone
+(`plan = 'house'`, a status) are no house (`TestAdminRevenue_FromLedger`).
+MRR = `housesMRR`; the by-tier table is one line per floor/add-on
 (`houseRevenueLines`); top customers = the 10 houses with the highest MRR
 (`topHouseCustomers`). A tenant on a legacy pack label without a house earns
-$0. Cards: MRR, Active Subs, New This Month, Churn (count + rate from the
-`subscriptions` table, which nothing writes — R10-14). The month trend
-(`subscriptions.created_at` × the pack prices) is gone until the payments
-ledger feeds one (WP-PAY-3); `TrendBars` renders empty. `admin.go`'s overview
+$0. Cards: MRR, Active Subs (`payments.CountLiveHouses`), New This Month and
+Churn (`payments.HouseMonthOf`: first grants / lapses in the UTC month, rate
+over the houses live at its start). `TrendBars` renders empty.
+The tenants list, tenant detail and support search show the house state of
+the record (`houseStateOf`: active / in grace / lapsed / free; the plan label
+says `house` only while one is granted — RP21-3); the billing page's plan card
+and onboarding's "plan waiting" read it too. `admin.go`'s overview
 revenue is `housesMRR` too. `formatCents(cents)` → "$X.XX".
 
 Template: `templates/admin/revenue.html`. Nil-DB and empty-state both render 200

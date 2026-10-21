@@ -1,14 +1,15 @@
 package handlers
 
 import (
-	"context"
 	"html/template"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -56,11 +57,9 @@ func TestHouse_WriteScreenshotFixtures(t *testing.T) {
 
 	// 3. An existing monthly house being resized, with usage on both floors.
 	owner := houseTenant(t, db, 0, 0)
-	qm := usage.NewQuotaManager(db)
-	require.NoError(t, qm.SetHouse(context.Background(), owner, usage.HouseFromTB(3, 2, 1)))
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', stripe_subscription_id = 'sub_fixture', house_period = 'monthly' WHERE id = $1`, owner)
-	require.NoError(t, err)
-	_, err = db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = CASE floor WHEN 'standard' THEN $1::bigint ELSE $2::bigint END WHERE tenant_id = $3`,
+	grantedHouseVia(t, db, owner, payments.Order{Std: 3, Vault: 2, PinHot: 1, Period: payments.PeriodMonthly},
+		time.Now().Add(20*24*time.Hour), payments.ProviderStripe, "sub_fixture", payments.RenewalAuto)
+	_, err := db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = CASE floor WHEN 'standard' THEN $1::bigint ELSE $2::bigint END WHERE tenant_id = $3`,
 		3*usage.TB/2, usage.TB/4, owner)
 	require.NoError(t, err)
 	render("billing-house-resize", owner, newFakeHouseBilling(), "?resized=1")

@@ -33,12 +33,13 @@ import (
 //
 // Per due tenant, in this order, every step idempotent and resumable:
 //
-//	a. Stripe — cancel the subscription immediately and stamp
-//	   tenants.deletion_stripe_cancelled_at. A subscription id on the row is
-//	   cancelled on every run, stamped or not (the call is idempotent; a
-//	   stale stamp must never let an erase skip it). A Stripe error (or no Stripe
-//	   client while a subscription id is set) defers THIS tenant to the next
-//	   run; nothing of theirs is touched before billing is settled.
+//	a. Billing — cancel every subscription the record names immediately
+//	   (the entitlement's provider_ref, an invalid house's subscription) and
+//	   stamp each in payment_events (deletion_cancel, keyed by the
+//	   reference — WP-PAY-7; a new subscription is a new reference, so a
+//	   stale stamp never lets an erase skip it). A provider error (or no
+//	   provider while a house renews by itself) defers THIS tenant to the
+//	   next run; nothing of theirs is touched before billing is settled.
 //	b. Objects — every object_head_cache row is deleted on its RECORDED
 //	   backend (engine.WithRecordedBackend + Delete, R6-05/WP-R6-1); chunked rows
 //	   release their manifest under the key lock in the same transaction as
@@ -507,70 +508,87 @@ func (r *AccountDeletionRunner) defer_(te TenantErasure, log *zap.Logger, stage 
 }
 
 // cancelSubscription is stage a: stop the money with the provider that
-// bills the tenant (WP-PAY-2, docs/PAYMENTS.md § 2.3). The entitlement row
-// names the provider and whether it renews by itself; a tenant with no row
-// keeps the pre-097 rule (a tenants.stripe_subscription_id is Stripe's,
-// renewed automatically). A configured provider is always asked to cancel
-// (idempotent — Stripe answers an already-cancelled subscription with
-// success, so a stale stamp never skips a new subscription); an
-// unconfigured one defers the tenant only when the house renews by itself
-// (renewal 'auto') — a prepaid row has nothing to cancel. The stamp
-// records that this runner cancelled a Stripe subscription.
+// bills the tenant (WP-PAY-2, docs/PAYMENTS.md § 2.3), read from the record
+// only (WP-PAY-7): the entitlement row names the provider, its reference
+// and whether it renews by itself, and payment_events names any Stripe
+// subscription the webhook acknowledged as an invalid house (RP22-3). Each
+// reference is cancelled once: a deletion_cancel row (payments.
+// MarkDeletionCancelled, written only after the provider answered) is
+// checked before calling, so a crash between the answer and the stamp only
+// repeats an idempotent cancel, and a NEW subscription — a new reference —
+// is never skipped by an old stamp. An unconfigured provider defers the
+// tenant only when the house renews by itself (renewal 'auto'); a prepaid
+// row has nothing to cancel. A tenant with neither has nothing billing in
+// the record (prod has no Stripe key, so no subscription exists outside
+// it; a legacy pack bought before WP-PAY-1 would be the operator's to
+// cancel — WP-PAY-7 PR note).
 func (r *AccountDeletionRunner) cancelSubscription(ctx context.Context, tenantID string, te *TenantErasure) error {
-	var subID sql.NullString
-	var stamped sql.NullTime
-	err := r.db.QueryRowContext(ctx,
-		`SELECT stripe_subscription_id, deletion_stripe_cancelled_at FROM tenants WHERE id = $1`, tenantID).Scan(&subID, &stamped)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	type target struct {
+		provider, ref string
+		auto          bool
 	}
-	if err != nil {
-		return fmt.Errorf("read subscription: %w", err)
-	}
-	provider, renewsItself := payments.ProviderStripe, true
+	var targets []target
 	e, err := payments.Get(ctx, r.db, tenantID)
 	switch {
 	case errors.Is(err, payments.ErrNoEntitlement):
-		if !subID.Valid || subID.String == "" {
-			// Nothing to bill: never subscribed, or the webhook cleared the
-			// id after an earlier run's cancel (the stamp says which).
-			te.StripeCancelled = stamped.Valid
-			return nil
-		}
 	case err != nil:
 		return fmt.Errorf("read entitlement: %w", err)
 	default:
-		provider, renewsItself = e.Provider, e.Renewal == payments.RenewalAuto
+		targets = append(targets, target{provider: e.Provider, ref: e.ProviderRef, auto: e.Renewal == payments.RenewalAuto})
+	}
+	invalid, err := payments.InvalidHouseRefs(ctx, r.db, tenantID)
+	if err != nil {
+		return err
+	}
+	for _, ref := range invalid {
+		if len(targets) > 0 && targets[0].provider == payments.ProviderStripe && targets[0].ref == ref {
+			continue
+		}
+		targets = append(targets, target{provider: payments.ProviderStripe, ref: ref, auto: true})
 	}
 
-	var p payments.Provider
-	if r.Payments != nil {
-		p = r.Payments.Provider(provider)
-	}
-	cerr := payments.ErrProviderUnconfigured
-	if p != nil {
-		cerr = p.Cancel(ctx, tenantID)
-	}
-	if errors.Is(cerr, payments.ErrProviderUnconfigured) {
-		if renewsItself {
-			hint := ""
-			if provider == payments.ProviderStripe {
-				hint = " (STRIPE_SECRET_KEY)"
+	for _, t := range targets {
+		if t.ref != "" {
+			done, err := payments.DeletionCancelled(ctx, r.db, tenantID, t.provider, t.ref)
+			if err != nil {
+				return err
 			}
-			return fmt.Errorf("the house is renewed by %s, which is not configured%s — the account is not erased until billing can be cancelled", provider, hint)
+			if done {
+				te.StripeCancelled = te.StripeCancelled || t.provider == payments.ProviderStripe
+				continue
+			}
 		}
-		te.StripeCancelled = stamped.Valid
-		return nil
-	}
-	if cerr != nil {
-		return fmt.Errorf("cancel with %s: %w", provider, cerr)
-	}
-	if provider == payments.ProviderStripe && (subID.String != "" || e.ProviderRef != "") {
-		if _, err := r.db.ExecContext(ctx,
-			`UPDATE tenants SET deletion_stripe_cancelled_at = NOW() WHERE id = $1`, tenantID); err != nil {
-			return fmt.Errorf("stamp subscription cancel: %w", err)
+		var p payments.Provider
+		if r.Payments != nil {
+			p = r.Payments.Provider(t.provider)
 		}
-		te.StripeCancelled = true
+		cerr := payments.ErrProviderUnconfigured
+		if p != nil {
+			if rc, ok := p.(payments.RefCanceller); ok && t.ref != "" {
+				cerr = rc.CancelRef(ctx, tenantID, t.ref)
+			} else {
+				cerr = p.Cancel(ctx, tenantID)
+			}
+		}
+		if errors.Is(cerr, payments.ErrProviderUnconfigured) {
+			if t.auto {
+				hint := ""
+				if t.provider == payments.ProviderStripe {
+					hint = " (STRIPE_SECRET_KEY)"
+				}
+				return fmt.Errorf("the house is renewed by %s, which is not configured%s — the account is not erased until billing can be cancelled", t.provider, hint)
+			}
+			continue
+		}
+		if cerr != nil {
+			return fmt.Errorf("cancel with %s: %w", t.provider, cerr)
+		}
+		if t.ref != "" {
+			if err := payments.MarkDeletionCancelled(ctx, r.db, tenantID, t.provider, t.ref); err != nil {
+				return fmt.Errorf("stamp subscription cancel: %w", err)
+			}
+			te.StripeCancelled = te.StripeCancelled || t.provider == payments.ProviderStripe
+		}
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -105,11 +106,8 @@ func TestAdminRevenue_HousesOnly(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	ctx := context.Background()
 	house, free, pack := houseTenant(t, db, 0, 0), houseTenant(t, db, 0, 0), houseTenant(t, db, 0, 0)
-	require.NoError(t, usage.NewQuotaManager(db).SetHouse(ctx, house, usage.HouseFromTB(3, 2, 1)))
-	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, house) })
-	_, err := db.Exec(`UPDATE tenants SET plan = 'house', subscription_status = 'active', house_period = 'monthly' WHERE id = $1`, house)
-	require.NoError(t, err)
-	_, err = db.Exec(`UPDATE tenants SET plan = 'vault100', subscription_status = 'active' WHERE id = $1`, pack)
+	grantedHouse(t, db, house, payments.Order{Std: 3, Vault: 2, PinHot: 1, Period: payments.PeriodMonthly}, time.Now().Add(20*24*time.Hour))
+	_, err := db.Exec(`UPDATE tenants SET plan = 'vault100' WHERE id = $1`, pack)
 	require.NoError(t, err)
 	mine := map[string]bool{house: true, free: true, pack: true}
 

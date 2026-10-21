@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/payments"
 	"go.uber.org/zap"
 )
 
@@ -226,7 +227,7 @@ func populateTraffic(ctx context.Context, db *sql.DB, logger *zap.Logger, data m
 		       (SELECT COUNT(*) FROM tenants),
 		       (SELECT COUNT(DISTINCT tenant_id) FROM buckets),
 		       (SELECT COUNT(DISTINCT tenant_id) FROM object_head_cache),
-		       (SELECT COUNT(*) FROM tenants WHERE subscription_status = 'active')`).
+		       (SELECT COUNT(*) FROM (`+payments.LiveHouseTenantsSQL+`) l)`).
 		Scan(&f.Waitlist, &f.Accounts, &f.WithBucket, &f.WithObject, &f.Paying); err != nil {
 		logger.Error("traffic funnel", zap.Error(err))
 	}

@@ -10,7 +10,7 @@ import (
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/payments"
-	"github.com/FairForge/vaultaire/internal/usage"
+	"github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
@@ -78,34 +78,28 @@ func HandleAdminRevenue(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 
 // populateRevenue prices houses only (WP-PAY-0, one product): every live
 // house at payments.QuoteHouse for its period — the sheet the customer saw.
-// The legacy pack prices and the metered estimate are gone; a tenant on a
-// pack label without a house (Bench2) earns nothing. The month trend read
-// the subscriptions table, which nothing writes (R10-14): it is gone until
-// the payments ledger feeds one (WP-PAY-3).
+// Since WP-PAY-7 every number on the page comes from the entitlement record
+// (payments.LiveHouses / CountLiveHouses / HouseMonthOf): a house is live
+// when its row is granted, whatever tenants.plan or a provider's status
+// says; new / churned are first grants / lapses in the UTC month.
 func populateRevenue(ctx context.Context, db *sql.DB, data map[string]any, logger *zap.Logger) {
 	houses := queryHouses(ctx, db, logger)
 	data["MRRFmt"] = formatCents(housesMRR(houses))
 
-	var activeSubs int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tenants WHERE subscription_status = 'active'`).Scan(&activeSubs); err != nil {
-		logger.Debug("revenue: count active subs", zap.Error(err))
+	activeSubs, err := payments.CountLiveHouses(ctx, db)
+	if err != nil {
+		logger.Debug("revenue: count live houses", zap.Error(err))
 	}
 	data["ActiveSubs"] = activeSubs
 
-	newThisMonth := queryCountSince(ctx, db, logger,
-		`SELECT COUNT(*) FROM subscriptions WHERE created_at >= date_trunc('month', CURRENT_DATE)`)
-	churnedThisMonth := queryCountSince(ctx, db, logger,
-		`SELECT COUNT(*) FROM subscriptions WHERE canceled_at >= date_trunc('month', CURRENT_DATE)`)
-	activeAtStart := queryCountSince(ctx, db, logger,
-		`SELECT COUNT(*) FROM subscriptions
-		 WHERE created_at < date_trunc('month', CURRENT_DATE)
-		   AND (canceled_at IS NULL OR canceled_at >= date_trunc('month', CURRENT_DATE))`)
-
-	data["NewThisMonth"] = newThisMonth
-	data["ChurnedThisMonth"] = churnedThisMonth
-	if activeAtStart > 0 {
-		rate := float64(churnedThisMonth) / float64(activeAtStart) * 100
+	m, err := payments.HouseMonthOf(ctx, db)
+	if err != nil {
+		logger.Debug("revenue: house month", zap.Error(err))
+	}
+	data["NewThisMonth"] = m.New
+	data["ChurnedThisMonth"] = m.Lapsed
+	if m.LiveAtStart > 0 {
+		rate := float64(m.Lapsed) / float64(m.LiveAtStart) * 100
 		data["ChurnRateFmt"] = fmt.Sprintf("%.1f%%", rate)
 	}
 
@@ -122,56 +116,54 @@ type houseRevenue struct {
 	quote           payments.Quote
 }
 
-// queryHouses reads every live house (dashboard plan Phase 4): the floor
-// quotas and pin-hot are the Stripe items' quantities, so the MRR is
-// payments.QuoteHouse at the tenant's period.
+// queryHouses reads every live house from the entitlement record — the
+// house as bought (its lines and period), priced at payments.QuoteHouse —
+// with its owner's e-mail and stored bytes.
 func queryHouses(ctx context.Context, db *sql.DB, logger *zap.Logger) []houseRevenue {
-	rows, err := db.QueryContext(ctx, `
-		SELECT t.id, t.email, t.house_period, f.floor, f.storage_limit_bytes,
-		       COALESCE(q.pin_hot_bytes, 0), COALESCE(q.storage_used_bytes, 0)
-		FROM tenants t
-		JOIN tenant_floor_quotas f ON f.tenant_id = t.id
-		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
-		WHERE t.plan = 'house' AND t.subscription_status IN ('active', 'past_due', 'trialing')
-		ORDER BY t.id`)
+	live, err := payments.LiveHouses(ctx, db)
 	if err != nil {
 		logger.Debug("revenue: houses", zap.Error(err))
 		return nil
 	}
+	if len(live) == 0 {
+		return nil
+	}
+	ids := make([]string, len(live))
+	for i, e := range live {
+		ids[i] = e.TenantID
+	}
+	type owner struct {
+		email string
+		used  int64
+	}
+	owners := map[string]owner{}
+	rows, err := db.QueryContext(ctx, `
+		SELECT t.id, t.email, COALESCE(q.storage_used_bytes, 0)
+		  FROM tenants t LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
+		 WHERE t.id = ANY($1)`, pq.Array(ids))
+	if err != nil {
+		logger.Debug("revenue: house owners", zap.Error(err))
+		return nil
+	}
 	defer func() { _ = rows.Close() }()
-
-	byID := map[string]*houseRevenue{}
-	var order []string
 	for rows.Next() {
-		var id, email, period, floor string
-		var limit, pin, used int64
-		if err := rows.Scan(&id, &email, &period, &floor, &limit, &pin, &used); err != nil {
+		var id string
+		var o owner
+		if err := rows.Scan(&id, &o.email, &o.used); err != nil {
 			continue
 		}
-		h, ok := byID[id]
-		if !ok {
-			h = &houseRevenue{tenantID: id, email: email, period: payments.Period(period), pin: int(pin / usage.TB), usedBytes: used}
-			if h.period != payments.PeriodMonthly {
-				h.period = payments.PeriodAnnual
-			}
-			byID[id] = h
-			order = append(order, id)
-		}
-		switch floor {
-		case usage.FloorStandard:
-			h.std = int(limit / usage.TB)
-		case usage.FloorVault:
-			h.vault = int(limit / usage.TB)
-		}
+		owners[id] = o
 	}
 	if err := rows.Err(); err != nil {
 		return nil
 	}
-	out := make([]houseRevenue, 0, len(order))
-	for _, id := range order {
-		h := byID[id]
+	out := make([]houseRevenue, 0, len(live))
+	for _, e := range live {
+		o := e.Order
+		h := houseRevenue{tenantID: e.TenantID, email: owners[e.TenantID].email, usedBytes: owners[e.TenantID].used,
+			std: o.Std, vault: o.Vault, pin: o.PinHot, period: o.Period}
 		h.quote = payments.QuoteHouse(h.std, h.vault, h.pin, h.period)
-		out = append(out, *h)
+		out = append(out, h)
 	}
 	return out
 }
@@ -243,12 +235,4 @@ func topHouseCustomers(houses []houseRevenue, n int) []custRevenue {
 		})
 	}
 	return out
-}
-
-func queryCountSince(ctx context.Context, db *sql.DB, logger *zap.Logger, query string) int {
-	var count int
-	if err := db.QueryRowContext(ctx, query).Scan(&count); err != nil {
-		logger.Debug("revenue: count query", zap.Error(err))
-	}
-	return count
 }

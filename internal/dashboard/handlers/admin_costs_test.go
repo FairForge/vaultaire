@@ -10,6 +10,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -40,16 +41,63 @@ func testCostsTemplate(t *testing.T) *template.Template {
 // costsQueryRows expects the tenant query and, when given, the houses query
 // that prices them (WP-PAY-0: revenue = the house at payments.QuoteHouse) —
 // it runs only when the tenant query returned rows.
-func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows, houses ...*sqlmock.Rows) {
+func costsQueryRows(mock sqlmock.Sqlmock, rows *sqlmock.Rows, houses ...*mockHouses) {
 	mock.ExpectQuery(`SELECT t.id, t.email, COALESCE\(t.plan, ''\)`).WillReturnRows(rows)
 	if len(houses) > 0 {
-		mock.ExpectQuery(`SELECT t.id, t.email, t.house_period, f.floor`).WillReturnRows(houses[0])
+		houses[0].expect(mock)
 	}
 }
 
-// houseRows are queryHouses' columns.
-func houseRows() *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"id", "email", "house_period", "floor", "storage_limit_bytes", "pin_hot_bytes", "storage_used_bytes"})
+// mockHouses stands in for queryHouses' two reads (WP-PAY-7): the granted
+// entitlements (payments.LiveHouses), then their owners. AddRow keeps the
+// per-floor shape the tests were written in: one call per floor line.
+type mockHouses struct {
+	order  []string
+	rows   map[string]*payments.Entitlement
+	owners map[string][2]any
+}
+
+func houseRows() *mockHouses {
+	return &mockHouses{rows: map[string]*payments.Entitlement{}, owners: map[string][2]any{}}
+}
+
+func (m *mockHouses) AddRow(id, email, period, floor string, limit, pin, used int64) *mockHouses {
+	e, ok := m.rows[id]
+	if !ok {
+		e = &payments.Entitlement{TenantID: id, Provider: payments.ProviderStripe, Renewal: payments.RenewalAuto}
+		m.rows[id] = e
+		m.order = append(m.order, id)
+	}
+	e.Order.Period = payments.Period(period)
+	e.Order.PinHot = int(pin / usage.TB)
+	switch floor {
+	case usage.FloorStandard:
+		e.Order.Std = int(limit / usage.TB)
+	case usage.FloorVault:
+		e.Order.Vault = int(limit / usage.TB)
+	}
+	m.owners[id] = [2]any{email, used}
+	return m
+}
+
+func (m *mockHouses) expect(mock sqlmock.Sqlmock) {
+	rows := sqlmock.NewRows([]string{"tenant_id", "std_tb", "vault_tb", "pin_hot_tb", "period", "paid_through",
+		"renewal", "provider", "provider_ref", "created_at", "updated_at"})
+	now := time.Now()
+	for _, id := range m.order {
+		e := m.rows[id]
+		rows.AddRow(id, e.Order.Std, e.Order.Vault, e.Order.PinHot, string(e.Order.Period), now.Add(24*time.Hour),
+			string(e.Renewal), e.Provider, "", now, now)
+	}
+	mock.ExpectQuery(`FROM entitlements WHERE lapsed_at IS NULL`).WillReturnRows(rows)
+	if len(m.order) == 0 {
+		return
+	}
+	owners := sqlmock.NewRows([]string{"id", "email", "used"})
+	for _, id := range m.order {
+		owners.AddRow(id, m.owners[id][0], m.owners[id][1])
+	}
+	mock.ExpectQuery(`SELECT t.id, t.email, COALESCE\(q.storage_used_bytes, 0\)`).WillReturnRows(owners)
 }
 
 func emptyActualBackendRows(mock sqlmock.Sqlmock) {

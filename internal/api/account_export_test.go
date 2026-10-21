@@ -144,8 +144,8 @@ func (f *exportFixture) seed() {
 	                           signup_referrer, signup_utm_source, created_at, updated_at)
 	        VALUES ($1, $2, $3, 'Export Co', 'active', 'user', TRUE, $4, 'https://ref.example', 'newsletter', NOW(), NOW())`,
 		u, f.email, f.secrets["password_hash"], f.secrets["verify_token"])
-	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, plan, intent_std_tb, intent_vault_tb, intent_room, house_period, slug)
-	        VALUES ($1, 'Export Co', $2, $3, $4, 'house', 2, 1, 'attic', 'annual', $5)`, tn, f.email, f.accessKey, f.secretKey, "exp-"+f.suffix)
+	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, plan, intent_std_tb, intent_vault_tb, intent_room, slug)
+	        VALUES ($1, 'Export Co', $2, $3, $4, 'house', 2, 1, 'attic', $5)`, tn, f.email, f.accessKey, f.secretKey, "exp-"+f.suffix)
 	f.exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier) VALUES ($1, 3000000000000, 4096, 'standard')`, tn)
 	f.exec(`INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes) VALUES ($1, 'standard', 2000000000000, 4096), ($1, 'vault', 1000000000000, 0)`, tn)
 	for _, b := range f.buckets {
@@ -278,7 +278,9 @@ func TestAccountExport_RequestThenRunWritesOneStreamedObject(t *testing.T) {
 	assert.Equal(t, "https://ref.example", user["signup_referrer"])
 	tn := body["tenant"].(map[string]any)
 	assert.Equal(t, "house", tn["plan"])
-	assert.Equal(t, "annual", tn["house_period"])
+	for _, gone := range []string{"house_period", "subscription_status", "deletion_stripe_cancelled_at", "stripe_subscription_id"} {
+		assert.NotContains(t, tn, gone, "WP-PAY-7: the record is the entitlement section")
+	}
 	assert.NotContains(t, tn, "secret_key")
 	quota := body["quota"].(map[string]any)
 	assert.Len(t, quota["floors"], 2)
