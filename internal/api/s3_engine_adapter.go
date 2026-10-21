@@ -1242,6 +1242,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				WriteS3Error(w, ErrIncompleteBody, r.URL.Path, generateRequestID())
 			case errors.Is(chunkErr, errBadDigest):
 				WriteS3Error(w, ErrBadDigest, r.URL.Path, generateRequestID())
+			case errors.Is(chunkErr, engine.ErrBackendFull):
+				writeBackendFull(w, r, a.logger, "PutObject", chunkErr,
+					zap.String("container", container), zap.String("artifact", artifact))
 			case errors.Is(chunkErr, engine.ErrAllBackendsUnavailable):
 				w.Header().Set("Retry-After", "30")
 				WriteS3Error(w, ErrServiceUnavailable, r.URL.Path, generateRequestID())
@@ -1288,6 +1291,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// rate: its request, never the backend's (Prompt 2b.2 C1,
 			// WP-R2-3).
 			answerClientBody(w, r, a.logger, "PutObject", src, err,
+				zap.String("container", container), zap.String("artifact", artifact))
+		case errors.Is(err, engine.ErrBackendFull):
+			writeBackendFull(w, r, a.logger, "PutObject", err,
 				zap.String("container", container), zap.String("artifact", artifact))
 		case errors.Is(err, engine.ErrAllBackendsUnavailable):
 			w.Header().Set("Retry-After", "30")

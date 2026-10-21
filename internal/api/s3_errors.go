@@ -108,6 +108,7 @@ const (
 	ErrInvalidPresignExpires             = "AuthorizationQueryParametersError_Expires"
 	ErrQuotaExceeded                     = "QuotaExceeded"
 	ErrServiceUnavailable                = "ServiceUnavailable"
+	ErrInsufficientStorage               = "InsufficientStorage"
 	ErrInvalidBucketState                = "InvalidBucketState"
 	ErrPreconditionFailed                = "PreconditionFailed"
 	ErrInvalidLocationConstraint         = "InvalidLocationConstraint"
@@ -159,6 +160,7 @@ var errorMessages = map[string]string{
 	ErrInvalidPresignExpires:             "X-Amz-Expires must be between 1 and 604800 seconds",
 	ErrQuotaExceeded:                     "Storage quota exceeded. Upgrade your plan for more storage.",
 	ErrServiceUnavailable:                "All storage backends are temporarily unavailable. Please retry.",
+	ErrInsufficientStorage:               "The storage behind this bucket is full. Nothing was stored; retrying will not help until it is expanded.",
 	ErrInvalidBucketState:                "The request is not valid for the current state of the bucket.",
 	ErrPreconditionFailed:                "At least one of the pre-conditions you specified did not hold.",
 	ErrInvalidLocationConstraint:         "The specified location constraint is not valid.",
@@ -210,6 +212,7 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidPresignExpires:             http.StatusBadRequest,
 	ErrQuotaExceeded:                     http.StatusForbidden,
 	ErrServiceUnavailable:                http.StatusServiceUnavailable,
+	ErrInsufficientStorage:               http.StatusInsufficientStorage,
 	ErrInvalidBucketState:                http.StatusConflict,
 	ErrPreconditionFailed:                http.StatusPreconditionFailed,
 	ErrInvalidLocationConstraint:         http.StatusBadRequest,

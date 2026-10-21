@@ -376,6 +376,17 @@ type SwiftError struct {
 	Body   string
 }
 
+// Unwrap names a full account: Swift's container quota answers 413 "Upload
+// exceeds quota." (Blomp's 40 GiB, prod 2026-10-21) and some proxies 507.
+// engine.ErrBackendFull is a verdict, not a failure — no retry, no breaker
+// charge, a 507 to the client.
+func (e *SwiftError) Unwrap() error {
+	if e.Status == http.StatusRequestEntityTooLarge || e.Status == http.StatusInsufficientStorage {
+		return engine.ErrBackendFull
+	}
+	return nil
+}
+
 func (e *SwiftError) Error() string {
 	if e.Body != "" {
 		return fmt.Sprintf("swift %s: HTTP %d: %s", e.Op, e.Status, e.Body)

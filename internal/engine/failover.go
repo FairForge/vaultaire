@@ -146,7 +146,7 @@ func isBackendFailure(err error) bool {
 	// Other client-level engine errors. Archived-on-tape is an object state,
 	// not a backend health signal (V18.2).
 	if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrInvalidInput) ||
-		errors.Is(err, ErrArchived) {
+		errors.Is(err, ErrArchived) || errors.Is(err, ErrBackendFull) {
 		return false
 	}
 	var perr PermissionError
@@ -245,6 +245,9 @@ func (f *FailoverManager) Register(backend string) {
 	if _, exists := f.breakers[backend]; !exists {
 		f.breakers[backend] = NewBackendCircuitBreaker()
 	}
+	// The full-backend series exist at 0 from registration, so the first
+	// refusal is an increase a rule can see.
+	backendFull.WithLabelValues(backend, "put")
 }
 
 // Execute tries fn against each registered backend in order, skipping open
@@ -343,6 +346,13 @@ func (f *FailoverManager) ExecuteOp(ctx context.Context, op string, backends []s
 			// bridge refuses) must not be stored on the next candidate —
 			// silently off the tier its bucket promises.
 			if errors.Is(err, ErrInvalidInput) {
+				return "", fmt.Errorf("all backends failed: %w", err)
+			}
+			// A full backend is final too: the next candidate would hold
+			// the bytes off the bucket's tier, and the client must not be
+			// told to retry what cannot fit (the account must grow first).
+			if errors.Is(err, ErrBackendFull) {
+				backendFull.WithLabelValues(backend, op).Inc()
 				return "", fmt.Errorf("all backends failed: %w", err)
 			}
 			// The part of this backend that holds the object is out while

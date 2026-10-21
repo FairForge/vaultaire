@@ -431,6 +431,33 @@ func TestSwift_LargeDeleteRemovesThePiecesInTheBackground(t *testing.T) {
 	assert.Equal(t, []string{"t-t1/b1/other"}, f.names())
 }
 
+// A full account is ErrBackendFull, not a failure to retry: Blomp's Swift
+// answered 413 "Upload exceeds quota." past its 40 GiB on prod 2026-10-21
+// and every client saw 503 "please retry". A large object refused midway
+// leaves no pieces behind.
+func TestSwift_FullAccountIsBackendFull(t *testing.T) {
+	f := newFakeSwift(t)
+	cfg := f.config()
+	cfg.SegmentSize = 1 << 10
+	d, err := NewSwiftDriver("swift-fake", cfg, zap.NewNop())
+	require.NoError(t, err)
+	ctx := swiftCtx("t1")
+	require.NoError(t, d.Put(ctx, "b1", "first", bytes.NewReader(make([]byte, 3000))))
+	f.quotaBytes = 4000
+	before := f.names()
+
+	err = d.Put(ctx, "b1", "small", bytes.NewReader(make([]byte, 1500)))
+	assert.ErrorIs(t, err, engine.ErrBackendFull)
+	body := randomBytes(t, 4<<10)
+	err = d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
+	assert.ErrorIs(t, err, engine.ErrBackendFull)
+	d.waitCleanups()
+	assert.Equal(t, before, f.names(), "the refused uploads' pieces were removed")
+
+	rc, err := d.Get(ctx, "b1", "first")
+	assert.Len(t, readAll(t, rc, err), 3000, "reads still work on a full account")
+}
+
 func TestSwift_StoreIDAndCleartext(t *testing.T) {
 	f := newFakeSwift(t)
 	d, err := NewSwiftDriver("swift-fake", f.config(), zap.NewNop())

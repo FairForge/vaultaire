@@ -34,9 +34,17 @@ var strictUnregistered = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Engine calls routed to a strict backend (sync) that is not registered on this process, answered 503, by backend and op (get, get_range, put, delete).",
 }, []string{"backend", "op"})
 
+// backendFull counts the writes a backend refused because its account or
+// container is full (ErrBackendFull): never a breaker charge, so this is
+// the one signal that a tier has stopped taking writes.
+var backendFull = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_engine_backend_full_total",
+	Help: "Engine calls a backend refused because its storage is full (a 507 to the client, never a breaker charge), by backend and op (put, other).",
+}, []string{"backend", "op"})
+
 // Collectors are the engine's metrics, for the server's registry.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered, noTenantRefusals, unrecordedBackendCalls, driverOpSeconds}
+	return []prometheus.Collector{partialUnavailable, fallover, strictUnregistered, backendFull, noTenantRefusals, unrecordedBackendCalls, driverOpSeconds}
 }
 
 // StrictUnregisteredCounter is vaultaire_engine_strict_target_unregistered_total.

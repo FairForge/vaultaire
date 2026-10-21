@@ -45,7 +45,7 @@ There is no age-based tiering engine (deleted in Review R15, WP-R6-4: it never r
 | File | Type | Purpose |
 |------|------|---------|
 | `types.go` | `Container`, `Artifact` | Domain types (internal names for bucket/object) |
-| `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`) |
+| `errors.go` | `NotFoundError`, `PermissionError` | Error types + sentinels (`ErrQuotaExceeded`, `ErrInvalidInput`, `ErrAllBackendsUnavailable`, `ErrBackendFull` — a backend refused a write because its storage is full: no breaker charge, ends the failover walk, `vaultaire_engine_backend_full_total{backend,op}` (series at 0 from `Register`), the API's 507 `InsufficientStorage`; 2026-10-21) |
 | `health.go` | `HealthScorer` | Weighted score — scored only by `api/health_handlers.go` for the `/health` / `/status` display (R6-17); **not a routing input**. The only live routing signal is the circuit breaker |
 | `load_balancer.go` | `LoadBalancer` | 4 strategies: RoundRobin, LeastConn, WeightedRandom, Adaptive — **unreachable** from the product (no constructor caller; WP-R6-4) |
 | `replicator.go` | `Replicator` | Cross-backend replication: Sync, Async (5 workers), Quorum — **unreachable** (WP-R6-4) |
