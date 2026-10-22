@@ -41,6 +41,39 @@ walk (`WalkTenant`) lists `_segments` too. Our writes never overwrite in place
 (every whole-object write has a new address since WP-R2-1), so the leftover
 pieces of an overwritten large object are not a product case.
 
+Every generation also holds a **marker**, `<generation>/manifest`, whose body
+is the manifest's name: written beside the first piece (no added time), taken
+by a delete with the pieces, left by a failed upload for the reaper below.
+
+## The segment reaper (`swift_segment_gc`, RB-2)
+
+Pieces no manifest references: a crashed process, a failed upload whose bulk
+delete failed, or a piece PUT cancelled after its body reached Blomp that
+lands after the failed upload's bulk delete (seen in the fake under load).
+The generation's name does not lead back to its object (the digest is
+one-way) and the listing cannot be trusted to find the manifest (it lags 90+
+min), so the reaper (`ReapOrphanSegments`, `swift_segment_gc.go`; the hourly
+`swift_segment_gc` job, boot +11 min) walks `t-<tenant>/_segments/` of every
+tenant and, per generation:
+
+- newest listed piece younger than **6 h** → `young`, not judged (an upload
+  in progress writes a piece every few seconds; its manifest follows the last
+  piece by seconds);
+- no marker, or a marker naming a key of another tenant or digest →
+  `unidentified`, kept (generations written before 2026-10-21's markers);
+- the marker read with a **GET** (consistent, unlike the listing), the named
+  key's manifest read with `?multipart-manifest=get`: lists a piece of this
+  generation → `live`; 404 or a plain object → orphan; a 5xx or timeout →
+  kept, an error in the result;
+- an orphan's listed pieces go in one bulk delete; its marker on a later run,
+  once the generation lists nothing else (so a piece the listing has not
+  shown yet still has its marker to be found by).
+
+At most 2,000 pieces a run (~11 min of Blomp's bulk delete); the rest next
+run. Metrics `vaultaire_swift_segment_gc_generations_total{backend,verdict}`,
+`vaultaire_swift_segment_gc_deleted_total{backend,kind=piece|marker}`; the
+run's counts are its `job_runs.result`.
+
 ## Behaviour
 
 - **Large uploads in parallel** (2026-10-21, after the prod bench): one
@@ -81,7 +114,7 @@ pieces of an overwritten large object are not a product case.
   caller's time — a plain DELETE; for a large object its manifest is read
   (`?multipart-manifest=get`), deleted alone, and its pieces go by one bulk
   delete in the background (bounded 2 min + 0.5 s a piece, ≤ 15 min; a
-  failure is a Warn and the erasure walk lists them under `_segments`).
+  failure is a Warn; the segment reaper and the erasure walk find them under `_segments`).
   Never Swift's `?multipart-manifest=delete`: it removes the pieces one by
   one inside the request, and at Blomp's ~3 writes a second a 6 GiB object
   of 96 pieces outran the 15 s bound — every DELETE of it answered 503

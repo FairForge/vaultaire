@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- Swift's ETag of an object or piece IS the MD5 of its bytes; compared, never a security primitive
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -72,6 +71,9 @@ type SwiftDriver struct {
 	// sent once more on a connection opened for it (swift_hedge.go).
 	hedgeAfter time.Duration
 	fresh      *http.Client
+	// segmentGCMaxPieces bounds the pieces one ReapOrphanSegments run
+	// deletes (swift_segment_gc.go).
+	segmentGCMaxPieces int
 
 	mu         sync.Mutex
 	token      string
@@ -291,10 +293,10 @@ func NewSwiftDriver(name string, cfg SwiftConfig, logger *zap.Logger) (*SwiftDri
 	initSwiftHedgeSeries(name)
 	return &SwiftDriver{name: name, cfg: cfg, logger: logger, now: time.Now, listPageSize: swiftListPage,
 		putBudget: semaphore.NewWeighted(cfg.PutBudget), segmentBackoff: swiftSegmentBackoff,
-		lateLandingWait: swiftLateLandingWait,
-		client:          TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only()),
-		fresh:           TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only(), WithFreshConnections()),
-		hedgeAfter:      driverHedgeAfterFromEnv(logger)}, nil
+		lateLandingWait: swiftLateLandingWait, segmentGCMaxPieces: swiftSegmentGCMaxPieces,
+		client:     TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only()),
+		fresh:      TunedHTTPClient(WithResponseHeaderTimeout(swiftAnswerTimeout), WithHTTP1Only(), WithFreshConnections()),
+		hedgeAfter: driverHedgeAfterFromEnv(logger)}, nil
 }
 
 // Name is the registration name.
@@ -830,6 +832,9 @@ func (d *SwiftDriver) deleteName(ctx context.Context, name string) (found bool, 
 		return false, &SwiftError{Op: "DELETE (manifest) " + name, Status: status}
 	}
 	if len(segs) > 0 {
+		if m, ok := generationMarkerOf(segs[0]); ok {
+			segs = append(segs, m)
+		}
 		d.cleanups.Add(1)
 		go func() {
 			defer d.cleanups.Done()
@@ -932,44 +937,7 @@ func (d *SwiftDriver) List(ctx context.Context, container, prefix string) ([]str
 // listNames hands every stored name under prefix to fn, page by page (each
 // page bounded by pageTimeout). A name outside the prefix aborts.
 func (d *SwiftDriver) listNames(ctx context.Context, prefix string, pageTimeout time.Duration, fn func(name string, size int64) error) error {
-	marker := ""
-	for {
-		q := url.Values{"format": {"json"}, "prefix": {prefix}, "limit": {strconv.Itoa(d.listPageSize)}}
-		if marker != "" {
-			q.Set("marker", marker)
-		}
-		pctx, cancel := context.WithTimeout(ctx, pageTimeout)
-		status, _, body, err := d.metaWithin(pctx, swiftRequest{method: http.MethodGet, query: q})
-		cancel()
-		if err != nil {
-			return fmt.Errorf("%s list %s: %w", d.name, prefix, err)
-		}
-		if status == http.StatusNoContent {
-			return nil
-		}
-		if status != http.StatusOK {
-			return &SwiftError{Op: "list " + prefix, Status: status, Body: truncate(string(body), 200)}
-		}
-		var page []struct {
-			Name  string `json:"name"`
-			Bytes int64  `json:"bytes"`
-		}
-		if err := json.Unmarshal(body, &page); err != nil {
-			return fmt.Errorf("%s list %s: decode: %w", d.name, prefix, err)
-		}
-		for _, o := range page {
-			if !strings.HasPrefix(o.Name, prefix) {
-				return fmt.Errorf("%s list %s: the backend returned %q, outside the prefix", d.name, prefix, o.Name)
-			}
-			if err := fn(o.Name, o.Bytes); err != nil {
-				return err
-			}
-		}
-		if len(page) < d.listPageSize {
-			return nil
-		}
-		marker = page[len(page)-1].Name
-	}
+	return d.listEntries(ctx, prefix, "", pageTimeout, func(e swiftEntry) error { return fn(e.Name, e.Bytes) })
 }
 
 // WalkTenant (engine.TenantWalker): everything the tenant holds, large-object
@@ -1146,13 +1114,11 @@ func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, bo
 			return fmt.Errorf("%w: %s put %s: %d bytes is more than %d pieces of 5 GiB", engine.ErrInvalidInput, d.name, name, size, swiftMaxManifestSegments)
 		}
 	}
-	tenantID := contextTenant(ctx)
-	digest := sha256.Sum256([]byte(name))
 	gen := make([]byte, 8)
 	if _, err := rand.Read(gen); err != nil {
 		return fmt.Errorf("%s put %s: generation: %w", d.name, name, err)
 	}
-	segPrefix := fmt.Sprintf("t-%s/_segments/%s/%x/", tenantID, hex.EncodeToString(digest[:16]), gen)
+	segPrefix := swiftSegmentPrefix(contextTenant(ctx), name, hex.EncodeToString(gen))
 
 	pctx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -1211,6 +1177,13 @@ func (d *SwiftDriver) putLarge(ctx context.Context, name, contentType string, bo
 				return fmt.Errorf("%s put %s: body ended after %d bytes, %d declared: %w", d.name, name, total+int64(got), size, io.ErrUnexpectedEOF)
 			}
 			return fmt.Errorf("%s put %s: read body: %w", d.name, name, rerr)
+		}
+		if n == 0 {
+			// The generation's marker names its manifest (the segment
+			// reaper's way back from a generation to its object). Beside
+			// the first piece, not before it: no write is added to the
+			// upload's time. A failed upload keeps it (the reaper's).
+			g.Go(func() error { return d.putMarker(gctx, segPrefix+swiftGenerationMarker, name) })
 		}
 		segName := fmt.Sprintf("%s%08d", segPrefix, n)
 		written = append(written, segName)
@@ -1336,7 +1309,7 @@ func (d *SwiftDriver) removeFailedUpload(ctx context.Context, name string, segs 
 }
 
 func (d *SwiftDriver) warnPiecesLeft(name string, pieces int, err error) {
-	d.logger.Warn("swift: large-object pieces were not all removed — the erasure walk lists them under _segments",
+	d.logger.Warn("swift: large-object pieces were not all removed — the segment reaper and the erasure walk list them under _segments",
 		zap.String("backend", d.name), zap.String("object", name), zap.Int("pieces", pieces), zap.Error(err))
 }
 

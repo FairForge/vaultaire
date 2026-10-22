@@ -51,6 +51,8 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	eng.AddDriver("permafrost", drivers.NewLocalDriver(t.TempDir(), zap.NewNop())) // the parity leg: vault_parity joins the table
 	// the pack store backend, and one that stripes: pack_gc and stripe_gc join the table
 	eng.AddDriver("sync", stripingLocal{drivers.NewLocalDriver(t.TempDir(), zap.NewNop())})
+	// Blomp's Swift (large objects as SLO pieces): swift_segment_gc joins the table
+	eng.AddDriver("blomp", segmentReapingLocal{drivers.NewLocalDriver(t.TempDir(), zap.NewNop())})
 	eng.SetPrimary("idrive")
 	// A master key: key_reencrypt joins the table (WP-R8-1).
 	t.Setenv("ENCRYPTION_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -251,4 +253,12 @@ type stripingLocal struct{ *drivers.LocalDriver }
 
 func (stripingLocal) ReapOrphanStripes(context.Context, time.Duration) (drivers.StripeReapResult, error) {
 	return drivers.StripeReapResult{}, nil
+}
+
+// segmentReapingLocal is a local driver that answers the Swift segment
+// reaper (the prod `blomp` backend, drivers.SwiftDriver).
+type segmentReapingLocal struct{ *drivers.LocalDriver }
+
+func (segmentReapingLocal) ReapOrphanSegments(context.Context, time.Duration) (drivers.SwiftSegmentReapResult, error) {
+	return drivers.SwiftSegmentReapResult{}, nil
 }
