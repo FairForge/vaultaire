@@ -144,16 +144,20 @@ func (f *mpChunkFixture) clientBodyErrors(t *testing.T, op, reason string) float
 	return total
 }
 
-// nothingKept: no head row, no bytes on the backend, nothing queued, the
-// reservation given back, no Error line, the 5xx count and the primary's
-// breaker untouched.
+// nothingKept: no head row, no bytes on the backend, nothing queued but
+// this write's own address (a body that went out is queued whoever cut it:
+// the store may have kept it — placeObject), the reservation given back, no
+// Error line, the 5xx count and the primary's breaker untouched.
 func (f *mpChunkFixture) nothingKept(t *testing.T, key string, logs *observer.ObservedLogs, errorsBefore int64) {
 	t.Helper()
 	assert.Zero(t, f.headRows(t, key), "no head row")
 	assert.Zero(t, f.used(t), "the reservation is released")
-	var retired int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM retired_blobs WHERE tenant_id = $1`, f.tenantID).Scan(&retired))
-	assert.Zero(t, retired, "the retired queue is untouched")
+	var other, own int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE NOT (storage_key LIKE $2 AND reason = 'orphan_write')),
+		COUNT(*) FILTER (WHERE storage_key LIKE $2 AND reason = 'orphan_write') FROM retired_blobs WHERE tenant_id = $1`,
+		f.tenantID, key+"@%").Scan(&other, &own))
+	assert.Zero(t, other, "the retired queue holds nothing else")
+	assert.LessOrEqual(t, own, 1, "at most this write's own address")
 	var files []string
 	_ = filepath.Walk(f.fixed.dir, func(p string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {

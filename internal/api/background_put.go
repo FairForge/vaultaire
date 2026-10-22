@@ -293,7 +293,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		release()
 		return deliveredObject{}, err
 	}
-	backendName, err := placeObject(tctx, g.db, g.eng, tenantID, bucket, container, blob, putBody, opts...)
+	backendName, err := placeObject(tctx, g.db, g.eng, g.logger, tenantID, bucket, container, blob, putBody, opts...)
 	if err != nil {
 		release()
 		return deliveredObject{}, fmt.Errorf("store %s/%s: %w", bucket, key, err)

@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"net"
+	"slices"
 	"sync"
 
 	"github.com/aws/smithy-go"
@@ -22,9 +23,17 @@ import (
 // connection was never made (a refused dial, a DNS failure), when the driver
 // refused the call before sending (invalid input), or when the backend was
 // not asked at all (an open breaker, a request already gone).
+//
+// Sent is wider: every backend whose failed attempt went out, answered or
+// not. An error answer does not prove the store kept nothing — a proxy in
+// front of it can answer 503 after the store took the body (Blomp, two
+// 64 MiB PUTs on 2026-10-21). A caller writing to an address only it uses
+// (a whole object's blob address) queues the address on each of them for
+// the collector; a miss costs one delete.
 type PutOutcome struct {
 	mu         sync.Mutex
 	unanswered []string
+	sent       []string
 }
 
 // WithPutOutcome asks Put to record its attempts' outcome in o. Drivers
@@ -54,13 +63,29 @@ func (o *PutOutcome) Unanswered() []string {
 	return append([]string(nil), o.unanswered...)
 }
 
+// Sent lists the backends whose failed attempt went out (answered or not),
+// each once, in the order they were asked.
+func (o *PutOutcome) Sent() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.sent...)
+}
+
 func (o *PutOutcome) record(backend string, err error) {
-	if o == nil || err == nil || PutAnsweredOrUnsent(err) {
+	if o == nil || err == nil || putUnsent(err) {
 		return
 	}
 	o.mu.Lock()
-	o.unanswered = append(o.unanswered, backend)
-	o.mu.Unlock()
+	defer o.mu.Unlock()
+	if !slices.Contains(o.sent, backend) {
+		o.sent = append(o.sent, backend)
+	}
+	if !PutAnsweredOrUnsent(err) {
+		o.unanswered = append(o.unanswered, backend)
+	}
 }
 
 // httpStatusError is any error that carries the status of an HTTP answer:
@@ -73,7 +98,8 @@ type httpStatusError interface{ HTTPStatusCode() int }
 // code), the request never reached it (a dial or DNS failure), or the driver
 // refused it before sending (ErrInvalidInput, ErrChunkAddress). Everything
 // else — a deadline, a reset, a cancel, an unknown error — may have left
-// the whole body with the backend.
+// the whole body with the backend. An answer is not proof everywhere: a
+// proxy's 503 came after the store kept the body (Sent).
 func PutAnsweredOrUnsent(err error) bool {
 	var hs httpStatusError
 	if errors.As(err, &hs) && hs.HTTPStatusCode() > 0 {
@@ -87,6 +113,13 @@ func PutAnsweredOrUnsent(err error) bool {
 	if errors.As(err, &perr) {
 		return true
 	}
+	return putUnsent(err)
+}
+
+// putUnsent reports whether a failed put attempt never left this process:
+// the driver refused it (ErrInvalidInput, ErrChunkAddress) or the
+// connection was never made (a dial or DNS failure).
+func putUnsent(err error) bool {
 	if errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrChunkAddress) {
 		return true
 	}

@@ -1134,7 +1134,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
 		}
 		var uploadErr error
-		backendName, uploadErr = placeObject(putCtx, s.db, s.engine, t.ID, bucket, containerName, blob, src, completeOpts...)
+		backendName, uploadErr = placeObject(putCtx, s.db, s.engine, s.logger, t.ID, bucket, containerName, blob, src, completeOpts...)
 		if uploadErr == nil && !staged.verified() {
 			// A backend that took the declared length without reading to
 			// the end: the bytes it holds were never checked. Not committed.

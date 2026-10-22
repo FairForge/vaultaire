@@ -100,6 +100,13 @@ func isBlobAddressOf(key, addr string) bool {
 	return true
 }
 
+// isBlobAddress reports whether addr ends in a newBlobAddress suffix: a
+// write's own address, never a bare key another row may name.
+func isBlobAddress(addr string) bool {
+	i := len(addr) - blobAddressSuffixLen
+	return i >= 0 && isBlobAddressOf(addr[:i], addr)
+}
+
 // objectBlobAddress is where a whole object's bytes are: the engine container
 // of the bucket and the artifact — storageKey when the row records one, else
 // the object key. storageKey is the column read as COALESCE(storage_key, ”)
