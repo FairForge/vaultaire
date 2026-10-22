@@ -179,6 +179,25 @@ Vaultaire a `blomp`-tier bucket is plain S3, so the S3-source products now work 
 - **rclone from Hostbrr NYC, 256 MiB**: through Cloudflare 12.6 MB/s up / 49 down,
   direct `s3.stored.ge` 26.3 up / 36 down — uploads belong on the DNS-only S3 host.
 
+## Inventory 2026-10-22 (both logins, dashboard session + API)
+
+Checked signed in to each login (the dashboard's own `/api/v4` with the session) because the API tokens cannot see everything (the zone token gets 10000 on Pages, KV, D1 and Containers of the production account).
+
+| | Production `cloudflare@fairforge.io` (`66866bb1…`) | Bench `isaacv17@gmail.com` (`71a9e011…`) |
+|---|---|---|
+| Workers / Pages / Queues / Workflows / Containers / Tunnels / Hyperdrive / Vectorize | none | none (`isaacv17.workers.dev` subdomain exists, nothing on it) |
+| Worker routes, custom domains | none on either zone | — |
+| R2 | `stored-sia-litestream` (private, no r2.dev, no custom domain) | `vaultaire-public` (the prod `r2` driver's bucket; private, no r2.dev, no Sippy) |
+| KV / D1 | none | none (`BENCH_KV`, `bench-snapshelter` deleted 2026-10-22) |
+| Access | Zero Trust team, no apps | not enabled |
+| Members | the login only | the login only |
+| API tokens kept | `vaultaire-plan-driver-zone-2026-10-04` (the zone token in the creds file), `vaultaire-email-sending-2026-10-12` (prod `SMTP_PASSWORD`) | `R2 Account Token` (= prod `R2_ACCESS_KEY`, checked by id — **never delete**), `black-bar-c5c7` (the bench account token in the creds file) |
+| 2FA | **off** (login and account `enforce_twofactor`) | **off** |
+
+Zone rules: `stored.ge` has the login/register/waitlist rate limit and the cache rule that leaves `/cdn/` alone; `stored.cloud` none; both SSL `strict`, no page rules. DNS: every A record is the SLC origin, proxied, except `s3.stored.ge` (DNS only, by design: S3 bodies bypass the 100 MB proxy limit) — so a deny for the origin has to be in HAProxy, not a WAF rule (the `/metrics` deny is, `docs/DEPLOY.md`).
+
+Cleaned up 2026-10-22: bench user token `Cloudflare Agent (auto-generated)` (last used 2026-03-25); the Ente buckets `ente-meta` / `ente-photos` (~2.4 GB, kept since Ente stopped on 2026-10-11) emptied and deleted; `BENCH_KV`, `bench-snapshelter`. Production tokens `Agent Lee (auto-generated)` (never used) and account token `misty-meadow-ed8a` (last used 2026-07-31) are for deletion once the production login is open again.
+
 ## Open
 
 2FA on both logins and rotation of everything pasted on 2026-10-04; an **Email Sending: Edit** token + stored.ge onboarded for Email Sending (item 7 above); the R2 Data Access Logs loss-rate count (dashboard toggle, item 6); the `/admin` Access gate; R2 event notifications → Queue → `direct-uploads/complete` so direct uploads register themselves; Workflows around Vault restores; a load balancer once a second origin exists; Workers for Platforms when a customer Worker must run; the stale NS records.

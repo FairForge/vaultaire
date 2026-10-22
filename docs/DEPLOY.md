@@ -483,8 +483,19 @@ app :8000/metrics  <- Prometheus (:9090, on the box, 10 s scrape)
   collectors, `vaultaire_requests_total` / `_errors_total` (5xx),
   `vaultaire_backend_health{backend}` and the probe/breaker/write-failure
   series, the auth-failure series (`vaultaire_auth_failures_total{reason,key_known}`),
-  the dashboard sign-in counters and the TLS expiry gauge. It should be denied
-  at HAProxy (WP-R1-1, still open).
+  the dashboard sign-in counters and the TLS expiry gauge. **Denied from
+  outside since 2026-10-22 (WP-R1-1)**: both public frontends (`http_front`,
+  `https_front`) answer 404 to `/metrics`, `/health/backends` and `/health`
+  with a `details` query, matched on the decoded, lower-cased path in a
+  `txn` variable — the request itself is never rewritten (a SigV4 signature
+  covers the path; keys may hold `//`), so `//metrics`, `/%6detrics` and
+  `/METRICS` are refused too. Prometheus scrapes through `127.0.0.1:8010`
+  (`frontend metrics_internal`, no deny) and every runbook line reads
+  `localhost:8000/health/backends`; plain `/health`, `/health/ready` and
+  `/version` stay public (the deploy check reads `/version`). The rules sit
+  right under each frontend's `bind` line and survive `vaultaire-switch`,
+  which rewrites only the `server` lines; backups
+  `haproxy.cfg.bak-metrics-deny-*`, `haproxy.cfg.bak-health-deny-*`.
 - Rules live in `deploy/monitoring/`: `vaultaire-backends.yml` (probe
   failures, write failures, breaker open, 5xx ratio), `vaultaire-auth.yml`
   (credential-stuffing signal, not yet installed), `vaultaire-tls.yml`
