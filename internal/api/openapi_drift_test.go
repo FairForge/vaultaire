@@ -178,4 +178,7 @@ var knownUndocumented = map[string]bool{
 	"POST /api/compliance/ropa/activities":                   true,
 	"POST /api/compliance/ropa/activities/{id}/review":       true,
 	"POST /api/compliance/sar":                               true,
+	// K5 PR 4: the recovery vault's token minter is dark (recovery_vault
+	// OFF = 404) and stays out of the public spec until the flag flips.
+	"POST /api/v1/recovery/tokens": true,
 }
