@@ -147,6 +147,31 @@ type InvoiceInvalidator interface {
 	InvalidateOpenInvoices(ctx context.Context, tenantID, reason string) (marked int, err error)
 }
 
+// ErrInvoicePaid: the provider says the invoice holds money (Processing, or
+// a payment toward it), so it is not cancelled — it is left to settle
+// (RP31-5: the crypto_invoice_open 409 stays, with its date).
+var ErrInvoicePaid = errors.New("invoice_paid")
+
+// InvoiceCanceller is a prepaid provider that lets the customer withdraw
+// an invoice nobody paid (RP31-5 — the way out of crypto_invoice_open):
+// fetched, provably unpaid, marked Invalid at the provider and the ledger
+// row closed, audited. ErrInvoicePaid when it holds money, ErrNoSuchPayment
+// when the tenant has no such open invoice.
+type InvoiceCanceller interface {
+	CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID, actor string) error
+}
+
+// CancelUnpaidInvoice is InvoiceCanceller through the registry: the named
+// provider (whatever its flag — withdrawing an invoice is never new
+// business), ErrUnknownProvider when it cannot cancel.
+func (r *Registry) CancelUnpaidInvoice(ctx context.Context, tenantID, provider, invoiceID, actor string) error {
+	c, ok := r.Provider(provider).(InvoiceCanceller)
+	if !ok {
+		return fmt.Errorf("%w: %q cannot cancel an invoice", ErrUnknownProvider, provider)
+	}
+	return c.CancelUnpaidInvoice(ctx, tenantID, invoiceID, actor)
+}
+
 // StopRun is what one pass over the pending renewal stops did.
 type StopRun struct {
 	Stopped, Failed, Unconfigured int

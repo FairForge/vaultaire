@@ -114,8 +114,8 @@ func TestSwitchToCrypto_EarlyPayment_ExtendsFromPaidThrough(t *testing.T) {
 func TestBTCPay_InvalidateOpenInvoices_MarksAuditsAndCountsARefusal(t *testing.T) {
 	// Arrange: two open invoices of the tenant, one settled one.
 	f := newFixture(t).lab(t)
-	open := f.openRow(t, "InvoiceSettled_exact", payments.PurposeSwitch)
-	f.serve(t, "InvoiceSettled_exact", false)
+	open := f.openRow(t, "InvoiceCreated_created", payments.PurposeSwitch)
+	f.serve(t, "InvoiceCreated_created", false) // New, nothing paid (RP31-1)
 	settled := f.openRow(t, "InvoiceSettled_overpaid", payments.PurposeNew)
 	_, err := f.db.Exec(`UPDATE payments SET status = 'settled' WHERE provider = 'btcpay' AND provider_id = $1`, settled)
 	require.NoError(t, err)

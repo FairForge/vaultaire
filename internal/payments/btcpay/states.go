@@ -492,13 +492,25 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		return err
 
 	case StatusInvalid:
-		ok, err := payments.Invalidate(ctx, tx, payments.ProviderBTCPay, inv.ID)
-		if err == nil && !ok && (row.Status == payments.StatusSettled || row.Status == payments.StatusRefunded) {
+		if row.Status == payments.StatusSettled || row.Status == payments.StatusRefunded {
 			// The lab: a hand-marked Settled invoice can later be marked
-			// Invalid. The grant stands — an operator adjusts it.
+			// Invalid. The grant stands — an operator adjusts it — and its
+			// money paid the period: no credit.
 			p.logger.Warn("btcpay webhook: a settled invoice was marked Invalid — the grant stands; adjust the entitlement by hand if meant",
 				zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID))
+			return nil
 		}
+		if _, err := payments.Invalidate(ctx, tx, payments.ProviderBTCPay, inv.ID); err != nil {
+			return err
+		}
+		// Money on an Invalid invoice is never lost (RP31-1 b): what arrived
+		// — paid before a mark, or after it — is a credit, as an expired
+		// invoice's partial payment; never a grant. SetCredit sets the
+		// invoice's one credit row to the total, so a redelivery credits it
+		// once.
+		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), paid,
+			"payment on invalid invoice "+inv.ID, now)
+		a.credit = d
 		return err
 
 	case StatusProcessing:
