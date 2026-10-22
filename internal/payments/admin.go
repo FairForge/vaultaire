@@ -303,7 +303,8 @@ type RefundResult struct {
 // One refund at a provider is one row (RP28-1): r.PaymentID may name the
 // charge or a refund row already in the ledger, and r.ProviderRef a refund
 // already recorded under that id. A refund found that way is not recorded
-// again: for the provider (FromProvider) it is ErrRefundRecorded; for an
+// again: for the provider (FromProvider) it is ErrRefundRecorded — or
+// ErrRefundMismatch when its amount differs (RP30-7); for an
 // operator it is an idempotent hit (Existing) — with ShortenPaidThrough,
 // the date is shortened by that refund's share once (ErrRefundShortened the
 // second time), audited billing.paid_through_adjusted. A NEW refund of a
@@ -358,6 +359,12 @@ func RecordRefund(ctx context.Context, db *sql.DB, r Refund) (RefundResult, erro
 			switch {
 			case existing.refundOf != chargeID:
 				return fmt.Errorf("%w: refund %s is of another charge", ErrRefundMismatch, existing.providerID)
+			case r.FromProvider && r.AmountCents != 0 && r.AmountCents != existing.amount:
+				// An operator recorded the refund first under its id with
+				// another amount (RP30-7): the provider's notice never
+				// silently confirms it.
+				return fmt.Errorf("%w: refund %s is %d cents in the ledger, the provider says %d", ErrRefundMismatch,
+					existing.providerID, existing.amount, r.AmountCents)
 			case r.FromProvider:
 				return fmt.Errorf("%w: %s/%s", ErrRefundRecorded, provider, existing.providerID)
 			case r.AmountCents != 0 && r.AmountCents != existing.amount:

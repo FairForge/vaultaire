@@ -182,6 +182,11 @@ func (h *WebhookHandler) recordRefunds(ctx context.Context, tenantID, paymentID,
 			h.logger.Info("stripe webhook: refund already in the ledger",
 				zap.String("tenant", tenantID), zap.String("refund", r.ID))
 		case errors.Is(err, payments.ErrRefundExceeds), errors.Is(err, payments.ErrRefundMismatch):
+			if errors.Is(err, payments.ErrRefundMismatch) {
+				// RP30-7: the ledger's refund under this id (an operator's,
+				// usually) says another amount or another charge.
+				payments.CountPayment(payments.ProviderStripe, payments.KindRefund, payments.OutcomeMismatch)
+			}
 			h.logger.Error("stripe webhook: refund disagrees with the ledger — acknowledged, not recorded",
 				zap.String("tenant", tenantID), zap.String("refund", r.ID), zap.String("charge", chargeID), zap.Error(err))
 		case err != nil:

@@ -6,11 +6,16 @@
 #                                                          0 while unready AND while pending (configured, verification not
 #                                                          completed — the minute after a boot; Part 0 of Prompt 20)
 #   vaultaire_payment_provider_enabled{provider}          1 while flag pay_<provider> is on globally (its global row or default)
-#   vaultaire_payment_webhook_total{provider,outcome}     webhook deliveries: ok / duplicate / rejected / error (500 = retried)
+#   vaultaire_payment_webhook_total{provider,outcome}     webhook deliveries: ok / duplicate / rejected / error (500 = retried);
+#                                                          BTCPay also foreign / settled_unpaid / mark_refused / fetch_refused
+#                                                          (200, nothing applied, the claim released — RP30-3/4/5; every
+#                                                          btcpay pair at 0 from boot)
 #   vaultaire_entitlement_lapse_skipped_unready           the last entitlement_lapse run's skipped_unready, READ FROM job_runs.result
 #   vaultaire_stripe_house_invalid_total                  Stripe subscriptions that describe no valid house (RP20-4; unlabelled, 0 from boot)
 #   vaultaire_payment_reminders_total{step,outcome}       renewal reminder mails: sent / failed per step (every pair at 0 from boot)
-#   vaultaire_payments_total{provider,kind,outcome}       ledger writes (documented, no rule: a failed charge is Stripe's dunning)
+#   vaultaire_payments_total{provider,kind,outcome}       ledger writes (no rule on a failed charge: Stripe's dunning);
+#                                                          kind="refund",outcome="mismatch" = a Stripe refund notice that
+#                                                          disagrees with the ledger's row under its id (RP30-7)
 #   vaultaire_entitlements_expiring{window}               7d / 30d / in_grace (the code's windows; the design wrote 14d/3d/grace)
 #
 # Prod today: no Stripe key (ready 0) and pay_stripe off (enabled 0) → PaymentProviderDown is silent; it fires only once
@@ -38,11 +43,14 @@ groups:
       # Webhook deliveries answered 500 (left for the provider to retry):
       # three or more in 15 minutes and at least one in five.
       - alert: PaymentWebhookFailing
+        # The ratio first: `and` keeps its LEFT side's value, which the
+        # summary prints as a percentage (it printed the error count as
+        # "300%" with the count first — found by promtool, Prompt 25).
         expr: |
-          sum by (provider) (increase(vaultaire_payment_webhook_total{outcome="error"}[15m])) >= 3
-          and
           sum by (provider) (increase(vaultaire_payment_webhook_total{outcome="error"}[15m]))
             / clamp_min(sum by (provider) (increase(vaultaire_payment_webhook_total{outcome=~"ok|duplicate|error"}[15m])), 1) > 0.2
+          and
+          sum by (provider) (increase(vaultaire_payment_webhook_total{outcome="error"}[15m])) >= 3
         for: 0m
         labels:
           severity: warning
@@ -85,3 +93,44 @@ groups:
         annotations:
           summary: "{{ $value | humanize }} renewal reminder(s) failed to send in 2 hours"
           description: "The payment_reminders job (hourly) could not send a reminder; it retries the step every hour until it is sent or the period changes. journalctl -u 'vaultaire@*' | grep 'payment reminder' gives the tenant, the step and the mail error (EMAIL_PROVIDER, SMTP_*)."
+
+      # RP30-5 (Stage 1a Prompt 25 Part 0): BTCPay money that arrived and
+      # was NOT applied. settled_unpaid = an invoice Settled with less than
+      # its amount paid (marked by hand, a store tolerance above 0 %);
+      # mark_refused = the paid-late automation's mark refused with a 4xx;
+      # fetch_refused = a Greenfield read refused (a wrong key). Each was
+      # answered 200 so the store's webhook queue is not stalled for ~71 min
+      # (RP30-4) — so nothing retries it: a person must look.
+      - alert: BTCPayPaymentNotApplied
+        expr: sum by (outcome) (increase(vaultaire_payment_webhook_total{provider="btcpay",outcome=~"settled_unpaid|mark_refused|fetch_refused"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A BTCPay delivery was acknowledged without being applied ({{ $labels.outcome }})"
+          description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' names the invoice and the tenant. settled_unpaid: BTCPay says Settled but paidAmount < amount — check the store's payment tolerance (must be 0 %) and whether an operator marked it; record a manual payment if the money is real. mark_refused: mark the late-paid invoice Settled by hand in BTCPay (the InvoiceSettled that follows grants it). fetch_refused: the store key is wrong or lost a permission (cancreateinvoice, canviewinvoices, canmodifyinvoices) — fix it, then redeliver the delivery from the BTCPay UI (it is handled fresh)."
+
+      # A verified BTCPay delivery for an invoice our ledger does not know,
+      # or whose metadata/amount disagrees with our row. One is a stray
+      # (a test invoice made in the BTCPay UI); a stream is a second store
+      # or webhook pointed here.
+      - alert: BTCPayWebhookForeign
+        expr: sum(increase(vaultaire_payment_webhook_total{provider="btcpay",outcome="foreign"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BTCPay deliveries for invoices the ledger does not match (last hour)"
+          description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' gives the invoice and why (unknown here, unknown at BTCPay, metadata tenant, amount). The store must have ONE webhook, ever (delete the old URL before adding a new one). Nothing was applied; a redelivery after a fix is handled fresh."
+
+      # RP30-7: Stripe reported a refund whose amount (or charge) differs
+      # from the row recorded under its re_ id — usually an operator typed
+      # the amount first. The ledger keeps the operator's row.
+      - alert: StripeRefundMismatch
+        expr: sum(increase(vaultaire_payments_total{provider="stripe",kind="refund",outcome="mismatch"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Stripe refund disagrees with the ledger's row under its id"
+          description: "journalctl -u 'vaultaire@*' -o cat | grep 'refund disagrees' names the tenant, the re_ id and both amounts. Correct the ledger by hand (an adjustment) to what Stripe actually refunded."

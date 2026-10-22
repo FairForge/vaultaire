@@ -83,6 +83,25 @@ func TestServer_BTCPayRouteAbsentWithoutSecrets(t *testing.T) {
 	assert.False(t, srv.flags.Enabled(flagPayBTCPay, ""), "pay_btcpay stays OFF")
 }
 
+// RP30-6: plain http to a host that is not loopback is one Error naming
+// BTCPAY_URL, the provider not registered, no route — never a refused boot.
+func TestServer_BTCPayPlainHTTPRemote_NotRegistered(t *testing.T) {
+	srv, logs := btcpayServer(t, map[string]string{"BTCPAY_URL": "http://pay.stored.cloud", "BTCPAY_STORE_ID": "S1",
+		"BTCPAY_API_KEY": "key-value-never-logged", "BTCPAY_WEBHOOK_SECRET": "secret-never-logged"})
+
+	assert.Nil(t, srv.payments.Provider(payments.ProviderBTCPay))
+	errs := logs.FilterLevelExact(zapcore.ErrorLevel).FilterMessageSnippet("btcpay").All()
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Message, "BTCPAY_URL")
+	for _, e := range logs.All() {
+		assert.NotContains(t, e.Message, "never-logged")
+		for _, v := range e.ContextMap() {
+			s, _ := v.(string)
+			assert.NotContains(t, s, "never-logged")
+		}
+	}
+}
+
 // A btcpay row is nothing to cancel: the runner neither defers the tenant
 // (registered or not — a prepaid row) nor calls Stripe.
 func TestDeletionRunner_BTCPayRow_NothingToCancel(t *testing.T) {

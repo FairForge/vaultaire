@@ -67,6 +67,18 @@ func IsUnknownInvoice(err error) bool {
 	return ae.Status == http.StatusNotFound || ae.Status == http.StatusForbidden && ae.Code == "missing-permission"
 }
 
+// IsPermanent reports a Greenfield refusal no retry changes: a 4xx answer
+// (a wrong key, a permission the key lacks, a 422 transition) — never a
+// 408/429, a 5xx or no answer at all. The webhook answers it 200 + counted
+// instead of a 5xx that would stall the store's webhook queue (RP30-4).
+func IsPermanent(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	return ae.Status >= 400 && ae.Status < 500 && ae.Status != http.StatusRequestTimeout && ae.Status != http.StatusTooManyRequests
+}
+
 // storePath is /api/v1/stores/{store}/… with every segment escaped.
 func (c *Client) storePath(parts ...string) string {
 	p := "/api/v1/stores/" + url.PathEscape(c.storeID)

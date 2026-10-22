@@ -95,17 +95,33 @@ func PaidThroughAfter(ctx context.Context, tx *sql.Tx, tenantID string, by Perio
 // provider knows as providerID: its id, tenant, status, purpose and the
 // house and credit it was opened with (ErrNoSuchPayment when there is
 // none). The webhook of a prepaid provider resolves the tenant from it —
-// never from the provider's payload.
+// never from the provider's payload. A plain read: what decides a write is
+// read again with LockedPending under the tenant's entitlement lock.
 func PendingOf(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, provider, providerID string) (Opened, error) {
+	return pendingOf(ctx, q, provider, providerID, "")
+}
+
+// LockedPending is PendingOf with the row locked (FOR UPDATE) for the rest
+// of tx. The caller holds the tenant's entitlement lock (RP30-1): the
+// status it returns is the one the caller's writes are decided on — a
+// concurrent delivery that settled the row has committed before the lock
+// was granted, so it is seen.
+func LockedPending(ctx context.Context, tx *sql.Tx, provider, providerID string) (Opened, error) {
+	return pendingOf(ctx, tx, provider, providerID, " FOR UPDATE")
+}
+
+func pendingOf(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, provider, providerID, lock string) (Opened, error) {
 	var o Opened
 	var tenant sql.NullString
 	var std, vault, pin sql.NullInt64
 	var period sql.NullString
 	err := q.QueryRowContext(ctx, `
 		SELECT id::text, tenant_id, status, purpose, kind, amount_cents, credit_cents, std_tb, vault_tb, pin_hot_tb, period
-		  FROM payments WHERE provider = $1 AND provider_id = $2`, provider, providerID).
+		  FROM payments WHERE provider = $1 AND provider_id = $2`+lock, provider, providerID).
 		Scan(&o.ID, &tenant, &o.Status, &o.Purpose, &o.Kind, &o.AmountCents, &o.CreditCents, &std, &vault, &pin, &period)
 	if errors.Is(err, sql.ErrNoRows) {
 		return o, ErrNoSuchPayment
@@ -118,6 +134,17 @@ func PendingOf(ctx context.Context, q interface {
 		o.Order = &Order{Std: int(std.Int64), Vault: int(vault.Int64), PinHot: int(pin.Int64), Period: Period(period.String)}
 	}
 	return o, nil
+}
+
+// Open reports a row a provider may still move: pending, processing, or
+// expired (an expired invoice can still be paid late — docs/PAYMENTS.md
+// § 3.3). Never settled, refunded, invalid or failed.
+func (o Opened) Open() bool {
+	switch o.Status {
+	case StatusPending, StatusProcessing, StatusExpired, StatusExpiredPartial:
+		return true
+	}
+	return false
 }
 
 // Opened is a ledger row as a prepaid provider opened it.
