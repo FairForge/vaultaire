@@ -886,10 +886,11 @@ func generateManagementPaths() map[string]*PathItem {
 				"Registers a bucket for the tenant. `region` picks the iDrive region the bucket is homed in; omitted = the deployment default. "+
 					"A region is selectable only when its driver is enabled on this deployment (`region_unavailable` otherwise) "+
 					"and its storage is answering (`region_unavailable_now`, 503 with `Retry-After`, otherwise; the default region is always available). "+
-					"Free-tier tenants are capped at one bucket (403); every tenant at 1000 (409).",
+					"Free-tier tenants are capped at one bucket (403); every tenant at 1000 (409). `mode` sets the bucket's mode at creation (the only time it is set from the API): "+
+					"`private` creates it requiring a customer-provided key on every write, in one transaction; omitted = `standard`. A public bucket is made from the dashboard.",
 				map[string]Response{
 					"201": jsonResp("Bucket created", ref("ManagedBucket")),
-					"400": errResp("`invalid_json`, `missing_parameter` (name), `invalid_bucket_name` (3 to 63 chars, lowercase alphanumeric and hyphens), `invalid_region` (not a known region id), `region_unavailable` (known region with no driver here)"),
+					"400": errResp("`invalid_json`, `missing_parameter` (name), `invalid_bucket_name` (3 to 63 chars, lowercase alphanumeric and hyphens), `invalid_mode` (not a mode the API creates), `invalid_region` (not a known region id), `region_unavailable` (known region with no driver here)"),
 					"403": errResp("`free_tier_bucket_limit`, the free tier allows one bucket; upgrade at /dashboard/billing"),
 					"409": errResp("`bucket_exists` (the tenant already owns it), `bucket_limit_exceeded` (1000 per account), or `idempotency_key_reuse`"),
 					"500": errResp("`internal_error`"),
@@ -910,12 +911,14 @@ func generateManagementPaths() map[string]*PathItem {
 				"Shallow-merges `metadata` into the stored map (a key set to null is removed; the whole map must be present) and/or sets `ssec_required`. "+
 					"With `ssec_required` true, every write into the bucket must carry the SSE-C headers (a customer-provided AES-256 key): an unkeyed PutObject, "+
 					"CreateMultipartUpload or copy destination is 400 `InvalidRequest`, and the bucket cannot receive server-generated objects (access logs, "+
-					"inventory reports). The key is never stored. Objects written before the flag stay as they were. A public bucket cannot require a key.",
+					"inventory reports). The key is never stored. The flag can be turned on only while the bucket holds nothing the server can read — "+
+					"every object and retained version sealed with a customer key, no unkeyed multipart upload in progress — otherwise 409 `bucket_has_readable_objects` "+
+					"with the counts in `error.readable`: create a new bucket with `\"mode\": \"private\"` and copy the data into it with your key. A public bucket cannot require a key.",
 				map[string]Response{
 					"200": jsonResp("The bucket as updated", ref("ManagedBucket")),
 					"400": errResp("`invalid_json`, `missing_parameter` (neither metadata nor ssec_required), or `invalid_metadata`"),
 					"404": errResp("`bucket_not_found`"),
-					"409": errResp("`bucket_public`: a public bucket cannot require a customer-provided key"),
+					"409": errResp("`bucket_public`: a public bucket cannot require a customer-provided key; `bucket_has_readable_objects`: the bucket holds objects, versions or uploads not sealed with a customer key (`error.readable` counts them)"),
 					"500": errResp("`db_error` or `no_database`"),
 				}),
 				jsonBody("What to change", objectPtr("", map[string]*Schema{
@@ -2018,6 +2021,7 @@ func generateJSONSchemas() map[string]Schema {
 		"ManagedBucketCreateRequest": object("", map[string]*Schema{
 			"name":   str("3 to 63 characters, lowercase alphanumeric and hyphens"),
 			"region": str("Region id the bucket is homed in (e.g. `us-central-1`, `eu-west-1`); omit for the deployment default. Only regions with an enabled driver are accepted"),
+			"mode":   strEnum(createModeDescription(), createModeIDs()...),
 		}, "name"),
 		"ManagedBucket": object("A bucket as the management API returns it", map[string]*Schema{
 			"object":        strEnum("", "bucket"),

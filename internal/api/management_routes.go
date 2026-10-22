@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -157,6 +158,15 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 	writeListResponse(w, items, hasMore, nextCursor, countResult)
 }
 
+// createdMode is the mode a create answers: the one asked for, else
+// Standard (a bucket is born Standard, docs/reviews/K3-PROBE.md W1).
+func createdMode(asked string) string {
+	if asked == "" {
+		return modes.Standard
+	}
+	return asked
+}
+
 func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
 	if tenantID == "" {
@@ -167,9 +177,17 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Name   string `json:"name"`
 		Region string `json:"region"`
+		// Mode is set at creation (RP33-1 c): standard (the default) or
+		// private; public is the dashboard's (F-32).
+		Mode string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+	if req.Mode != "" && !slices.Contains(modes.DeveloperModes(), req.Mode) {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_mode",
+			fmt.Sprintf("mode must be one of %s; a public bucket is made public from its settings in the dashboard", strings.Join(modes.DeveloperModes(), ", ")), "mode")
 		return
 	}
 
@@ -184,7 +202,8 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	outcome, err := s.createBucketRegistry(r.Context(), tenantID, req.Name, req.Region)
+	outcome, err := s.createBucketRegistryWith(r.Context(), tenantID, req.Name, req.Region,
+		bucketCreateOptions{private: req.Mode == modes.Private})
 	if err != nil {
 		s.logger.Error("management create bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create bucket", "")
@@ -221,7 +240,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		Object:    "bucket",
 		Name:      req.Name,
 		Region:    outcome.region,
-		Mode:      modes.Standard, // a bucket is born Standard (docs/reviews/K3-PROBE.md W1)
+		Mode:      createdMode(req.Mode),
 		CreatedAt: time.Now().UTC(),
 		RequestID: getRequestID(w),
 	}
@@ -320,8 +339,8 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SSECRequired != nil {
 		// A public bucket serves its objects without a key: it cannot
-		// require one (409). Objects written before the flag stay as they
-		// were; the flag governs writes from now on.
+		// require one (409). A bucket that holds anything we can read cannot
+		// become Private either (the door refuses it, RP33-1).
 		if *req.SSECRequired && visibility == "public-read" {
 			writeManagementError(w, ErrTypeConflict, "bucket_public", "a public bucket cannot require a customer-provided key; make it private first", "ssec_required")
 			return
@@ -352,7 +371,11 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 		}
 		return tx.Commit()
 	}()
+	var readable *modes.ReadableObjectsError
 	switch {
+	case errors.As(err, &readable):
+		writeReadableObjectsError(w, readable)
+		return
 	case errors.Is(err, modes.ErrPublicSSEC):
 		writeManagementError(w, ErrTypeConflict, "bucket_public", "a public bucket cannot require a customer-provided key; make it private first", "ssec_required")
 		return

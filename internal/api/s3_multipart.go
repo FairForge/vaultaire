@@ -1188,6 +1188,9 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 				// (its retry commits this same address) and removes it once the
 				// upload is aborted or reaped.
 				retireOrphanWrite(pctx, s.db, s.logger, t.ID, bucket, blob, backendName)
+				if refusedAtCommit(w, r, dbErr) {
+					return
+				}
 				s.logger.Error("multipart complete: head row write failed — failing the request",
 					zap.Error(dbErr), zap.String("bucket", bucket), zap.String("key", object))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -1275,6 +1278,9 @@ func (s *Server) answerConcurrentComplete(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) writeCompleteStoreError(w http.ResponseWriter, r *http.Request, err error, bucket, object, uploadID, tierClass string) {
+	if refusedAtCommit(w, r, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, errRegionDriverUnavailable):
 		s.logger.Error("multipart complete: region-pinned bucket has no driver — refused",

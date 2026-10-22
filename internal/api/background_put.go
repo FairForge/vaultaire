@@ -313,6 +313,16 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		// report success without the row.
 		release()
 		retireOrphanWrite(tctx, g.db, g.logger, tenantID, bucket, blob, backendName)
+		if errors.Is(dbErr, errSSECRequiredAtCommit) {
+			// The bucket was made Private while this object was written
+			// (RP33-1 b): refused and counted as at the start.
+			kind := o.Kind
+			if kind == "" {
+				kind = "other"
+			}
+			generatedObjectRefused.WithLabelValues(kind, refusedSSECRequired).Inc()
+			return deliveredObject{}, fmt.Errorf("%w: %w", errGeneratedSSECRequired, dbErr)
+		}
 		return deliveredObject{}, fmt.Errorf("head row for %s/%s: %w", bucket, key, dbErr)
 	}
 	return deliveredObject{Size: size, ETag: etag, Backend: backendName, OverQuota: overQuota}, nil

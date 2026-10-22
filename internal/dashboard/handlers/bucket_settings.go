@@ -213,7 +213,15 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 				corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName)
 			return err
 		})
+		var readable *modes.ReadableObjectsError
 		switch {
+		case errors.As(err, &readable):
+			// Private only over nothing we can read (RP33-1): the bytes
+			// already here stay readable by us whatever the flag says.
+			middleware.SetFlash(w, "error", fmt.Sprintf("This bucket holds %d file(s) that are not encrypted with your own key, so it cannot require one: "+
+				"we could still read them. Create a new bucket that requires your key and copy the data into it with your key.", readable.Total()))
+			http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
+			return
 		case errors.Is(err, modes.ErrNoBucket):
 			middleware.SetFlash(w, "error", "Bucket not found.")
 			http.Redirect(w, r, "/dashboard/buckets", http.StatusSeeOther)

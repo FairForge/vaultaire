@@ -717,3 +717,49 @@ func TestHandleUpdateBucketSettings_RequireCustomerKey(t *testing.T) {
 	_, required = flag()
 	assert.False(t, required)
 }
+
+// RP33-1: the settings form cannot make a bucket that holds readable files
+// Private — the door refuses, the flash says to copy into a new bucket.
+func TestHandleUpdateBucketSettings_PrivateOverReadable_FlashesCopyAdvice(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	const tenant = "test-dash-p27"
+	clean := func() {
+		_, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenant)
+		_, _ = db.Exec(`DELETE FROM buckets WHERE tenant_id = $1`, tenant)
+		_, _ = db.Exec(`DELETE FROM audit_logs WHERE tenant_id = $1`, tenant)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
+	}
+	clean()
+	t.Cleanup(clean)
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'P27', 'p27@test.com', 'VK-p27', 'SK-p27')`, tenant)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'has-plain', 'private')`, tenant)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type)
+		VALUES ($1, 'has-plain', 'plain.txt', 5, 'e', 'text/plain')`, tenant)
+	require.NoError(t, err)
+
+	form := url.Values{"visibility": {"private"}, "ssec_required": {"on"}}
+	req := injectSessionWithTenant(httptest.NewRequest("POST", "/dashboard/buckets/has-plain/settings", strings.NewReader(form.Encode())), tenant)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	HandleUpdateBucketSettings(testBucketSettingsTemplate(t), db, zap.NewNop()).ServeHTTP(w, injectBucketRoute(req, "has-plain"))
+
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	var flash string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "flash" {
+			v, _ := url.ParseQuery(c.Value)
+			flash = v.Get("error")
+		}
+	}
+	assert.Contains(t, flash, "1 file(s) that are not encrypted with your own key")
+	assert.Contains(t, flash, "Create a new bucket")
+	var mode string
+	require.NoError(t, db.QueryRow(`SELECT mode FROM buckets WHERE tenant_id = $1 AND name = 'has-plain'`, tenant).Scan(&mode))
+	assert.Equal(t, "standard", mode, "nothing written")
+}

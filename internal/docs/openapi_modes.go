@@ -36,6 +36,25 @@ func modeIDs() []string {
 	return ids
 }
 
+// createModeIDs are the modes a bucket can be created in through the API
+// (modes.DeveloperModes).
+func createModeIDs() []string { return modes.DeveloperModes() }
+
+// createModeDescription is ManagedBucketCreateRequest.mode's description:
+// each creatable mode's name and how a bucket has it.
+func createModeDescription() string {
+	var b strings.Builder
+	b.WriteString("The bucket's mode, set at creation (omitted = the default, `" + modes.All().Surfaces["developer"].Default + "`): ")
+	for i, id := range modes.DeveloperModes() {
+		m, _ := modes.Get(id)
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString("`" + m.ID + "` — " + m.Name + ": " + m.Customer.Render(modes.MasterKeyLoaded()))
+	}
+	return b.String()
+}
+
 // headerParam is an optional request header.
 func headerParam(name, desc string) Parameter {
 	return Parameter{Name: name, In: "header", Description: desc, Schema: &Schema{Type: "string"}}

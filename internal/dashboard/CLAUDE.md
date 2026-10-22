@@ -73,7 +73,7 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/buckets/{name}/restore` | POST | session | Recall an attic (vault-floor, GLACIER-class) object from tape (V18.2, `handlers/bucket_restore.go`; form key + optional prefix; a Smart-demoted downstairs object is refused — it is STANDARD, WP-R13-1) |
 | `/dashboard/buckets/{name}/restore-status` | GET | session | htmx status span for a recall (`?key=`): on tape / restoring / restored |
 | `/dashboard/buckets/{name}/settings` | GET | session | Bucket settings: visibility, CDN URL, cache, CORS |
-| `/dashboard/buckets/{name}/settings` | POST | session | Update bucket visibility, cache TTL, CORS origins |
+| `/dashboard/buckets/{name}/settings` | POST | session | Update bucket visibility, the customer-key requirement, cache TTL, CORS origins — the mode columns through the door `modes.SetBucket` (audited `bucket.mode_changed`); requiring a key on a bucket that holds readable files is refused with a flash: copy into a new bucket (RP33-1). The settings page says a Public bucket's cached CDN copies may be served for up to its max-age + 600 s after it is made non-public (no purge, RP33-10) |
 | `/dashboard/buckets/{name}/analytics` | GET | session | CDN analytics: downloads, bandwidth, top objects, geo |
 | `/dashboard/apikeys` | GET | session | List API keys with status |
 | `/dashboard/apikeys` | POST | session | Generate new API key (shows secret once) |

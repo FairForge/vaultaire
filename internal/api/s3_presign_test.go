@@ -400,6 +400,12 @@ func TestPresignedURL_Integration(t *testing.T) {
 	// probe, the upsert naming the address, its read-back, the bucket's
 	// versioning status, commit.
 	mock.ExpectBegin()
+	// The bucket-mode lock, shared, and ssec_required under it (RP33-1 b).
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock_shared\(hashtext\('bucket-mode'\)`).
+		WithArgs(testPresignTenantID, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`SELECT ssec_required FROM buckets`).
+		WillReturnRows(sqlmock.NewRows([]string{"ssec_required"}).AddRow(false))
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtext\(`).
 		WithArgs(testPresignTenantID, sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))

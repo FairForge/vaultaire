@@ -33,6 +33,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/modes"
 )
 
 // blobWrite is one writer's commit.
@@ -81,19 +84,66 @@ type flipResult struct {
 // write).
 var headFlipHook = func(tenantID, bucket, key string) error { return nil }
 
+// blobCommitStartHook runs when a commit starts, before its first lock
+// (tests: a mode change between a write's placement and its commit).
+var blobCommitStartHook = func(tenantID, bucket, key string) {}
+
+// errSSECRequiredAtCommit: the bucket required a customer key by the time
+// the write committed, and the row it would write is not sealed with one
+// (RP33-1 b). The client's 400, as refuseSSECRequired at placement; the
+// caller queues the blob as an orphan like any failed commit.
+var errSSECRequiredAtCommit = errors.New("the bucket requires a customer-provided key (ssec_required) and the write carries none")
+
+// lockBucketModeShared takes the bucket-mode lock SHARED (modes.ModeLockSQL
+// is the door's exclusive one) and reads ssec_required under it: a mode
+// change either committed before this (the flag is read here) or waits for
+// this commit (and then counts what it wrote). No bucket row = no rule.
+func lockBucketModeShared(ctx context.Context, tx *sql.Tx, tenantID, bucket string) (ssecRequired bool, err error) {
+	if _, err := tx.ExecContext(ctx, modes.ModeLockSharedSQL, tenantID, bucket); err != nil {
+		return false, fmt.Errorf("lock the bucket's mode: %w", err)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, bucket).Scan(&ssecRequired)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the bucket's ssec_required: %w", err)
+	}
+	return ssecRequired, nil
+}
+
 // commitBlobWrite is the flip (see the file comment). Lock order, the same
 // on every path that takes more than one (WP-R10-8; usage/ledger_tx.go):
-// the key's advisory lock → the head row → the key's version lock and rows
-// → the upload row (a Complete's markCompleted / Held) → tenant_quotas →
-// tenant_floor_quotas. The ledger is the last statement before COMMIT, so
-// the tenant's quota row is held from its UPDATE to COMMIT only, and
-// nothing holding it waits for a key, row or upload lock.
+// the bucket-mode lock (SHARED here, exclusive in the door modes.SetBucket —
+// RP33-1) → the key's advisory lock → the head row → the key's version lock
+// and rows → the upload row (a Complete's markCompleted / Held) →
+// tenant_quotas → tenant_floor_quotas. The ledger is the last statement
+// before COMMIT, so the tenant's quota row is held from its UPDATE to COMMIT
+// only, and nothing holding it waits for a key, row or upload lock. The door
+// holds the mode lock and then the buckets row only; nothing here locks a
+// buckets row, so the two never wait on each other in a cycle.
+//
+// Every commit of a head row or a version row with new bytes runs here
+// (TestBlobRowWritersOnlyThroughTheFlip): PutObject whole and chunked,
+// CompleteMultipartUpload whole and chunked (UploadPartCopy's parts land
+// with it), CopyObject whole and chunked, generated objects, the direct
+// upload's complete.
 func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, error) {
+	blobCommitStartHook(w.TenantID, w.Bucket, w.Key)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return flipResult{}, fmt.Errorf("begin head-cache upsert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// A bucket made Private after this write was placed must not take its
+	// unkeyed row (RP33-1 b): the flag is read under the mode lock and the
+	// written row is checked below, before anything else is decided.
+	ssecRequired, err := lockBucketModeShared(ctx, tx, w.TenantID, w.Bucket)
+	if err != nil {
+		return flipResult{}, err
+	}
 
 	// Serialise writers of the same key BEFORE the probe. A row that does not
 	// exist yet cannot be locked by FOR UPDATE, so two concurrent first
@@ -154,6 +204,9 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 	if err := tx.QueryRowContext(ctx, `SELECT is_chunked, COALESCE(storage_key, ''), floor, size_bytes, COALESCE(encryption_algorithm, '') FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key).Scan(&newChunked, &newSK, &newFloor, &newSize, &newEnc); err != nil {
 		return flipResult{}, fmt.Errorf("read the written head row: %w", err)
+	}
+	if ssecRequired && !w.DryRun && !crypto.IsSSEC(newEnc) {
+		return flipResult{}, errSSECRequiredAtCommit
 	}
 	// The displaced row's bytes and the new row's: an address and a kind
 	// (a whole blob, or a manifest — WP-VM-1). <key> for a row written

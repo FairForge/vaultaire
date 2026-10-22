@@ -11,7 +11,7 @@
         "text": "Only you hold the key: we store your files encrypted and cannot read them, and cannot recover them if the key is lost."
       },
       "how": {
-        "text": "Every write into the bucket carries your own key (SSE-C), or your files are encrypted on your device before they are uploaded."
+        "text": "Chosen when the bucket is created (or turned on while it holds only files written with your key): every write into it carries your own key (SSE-C), or your files are encrypted on your device before they are uploaded."
       }
     },
     {
@@ -23,7 +23,7 @@
       "customer": {
         "text": "Encrypted at rest with keys we hold; we can read your files.",
         "requires_master_key": true,
-        "without_master_key": "Encrypted in transit. At rest your files sit on our storage providers' disks under the providers' own encryption, and we can read them."
+        "without_master_key": "Not encrypted by us at rest yet: your files sit on our storage providers' disks and tapes as we send them, encrypted there only where the provider does so, and we can read them."
       },
       "how": {
         "text": "The default for every bucket: nothing to set up."

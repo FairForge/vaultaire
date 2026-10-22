@@ -35,6 +35,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"go.uber.org/zap"
@@ -120,6 +121,18 @@ const ssecRequiredRefusal = "Requests specifying Server Side Encryption with Cus
 // carries none — 400, the client's, before any byte.
 var refuseSSECRequired = &placementRefusal{Status: http.StatusBadRequest, Code: ErrInvalidRequest, Message: ssecRequiredRefusal,
 	Suggestion: "This bucket requires SSE-C: send x-amz-server-side-encryption-customer-algorithm: AES256, -key and -key-MD5 on every write."}
+
+// refusedAtCommit writes the client's 400 when the commit found the bucket
+// made Private after the write was placed (errSSECRequiredAtCommit, RP33-1 b)
+// — the answer placement gives the same write — and reports whether it did.
+func refusedAtCommit(w http.ResponseWriter, r *http.Request, err error) bool {
+	if !errors.Is(err, errSSECRequiredAtCommit) {
+		return false
+	}
+	markClientRefusal(r.Context())
+	refuseSSECRequired.write(w, r)
+	return true
+}
 
 var (
 	refuseUnreadableEncryption = &placementRefusal{Status: http.StatusInternalServerError, Code: ErrInternalError}
