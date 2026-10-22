@@ -833,6 +833,21 @@ does not pay anyone loses the **house** (quota) after grace, never a byte.
   - **RP31-5:** the `crypto_invoice_open` 409 offers **"Cancel the bitcoin invoice and continue"** — only for an invoice nobody paid (RP31-1's rule); it is marked Invalid, our row closed at once, and the refused checkout continues. One holding a payment keeps the 409 with its date.
   - **RP31-6:** `SwitchToPrepaid` commits the row, then stops the renewal; a refused stop puts the row back (only if unchanged).
   - **RP31-7:** with `entitlement_lapse` OFF a Stripe house whose renewal is off ends at Stripe's deletion on the date, no grace; the billing page and the reminders say "Your house ends on <date> unless the bitcoin payment arrives" (or "unless you renew") instead of promising grace.
+- **Prompt 27 Part 0b (#881, the WP-P26 review's RP33-2/3/7/8/9/11; prod `6bbd3ed`):**
+  - **The switch to bitcoin at renewal is durable (RP33-3, RP33-8a).**
+    - The intent to stop the card is a pending `renewal_stop` row (reason `switch`), written in the switch's own transaction.
+    - After the commit, `StopRenewalRef` is called under `Detached(ctx)`.
+    - Only a permanent refusal (`ErrProviderRefused`: a Stripe 4xx other than 404/408/409/429) puts the switch back and deletes the stop.
+    - A client that leaves, a Stripe 5xx or a crash leaves the switch standing with the stop owed to the `renewal_stops` job.
+  - A `stopped` record never closes a `pending` row, so a bitcoin settle cannot mark Stripe stopped before Stripe answered.
+  - The Stripe webhook treats the stop row of the entitlement's own subscription as owed, so a portal un-cancel still withdraws the switch and its stop.
+  - **RP33-7:** a switch from a past_due / unpaid / incomplete subscription cancels it now (RP31-4's path).
+  - **RP33-2: only confirmed bitcoin is value.** The Invalid credit, the Expired partial credit and the paid-late mark use `btcpay.confirmedCents` = max(0, min(`paidAmount` − Σ unconfirmed value×rate, Σ Settled value×rate)). A seen-but-unconfirmed payment waits for its `InvoicePaymentSettled`.
+  - **RP33-11 (lab):** BTCPay delivers `InvoicePaymentSettled` even for an invoice already Invalid, so a late confirmation is credited, never granted.
+    - BTCPay 2.4.5 sends **no** `InvoiceInvalid` webhook when the monitoring window ends (RP34-1).
+  - **RP33-8b:** a cancel that BTCPay accepted but our transaction did not close tells the customer the invoice was cancelled.
+  - **RP33-9:** the hourly price assert also refuses a default customer portal that allows plan changes; checkout stays closed.
+  - `pay_btcpay` stays OFF until the owner flips it.
 - **§ 4.2** is RP24-1's path with purpose `switch`: `trial_end =
   paid_through` (≥ 48 h, else starts now and the page says the prepaid
   days are forfeited); the completed trialing subscription flips the row to
