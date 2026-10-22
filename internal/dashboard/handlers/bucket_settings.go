@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -188,26 +191,52 @@ func HandleUpdateBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap
 			}
 		}
 
-		result, err := db.ExecContext(r.Context(),
-			`UPDATE buckets
-			 SET visibility = $1, cors_origins = $2, cache_max_age_secs = $3, tier_preference = $4, ssec_required = $7, updated_at = NOW()
-			 WHERE tenant_id = $5 AND name = $6`,
-			visibility, corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName, ssecRequired)
-		if err != nil {
+		// The mode columns go through the one door (internal/modes, K3) —
+		// which enforces the 096 rule again in its statement — and the rest
+		// of the form in the same transaction.
+		err := runInTx(r.Context(), db, func(tx *sql.Tx) error {
+			if _, err := modes.SetBucket(r.Context(), tx, sd.TenantID, bucketName,
+				modes.Change{Visibility: &visibility, SSECRequired: &ssecRequired}); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(r.Context(),
+				`UPDATE buckets
+				 SET cors_origins = $1, cache_max_age_secs = $2, tier_preference = $3, updated_at = NOW()
+				 WHERE tenant_id = $4 AND name = $5`,
+				corsOrigins, cacheMaxAge, tierPref, sd.TenantID, bucketName)
+			return err
+		})
+		switch {
+		case errors.Is(err, modes.ErrNoBucket):
+			middleware.SetFlash(w, "error", "Bucket not found.")
+			http.Redirect(w, r, "/dashboard/buckets", http.StatusSeeOther)
+			return
+		case errors.Is(err, modes.ErrPublicSSEC):
+			middleware.SetFlash(w, "error", "A public bucket cannot require a customer-provided key: its objects are served without one. Keep it private, or turn the key requirement off.")
+			http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
+			return
+		case err != nil:
 			logger.Error("update bucket settings", zap.Error(err))
 			middleware.SetFlash(w, "error", "Failed to save settings.")
 			http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 			return
 		}
 
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			middleware.SetFlash(w, "error", "Bucket not found.")
-			http.Redirect(w, r, "/dashboard/buckets", http.StatusSeeOther)
-			return
-		}
-
 		middleware.SetFlash(w, "success", "Bucket settings saved.")
 		http.Redirect(w, r, settingsURL, http.StatusSeeOther) // #nosec G710 -- hardcoded path prefix
 	}
+}
+
+// runInTx runs fn in one transaction: committed when fn returns nil, else
+// rolled back.
+func runInTx(ctx context.Context, db *sql.DB, fn func(*sql.Tx) error) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

@@ -205,9 +205,13 @@ func TestManagementBucketMetadata_Patch(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"metadata", "created_at", "visibility", "ssec_required"}).
 			AddRow([]byte(`{"color":"blue"}`), now, "private", false))
 
+	// Metadata only: no mode change, so the door (modes.SetBucket) is not
+	// asked; one transaction.
+	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE buckets SET metadata`).
-		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket", false).
+		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
 
 	body := bytes.NewBufferString(`{"metadata":{"color":null,"env":"prod"}}`)
 	req := httptest.NewRequest("PATCH", "/api/v1/manage/buckets/my-bucket", body)

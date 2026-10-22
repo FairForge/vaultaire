@@ -1,0 +1,63 @@
+{
+  "_about": "The ONE mode table (docs/ARCHITECTURE_CONTRACT.md line 3, plan Phase 41.0, keystone K3). A mode is a property of the surface, never a user's choice. The privacy page's per-mode table, the OpenAPI text, the dashboard labels and the S3 encryption header text are generated from this file through internal/modes; a test fails when a name or sentence is typed anywhere else. A sentence marked requires_master_key is rendered only while the process has ENCRYPTION_MASTER_KEY loaded; otherwise its without_master_key text is. Vault is a tier, never a mode.",
+  "modes": [
+    {
+      "id": "private",
+      "name": "Private",
+      "server_holds": {
+        "text": "Your files as ciphertext we cannot decrypt — the key arrives with each request and is never stored. We still see object names, sizes, counts, timestamps and when they are read."
+      },
+      "customer": {
+        "text": "Only you hold the key: we store your files encrypted and cannot read them, and cannot recover them if the key is lost."
+      },
+      "how": {
+        "text": "Every write into the bucket carries your own key (SSE-C), or your files are encrypted on your device before they are uploaded."
+      }
+    },
+    {
+      "id": "standard",
+      "name": "Standard",
+      "server_holds": {
+        "text": "Everything: your files, their names, sizes and metadata — we can read them."
+      },
+      "customer": {
+        "text": "Encrypted at rest with keys we hold; we can read your files.",
+        "requires_master_key": true,
+        "without_master_key": "Encrypted in transit. At rest your files sit on our storage providers' disks under the providers' own encryption, and we can read them."
+      },
+      "how": {
+        "text": "The default for every bucket: nothing to set up."
+      }
+    },
+    {
+      "id": "public",
+      "name": "Public",
+      "server_holds": {
+        "text": "Everything, by design: anyone with the link can read it."
+      },
+      "customer": {
+        "text": "Anyone with the link can download these files. They are not encrypted: they are meant to be read."
+      },
+      "how": {
+        "text": "Make a bucket public from its settings in the dashboard; its files are served from our CDN."
+      }
+    }
+  ],
+  "surfaces": {
+    "developer": {
+      "default": "standard",
+      "also": ["private"],
+      "note": "The S3 API, the management API and the SDK. Private through a bucket that requires SSE-C, or client-side encryption."
+    },
+    "consumer": {
+      "default": "standard",
+      "also": ["private"],
+      "note": "Recoverable (Standard) with Advanced protection (Private) as an opt-in until the passcode recovery vault exists (F-19); Private becomes the default the day it does."
+    },
+    "public": {
+      "default": "public",
+      "also": [],
+      "note": "Public buckets, share links and the content domain."
+    }
+  }
+}

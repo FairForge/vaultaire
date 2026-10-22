@@ -35,6 +35,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/idrive"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/payments/btcpay"
 	"github.com/FairForge/vaultaire/internal/sitestats"
@@ -326,6 +327,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			countSSEOpens(s.sseService)
 			s.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 			logger.Info("encryption initialized: SSE-S3 (ML-KEM-768+AES-256-GCM) and chunk convergent (AES-256-GCM), versioned tenant keys")
+			// K3: Standard's "keys we hold" sentence is true from now on
+			// (modes.json requires_master_key); until then every surface
+			// renders the pre-key sentence.
+			modes.SetMasterKeyLoaded(true)
 			checkTenantKeysAtBoot(context.Background(), keys, logger)
 		}
 	}
