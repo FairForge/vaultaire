@@ -124,3 +124,33 @@ func TestDueReminders_CarryThePendingSwitch(t *testing.T) {
 	require.NotNil(t, mine)
 	assert.Equal(t, ProviderBTCPay, mine.PendingProvider)
 }
+
+func TestDoublePeriod_ZeroRowsNeverMatch_BothBoundsDo(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	order := Order{Std: 1, Period: PeriodMonthly}
+	settle := func(provider, id string, cents int64, start, end time.Time) Settled {
+		var s Settled
+		f.tx(t, func(tx *sql.Tx) error {
+			var err error
+			s, err = Settle(ctx, tx, Payment{TenantID: f.tenantID, Provider: provider, ProviderID: id + f.tenantID, Kind: KindCharge,
+				Purpose: PurposeNew, AmountCents: cents, Order: &order, PeriodStart: start, PeriodEnd: end, Unnumbered: true}, now)
+			return err
+		})
+		return s
+	}
+	// A trialing subscription's $0 first invoice over the coming month.
+	settle(ProviderStripe, "in_trial_", 0, now, now.Add(30*24*time.Hour))
+	// A paid bitcoin month over the same dates: the $0 row paid nothing.
+	assert.Nil(t, settle(ProviderBTCPay, "btc_a_", 1000, now, now.Add(30*24*time.Hour)).DoublePeriod)
+	// A later, adjacent card period does not overlap the bitcoin month.
+	assert.Nil(t, settle(ProviderStripe, "in_next_", 1000, now.Add(30*24*time.Hour), now.Add(60*24*time.Hour)).DoublePeriod)
+	// A bitcoin period that ENDS before the card period starts is no match
+	// either (the one-sided "other.end > this.start" would flag it).
+	assert.Nil(t, settle(ProviderBTCPay, "btc_early_", 1000, now.Add(-60*24*time.Hour), now.Add(-30*24*time.Hour)).DoublePeriod)
+	// An overlap on both bounds is.
+	d := settle(ProviderManual, "manual_", 1000, now.Add(10*24*time.Hour), now.Add(40*24*time.Hour)).DoublePeriod
+	require.NotNil(t, d)
+	assert.Equal(t, ProviderManual, d.ThisProvider)
+}
