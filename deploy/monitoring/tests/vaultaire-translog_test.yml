@@ -1,0 +1,84 @@
+# promtool unit test of vaultaire-translog.yml (K4, Stage 1a Prompt 28).
+# Run on the box (promtool is there; rule file and test in ONE directory):
+#   scp deploy/monitoring/vaultaire-translog.yml deploy/monitoring/tests/vaultaire-translog_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-translog_test.yml'
+rule_files:
+  - vaultaire-translog.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Key loaded, 12 entries, the newest checkpoint (size 10) signed at t=0:
+  # silent for the first hour, firing 15 min after it.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_signing_key_loaded'
+        values: '1x120'
+      - series: 'vaultaire_translog_size'
+        values: '12x120'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '10x120'
+      - series: 'vaultaire_translog_checkpoint_timestamp_seconds'
+        values: '0x120'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: TranslogCheckpointStale
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: TranslogCheckpointStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Transparency log: no checkpoint signed for 1h 20m 0s while entries wait"
+              description: "The signing key is loaded and the log has grown past its newest checkpoint, which is more than an hour old. The translog_checkpoint job (every 10 min) is failing or refusing to sign: GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'translog checkpoint'. A 'does not extend' error is a rewritten history — never re-sign over it (docs/TRANSPARENCY.md)."
+
+  # Prod until the owner's ceremony: no key — silent whatever the age.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_signing_key_loaded'
+        values: '0x200'
+      - series: 'vaultaire_translog_size'
+        values: '3x200'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '0x200'
+      - series: 'vaultaire_translog_checkpoint_timestamp_seconds'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 180m
+        alertname: TranslogCheckpointStale
+        exp_alerts: []
+
+  # Key loaded, nothing new since an old checkpoint: an idle log is not stale.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_signing_key_loaded'
+        values: '1x200'
+      - series: 'vaultaire_translog_size'
+        values: '10x200'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '10x200'
+      - series: 'vaultaire_translog_checkpoint_timestamp_seconds'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 180m
+        alertname: TranslogCheckpointStale
+        exp_alerts: []
+
+  # A failed append fires at once, per kind.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_append_failures_total{kind="server_build"}'
+        values: '0 0 1 1 1'
+      - series: 'vaultaire_translog_append_failures_total{kind="key_ceremony"}'
+        values: '0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: TranslogAppendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: server_build
+            exp_annotations:
+              summary: "Transparency log: 1.333 server_build append(s) failed in the last hour"
+              description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again by hand (cmd/tools/translog-append)."

@@ -1,0 +1,49 @@
+# The transparency log (keystone K4, Stage 1a Prompt 28; docs/TRANSPARENCY.md)
+# — install to /etc/prometheus/rules/ (see README).
+#
+# Series from the app's /metrics (internal/translog/logstore):
+#   vaultaire_translog_size                           entries in the log           (READ FROM translog_entries on scrape)
+#   vaultaire_translog_checkpoint_size                tree size of the newest checkpoint, 0 = none   (translog_checkpoints)
+#   vaultaire_translog_checkpoint_timestamp_seconds   when it was signed, 0 = never                  (translog_checkpoints)
+#   vaultaire_translog_signing_key_loaded             1 = this process has the signing key (credential translog_signing_key)
+#   vaultaire_translog_append_failures_total{kind}    appends that failed (server_build, key_ceremony)
+#
+# The translog_checkpoint job signs a checkpoint every 10 min when the tree
+# grew; without the key it signs nothing and nothing here fires (the key is
+# an owner ceremony — until then signing_key_loaded is 0 on purpose).
+#
+# Triage:
+#   GET /api/v1/admin/jobs → translog_checkpoint: last_error ("no signing key",
+#   "unchanged") and result {size, checkpoint_size, signed, reason}.
+#   journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'
+#   — "does not extend checkpoint N" means the stored log no longer extends
+#   the last signed tree: STOP, do not re-sign; that is the event the log
+#   exists to expose (docs/TRANSPARENCY.md § Incidents).
+groups:
+  - name: vaultaire-translog
+    rules:
+      # The key is loaded, entries exist past the newest checkpoint, and that
+      # checkpoint is more than an hour old (six runs of the 10-min job):
+      # the job is failing or refusing to sign.
+      - alert: TranslogCheckpointStale
+        expr: |
+          (time() - max(vaultaire_translog_checkpoint_timestamp_seconds)) > 3600
+          and on () max(vaultaire_translog_signing_key_loaded) == 1
+          and on () max(vaultaire_translog_size) > max(vaultaire_translog_checkpoint_size)
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transparency log: no checkpoint signed for {{ $value | humanizeDuration }} while entries wait"
+          description: "The signing key is loaded and the log has grown past its newest checkpoint, which is more than an hour old. The translog_checkpoint job (every 10 min) is failing or refusing to sign: GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'translog checkpoint'. A 'does not extend' error is a rewritten history — never re-sign over it (docs/TRANSPARENCY.md)."
+
+      # An append failed: a server_build at boot (never blocks the boot) or a
+      # ceremony entry. The producer logged an Error line with the reason.
+      - alert: TranslogAppendFailing
+        expr: sum by (kind) (increase(vaultaire_translog_append_failures_total[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transparency log: {{ $value | humanize }} {{ $labels.kind }} append(s) failed in the last hour"
+          description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again by hand (cmd/tools/translog-append)."

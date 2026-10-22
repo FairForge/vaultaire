@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -250,6 +251,7 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		}
 		assert.NotEqual(t, "audit_logs", p.Table)
 		assert.NotEqual(t, "payments", p.Table, "the ledger is an accounting record: never pruned")
+		assert.False(t, strings.HasPrefix(p.Table, "translog_"), "the transparency log is append-only: never pruned (K4)")
 	}
 	assert.Equal(t, want, got)
 }

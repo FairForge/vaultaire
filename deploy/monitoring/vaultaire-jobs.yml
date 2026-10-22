@@ -51,13 +51,13 @@ groups:
           description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u 'vaultaire@*' | grep 'job run'."
 
       - alert: PeriodicJobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|swift_segment_gc|key_reencrypt|retired_blobs|webhook_retry|payment_reminders|renewal_stops"}) > 3 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|swift_segment_gc|key_reencrypt|retired_blobs|webhook_retry|payment_reminders|renewal_stops|translog_checkpoint"}) > 3 * 3600
         for: 30m
         labels:
           severity: warning
         annotations:
           summary: "Periodic job {{ $labels.job_name }} has not succeeded in 3 hours"
-          description: "{{ $labels.job_name }} runs every hour (payment_reminders too; access_log_delivery every 5 minutes, account_export every minute, key_reencrypt, retired_blobs and renewal_stops every 10 minutes, webhook_retry every 30 seconds) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
+          description: "{{ $labels.job_name }} runs every hour (payment_reminders too; access_log_delivery every 5 minutes, account_export every minute, key_reencrypt, retired_blobs, renewal_stops and translog_checkpoint every 10 minutes, webhook_retry every 30 seconds) and last succeeded {{ $value | humanizeDuration }} ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
 
       - alert: JobFailing
         expr: increase(vaultaire_job_runs_total{outcome="error"}[6h]) >= 3
