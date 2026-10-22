@@ -38,10 +38,13 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0
+	github.com/gtank/ristretto255 v0.2.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/transparency-dev/formats v0.1.1
 	github.com/transparency-dev/merkle v0.0.2
 	github.com/xssnick/raptorq v1.6.0
+	go.etcd.io/bbolt v1.4.3
 	golang.org/x/mod v0.41.0
 	golang.org/x/sync v0.24.0
 )
