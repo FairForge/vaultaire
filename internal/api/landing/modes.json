@@ -5,10 +5,10 @@
       "id": "private",
       "name": "Private",
       "server_holds": {
-        "text": "Your files as ciphertext we cannot decrypt — the key arrives with each request and is never stored. We still see object names, sizes, counts, timestamps and when they are read."
+        "text": "Your files as ciphertext. The key is never stored: with SSE-C it reaches our server with each request, which uses it for that request only; with client-side encryption it never reaches us. We still see object names, sizes, counts, timestamps and when they are read."
       },
       "customer": {
-        "text": "Only you hold the key: we store your files encrypted and cannot read them, and cannot recover them if the key is lost."
+        "text": "Only you keep the key: we store your files encrypted and never store the key, so we cannot read them at rest or recover them if the key is lost."
       },
       "how": {
         "text": "Chosen when the bucket is created (or turned on while it holds only files written with your key): every write into it carries your own key (SSE-C), or your files are encrypted on your device before they are uploaded."
@@ -43,6 +43,9 @@
       }
     }
   ],
+  "deleted_bytes": {
+    "text": "when you delete or overwrite a file, its stored bytes stay with our storage provider for up to a day before our collector erases them (the deduplicated blocks of a large file, up to seven days after no file uses them), and a copy that reached tape is not erased from the tape by a delete. Changing a bucket's mode does not re-encrypt or erase what was stored before the change."
+  },
   "surfaces": {
     "developer": {
       "default": "standard",

@@ -12,7 +12,7 @@ import (
 func HandleLegalPage(tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = tmpl.ExecuteTemplate(w, "base", map[string]any{"Page": "legal", "Modes": privacyModes()})
+		_ = tmpl.ExecuteTemplate(w, "base", map[string]any{"Page": "legal", "Modes": privacyModes(), "DeletedBytes": privacyDeletedBytes()})
 	}
 }
 
@@ -37,4 +37,14 @@ func privacyModes() []PrivacyMode {
 			Customer: m.Customer.Render(key), How: m.How.Render(key)})
 	}
 	return out
+}
+
+// privacyDeletedBytes is the privacy page's retention sentence for the bytes
+// of deleted and overwritten files (RP37-8), from modes.json — behind
+// modes_copy like the per-mode table, else "" and the page says nothing.
+func privacyDeletedBytes() string {
+	if !modesCopy("") {
+		return ""
+	}
+	return modes.All().DeletedBytes.Render(modes.MasterKeyLoaded())
 }
