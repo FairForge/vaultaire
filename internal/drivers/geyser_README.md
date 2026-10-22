@@ -31,6 +31,15 @@ Measured 2026-07-29 against the prod bucket:
   to staging**. `geyser.go` now forces h1 via `WithHTTP1Only()`. Single
   connection is still ~25–30 MB/s (TCP-window bound) — throughput comes from
   concurrent objects/parts, so drain many objects in parallel.
+- **Multipart PUT (2026-10-22, `geyser_multipart.go`,
+  `bench-results/GEYSER-MULTIPART-2026-10-22.md`):** a driver Put of a known
+  length ≥ 1 GiB goes as ~16 parts of 64–256 MiB at once. Vail's
+  `CompleteMultipartUpload` costs per PART (5–10 s up to 16 parts, 21–34 s at
+  32–64), so one wave of big parts wins: 4 GiB 205–307 MB/s, 8 GiB 266, against
+  92–96 for the single stream (which itself now ramps to ~90 MB/s on large
+  objects; 63 MB/s at 256 MiB, where multipart loses). Vail accepts a single
+  PUT over 5 GiB (8 GiB streamed fine). Knobs `GEYSER_MULTIPART_MIN`,
+  `GEYSER_PUT_CONCURRENCY`, `GEYSER_PUT_PART_MAX`, `GEYSER_PUT_BUDGET`.
 - **Reads are genuinely slow per-stream, but scale with fan-out**
   (h1, staging-disk objects, 2026-07-29): ~2.5–3 MB/s per stream; 8 streams
   → 25 MB/s, 32 streams → 76 MB/s aggregate (≈6.4 TB/day; more streams
