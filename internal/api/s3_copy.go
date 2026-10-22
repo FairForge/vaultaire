@@ -603,6 +603,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		if dbErr != nil {
 			releaseReservation()
 			retireOrphanWrite(pctx, s.db, s.logger, t.ID, destBucket, destBlob, backendName)
+			if refusedAtCommit(w, r, dbErr) {
+				return
+			}
 			if errors.Is(dbErr, errQuotaRace) {
 				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 					WithSuggestion("Upgrade at "+billingURL()))
@@ -930,6 +933,9 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		}})
 	if dbErr != nil {
 		releaseReservation()
+		if refusedAtCommit(w, r, dbErr) {
+			return
+		}
 		if errors.Is(dbErr, errQuotaRace) {
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Upgrade at "+billingURL()))

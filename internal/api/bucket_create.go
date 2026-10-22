@@ -8,6 +8,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
@@ -33,6 +34,11 @@ const (
 // creates it.
 type bucketCreateOptions struct {
 	objectLock bool
+	// private: the bucket is created Private (the management API's
+	// "mode": "private", RP33-1 c — plan line 1699, "set at creation"): the
+	// row is born Standard and made Private through the door in the same
+	// transaction, so no write can land between the two.
+	private bool
 }
 
 // bucketCreateOutcome is what createBucketRegistry decided. Region is the
@@ -158,13 +164,36 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 	if opts.objectLock {
 		versioning = "Enabled"
 	}
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
-			object_lock_enabled, versioning_status)
-		VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
-		ON CONFLICT (tenant_id, name) DO NOTHING
-	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning); err != nil {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var inserted bool
+	if err := tx.QueryRowContext(ctx, `
+		WITH ins AS (
+			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
+				object_lock_enabled, versioning_status)
+			VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
+			ON CONFLICT (tenant_id, name) DO NOTHING
+			RETURNING 1)
+		SELECT EXISTS (SELECT 1 FROM ins)
+	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning).Scan(&inserted); err != nil {
+		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	if !inserted {
+		// A concurrent create of the same name won: nothing of ours to set.
+		out.alreadyOwned = true
+	} else if opts.private {
+		if _, err := modes.SetBucket(ctx, tx, tenantID, bucket, modes.Change{SSECRequired: &opts.private}); err != nil {
+			return out, fmt.Errorf("make bucket %s private: %w", bucket, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	if out.alreadyOwned {
+		return out, nil
 	}
 	auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 

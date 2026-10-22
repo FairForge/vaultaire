@@ -1267,6 +1267,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					WithSuggestion("Retry in 30 seconds."))
 				return
 			}
+			if refusedAtCommit(w, r, chunkErr) {
+				return
+			}
 			a.logger.Error("chunked upload failed",
 				zap.Error(chunkErr),
 				zap.String("bucket", bucket),
@@ -1446,6 +1449,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 			// previous object is intact, the new blob is an orphan queued
 			// for the collector, and the client's retry writes afresh.
 			retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
+			if refusedAtCommit(w, r, dbErr) {
+				return
+			}
 			if errors.Is(dbErr, errQuotaRace) {
 				// A concurrent write changed what this overwrite displaces:
 				// the net reservation no longer fits (Part B). Refused,

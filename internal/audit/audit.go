@@ -99,6 +99,38 @@ func Record(ctx context.Context, db *sql.DB, e Entry) {
 	if db == nil || e.Action == "" {
 		return
 	}
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), insertTimeout)
+	defer cancel()
+	if err := insert(wctx, ctx, db, e); err != nil {
+		logger.Error("audit row not written",
+			zap.String("action", e.Action),
+			zap.String("tenant_id", e.TenantID),
+			zap.Error(err))
+	}
+}
+
+// Execer is a *sql.DB or a *sql.Tx.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// RecordTx writes one row inside the caller's transaction and returns the
+// error: the row commits with the change it records, or neither does
+// (a bucket's mode change, RP33-4). The request info and the actor are read
+// from ctx as Record reads them.
+func RecordTx(ctx context.Context, tx Execer, e Entry) error {
+	if e.Action == "" {
+		return errors.New("audit: an entry needs an action")
+	}
+	if err := insert(ctx, ctx, tx, e); err != nil {
+		return fmt.Errorf("audit %s: %w", e.Action, err)
+	}
+	return nil
+}
+
+// insert writes e on q under ctx; info is the context the request info and
+// the actor are read from.
+func insert(ctx, info context.Context, q Execer, e Entry) error {
 	if e.EventType == "" {
 		if i := strings.IndexByte(e.Action, '.'); i > 0 {
 			e.EventType = e.Action[:i]
@@ -120,13 +152,13 @@ func Record(ctx context.Context, db *sql.DB, e Entry) {
 	}
 	actor := e.Actor
 	if actor == "" {
-		actor = ActorFromContext(ctx)
+		actor = ActorFromContext(info)
 	}
 	if actor == "" {
 		actor = e.UserID
 	}
 	var ip, ua sql.NullString
-	if ri, ok := ctx.Value(requestKey).(requestInfo); ok {
+	if ri, ok := info.Value(requestKey).(requestInfo); ok {
 		if net.ParseIP(ri.ip) != nil {
 			ip = sql.NullString{String: ri.ip, Valid: true}
 		}
@@ -141,20 +173,13 @@ func Record(ctx context.Context, db *sql.DB, e Entry) {
 		}
 	}
 
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), insertTimeout)
-	defer cancel()
-	_, err := db.ExecContext(wctx, `
+	_, err := q.ExecContext(ctx, `
 		INSERT INTO audit_logs (user_id, tenant_id, event_type, action, resource, result, severity,
 		                        ip, user_agent, error_msg, metadata, performed_by)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10, $11, $12)`,
 		nullUUID(e.UserID), nullString(e.TenantID), e.EventType, e.Action, nullString(e.Resource),
 		result, severity, ip, ua, errMsg, meta, nullUUID(actor))
-	if err != nil {
-		logger.Error("audit row not written",
-			zap.String("action", e.Action),
-			zap.String("tenant_id", e.TenantID),
-			zap.Error(err))
-	}
+	return err
 }
 
 // Row is one audit_logs record as read back by List.

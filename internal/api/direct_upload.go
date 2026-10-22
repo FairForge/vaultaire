@@ -270,9 +270,15 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 				objectAttrs{ContentType: contentType})
 		}})
 	if err != nil {
-		s.logger.Error("direct upload: head row", zap.Error(err))
 		s.releaseQuota(context.WithoutCancel(ctx), tenantID, "standard", size)
 		retireOrphanWrite(ctx, s.db, s.logger, tenantID, bucket, blob, "r2")
+		if errors.Is(err, errSSECRequiredAtCommit) {
+			// A public bucket never requires a key (096); a bucket made
+			// Private since the upload started does (RP33-1 b).
+			writeManagementError(w, ErrTypeInvalidRequest, "ssec_required", "the bucket now requires a customer-provided key; the uploaded object was removed", "")
+			return
+		}
+		s.logger.Error("direct upload: head row", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to register the object", "")
 		return
 	}
