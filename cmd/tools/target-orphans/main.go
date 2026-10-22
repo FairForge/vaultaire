@@ -85,7 +85,7 @@ const (
 // internal/packstore: DefaultContainer; the probe canary's reserved tenant).
 const (
 	parityBucket    = "_parity"
-	packTenant      = "_global"
+	packTenant      = engine.ChunkAddressTenant
 	packContainer   = "_packs"
 	probeTenant     = "_probe"
 	segmentsName    = "_segments"
