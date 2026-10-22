@@ -44,6 +44,9 @@ type walkS3 struct {
 	pageSize int
 	requests int
 	deleted  []string
+	// deleteVersions is the versionId query of every DELETE, "<none>" when
+	// the request named no version.
+	deleteVersions []string
 
 	failPage    int    // 1-based list request that answers 500 (0 = never)
 	repeatToken bool   // every truncated page hands back the same token
@@ -85,6 +88,11 @@ func (w *walkS3) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && len(parts) == 2:
 		delete(w.keys, parts[1])
 		w.deleted = append(w.deleted, parts[1])
+		v := "<none>"
+		if r.URL.Query().Has("versionId") {
+			v = r.URL.Query().Get("versionId")
+		}
+		w.deleteVersions = append(w.deleteVersions, v)
 		rw.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodGet && r.URL.Query().Get("list-type") == "2":
 		w.list(rw, r)
@@ -263,6 +271,32 @@ func TestWalkTenant_S3Class_ListsTheTenantOnlyAndRemovesExactlyWhatItListed(t *t
 // On a fixed-bucket backend the chunk blobs a tenant's requests wrote sit
 // under that tenant's prefix: the walk reports them (container `_global`) so
 // the caller can leave them — it must be able to tell.
+// The sweep's Remove on Geyser deletes the null version, like the driver's
+// Delete (a plain DeleteObject on its versioning-Suspended bucket leaves a
+// delete marker); every other driver's Remove names no version — R2 and s3d
+// were never tried with one.
+func TestWalkTenant_GeyserRemoveDeletesTheNullVersionOnly(t *testing.T) {
+	for _, tc := range s3WalkCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newWalkS3(2,
+				tc.key(walkTenant, walkTenant+"_b", "k1"),
+				tc.key(walkTenant, walkTenant+"_b", "k2"),
+				tc.key(walkTenant, walkTenant+"_b", "k3"))
+			d := tc.build(walkClient(t, fake))
+
+			collect(t, d, walkTenant, true)
+
+			want := "<none>"
+			if tc.name == "geyser" {
+				want = "null"
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			assert.Equal(t, []string{want, want, want}, fake.deleteVersions)
+		})
+	}
+}
+
 func TestWalkTenant_FixedBucket_ReportsTheChunkContainerAsItsOwnContainer(t *testing.T) {
 	fake := newWalkS3(10,
 		"t-"+walkTenant+"/_global/_chunks/aa",

@@ -387,8 +387,10 @@ type GeyserEstimate struct {
 }
 
 // GeyserTapeCollectionRequest is the payload for POST /api/tapeCollections and
-// PUT /api/tapeCollections/{id} (resize — both grow and shrink are accepted,
-// live-verified 2026-09-19). All fields are required by the console API.
+// PUT /api/tapeCollections/{id}. All fields are required by the console API.
+// A resize is NOT applied: on 2026-10-22 a PUT of size 21 on a 20 TB
+// collection answered 200 and the size stayed 20 (the console's capacity
+// field is disabled); the capacity is set only when a collection is created.
 type GeyserTapeCollectionRequest struct {
 	Name         string `json:"name"`
 	Size         int    `json:"size"` // provisioned TB

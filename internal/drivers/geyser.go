@@ -37,6 +37,10 @@ const (
 	// than this are spilled to a temporary file to avoid OOM on GB+
 	// archive uploads.
 	spillThreshold = 64 << 20 // 64 MB
+
+	// nullVersionID is the version a Geyser delete names: see
+	// GeyserDriver.Delete.
+	nullVersionID = "null"
 )
 
 // GeyserDriver implements the engine.Driver interface for Geyser's
@@ -437,9 +441,16 @@ func (d *GeyserDriver) Delete(ctx context.Context, container, artifact string) e
 	}
 	key := d.buildKey(tenantID, container, artifact)
 
+	// VersionId "null": the bucket is versioning-Suspended, where a plain
+	// delete leaves a null delete marker (a never-written key too) that
+	// Geyser's ExpiredObjectDeleteMarker rule does not reap. Deleting the null
+	// version leaves nothing, and is the same plain delete on a never-versioned
+	// bucket (delete-method matrix on LA1 and LA2, 2026-10-22). Every write
+	// goes to a fresh <key>@<id> address: there is no older version to expose.
 	_, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(d.bucket),
-		Key:    aws.String(key),
+		Bucket:    aws.String(d.bucket),
+		Key:       aws.String(key),
+		VersionId: aws.String(nullVersionID),
 	}, sdkCallOptions(ctx)...)
 	if err != nil {
 		return fmt.Errorf("geyser delete %s: %w", key, err)

@@ -73,7 +73,14 @@ type s3TenantWalkAPI interface {
 // It runs its own page loop instead of s3ListPaginator: that one STOPS on a
 // repeated continuation token, which is right for a customer listing and
 // wrong here — a listing cut short would be reported as a finished sweep.
-func s3WalkPrefix(ctx context.Context, client s3TenantWalkAPI, bucket, prefix, containerLead string, fn func(engine.TenantObject) error) error {
+//
+// deleteNullVersion makes Remove delete VersionId "null" (Geyser: see
+// GeyserDriver.Delete); the other backends get a plain delete.
+func s3WalkPrefix(ctx context.Context, client s3TenantWalkAPI, bucket, prefix, containerLead string, deleteNullVersion bool, fn func(engine.TenantObject) error) error {
+	var deleteVersion *string
+	if deleteNullVersion {
+		deleteVersion = aws.String(nullVersionID)
+	}
 	var token *string
 	for {
 		pctx, cancel := context.WithTimeout(ctx, tenantWalkPageTimeout)
@@ -105,8 +112,9 @@ func s3WalkPrefix(ctx context.Context, client s3TenantWalkAPI, bucket, prefix, c
 				Artifact:  artifact,
 				Remove: func(ctx context.Context) error {
 					if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
-						Bucket: aws.String(bucket),
-						Key:    aws.String(key),
+						Bucket:    aws.String(bucket),
+						Key:       aws.String(key),
+						VersionId: deleteVersion,
 					}); err != nil && !s3IsNotFound(err) {
 						return fmt.Errorf("delete %s: %w", key, err)
 					}
@@ -138,7 +146,7 @@ func (d *IDriveDriver) WalkTenant(ctx context.Context, tenantID string, fn func(
 	if err := checkWalkTenant(tenantID); err != nil {
 		return err
 	}
-	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", false, fn); err != nil {
 		return fmt.Errorf("idrive: %w", err)
 	}
 	return nil
@@ -149,7 +157,7 @@ func (d *LyveDriver) WalkTenant(ctx context.Context, tenantID string, fn func(en
 	if err := checkWalkTenant(tenantID); err != nil {
 		return err
 	}
-	if err := s3WalkPrefix(ctx, d.client, d.getBucket(), tenantKeyPrefix(tenantID), "", fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, d.getBucket(), tenantKeyPrefix(tenantID), "", false, fn); err != nil {
 		return fmt.Errorf("lyve: %w", err)
 	}
 	return nil
@@ -157,13 +165,13 @@ func (d *LyveDriver) WalkTenant(ctx context.Context, tenantID string, fn func(en
 
 // WalkTenant implements engine.TenantWalker. A delete of an object that has
 // gone to tape is an ordinary DeleteObject (geyser_README: "Safe on archived
-// objects: DELETE"); the bucket's versioning is suspended, so it leaves no
-// marker behind.
+// objects: DELETE") of the null version: the bucket's versioning is
+// Suspended, where a plain delete would leave a delete marker behind.
 func (d *GeyserDriver) WalkTenant(ctx context.Context, tenantID string, fn func(engine.TenantObject) error) error {
 	if err := checkWalkTenant(tenantID); err != nil {
 		return err
 	}
-	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", true, fn); err != nil {
 		return fmt.Errorf("geyser: %w", err)
 	}
 	return nil
@@ -174,7 +182,7 @@ func (d *R2Driver) WalkTenant(ctx context.Context, tenantID string, fn func(engi
 	if err := checkWalkTenant(tenantID); err != nil {
 		return err
 	}
-	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", false, fn); err != nil {
 		return fmt.Errorf("r2: %w", err)
 	}
 	return nil
@@ -188,7 +196,7 @@ func (d *S3CompatDriver) WalkTenant(ctx context.Context, tenantID string, fn fun
 		return err
 	}
 	lead := tenantID + "_"
-	if err := s3WalkPrefix(ctx, d.client, d.bucket, d.prefix+"/"+lead, lead, fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, d.bucket, d.prefix+"/"+lead, lead, false, fn); err != nil {
 		return fmt.Errorf("s3compat: %w", err)
 	}
 	return nil
@@ -201,7 +209,7 @@ func (d *QuotalessDriver) WalkTenant(ctx context.Context, tenantID string, fn fu
 		return err
 	}
 	lead := tenantID + "_"
-	if err := s3WalkPrefix(ctx, d.client, "data", d.rootPath+"/"+lead, lead, fn); err != nil {
+	if err := s3WalkPrefix(ctx, d.client, "data", d.rootPath+"/"+lead, lead, false, fn); err != nil {
 		return fmt.Errorf("quotaless: %w", err)
 	}
 	return nil
