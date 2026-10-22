@@ -646,7 +646,8 @@ func populateAdminBilling(ctx context.Context, db *sql.DB, data map[string]any, 
 	if err != nil {
 		logger.Debug("admin: tenant entitlement", zap.Error(err))
 	} else {
-		data["BillingSentence"] = houseSentence(st)
+		// The operator's view states the record, not the flag's copy.
+		data["BillingSentence"] = houseSentence(st, false)
 		if st.Found {
 			data["BillingEntitlement"] = st.Entitlement
 			data["BillingPeriod"] = string(st.Entitlement.Order.Period)

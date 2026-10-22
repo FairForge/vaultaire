@@ -17,29 +17,72 @@ import (
 // § 4.1): a subscription a switch took the house from never takes it back,
 // and the portal race withdraws a pending switch.
 
+// stripeGrant is what grantStripe did in the caller's transaction.
+type stripeGrant struct {
+	payments.Granted
+	// uncancelled: the portal race — the caller invalidates the tenant's
+	// open prepaid invoices after the commit (afterUncancel).
+	uncancelled bool
+	// away: a renewal_stop row names the subscription (a provider switch
+	// took the house from it) — nothing was granted. stop is that row;
+	// reassert: the subscription renews again, its row was re-opened
+	// (pending) in the transaction, and the caller asks Stripe to stop it
+	// after the commit (afterSwitchedAway).
+	away     bool
+	stop     payments.RenewalStop
+	reassert bool
+}
+
 // grantStripe is the webhook's grant of a Stripe house (GrantRecorded) in
-// tx, and the portal race: a grant that turns the entitlement's own
-// subscription from renewal 'prepaid' back to 'auto' — the customer
-// re-enabled it in Stripe's portal — withdraws a pending switch
-// (pending_provider cleared in the same transaction); uncancelled tells the
-// caller to invalidate the tenant's open prepaid invoices after the commit
-// (afterUncancel).
-func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Order, paidThrough time.Time, subID string,
-	renewal payments.Renewal) (g payments.Granted, uncancelled bool, err error) {
-	g, err = payments.GrantRecorded(ctx, tx, tenantID, o, paidThrough, payments.ProviderStripe, subID, renewal)
+// tx, under the tenant's entitlement lock taken FIRST:
+//
+//   - a subscription a provider switch took the house from (a renewal_stop
+//     row names it) never takes it back (RP30-2). The row is read here,
+//     after the lock (RP31-3): read before it, an implicit switch that
+//     committed while this event waited on the lock went unseen and the
+//     Stripe grant overwrote the bitcoin house. One that renews again
+//     (un-cancelled in the portal) has its row re-opened in tx (reassert).
+//   - the portal race: a grant that turns the entitlement's own
+//     subscription from renewal 'prepaid' back to 'auto' — the customer
+//     re-enabled it in Stripe's portal — withdraws a pending switch
+//     (pending_provider cleared in the same transaction); uncancelled tells
+//     the caller to invalidate the tenant's open prepaid invoices after the
+//     commit (afterUncancel).
+func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Order, paidThrough time.Time, sub *stripe.Subscription,
+	renewal payments.Renewal) (stripeGrant, error) {
+	var out stripeGrant
+	if err := payments.Lock(ctx, tx, tenantID); err != nil {
+		return out, err
+	}
+	st, found, err := payments.RenewalStopOf(ctx, tx, tenantID, payments.ProviderStripe, sub.ID)
 	if err != nil {
-		return g, false, err
+		return out, err
+	}
+	if found {
+		out.away, out.stop = true, st
+		if !sub.CancelAtPeriodEnd && st.Status != payments.RenewalStopGone {
+			out.reassert = true
+			err = payments.RecordRenewalStop(ctx, tx, tenantID, payments.ProviderStripe, sub.ID, st.Reason, payments.RenewalStopPending,
+				map[string]any{"reasserted_at": time.Now().UTC().Format(time.RFC3339)})
+		}
+		return out, err
+	}
+	g, err := payments.GrantRecorded(ctx, tx, tenantID, o, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+	out.Granted = g
+	if err != nil {
+		return out, err
 	}
 	prev := g.Previous
-	if !g.Changed || prev == nil || prev.LapsedAt != nil || prev.Provider != payments.ProviderStripe || prev.ProviderRef != subID ||
+	if !g.Changed || prev == nil || prev.LapsedAt != nil || prev.Provider != payments.ProviderStripe || prev.ProviderRef != sub.ID ||
 		prev.Renewal != payments.RenewalPrepaid || renewal != payments.RenewalAuto {
-		return g, false, nil
+		return out, nil
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE entitlements SET pending_provider = NULL WHERE tenant_id = $1 AND pending_provider IS NOT NULL`, tenantID); err != nil {
-		return g, false, fmt.Errorf("withdraw the pending switch of tenant %s: %w", tenantID, err)
+		return out, fmt.Errorf("withdraw the pending switch of tenant %s: %w", tenantID, err)
 	}
-	return g, true, nil
+	out.uncancelled = true
+	return out, nil
 }
 
 // afterUncancel marks the tenant's open prepaid invoices Invalid after the
@@ -73,37 +116,23 @@ func (h *WebhookHandler) renewalStopper() payments.RefRenewalStopper {
 	return h.stripe
 }
 
-// switchedAway reports a subscription a provider switch took the house from
-// (a renewal_stop row names it): a granting event of it never takes the
-// house back (RP30-2 — the entitlement is another provider's). One that
-// renews again (un-cancelled in the portal) has its stop asserted again:
-// the row re-opened (pending) and the stop asked of Stripe now, audited
+// afterSwitchedAway is the work after the commit of an event whose
+// subscription a provider switch took the house from (grantStripe's away):
+// nothing was granted; one that renews again had its renewal_stop row
+// re-opened in the transaction, so its stop is asked of Stripe now, audited
 // billing.renewal_stop_reasserted — the period the customer prepaid is not
 // billed twice (a renewal that lands anyway is the double-period
 // detector's). A provider call that fails leaves the row pending for the
 // renewal_stops job; never a 500.
-func (h *WebhookHandler) switchedAway(ctx context.Context, tenantID string, sub *stripe.Subscription) (bool, error) {
-	if h.stripe.db == nil {
-		return false, nil
-	}
-	st, found, err := payments.RenewalStopOf(ctx, h.stripe.db, tenantID, payments.ProviderStripe, sub.ID)
-	if err != nil || !found {
-		return false, err
-	}
-	if sub.CancelAtPeriodEnd || st.Status == payments.RenewalStopGone {
+func (h *WebhookHandler) afterSwitchedAway(ctx context.Context, tenantID string, sub *stripe.Subscription, g stripeGrant) {
+	if !g.reassert {
 		h.logger.Info("stripe webhook: event of a subscription a switch took the house from — nothing applied",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
-		return true, nil
-	}
-	if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-		return payments.RecordRenewalStop(ctx, tx, tenantID, payments.ProviderStripe, sub.ID, st.Reason, payments.RenewalStopPending,
-			map[string]any{"reasserted_at": time.Now().UTC().Format(time.RFC3339)})
-	}); err != nil {
-		return true, err
+		return
 	}
 	audit.Record(ctx, h.stripe.db, audit.Entry{TenantID: tenantID, EventType: "billing", Action: "billing.renewal_stop_reasserted",
 		Resource: "tenant:" + tenantID, Metadata: map[string]any{"tenant": tenantID, "actor": webhookActor, "provider": payments.ProviderStripe,
-			"subscription": sub.ID, "status": string(sub.Status), "reason": st.Reason}})
+			"subscription": sub.ID, "status": string(sub.Status), "reason": g.stop.Reason}})
 	h.logger.Warn("stripe webhook: a subscription a switch took the house from renews again — its stop is asserted again",
 		zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
 	cerr := h.renewalStopper().StopRenewalRef(ctx, tenantID, sub.ID)
@@ -120,5 +149,4 @@ func (h *WebhookHandler) switchedAway(ctx context.Context, tenantID string, sub 
 	if err := payments.MarkRenewalStop(ctx, h.stripe.db, payments.ProviderStripe, sub.ID, status, last); err != nil {
 		h.logger.Warn("stripe webhook: renewal stop outcome not recorded", zap.String("subscription", sub.ID), zap.Error(err))
 	}
-	return true, nil
 }

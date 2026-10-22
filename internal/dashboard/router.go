@@ -320,12 +320,23 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			billingSvc = deps.Payments
 		}
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
-		dr.Post("/billing/house", handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Flags, deps.BaseURL, deps.Logger))
+		houseCheckout := handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Flags, deps.BaseURL, deps.Logger)
+		dr.Post("/billing/house", houseCheckout)
 		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Payments.Provider(payments.ProviderStripe), deps.BaseURL, deps.Logger))
 		// WP-PAY-3: renew a prepaid or lapsed house by hand; the receipts
 		// (print-ready, from the ledger row, the session's tenant only).
-		dr.Post("/billing/renew", handlers.HandleRenewHouse(billingSvc, deps.DB, deps.BaseURL, deps.Logger))
-		dr.Post("/billing/switch", handlers.HandleSwitchProvider(billingSvc, deps.DB, deps.BaseURL, deps.Logger))
+		renewHouse := handlers.HandleRenewHouse(billingSvc, deps.DB, deps.BaseURL, deps.Logger)
+		switchProvider := handlers.HandleSwitchProvider(billingSvc, deps.DB, deps.BaseURL, deps.Logger)
+		dr.Post("/billing/renew", renewHouse)
+		dr.Post("/billing/switch", switchProvider)
+		// RP31-5: the way out of a crypto_invoice_open 409 — cancel the
+		// unpaid bitcoin invoice, then the refused form continues.
+		var invoiceCancel handlers.InvoiceCancelling
+		if deps.Payments != nil {
+			invoiceCancel = deps.Payments
+		}
+		dr.Post("/billing/crypto-invoice/cancel", handlers.HandleCancelCryptoInvoice(invoiceCancel,
+			map[string]http.Handler{"house": houseCheckout, "renew": renewHouse, "switch": switchProvider}, deps.Logger))
 		receiptTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates, "templates/customer/receipt.html"))
 		dr.Get("/billing/receipts/{id}", handlers.HandleReceipt(receiptTmpl, deps.DB, deps.hostSet().Legal(), deps.Logger))
 

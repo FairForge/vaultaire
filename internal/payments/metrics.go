@@ -64,13 +64,18 @@ const (
 	WebhookSettledUnpaid = "settled_unpaid"
 	WebhookMarkRefused   = "mark_refused"
 	WebhookFetchRefused  = "fetch_refused"
+	// WebhookInvalidateSkippedPaid: an open invoice we were asked to mark
+	// Invalid (the portal race, the bulk resume) was not, because BTCPay
+	// says it holds money — Processing, or New/Expired with a paidAmount —
+	// and it is left to settle (RP31-1).
+	WebhookInvalidateSkippedPaid = "invalidate_skipped_paid"
 )
 
 // webhookTotal counts provider webhook deliveries by outcome: the series
 // PaymentWebhookFailing reads (no per-route HTTP series exists — D-P20-A2).
 var webhookTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_payment_webhook_total",
-	Help: "Payment-provider webhook deliveries by provider and outcome: ok (applied), duplicate (already applied), rejected (bad signature or body), error (500, the provider retries), foreign (not ours), settled_unpaid, mark_refused, fetch_refused (BTCPay: 200, nothing applied — RP30-4/5).",
+	Help: "Payment-provider webhook deliveries by provider and outcome: ok (applied), duplicate (already applied), rejected (bad signature or body), error (500, the provider retries), foreign (not ours), settled_unpaid, mark_refused, fetch_refused (BTCPay: 200, nothing applied — RP30-4/5), invalidate_skipped_paid (an open invoice holding money left to settle instead of marked Invalid — RP31-1).",
 }, []string{"provider", "outcome"})
 
 // providerEnabledDesc: 1 while the provider's pay_<name> flag is on
@@ -138,7 +143,7 @@ func init() {
 	// payment of an expired invoice) and the refunds of its charges an
 	// operator records — every pair at 0 from boot, registered or not.
 	for _, o := range []string{WebhookOK, WebhookDuplicate, WebhookRejected, WebhookError, WebhookForeign,
-		WebhookSettledUnpaid, WebhookMarkRefused, WebhookFetchRefused} {
+		WebhookSettledUnpaid, WebhookMarkRefused, WebhookFetchRefused, WebhookInvalidateSkippedPaid} {
 		webhookTotal.WithLabelValues(ProviderBTCPay, o)
 	}
 	for _, o := range []string{OutcomeSettled, OutcomeReplayed} {

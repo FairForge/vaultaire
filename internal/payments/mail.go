@@ -86,7 +86,7 @@ func (m *Mailer) SendReminder(ctx context.Context, d DueReminder) error {
 	}
 	data := email.ReminderMail{BaseURL: m.BaseURL, Email: d.Email, House: d.Order.Words(),
 		PaidThrough: d.PaidThrough.UTC().Format("2 Jan 2006"), GraceEnds: d.GraceEnds.UTC().Format("2 Jan 2006"),
-		RenewURL: m.renewURL(), DaysLeft: d.DaysLeft, InGrace: d.Step == StepInGrace, LastDay: d.Step == StepLastDay}
+		RenewURL: m.renewURL(), DaysLeft: d.DaysLeft, InGrace: d.Step == StepInGrace, LastDay: d.Step == StepLastDay, NoGrace: d.NoGrace}
 	if d.PendingProvider == ProviderBTCPay {
 		data.SwitchTo = "bitcoin" // WP-PAY-5: the switch the customer asked for
 	}

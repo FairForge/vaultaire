@@ -1,0 +1,315 @@
+package billing
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/stripe/stripe-go/v75"
+	"go.uber.org/zap"
+)
+
+// Stage 1a Prompt 26 Part 0 — the WP-P25 review's findings at the Stripe
+// side of WP-PAY-5.
+
+// settleBTC writes a settled bitcoin charge of the tenant for [start, end].
+func (f *houseFixture) settleBTC(t *testing.T, id, purpose string, cents int64, start, end time.Time) payments.Settled {
+	t.Helper()
+	ctx := context.Background()
+	order := payments.Order{Std: 2, Vault: 1, Period: payments.PeriodMonthly}
+	var s payments.Settled
+	require.NoError(t, payments.InTx(ctx, f.db, func(tx *sql.Tx) error {
+		var err error
+		s, err = payments.Settle(ctx, tx, payments.Payment{TenantID: f.tenantID, Provider: payments.ProviderBTCPay,
+			ProviderID: id + f.tenantID, Kind: payments.KindCharge, Purpose: purpose, AmountCents: cents,
+			Order: &order, PeriodStart: start, PeriodEnd: end, Unnumbered: true}, time.Now())
+		return err
+	}))
+	return s
+}
+
+// RP31-2 (P3, proven): a resize top-up prices the rest of a period that
+// was already bought — by design inside it — so it never matches.
+func TestDoublePeriod_ResizeTopUpNeverMatches(t *testing.T) {
+	// Arrange: Stripe's month is paid; then a bitcoin top-up settles for the
+	// rest of it (the implicit switch's resize before the card stop landed).
+	f := setupHouseFixture(t)
+	f.paidInvoiceForPeriod(t, 1500, 30*24*time.Hour)
+	before := doublePeriods()
+
+	// Act
+	s := f.settleBTC(t, "BtcTopUp_", payments.PurposeResize, 400, time.Now(), time.Now().Add(29*24*time.Hour))
+	require.NoError(t, payments.ReportDoublePeriod(context.Background(), f.db, nil, f.tenantID, s))
+
+	// Assert
+	assert.Nil(t, s.DoublePeriod)
+	assert.Nil(t, s.Forfeit)
+	assert.Equal(t, before, doublePeriods())
+	assert.Zero(t, f.audits(t, "billing.double_period"))
+}
+
+func TestDoublePeriod_StripeResizeOverBitcoinPeriod_NeverMatches(t *testing.T) {
+	// The other side: a Stripe proration invoice (subscription_update)
+	// inside a bitcoin period.
+	f := setupHouseFixture(t)
+	start := time.Now().Add(-time.Hour).Truncate(time.Second)
+	f.settleBTC(t, "BtcMonth_", payments.PurposeNew, 1000, start, start.Add(30*24*time.Hour))
+	before := doublePeriods()
+	sub := f.houseSub("active", start, start.Add(30*24*time.Hour))
+	f.post(t, "created", "customer.subscription.created", f.stripeHas(sub))
+	inv := invoiceFor("in_resize_"+f.tenantID, "cus_"+f.tenantID, sub.ID)
+	inv.AmountPaid, inv.Currency = 300, "usd"
+	inv.BillingReason = stripe.InvoiceBillingReasonSubscriptionUpdate
+	inv.Lines = &stripe.InvoiceLineItemList{Data: []*stripe.InvoiceLineItem{
+		{Period: &stripe.Period{Start: time.Now().Unix(), End: start.Add(30 * 24 * time.Hour).Unix()}}}}
+
+	f.post(t, "resize-paid", "invoice.payment_succeeded", inv)
+
+	assert.Equal(t, before, doublePeriods())
+	assert.Zero(t, f.audits(t, "billing.double_period"))
+}
+
+func TestSwitchToCard_Inside48h_NoDoublePeriod(t *testing.T) {
+	// Arrange: the bitcoin month ends in 30 h; the customer switches to
+	// card — inside MinDeferredStart, so Stripe bills from now and the page
+	// said the remaining prepaid hours are forfeited.
+	f := setupHouseFixture(t)
+	btcEnd := time.Now().Add(30 * time.Hour).Truncate(time.Second)
+	f.settleBTC(t, "BtcEnding_", payments.PurposeNew, 1000, btcEnd.Add(-30*24*time.Hour), btcEnd)
+	notes := &operatorNotes{}
+	f.handler.SetReceiptSender(notes)
+	before := doublePeriods()
+
+	// Act: Stripe's first charge (its period starts an hour ago).
+	f.paidInvoiceForPeriod(t, 1500, 30*24*time.Hour)
+
+	// Assert: no detector hit, nobody told to refund — a known forfeit,
+	// audited with the days given up.
+	assert.Equal(t, before, doublePeriods())
+	assert.Zero(t, f.audits(t, "billing.double_period"))
+	notes.mu.Lock()
+	assert.Empty(t, notes.subjects)
+	notes.mu.Unlock()
+	require.Equal(t, 1, f.audits(t, "billing.prepaid_forfeited"))
+	var days float64
+	require.NoError(t, f.db.QueryRow(`SELECT (metadata->>'days')::float FROM audit_logs WHERE tenant_id = $1 AND action = 'billing.prepaid_forfeited'`,
+		f.tenantID).Scan(&days))
+	assert.InDelta(t, 31.0/24, days, 0.05, "30 h ahead + the hour Stripe's period started early")
+}
+
+func TestDoublePeriod_OverlapPast48h_StillDetected(t *testing.T) {
+	// The forfeit window is MinDeferredStart, not a blanket pass: three
+	// prepaid days overlapped is a double period.
+	f := setupHouseFixture(t)
+	btcEnd := time.Now().Add(72 * time.Hour).Truncate(time.Second)
+	f.settleBTC(t, "BtcLong_", payments.PurposeNew, 1000, btcEnd.Add(-30*24*time.Hour), btcEnd)
+	before := doublePeriods()
+
+	f.paidInvoiceForPeriod(t, 1500, 30*24*time.Hour)
+
+	assert.Equal(t, before+1, doublePeriods())
+	assert.Zero(t, f.audits(t, "billing.prepaid_forfeited"))
+}
+
+// waitForLockWaiter polls pg_locks until a backend other than the test's
+// waits on an advisory lock (the webhook queued behind the held
+// entitlement lock).
+func waitForLockWaiter(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&n))
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the webhook never waited on the entitlement lock")
+}
+
+// RP31-3 (P3): the switched-away check reads the renewal_stop row UNDER the
+// entitlement lock — an implicit switch that commits while a Stripe event
+// waits on the lock is seen, and the house is not taken back.
+func TestStripeEvent_ImplicitSwitchCommitsWhileWaiting_NeverTakesTheHouse(t *testing.T) {
+	// Arrange: Stripe renews the house; a bitcoin settle (the implicit
+	// switch) holds the tenant's entitlement lock with its grant and its
+	// renewal_stop row written, not committed yet.
+	f := setupHouseFixture(t)
+	ctx := context.Background()
+	start := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	end := start.Add(30 * 24 * time.Hour)
+	sub := f.houseSub("active", start, end)
+	f.post(t, "granted", "customer.subscription.updated", f.stripeHas(sub))
+	require.Equal(t, payments.ProviderStripe, f.entitlement(t).Provider)
+	btcPT := end.Add(30 * 24 * time.Hour)
+	tx, err := f.db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	require.NoError(t, payments.Lock(ctx, tx, f.tenantID))
+	require.NoError(t, payments.Grant(ctx, tx, f.tenantID, payments.Order{Std: 2, Vault: 1, Period: payments.PeriodMonthly}, btcPT,
+		payments.ProviderBTCPay, "BtcImplicit_"+f.tenantID, payments.RenewalPrepaid))
+	require.NoError(t, payments.RecordRenewalStop(ctx, tx, f.tenantID, payments.ProviderStripe, sub.ID, payments.ReasonImplicitSwitch,
+		payments.RenewalStopPending, nil))
+	stops := &fakeStops{}
+	f.handler.stops = stops
+
+	// Act: Stripe's update of the same subscription arrives and waits on
+	// the lock; the switch commits.
+	body := eventBody(t, "evt_"+f.tenantID+"_race", "customer.subscription.updated", f.stripeHas(sub))
+	req := signedRequest(t, testWebhookSecret, time.Now(), body)
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, req)
+		done <- w.Code
+	}()
+	waitForLockWaiter(t, f.db)
+	require.NoError(t, tx.Commit())
+	code := <-done
+
+	// Assert: the house stays bitcoin's; the stop is asserted again.
+	require.Equal(t, http.StatusOK, code)
+	e := f.entitlement(t)
+	assert.Equal(t, payments.ProviderBTCPay, e.Provider, "the Stripe grant must not take the house back")
+	assert.True(t, btcPT.Equal(e.PaidThrough))
+	stops.mu.Lock()
+	assert.Equal(t, []string{sub.ID}, stops.refs)
+	stops.mu.Unlock()
+}
+
+// fakeSubAPI is Stripe's subscription endpoints behind stripe-go's own
+// backend: GET answers the subscription in the given status; DELETE (cancel
+// now) and POST (update) are recorded with their forms.
+type fakeSubAPI struct {
+	mu      sync.Mutex
+	status  string
+	deletes []url.Values
+	updates []url.Values
+}
+
+func (f *fakeSubAPI) install(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasPrefix(r.URL.Path, "/v1/subscriptions/") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"fake"}}`))
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/subscriptions/")
+		// stripe-go sends a DELETE's params as a form body (stripe.go
+		// bodyMethod), which r.ParseForm ignores for DELETE.
+		raw, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(raw))
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		status := f.status
+		switch r.Method {
+		case http.MethodDelete:
+			f.deletes = append(f.deletes, form)
+			status = "canceled"
+		case http.MethodPost:
+			f.updates = append(f.updates, form)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "object": "subscription", "status": status})
+	}))
+	t.Cleanup(srv.Close)
+	prev := stripe.GetBackend(stripe.APIBackend)
+	stripe.SetBackend(stripe.APIBackend, stripe.GetBackendWithConfig(stripe.APIBackend, &stripe.BackendConfig{
+		URL: stripe.String(srv.URL), MaxNetworkRetries: stripe.Int64(0), LeveledLogger: &stripe.LeveledLogger{Level: stripe.LevelNull},
+	}))
+	t.Cleanup(func() { stripe.SetBackend(stripe.APIBackend, prev) })
+}
+
+// RP31-4 (P3): an implicit switch from a subscription whose current period
+// was never paid (past_due / unpaid / incomplete) cancels it now — with
+// cancel_at_period_end, Stripe's dunning would keep retrying the card and a
+// later success would bill the period the customer paid in bitcoin.
+func TestImplicitSwitch_FromPastDue_CancelsNow(t *testing.T) {
+	for _, status := range []string{"past_due", "unpaid", "incomplete"} {
+		t.Run(status, func(t *testing.T) {
+			// Arrange
+			f := setupHouseFixture(t)
+			api := &fakeSubAPI{status: status}
+			api.install(t)
+			svc := NewStripeService("sk_test_fake", f.db, zap.NewNop())
+
+			// Act
+			err := svc.StopRenewalRef(context.Background(), f.tenantID, "sub_dunning_"+f.tenantID)
+
+			// Assert: cancelled now, no proration, no final invoice; the
+			// renewal_stop row is closed as gone.
+			assert.ErrorIs(t, err, payments.ErrRefGone)
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			require.Len(t, api.deletes, 1)
+			assert.Equal(t, "false", api.deletes[0].Get("invoice_now"))
+			assert.Equal(t, "false", api.deletes[0].Get("prorate"))
+			assert.Empty(t, api.updates, "never cancel_at_period_end on an unpaid period")
+		})
+	}
+}
+
+func TestImplicitSwitch_FromActive_StopsAtPeriodEnd(t *testing.T) {
+	f := setupHouseFixture(t)
+	api := &fakeSubAPI{status: "active"}
+	api.install(t)
+	svc := NewStripeService("sk_test_fake", f.db, zap.NewNop())
+
+	require.NoError(t, svc.StopRenewalRef(context.Background(), f.tenantID, "sub_paid_"+f.tenantID))
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	assert.Empty(t, api.deletes, "a paid period runs out")
+	require.Len(t, api.updates, 1)
+	assert.Equal(t, "true", api.updates[0].Get("cancel_at_period_end"))
+}
+
+// RP31-7 (note): with entitlement_lapse OFF, an unpaid switch to bitcoin is
+// cleared when Stripe deletes the subscription at the paid date — no grace
+// (WP-PAY-5's own test set the flag ON). The page and the T−3 reminder say
+// it for such a tenant.
+func TestSwitchToBitcoin_FlagOff_UnpaidSwitchClearedAtStripeDeletion(t *testing.T) {
+	// Arrange: the card renewal was stopped for a switch to bitcoin; the
+	// period ended an hour ago and no bitcoin payment arrived.
+	f := setupHouseFixture(t)
+	f.handler.SetFlags(lapseFlag{}) // OFF for the tenant
+	start, end := f.pastHouse(t)
+	_, err := f.db.Exec(`UPDATE entitlements SET renewal = 'prepaid', pending_provider = 'btcpay' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+
+	// Act: Stripe deletes the subscription at its period end.
+	deleted := f.houseSub("canceled", start, end)
+	f.post(t, "deleted", "customer.subscription.deleted", f.stripeHas(deleted))
+
+	// Assert: the house is cleared at once (data untouched) — what the
+	// page and the reminder warn about.
+	assert.False(t, f.hasHouse(t))
+	e := f.entitlement(t)
+	assert.NotNil(t, e.LapsedAt)
+}
+
+func TestSwitchToBitcoin_FlagOn_UnpaidSwitchKeptForGrace(t *testing.T) {
+	f := setupHouseFixture(t)
+	f.handler.SetFlags(lapseFlag{f.tenantID: true})
+	start, end := f.pastHouse(t)
+	_, err := f.db.Exec(`UPDATE entitlements SET renewal = 'prepaid', pending_provider = 'btcpay' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+
+	f.post(t, "deleted", "customer.subscription.deleted", f.stripeHas(f.houseSub("canceled", start, end)))
+
+	assert.True(t, f.hasHouse(t), "the lapse job decides after the grace")
+	assert.Nil(t, f.entitlement(t).LapsedAt)
+}

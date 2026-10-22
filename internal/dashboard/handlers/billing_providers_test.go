@@ -93,7 +93,7 @@ func TestCheckout_OtherProviderLive_409(t *testing.T) {
 
 	assert.ErrorIs(t, err, payments.ErrOtherProviderLive)
 	w := httptest.NewRecorder()
-	assert.True(t, refusedForProvider(w, err))
+	assert.True(t, refusedForProvider(w, nil, err))
 	assert.Equal(t, http.StatusConflict, w.Code)
 	assert.Equal(t, "other_provider_live", w.Header().Get("X-Error-Code"))
 	assert.Zero(t, fb.liveAsked)

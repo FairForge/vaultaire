@@ -115,8 +115,11 @@ func (r *PaymentRemindersRunner) RunOnce(ctx context.Context) (PaymentRemindersR
 			continue
 		}
 		res.Candidates++
-		if (d.Step == payments.StepInGrace || d.Step == payments.StepLastDay) &&
-			(r.Flags == nil || !r.Flags.Enabled(payments.FlagEntitlementLapse, d.TenantID)) {
+		lapseOn := r.Flags != nil && r.Flags.Enabled(payments.FlagEntitlementLapse, d.TenantID)
+		// RP31-7: with the flag off a Stripe house ends at Stripe's deletion
+		// on the date — the copy says so, never a grace period.
+		d.NoGrace = !lapseOn && d.Provider == payments.ProviderStripe
+		if (d.Step == payments.StepInGrace || d.Step == payments.StepLastDay) && !lapseOn {
 			// RP24-2: the mail would announce an ending the lapse job only
 			// counts as would_clear while the flag is off. Not marked sent:
 			// the step goes out if the flag turns on inside its window.

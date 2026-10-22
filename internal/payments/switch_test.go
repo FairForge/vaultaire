@@ -18,11 +18,15 @@ type renewingProvider struct {
 	fakeProvider
 	stops, resumes int
 	stopErr        error
+	onStop         func()
 }
 
 func (r *renewingProvider) Renewal() Renewal { return RenewalAuto }
 func (r *renewingProvider) StopRenewal(context.Context, string) error {
 	r.stops++
+	if r.onStop != nil {
+		r.onStop()
+	}
 	return r.stopErr
 }
 func (r *renewingProvider) ResumeRenewal(context.Context, string) error {

@@ -41,6 +41,7 @@ var (
 	_ payments.Provider           = (*Provider)(nil)
 	_ payments.LockedCheckout     = (*Provider)(nil)
 	_ payments.InvoiceInvalidator = (*Provider)(nil)
+	_ payments.InvoiceCanceller   = (*Provider)(nil)
 )
 
 // New builds the provider over a complete Config. Readiness is Pending
@@ -431,14 +432,34 @@ func (p *Provider) Resize(ctx context.Context, tenantID string, o payments.Order
 	return payments.ResizeOutcome{RedirectURL: u}, nil
 }
 
-// InvalidateOpenInvoices marks every open (pending / processing) invoice
-// of the tenant Invalid at BTCPay (payments.InvoiceInvalidator — the portal
-// race withdraws a pending switch, docs/PAYMENTS.md § 4.1 step 5). Each
-// mark is audited billing.invoice_marked with the reason; BTCPay's
-// InvoiceInvalid delivery that follows moves our row (the fetched state).
-// A refused mark (a 4xx) is an Error and vaultaire_payment_webhook_total
-// {provider="btcpay",outcome="mark_refused"} (pages — RP30-4), another
-// failure an Error; neither fails the caller.
+// unpaidForInvalid reports whether the fetched invoice may be marked
+// Invalid: provably unpaid — New or Expired with a paidAmount of 0
+// (RP31-1). Processing is paid (a payment seen, not confirmed yet), a
+// partly-paid New or Expired invoice holds money, Settled and Invalid are
+// final: none of them is ours to invalidate. BTCPay 2.4.5 would let us
+// (InvoiceEntity.CanMarkInvalid = New|Processing|Expired) — the rule is
+// ours.
+func unpaidForInvalid(inv Invoice) (bool, error) {
+	paid, err := usdToCents(inv.PaidAmount)
+	if err != nil {
+		return false, fmt.Errorf("invoice %s: paidAmount: %w", inv.ID, err)
+	}
+	return (inv.Status == StatusNew || inv.Status == StatusExpired) && paid == 0, nil
+}
+
+// InvalidateOpenInvoices marks the tenant's open (pending / processing)
+// invoices Invalid at BTCPay (payments.InvoiceInvalidator — the portal
+// race withdraws a pending switch, docs/PAYMENTS.md § 4.1 step 5) — only
+// the ones BTCPay says are provably unpaid (unpaidForInvalid, each fetched
+// first): one that holds money is left to settle (its settle is an
+// implicit switch, which asserts the other provider's stop again) and is
+// counted vaultaire_payment_webhook_total{provider="btcpay",outcome=
+// "invalidate_skipped_paid"} with a Warn (RP31-1). Each mark is audited
+// billing.invoice_marked with the reason; BTCPay's InvoiceInvalid delivery
+// that follows moves our row (the fetched state, which credits anything
+// paid after the fetch). A fetch that fails marks nothing; a refused mark
+// (a 4xx) is an Error and outcome mark_refused (pages — RP30-4), another
+// failure an Error; none fails the caller.
 func (p *Provider) InvalidateOpenInvoices(ctx context.Context, tenantID, reason string) (int, error) {
 	if p.db == nil {
 		return 0, nil
@@ -466,20 +487,98 @@ func (p *Provider) InvalidateOpenInvoices(ctx context.Context, tenantID, reason 
 	}
 	marked := 0
 	for _, id := range ids {
-		if _, err := p.client.MarkStatus(ctx, id, StatusInvalid); err != nil {
-			if IsPermanent(err) {
-				payments.CountWebhook(payments.ProviderBTCPay, payments.WebhookMarkRefused)
-			}
-			p.logger.Error("btcpay: an open invoice could not be marked Invalid — mark it by hand in BTCPay",
+		inv, err := p.client.GetInvoice(ctx, id)
+		if err != nil {
+			p.logger.Error("btcpay: an open invoice could not be read, so it is not marked Invalid — check it in BTCPay",
 				zap.String("tenant", tenantID), zap.String("invoice", id), zap.String("reason", reason), zap.Error(err))
 			continue
 		}
+		unpaid, err := unpaidForInvalid(inv)
+		if err != nil || !unpaid {
+			payments.CountWebhook(payments.ProviderBTCPay, payments.WebhookInvalidateSkippedPaid)
+			p.logger.Warn("btcpay: an open invoice holds a payment — left to settle, not marked Invalid",
+				zap.String("tenant", tenantID), zap.String("invoice", id), zap.String("status", inv.Status),
+				zap.String("paid", inv.PaidAmount), zap.String("reason", reason), zap.Error(err))
+			continue
+		}
+		if !p.markInvalid(ctx, tenantID, id, reason, "payments") {
+			continue
+		}
 		marked++
-		audit.Record(ctx, p.db, audit.Entry{TenantID: tenantID, EventType: "billing", Action: "billing.invoice_marked",
-			Resource: "btcpay-invoice:" + id, Metadata: map[string]any{"tenant": tenantID, "actor": "payments",
-				"invoice": id, "status": StatusInvalid, "reason": reason}})
 	}
 	return marked, nil
+}
+
+// markInvalid marks one invoice Invalid at BTCPay and audits it; false
+// (logged, a refusal counted mark_refused) when BTCPay did not.
+func (p *Provider) markInvalid(ctx context.Context, tenantID, id, reason, actor string) bool {
+	if _, err := p.client.MarkStatus(ctx, id, StatusInvalid); err != nil {
+		if IsPermanent(err) {
+			payments.CountWebhook(payments.ProviderBTCPay, payments.WebhookMarkRefused)
+		}
+		p.logger.Error("btcpay: an open invoice could not be marked Invalid — mark it by hand in BTCPay",
+			zap.String("tenant", tenantID), zap.String("invoice", id), zap.String("reason", reason), zap.Error(err))
+		return false
+	}
+	audit.Record(ctx, p.db, audit.Entry{TenantID: tenantID, EventType: "billing", Action: "billing.invoice_marked",
+		Resource: "btcpay-invoice:" + id, Metadata: map[string]any{"tenant": tenantID, "actor": actor,
+			"invoice": id, "status": StatusInvalid, "reason": reason}})
+	return true
+}
+
+// ReasonCustomerCancel is the reason of an invoice the customer withdrew
+// from the crypto_invoice_open page (RP31-5).
+const ReasonCustomerCancel = "customer_cancel"
+
+// CancelUnpaidInvoice withdraws an open invoice of the tenant nobody paid
+// (payments.InvoiceCanceller, RP31-5): our open row must be the tenant's
+// (else ErrNoSuchPayment), BTCPay's invoice provably unpaid
+// (unpaidForInvalid; else ErrInvoicePaid, an *OpenInvoiceError with its
+// date and Paid set — it is left to settle), then it
+// is marked Invalid at BTCPay and — under the tenant's entitlement lock —
+// our row is closed (invalid) at once, so the card checkout's guard lets
+// the customer through without waiting for BTCPay's delivery. Audited
+// billing.invoice_marked, reason customer_cancel. A payment that reaches
+// the invoice after the fetch is credited by the InvoiceInvalid delivery
+// (apply's StatusInvalid branch).
+func (p *Provider) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID, actor string) error {
+	if p.db == nil {
+		return errors.New("btcpay: no database")
+	}
+	open, err := payments.OpenInvoiceOf(ctx, p.db, tenantID, payments.ProviderBTCPay, invoiceID)
+	if err != nil {
+		return err
+	}
+	inv, err := p.client.GetInvoice(ctx, invoiceID)
+	if err != nil {
+		return fmt.Errorf("read invoice %s: %w: %w", invoiceID, payments.ErrProviderUnavailable, err)
+	}
+	unpaid, err := unpaidForInvalid(inv)
+	if err != nil {
+		return err
+	}
+	if !unpaid {
+		payments.CountWebhook(payments.ProviderBTCPay, payments.WebhookInvalidateSkippedPaid)
+		open.Paid = true
+		return fmt.Errorf("invoice %s is %s with %s paid: %w", invoiceID, inv.Status, inv.PaidAmount, open)
+	}
+	if !p.markInvalid(ctx, tenantID, invoiceID, ReasonCustomerCancel, actor) {
+		return fmt.Errorf("mark invoice %s invalid: %w", invoiceID, payments.ErrProviderUnavailable)
+	}
+	return payments.InTx(ctx, p.db, func(tx *sql.Tx) error {
+		if err := payments.Lock(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		if _, err := payments.Invalidate(ctx, tx, payments.ProviderBTCPay, invoiceID); err != nil {
+			return err
+		}
+		// An expired row is closed for the guard too.
+		if _, err := tx.ExecContext(ctx, `UPDATE payments SET status = 'invalid'
+			 WHERE provider = 'btcpay' AND provider_id = $1 AND status = 'expired'`, invoiceID); err != nil {
+			return fmt.Errorf("close expired invoice %s: %w", invoiceID, err)
+		}
+		return nil
+	})
 }
 
 // StopRenewal: nothing renews a prepaid house by itself.
