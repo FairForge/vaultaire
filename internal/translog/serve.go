@@ -116,7 +116,7 @@ func write(w http.ResponseWriter, contentType, cache string, b []byte) {
 	w.Header().Set("Cache-Control", cache)
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(b)
+	_, _ = w.Write(b) // #nosec G705 -- a signed note (text/plain) or tile bytes (octet-stream) under nosniff, never HTML
 }
 
 // MemorySource serves a Memory log, signing a checkpoint of its current
