@@ -190,7 +190,7 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 		return fmt.Errorf("subscription %s of tenant %s: %w", ref, tenantID, payments.ErrRefGone)
 	}
 	if err != nil {
-		return fmt.Errorf("read subscription %s: %w", ref, err)
+		return fmt.Errorf("read subscription %s: %w", ref, refusedOr(err))
 	}
 	switch {
 	case sub.Status == stripe.SubscriptionStatusCanceled || sub.Status == stripe.SubscriptionStatusIncompleteExpired:
@@ -199,7 +199,7 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 		sub.Status == stripe.SubscriptionStatusIncomplete:
 		if _, err := subscription.Cancel(ref, &stripe.SubscriptionCancelParams{Params: stripe.Params{Context: ctx},
 			InvoiceNow: stripe.Bool(false), Prorate: stripe.Bool(false)}); err != nil {
-			return fmt.Errorf("cancel unpaid subscription %s (%s): %w", ref, sub.Status, err)
+			return fmt.Errorf("cancel unpaid subscription %s (%s): %w", ref, sub.Status, refusedOr(err))
 		}
 		s.logger.Warn("stripe: a subscription whose period was never paid is cancelled now — the house is paid another way",
 			zap.String("tenant", tenantID), zap.String("subscription", ref), zap.String("status", string(sub.Status)))
@@ -208,9 +208,26 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 		return nil
 	}
 	if _, err := subscription.Update(ref, renewalParams(ctx, true)); err != nil {
-		return fmt.Errorf("set cancel_at_period_end on %s: %w", ref, err)
+		return fmt.Errorf("set cancel_at_period_end on %s: %w", ref, refusedOr(err))
 	}
 	return nil
+}
+
+// refusedOr marks a PERMANENT Stripe answer — a 4xx other than 404 (gone,
+// handled by the caller), 408, 409 (an idempotency / lock conflict) and
+// 429 — as payments.ErrProviderRefused (RP33-3: SwitchToPrepaid reverts
+// only on it; a 5xx, a timeout or no answer leaves the stop to the
+// renewal_stops job).
+func refusedOr(err error) error {
+	var se *stripe.Error
+	if errors.As(err, &se) && se.HTTPStatusCode >= 400 && se.HTTPStatusCode < 500 {
+		switch se.HTTPStatusCode {
+		case http.StatusNotFound, http.StatusRequestTimeout, http.StatusConflict, http.StatusTooManyRequests:
+		default:
+			return fmt.Errorf("%w: %w", payments.ErrProviderRefused, err)
+		}
+	}
+	return err
 }
 
 // Cancel cancels the tenant's subscription now (cancelRef: idempotent). A

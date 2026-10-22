@@ -3,6 +3,7 @@ package payments
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,13 +20,41 @@ type renewingProvider struct {
 	stops, resumes int
 	stopErr        error
 	onStop         func()
+	// stopErrOnce fails the next stop only; panicOnStop dies inside it (a
+	// process killed mid-call); refs are the references stopped by name;
+	// ctxErrAtStop is the call context's state after onStop ran.
+	stopErrOnce  error
+	panicOnStop  bool
+	refs         []string
+	ctxErrAtStop error
 }
 
 func (r *renewingProvider) Renewal() Renewal { return RenewalAuto }
-func (r *renewingProvider) StopRenewal(context.Context, string) error {
+func (r *renewingProvider) StopRenewal(ctx context.Context, _ string) error {
+	return r.stop(ctx)
+}
+
+// StopRenewalRef makes the fake a RefRenewalStopper, as Stripe is.
+func (r *renewingProvider) StopRenewalRef(ctx context.Context, _, ref string) error {
+	if err := r.stop(ctx); err != nil {
+		return err
+	}
+	r.refs = append(r.refs, ref)
+	return nil
+}
+
+func (r *renewingProvider) stop(ctx context.Context) error {
 	r.stops++
+	if r.panicOnStop {
+		panic("process killed during the provider call")
+	}
 	if r.onStop != nil {
 		r.onStop()
+	}
+	r.ctxErrAtStop = ctx.Err()
+	if err := r.stopErrOnce; err != nil {
+		r.stopErrOnce = nil
+		return err
 	}
 	return r.stopErr
 }
@@ -97,7 +126,7 @@ func TestSwitchToCrypto_Refusals(t *testing.T) {
 	_, err = SwitchToPrepaid(ctx, off, f.tenantID, ProviderBTCPay, "customer")
 	assert.ErrorIs(t, err, ErrProviderDisabled)
 	// Stripe refuses the stop: nothing written.
-	stripe.stopErr = assert.AnError
+	stripe.stopErr = fmt.Errorf("%w: %w", ErrProviderRefused, assert.AnError) // a permanent refusal reverts (RP33-3)
 	_, err = SwitchToPrepaid(ctx, r, f.tenantID, ProviderBTCPay, "customer")
 	require.Error(t, err)
 	assert.Equal(t, RenewalAuto, f.entitlement(t).Renewal)

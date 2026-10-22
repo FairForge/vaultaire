@@ -395,13 +395,20 @@ func overpaidCreditID(invoice string) string { return "overpaid:" + invoice }
 // 5.00 on a half) — never from the crypto due, which grows by a network
 // fee once a first partial payment arrived (networkFeeMode
 // MultiplePaymentsOnly), so a customer paying in two transactions is not
-// held to more than the invoice.
+// held to more than the invoice. paidAmount counts a payment the moment it
+// is seen; what becomes VALUE without BTCPay's own Settled — a credit, a
+// paid-late mark — is the confirmed part of it (confirmedCents, RP33-2):
+// an unconfirmed payment can still be double-spent away.
 func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row payments.Opened, inv Invoice, pms []PaymentMethod) error {
 	now := p.now().UTC()
 	pm := btcMethod(pms)
 	paid, err := usdToCents(inv.PaidAmount)
 	if err != nil {
 		return fmt.Errorf("invoice %s: paidAmount: %w", inv.ID, err)
+	}
+	confirmed, err := confirmedCents(paid, pms)
+	if err != nil {
+		return fmt.Errorf("invoice %s: confirmed amount: %w", inv.ID, err)
 	}
 	switch inv.Status {
 	case StatusSettled:
@@ -464,11 +471,14 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 				zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.String("row_status", row.Status))
 			return nil
 		}
-		// An expired invoice whose payments reached its amount was paid late
-		// (§ 3.3; the lab: Expired/PaidLate — a full payment inside the
-		// window makes it Processing): mark it Settled; BTCPay's
-		// InvoiceSettled{manuallyMarked} that follows grants it.
-		if paid > 0 && paid >= row.AmountCents {
+		// An expired invoice whose CONFIRMED payments reached its amount was
+		// paid late (§ 3.3; the lab: Expired/PaidLate — a full payment
+		// inside the window makes it Processing): mark it Settled; BTCPay's
+		// InvoiceSettled{manuallyMarked} that follows grants it. A late
+		// payment seen but not confirmed waits (RP33-2): the
+		// InvoicePaymentSettled BTCPay sends when it confirms fetches the
+		// invoice again and lands here with it confirmed.
+		if confirmed > 0 && confirmed >= row.AmountCents {
 			if _, err := p.client.MarkStatus(ctx, inv.ID, StatusSettled); err != nil {
 				if IsPermanent(err) {
 					// 422 (not in availableStatusesForManualMarking), 403 (the
@@ -486,9 +496,10 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		if _, err := payments.Expire(ctx, tx, payments.ProviderBTCPay, inv.ID, paid > 0); err != nil {
 			return err
 		}
-		// Never a partial grant (§ 3.4): what arrived is a credit (it tracks
-		// a late partial payment too).
-		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), paid,
+		// Never a partial grant (§ 3.4): what arrived AND confirmed is a
+		// credit (it tracks a late partial payment too — each confirmation
+		// is an InvoicePaymentSettled that sets it again).
+		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), confirmed,
 			"partial payment of expired invoice "+inv.ID, now)
 		a.credit = d
 		return err
@@ -506,11 +517,13 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 			return err
 		}
 		// Money on an Invalid invoice is never lost (RP31-1 b): what arrived
-		// — paid before a mark, or after it — is a credit, as an expired
-		// invoice's partial payment; never a grant. SetCredit sets the
-		// invoice's one credit row to the total, so a redelivery credits it
-		// once.
-		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), paid,
+		// and CONFIRMED — paid before a mark, or after it — is a credit, as
+		// an expired invoice's partial payment; never a grant. An
+		// unconfirmed payment is not (RP33-2: BTCPay's own Invalid is "the
+		// monitoring window passed without confirmation" — a payment that
+		// may be double-spent back). SetCredit sets the invoice's one credit
+		// row to the total, so a redelivery credits it once.
+		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), confirmed,
 			"payment on invalid invoice "+inv.ID, now)
 		a.credit = d
 		return err

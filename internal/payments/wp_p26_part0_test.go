@@ -3,7 +3,6 @@ package payments
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -66,7 +65,7 @@ func TestSwitchToPrepaid_StripeRefuses_RowReverted(t *testing.T) {
 		return Grant(context.Background(), tx, f.tenantID, Order{Std: 1, Period: PeriodMonthly}, pt, ProviderStripe, "sub_r", RenewalAuto)
 	})
 	r, stripe := f.switchRegistry(t, true)
-	stripe.stopErr = errors.New("stripe: 500")
+	stripe.stopErr = fmt.Errorf("stripe: 400 resource_invalid: %w", ErrProviderRefused)
 
 	// Act
 	_, err := SwitchToPrepaid(context.Background(), r, f.tenantID, ProviderBTCPay, "customer")
@@ -80,6 +79,8 @@ func TestSwitchToPrepaid_StripeRefuses_RowReverted(t *testing.T) {
 	assert.True(t, pt.Equal(e.PaidThrough))
 	assert.Empty(t, f.pendingProvider(t))
 	assert.Zero(t, f.auditCount(t, "billing.provider_switch_requested"))
+	_, found := f.stopRow(t, "sub_r")
+	assert.False(t, found, "the reverted switch owes no stop (RP33-3)")
 }
 
 func TestSwitchToPrepaid_StripeRefuses_ConcurrentChangeKept(t *testing.T) {
@@ -92,7 +93,7 @@ func TestSwitchToPrepaid_StripeRefuses_ConcurrentChangeKept(t *testing.T) {
 		return Grant(context.Background(), tx, f.tenantID, Order{Std: 1, Period: PeriodMonthly}, pt, ProviderStripe, "sub_k", RenewalAuto)
 	})
 	r, stripe := f.switchRegistry(t, true)
-	stripe.stopErr = errors.New("stripe: 500")
+	stripe.stopErr = fmt.Errorf("stripe: 400 resource_invalid: %w", ErrProviderRefused)
 	stripe.onStop = func() {
 		_, err := f.db.Exec(`UPDATE entitlements SET pending_provider = NULL, renewal = 'prepaid' WHERE tenant_id = $1`, f.tenantID)
 		require.NoError(t, err)

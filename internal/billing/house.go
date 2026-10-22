@@ -13,6 +13,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stripe/stripe-go/v75"
+	portalconfig "github.com/stripe/stripe-go/v75/billingportal/configuration"
 	checkoutsession "github.com/stripe/stripe-go/v75/checkout/session"
 	"github.com/stripe/stripe-go/v75/price"
 	"github.com/stripe/stripe-go/v75/subscription"
@@ -157,6 +158,42 @@ func (stripePrices) Get(ctx context.Context, id string) (*stripe.Price, error) {
 	return price.Get(id, params)
 }
 
+// portalFetcher answers the customer portal's default configuration — the
+// one CreateBillingPortalSession opens (it names no configuration). A
+// priceFetcher that also implements it (stripePrices does; the tests'
+// fakes may) has the portal asserted with the prices (RP33-9).
+type portalFetcher interface {
+	DefaultPortalConfiguration(ctx context.Context) (*stripe.BillingPortalConfiguration, error)
+}
+
+// DefaultPortalConfiguration lists the configuration with is_default=true
+// (stripe-go v75.11.0 billingportal/configuration.List,
+// BillingPortalConfigurationListParams.IsDefault; nil when the portal was
+// never configured — no session can be opened then either).
+func (stripePrices) DefaultPortalConfiguration(ctx context.Context) (*stripe.BillingPortalConfiguration, error) {
+	params := &stripe.BillingPortalConfigurationListParams{IsDefault: stripe.Bool(true)}
+	params.Context = ctx
+	it := portalconfig.List(params)
+	if it.Next() {
+		return it.BillingPortalConfiguration(), nil
+	}
+	return nil, it.Err()
+}
+
+// checkPortal refuses a portal that lets a customer change a subscription's
+// plan, quantity or interval (features.subscription_update.enabled —
+// stripe-go v75.11.0 BillingPortalConfigurationFeaturesSubscriptionUpdate
+// .Enabled). Such a change bills an invoice with billing_reason
+// subscription_update, which the ledger files as a resize and the
+// double-period detector skips (RP33-9): it is safe only while the portal
+// cannot make one. Our own resize goes through the dashboard.
+func checkPortal(cfg *stripe.BillingPortalConfiguration) error {
+	if cfg == nil || cfg.Features == nil || cfg.Features.SubscriptionUpdate == nil || !cfg.Features.SubscriptionUpdate.Enabled {
+		return nil
+	}
+	return fmt.Errorf("customer portal configuration %s allows plan changes (features.subscription_update.enabled) — turn it off in the Stripe dashboard: Settings → Billing → Customer portal", cfg.ID)
+}
+
 // expected is the Stripe shape a house price must have.
 type expected struct {
 	interval  string
@@ -240,6 +277,18 @@ func VerifyHousePrices(ctx context.Context, fetch priceFetcher, ids HousePriceID
 		}
 		if err := checkPrice(p, r.id, expectedShape(r.line, r.period)); err != nil {
 			return fmt.Errorf("house prices: %s %s: %w", r.line, r.period, err)
+		}
+	}
+	if pf, ok := fetch.(portalFetcher); ok {
+		cfg, err := pf.DefaultPortalConfiguration(ctx)
+		if err != nil {
+			if transientPriceError(err) {
+				return fmt.Errorf("house prices: read the customer portal configuration: %w: %w", ErrPricesUnreachable, err)
+			}
+			return fmt.Errorf("house prices: read the customer portal configuration (the key needs billing portal read): %w", err)
+		}
+		if err := checkPortal(cfg); err != nil {
+			return fmt.Errorf("house prices: %w", err)
 		}
 	}
 	return nil

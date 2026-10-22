@@ -1,0 +1,45 @@
+{
+ "id": "Mzi1Jrcr9PcioRFnE6p2BK",
+ "storeId": "HFK8V2kXejMrMJdHZbA1ooTkUjeiUuk3XdT9yULGyeHK",
+ "amount": "10",
+ "paidAmount": "10.00",
+ "checkoutLink": "http://127.0.0.1:23001/i/Mzi1Jrcr9PcioRFnE6p2BK",
+ "status": "Expired",
+ "additionalStatus": "PaidLate",
+ "monitoringExpiration": 1792763145,
+ "expirationTime": 1792676745,
+ "createdTime": 1792676685,
+ "availableStatusesForManualMarking": [
+  "Settled",
+  "Invalid"
+ ],
+ "archived": false,
+ "paymentMethods": [],
+ "type": "Standard",
+ "currency": "USD",
+ "metadata": {
+  "order": "1 TB standard yearly",
+  "purpose": "new",
+  "tenant_id": "t-lab",
+  "payment_id": "00000000-0000-0000-0000-000000000000"
+ },
+ "checkout": {
+  "speedPolicy": "MediumSpeed",
+  "paymentMethods": [
+   "BTC-CHAIN"
+  ],
+  "defaultPaymentMethod": null,
+  "expirationMinutes": 1,
+  "monitoringMinutes": 1440,
+  "paymentTolerance": 0.0,
+  "redirectURL": "https://stored.example/dashboard/billing",
+  "redirectAutomatically": true,
+  "defaultLanguage": null,
+  "lazyPaymentMethods": null
+ },
+ "receipt": {
+  "enabled": true,
+  "showQR": true,
+  "showPayments": true
+ }
+}

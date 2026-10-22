@@ -703,6 +703,13 @@ func HandleCancelCryptoInvoice(svc InvoiceCancelling, next map[string]http.Handl
 		case errors.Is(err, payments.ErrNoSuchPayment):
 			back("error", "That invoice is no longer open — nothing to cancel.")
 			return
+		case errors.Is(err, payments.ErrInvoiceCancelPending):
+			// BTCPay has it cancelled; our row closes with its delivery
+			// (RP33-8b). The checkout would still be refused until then.
+			logger.Warn("crypto invoice cancelled at the provider, row closes with its webhook", zap.Error(err),
+				zap.String("tenant", sd.TenantID), zap.String("invoice", invoice))
+			back("info", "The bitcoin invoice was cancelled. This page updates within a minute or two — then choose card again.")
+			return
 		case err != nil:
 			logger.Error("cancel crypto invoice", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("invoice", invoice))
 			back("error", "The invoice couldn't be cancelled right now. Nothing was changed; please try again in a minute.")

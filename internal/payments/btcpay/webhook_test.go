@@ -323,8 +323,9 @@ func TestBTCPayWebhook_PaidLateInFull_MarksSettled(t *testing.T) {
 	f := newFixture(t).lab(t)
 	inv := f.openRow(t, "InvoiceReceivedPayment_late_full", payments.PurposeNew)
 
-	// Act: the late payment; then BTCPay's Settled{manuallyMarked}.
-	f.serve(t, "InvoiceReceivedPayment_late_full", false)
+	// Act: the late payment, confirmed (the fetched invoice: Expired/PaidLate,
+	// its payment Settled — RP33-2); then BTCPay's Settled{manuallyMarked}.
+	f.serve(t, "InvoicePaymentSettled_late_full", false)
 	require.Equal(t, http.StatusOK, f.deliver(t, "InvoiceReceivedPayment_late_full"))
 	marked := append([]string(nil), f.fake.marked...)
 	f.serve(t, "InvoiceSettled_late_full_marked", false)
@@ -344,7 +345,9 @@ func TestBTCPayWebhook_PaidLateInFull_MarksSettled(t *testing.T) {
 func TestBTCPayWebhook_PaidLateShort_Credit(t *testing.T) {
 	f := newFixture(t).lab(t)
 	inv := f.openRow(t, "InvoiceReceivedPayment_late_partial", payments.PurposeNew)
-	f.serve(t, "InvoiceReceivedPayment_late_partial", false)
+	// The short payment, confirmed (RP33-2: an unconfirmed one credits
+	// nothing — TestInvoiceExpired_UnconfirmedPartial_NoCredit).
+	f.serve(t, "InvoicePaymentSettled_late_partial", false)
 
 	require.Equal(t, http.StatusOK, f.deliver(t, "InvoiceReceivedPayment_late_partial"))
 

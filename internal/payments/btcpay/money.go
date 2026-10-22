@@ -47,3 +47,53 @@ func roundRat(v *big.Rat) int64 {
 	}
 	return q.Int64()
 }
+
+// confirmedCents is how much of an invoice's paidAmount (cents) is
+// CONFIRMED bitcoin (RP33-2): only a payment whose status is Settled is
+// value — Processing is seen, not confirmed (and a payment double-spent
+// before it confirms vanishes from the invoice). Over every payment method
+// of the invoice, each payment converted at its method's rate (USD/BTC):
+//
+//	confirmed = max(0, min(paidAmount − Σ value×rate of the payments not Settled (Processing),
+//	                       Σ value×rate of the Settled payments))
+//
+// paidAmount is BTCPay's own net figure (a second payment's network fee —
+// networkFeeMode MultiplePaymentsOnly — counts toward nothing), so the
+// first term is never more than the confirmed part of it and the second
+// never more than the Settled payments are worth; when every payment is
+// Settled the first term is paidAmount itself. Invalid payments are not in
+// paidAmount and are skipped. Rounded half up once per sum. The lab:
+// 0.0001181 BTC × 84675 = 10.0001 → 1000 cents Settled, 0 while it was
+// Processing.
+func confirmedCents(paid int64, pms []PaymentMethod) (int64, error) {
+	settled, unconfirmed := new(big.Rat), new(big.Rat)
+	for _, pm := range pms {
+		rate, err := parseDecimal(pm.Rate)
+		if err != nil {
+			return 0, fmt.Errorf("rate of %s: %w", pm.PaymentMethodID, err)
+		}
+		for _, pay := range pm.Payments {
+			v, err := parseDecimal(pay.Value)
+			if err != nil {
+				return 0, fmt.Errorf("payment %s value: %w", pay.ID, err)
+			}
+			v.Mul(v, rate)
+			switch pay.Status {
+			case PaymentSettled:
+				settled.Add(settled, v)
+			case PaymentInvalid:
+			default:
+				unconfirmed.Add(unconfirmed, v)
+			}
+		}
+	}
+	hundred := big.NewRat(100, 1)
+	c := paid - roundRat(unconfirmed.Mul(unconfirmed, hundred))
+	if s := roundRat(settled.Mul(settled, hundred)); s < c {
+		c = s
+	}
+	if c < 0 {
+		c = 0
+	}
+	return c, nil
+}

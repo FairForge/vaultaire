@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,9 @@ type cancellingBitcoin struct {
 	db      *sql.DB
 	paid    bool
 	cancels []string
+	// closeFails: BTCPay accepted the mark, then our transaction failed
+	// (RP33-8b) — the webhook closes the row later.
+	closeFails bool
 }
 
 func (c *cancellingBitcoin) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID, _ string) error {
@@ -41,6 +45,9 @@ func (c *cancellingBitcoin) CancelUnpaidInvoice(ctx context.Context, tenantID, i
 	if c.paid {
 		open.Paid = true
 		return open
+	}
+	if c.closeFails {
+		return fmt.Errorf("close invoice %s: %w", invoiceID, payments.ErrInvoiceCancelPending)
 	}
 	_, err = c.db.ExecContext(ctx, `UPDATE payments SET status = 'invalid' WHERE provider = 'btcpay' AND provider_id = $1`, invoiceID)
 	return err

@@ -153,7 +153,7 @@ func TestBTCPayWebhook_MarkStatus422_200Counted(t *testing.T) {
 	// transition not in availableStatusesForManualMarking — permanent).
 	f := newFixture(t).lab(t)
 	inv := f.openRow(t, "InvoiceReceivedPayment_late_full", payments.PurposeNew)
-	f.serve(t, "InvoiceReceivedPayment_late_full", false)
+	f.serve(t, "InvoicePaymentSettled_late_full", false) // confirmed (RP33-2)
 	f.fake.mu.Lock()
 	f.fake.markErr = http.StatusUnprocessableEntity
 	f.fake.mu.Unlock()
