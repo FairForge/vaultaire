@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/stripe/stripe-go/v75"
 	"go.uber.org/zap"
 )
 
@@ -118,4 +120,14 @@ func TestPortalUncancel_AfterDurableSwitch_WithdrawsTheStop(t *testing.T) {
 	stops.mu.Lock()
 	defer stops.mu.Unlock()
 	assert.Empty(t, stops.refs, "Stripe is not told to stop a renewal the customer just re-enabled")
+}
+
+// RP33-3: only a permanent Stripe answer reverts a switch.
+func TestRefusedOr_PermanentOnlyForA4xx(t *testing.T) {
+	for code, permanent := range map[int]bool{400: true, 401: true, 403: true, 402: true,
+		404: false, 408: false, 409: false, 429: false, 500: false, 502: false, 0: false} {
+		err := refusedOr(&stripe.Error{HTTPStatusCode: code, Msg: "fake"})
+		assert.Equal(t, permanent, errors.Is(err, payments.ErrProviderRefused), "HTTP %d", code)
+	}
+	assert.False(t, errors.Is(refusedOr(context.DeadlineExceeded), payments.ErrProviderRefused), "no answer is not a refusal")
 }

@@ -44,4 +44,17 @@ func TestConfirmedCents(t *testing.T) {
 		require.NoError(t, err, c.name)
 		assert.Equal(t, c.want, got, c.name)
 	}
+	// Never more than the Settled payments are worth, whatever paidAmount
+	// says (the second term).
+	got, err := confirmedCents(1500, load("InvoiceSettled_exact"))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1000), got)
+	// An Invalid (double-spent) payment counts for nothing either way.
+	got, err = confirmedCents(1000, []PaymentMethod{{Rate: "84675", Payments: []Payment{
+		{Value: "0.0001181", Status: PaymentInvalid}, {Value: "0.0001181", Status: PaymentSettled}}}})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1000), got)
+	// An undecodable rate is an error, never a guess.
+	_, err = confirmedCents(1000, []PaymentMethod{{Rate: "n/a", Payments: []Payment{{Value: "1", Status: PaymentSettled}}}})
+	assert.Error(t, err)
 }
