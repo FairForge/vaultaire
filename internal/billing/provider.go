@@ -17,7 +17,10 @@ import (
 // § 2.2): the dashboard and the deletion runner reach Stripe only through
 // this interface, via payments.Registry.
 
-var _ payments.Provider = (*StripeService)(nil)
+var (
+	_ payments.Provider          = (*StripeService)(nil)
+	_ payments.RefRenewalStopper = (*StripeService)(nil)
+)
 
 // NewUnconfiguredStripe is the provider registered when STRIPE_SECRET_KEY
 // is not set: never Ready (vaultaire_payment_provider_ready{provider=
@@ -162,6 +165,35 @@ func (s *StripeService) StopRenewal(ctx context.Context, tenantID string) error 
 // ResumeRenewal sets cancel_at_period_end = false.
 func (s *StripeService) ResumeRenewal(ctx context.Context, tenantID string) error {
 	return s.setRenewal(ctx, tenantID, false)
+}
+
+// StopRenewalRef sets cancel_at_period_end on the named subscription
+// (payments.RefRenewalStopper, WP-PAY-5): one the entitlement no longer
+// names because a BTCPay payment took the house. Read first, so a repeat is
+// free: already stopping = nil; missing, cancelled or expired =
+// payments.ErrRefGone. Never an immediate cancel — the period it was paid
+// for runs out.
+func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string) error {
+	if !s.configured {
+		return payments.ErrProviderUnconfigured
+	}
+	sub, err := s.subs().Get(ctx, ref)
+	if stripeMissing(err) {
+		return fmt.Errorf("subscription %s of tenant %s: %w", ref, tenantID, payments.ErrRefGone)
+	}
+	if err != nil {
+		return fmt.Errorf("read subscription %s: %w", ref, err)
+	}
+	switch {
+	case sub.Status == stripe.SubscriptionStatusCanceled || sub.Status == stripe.SubscriptionStatusIncompleteExpired:
+		return fmt.Errorf("subscription %s is %s: %w", ref, sub.Status, payments.ErrRefGone)
+	case sub.CancelAtPeriodEnd:
+		return nil
+	}
+	if _, err := subscription.Update(ref, renewalParams(ctx, true)); err != nil {
+		return fmt.Errorf("set cancel_at_period_end on %s: %w", ref, err)
+	}
+	return nil
 }
 
 // Cancel cancels the tenant's subscription now (cancelRef: idempotent). A

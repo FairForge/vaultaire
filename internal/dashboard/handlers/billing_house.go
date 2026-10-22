@@ -43,6 +43,8 @@ type HouseBilling interface {
 	StartCheckout(ctx context.Context, provider string, c payments.Checkout) (string, error)
 	Resize(ctx context.Context, tenantID string, o payments.Order) (payments.ResizeOutcome, error)
 	ManageURL(ctx context.Context, tenantID, returnURL string) (string, error)
+	// SwitchToPrepaid is "Switch to bitcoin at renewal" (WP-PAY-5 item 1).
+	SwitchToPrepaid(ctx context.Context, tenantID, to, actor string) (payments.Entitlement, error)
 }
 
 // BillingService is what the billing page needs: the house checkout, the
@@ -76,6 +78,11 @@ type HouseView struct {
 	CanRenew      bool
 	RenewLabel    string
 	RenewProvider string
+	// The switch offers (WP-PAY-5): SwitchToCrypto — Stripe renews and
+	// bitcoin is on ("Switch to bitcoin at renewal"); SwitchToCard — a
+	// prepaid house and card is on ("Switch to card"), its first charge on
+	// the paid date unless that is under 48 h away (SwitchToCardStartsNow).
+	SwitchToCrypto, SwitchToCard, SwitchToCardStartsNow bool
 
 	UsedStd, UsedVault       int64
 	UsedStdFmt, UsedVaultFmt string
@@ -102,6 +109,10 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 			data["HouseSentence"] = houseSentence(st)
 			if p, label := renewOffer(ctx, svc, tenantID, st); p != "" {
 				v.CanRenew, v.RenewProvider, v.RenewLabel = true, p, label
+			}
+			switchOffers(ctx, svc, tenantID, st, &v)
+			if v.CanRenew && v.RenewProvider == payments.ProviderStripe {
+				v.SwitchToCard = false // the Renew button is that same card checkout
 			}
 		}
 	}
@@ -172,6 +183,13 @@ func renewOffer(ctx context.Context, svc HouseBilling, tenantID string, st payme
 		return "", ""
 	}
 	e := st.Entitlement
+	if e.PendingProvider != "" {
+		// A switch the customer asked for (WP-PAY-5): the next period is paid
+		// the new way, from the date already paid.
+		if ok, _ := svc.Ready(ctx, tenantID, e.PendingProvider); ok {
+			return e.PendingProvider, "Pay the next " + periodNoun(e.Order.Period) + " in " + payWord(e.PendingProvider)
+		}
+	}
 	if ok, _ := svc.Ready(ctx, tenantID, e.Provider); ok {
 		provider = e.Provider
 	} else if enabled := svc.Enabled(ctx, tenantID); len(enabled) > 0 {
@@ -209,8 +227,17 @@ func houseSentence(st payments.Status) string {
 	renew := "renews automatically"
 	if e.Renewal == payments.RenewalPrepaid {
 		renew = "renewal stopped"
+		if e.Provider == payments.ProviderBTCPay || e.Provider == payments.ProviderManual {
+			renew = "renewal stopped (prepaid: you pay the next period here, before the date)"
+		}
 	}
 	s := fmt.Sprintf("Paid through %s via %s, %s.", e.PaidThrough.UTC().Format("2 Jan 2006"), via, renew)
+	if e.PendingProvider != "" && e.PendingProvider != e.Provider {
+		// WP-PAY-5: the switch the customer asked for.
+		s = fmt.Sprintf("Paid through %s via %s; its renewal is off — you chose to pay in %s from then on. The %s invoice opens here on %s and its period starts on the paid date.",
+			e.PaidThrough.UTC().Format("2 Jan 2006"), via, payWord(e.PendingProvider), payWord(e.PendingProvider),
+			e.PaidThrough.Add(-payments.ReminderLead).UTC().Format("2 Jan 2006"))
+	}
 	if st.InGrace {
 		s += fmt.Sprintf(" The date has passed: the house is kept until %s while payment catches up.", st.GraceEnds.UTC().Format("2 Jan 2006"))
 	}
@@ -480,6 +507,9 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 		co := payments.Checkout{
 			TenantID: sd.TenantID, Email: sd.Email, Order: st.Entitlement.Order, Purpose: payments.PurposeRenew,
 		}
+		if provider == st.Entitlement.PendingProvider {
+			co.Purpose = payments.PurposeSwitch // WP-PAY-5: the switch asked for
+		}
 		// A renew of a GRANTED row is a top-up: the first charge lands on
 		// the date already paid through (RP24-1; Stripe: trial_end). Inside
 		// payments.MinDeferredStart (48 h) the provider starts now, so the
@@ -523,7 +553,7 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 	}
 }
 
-// refusedForProvider answers the two provider refusals as 409 with the
+// refusedForProvider answers the provider refusals as 409 with the
 // page's message (docs/PAYMENTS.md § 2.3, § 2.5) — rendered in the
 // dashboard's error look (WP-PAY-3; the status and X-Error-Code are what
 // WP-PAY-2's tests pin) — and reports whether it did.
@@ -534,6 +564,14 @@ func refusedForProvider(w http.ResponseWriter, err error) bool {
 		code, title, msg = "provider_disabled", "This way of paying is switched off", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
 	case errors.Is(err, payments.ErrOtherProviderLive):
 		code, title, msg = "other_provider_live", "Your house is renewed another way", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
+	case errors.Is(err, payments.ErrCryptoInvoiceOpen):
+		until := "a day after it was opened"
+		var open *payments.OpenInvoiceError
+		if errors.As(err, &open) {
+			until = open.Until.UTC().Format("2 Jan 2006 15:04 UTC")
+		}
+		code, title, msg = "crypto_invoice_open", "A bitcoin invoice is still open", "A bitcoin invoice on your account can still be paid until "+until+
+			". Pay it, or wait until then, before paying by card — otherwise you could pay twice. Nothing was started or charged."
 	default:
 		return false
 	}

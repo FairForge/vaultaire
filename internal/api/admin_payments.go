@@ -22,12 +22,17 @@ import (
 //	                                                     Grant (no row — the body names the house) / Extend (a row)
 //	POST /api/v1/admin/tenants/{tenant_id}/entitlement   set paid_through and/or the house by hand
 //	POST /api/v1/admin/tenants/{tenant_id}/refunds       record a refund made outside; optionally shorten the date
+//	POST /api/v1/admin/payments/stripe/stop-renewals     WP-PAY-5 § 4.3: {dry_run: true by default} lists every Stripe
+//	POST /api/v1/admin/payments/stripe/resume-renewals   house renewing by itself (stop) / stopped by the bulk (resume);
+//	                                                     dry_run false = 202, the stripe_bulk_renewals job (409 while one runs)
 
 func (s *Server) registerAdminPaymentRoutes(r chi.Router) {
 	r.Get("/tenants/{tenant_id}/payments", s.requireAdmin(s.handleAdminTenantPayments))
 	r.Post("/tenants/{tenant_id}/payments", s.requireAdmin(s.handleAdminManualPayment))
 	r.Post("/tenants/{tenant_id}/entitlement", s.requireAdmin(s.handleAdminAdjustEntitlement))
 	r.Post("/tenants/{tenant_id}/refunds", s.requireAdmin(s.handleAdminRefund))
+	r.Post("/payments/stripe/stop-renewals", s.requireAdmin(s.handleBulkStopRenewals))
+	r.Post("/payments/stripe/resume-renewals", s.requireAdmin(s.handleBulkResumeRenewals))
 }
 
 // entitlementJSON is the record as the admin API and the dashboard show it.

@@ -130,6 +130,29 @@ type RefCanceller interface {
 	CancelRef(ctx context.Context, tenantID, ref string) error
 }
 
+// RefRenewalStopper is a Provider that can stop the renewal of one named
+// reference (a Stripe subscription the entitlement no longer names —
+// WP-PAY-5): cancel_at_period_end, never an immediate cancel. nil when the
+// provider no longer has it or it is already cancelled / stopped.
+type RefRenewalStopper interface {
+	StopRenewalRef(ctx context.Context, tenantID, ref string) error
+}
+
+// InvoiceInvalidator is a prepaid Provider that can mark the tenant's open
+// invoices Invalid at the provider (BTCPay MarkStatus) — the portal race
+// withdraws a pending switch with it (WP-PAY-5 item 2). marked = how many
+// were marked; a refused mark is the implementer's Error + counter, never
+// the caller's failure.
+type InvoiceInvalidator interface {
+	InvalidateOpenInvoices(ctx context.Context, tenantID, reason string) (marked int, err error)
+}
+
+// StopRun is what one pass over the pending renewal stops did.
+type StopRun struct {
+	Stopped, Failed, Unconfigured int
+	Errors                        []string `json:",omitempty"`
+}
+
 var (
 	// ErrUnknownProvider: no provider of that name is registered.
 	ErrUnknownProvider = errors.New("unknown payment provider")
@@ -294,7 +317,9 @@ func lockTimedOut(err error) bool {
 // the tenant's entitlement lock — the lock every grant takes, so a webhook
 // and a checkout cannot pass each other — it refuses ErrOtherProviderLive
 // when the tenant's granted house is renewed (renewal 'auto') by another
-// provider, then runs the provider's own StartCheckout (Stripe's
+// provider, refuses a provider that renews by itself (ErrCryptoInvoiceOpen)
+// while a prepaid invoice of the tenant can still settle, then runs the
+// provider's own StartCheckout (Stripe's
 // HasLiveSubscription is the second guard, for a second Stripe
 // subscription). The lock is held across the provider call, and waited
 // for at most checkoutLockTimeout (RP22-4).
@@ -328,6 +353,19 @@ func StartCheckout(ctx context.Context, r *Registry, tenantID, provider string, 
 			return fmt.Errorf("read entitlement of tenant %s: %w", tenantID, err)
 		case other != provider && Renewal(renewal) == RenewalAuto:
 			return fmt.Errorf("tenant %s is renewed by %s: %w", tenantID, other, ErrOtherProviderLive)
+		}
+		if p.Renewal() == RenewalAuto {
+			// WP-PAY-5 item 0 c: a provider that renews by itself is not
+			// started while a prepaid invoice may still settle — the settle
+			// would be an implicit switch (handled, but a page saying "pay
+			// it, or wait" is better than a stop after the fact).
+			open, err := openPrepaidInvoice(ctx, tx, tenantID, provider)
+			if err != nil {
+				return err
+			}
+			if open != nil {
+				return open
+			}
 		}
 		var u string
 		if lc, ok := p.(LockedCheckout); ok {

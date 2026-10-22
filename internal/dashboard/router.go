@@ -325,6 +325,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// WP-PAY-3: renew a prepaid or lapsed house by hand; the receipts
 		// (print-ready, from the ledger row, the session's tenant only).
 		dr.Post("/billing/renew", handlers.HandleRenewHouse(billingSvc, deps.DB, deps.BaseURL, deps.Logger))
+		dr.Post("/billing/switch", handlers.HandleSwitchProvider(billingSvc, deps.DB, deps.BaseURL, deps.Logger))
 		receiptTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates, "templates/customer/receipt.html"))
 		dr.Get("/billing/receipts/{id}", handlers.HandleReceipt(receiptTmpl, deps.DB, deps.hostSet().Legal(), deps.Logger))
 

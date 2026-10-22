@@ -62,3 +62,5 @@ go test ./internal/email/... -v -race
 ```
 
 Tests cover: log sender (asserts the body never reaches the log), rate limiting, Resend API mock, SMTP MIME building, template rendering, factory env routing.
+
+**WP-PAY-5 (Prompt 25):** `renewal_reminder.html` has a `SwitchTo` branch (a customer who asked to switch to bitcoin: the copy says so and the button is "Pay the next period in bitcoin"); `renewal_stopped.html` / `RenderRenewalStopped(RenewalStoppedMail{…, Resumed})` is the bulk stop (or resume) notice. Test `TestRenderRenewalReminder_SwitchOffer`.

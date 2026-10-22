@@ -145,6 +145,10 @@ func (s *Server) triggerJob(w http.ResponseWriter, r *http.Request, requested st
 	}
 	name := j.spec.Name
 	actor, _ := r.Context().Value(userIDKey).(string)
+	if j.spec.Manual {
+		http.Error(w, "this job is started by its own admin endpoint, never by the generic trigger", http.StatusBadRequest)
+		return
+	}
 
 	// The dry run: synchronous, under the job's lock, never recorded as a run.
 	if dry, _ := strconv.ParseBool(r.URL.Query().Get("dry_run")); dry {

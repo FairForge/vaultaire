@@ -94,11 +94,26 @@ type ReminderMail struct {
 	BaseURL, Email, House, PaidThrough, GraceEnds, RenewURL string
 	DaysLeft                                                int
 	InGrace, LastDay                                        bool
+	// SwitchTo names the way the customer chose to pay the next period
+	// ("bitcoin" — WP-PAY-5): the copy and the button offer it.
+	SwitchTo string
 }
 
 // RenderRenewalReminder renders one reminder step.
 func RenderRenewalReminder(d ReminderMail) (string, string, error) {
 	return render("renewal_reminder.html", d)
+}
+
+// RenewalStoppedMail is renewal_stopped.html's data (WP-PAY-5, the bulk
+// stop / resume of Stripe renewals): Resumed picks the resume copy.
+type RenewalStoppedMail struct {
+	BaseURL, Email, House, PaidThrough, BillingURL, Support string
+	Resumed                                                 bool
+}
+
+// RenderRenewalStopped renders the bulk stop (or resume) notice.
+func RenderRenewalStopped(d RenewalStoppedMail) (string, string, error) {
+	return render("renewal_stopped.html", d)
 }
 
 // LapsedMail is house_lapsed.html's data.

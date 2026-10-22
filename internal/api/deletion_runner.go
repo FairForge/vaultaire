@@ -595,7 +595,9 @@ func (r *AccountDeletionRunner) defer_(te TenantErasure, log *zap.Logger, stage 
 // bills the tenant (WP-PAY-2, docs/PAYMENTS.md § 2.3), read from the record
 // only (WP-PAY-7): the entitlement row names the provider, its reference
 // and whether it renews by itself, and payment_events names any Stripe
-// subscription the webhook acknowledged as an invalid house (RP22-3). Each
+// subscription the webhook acknowledged as an invalid house (RP22-3) and
+// any subscription a provider switch took the house from (renewal_stop,
+// WP-PAY-5 — pending ones renew by itself until stopped). Each
 // reference is cancelled once: a deletion_cancel row (payments.
 // MarkDeletionCancelled, written only after the provider answered) is
 // checked before calling, so a crash between the answer and the stamp only
@@ -629,6 +631,21 @@ func (r *AccountDeletionRunner) cancelSubscription(ctx context.Context, tenantID
 			continue
 		}
 		targets = append(targets, target{provider: payments.ProviderStripe, ref: ref, auto: true})
+	}
+	// WP-PAY-5 (RP30-2 b): a subscription the entitlement no longer names
+	// because a switch took the house (a renewal_stop row). Until its stop
+	// is confirmed it renews by itself (auto: an unconfigured provider
+	// defers the tenant); a stopped one is cancelled all the same — never a
+	// subscription we stopped knowing about. A gone one has nothing left.
+	stops, err := payments.RenewalStops(ctx, r.db, tenantID)
+	if err != nil {
+		return err
+	}
+	for _, s := range stops {
+		if s.Status == payments.RenewalStopGone || (len(targets) > 0 && targets[0].provider == s.Provider && targets[0].ref == s.Ref) {
+			continue
+		}
+		targets = append(targets, target{provider: s.Provider, ref: s.Ref, auto: s.Status == payments.RenewalStopPending})
 	}
 
 	for _, t := range targets {

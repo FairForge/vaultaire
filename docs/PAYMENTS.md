@@ -761,6 +761,48 @@ whose period still runs and whose `pending_provider` is unset. "Without any
 paying customer losing storage" = every date is honoured; a customer who
 does not pay anyone loses the **house** (quota) after grace, never a byte.
 
+### 4.4 As built (WP-PAY-5, Stage 1a Prompt 25) — where the build departs
+
+- **Implicit switch (RP30-2, item 0).** A BTCPay invoice settles up to 24 h
+  after it opened, after a Stripe checkout that passed the guard: a prepaid
+  settle over a house another provider renews `auto` is an **implicit
+  switch** — the BTC period appended from `paid_through`, the house named
+  btcpay/prepaid, and the old subscription written into a `renewal_stop`
+  row (`payment_events`) **in the same transaction**. The Stripe stop
+  (`cancel_at_period_end`) is called **after the commit** (and every 10 min
+  by the `renewal_stops` job until confirmed), never before the grant: a
+  Stripe outage must not turn a BTCPay delivery into a 5xx that stalls the
+  store's queue (RP30-4). Until confirmed the row keeps the subscription
+  findable — the deletion runner cancels it; the Stripe webhook never lets
+  it take the house back (a granting event of it is not applied; an
+  un-cancel re-asserts the stop). `isCurrentSubscription` deliberately does
+  NOT name it: its clearing events must not clear the house that replaced
+  it. Rule `RenewalStopsPending` (> 0 for 1 h).
+- **Checkout side (item 0 c).** A provider that renews by itself is refused
+  409 `crypto_invoice_open` while a prepaid invoice of the tenant is
+  pending/processing or expired inside the 24 h monitoring window; the page
+  names the date it stops being payable.
+- **§ 4.1 step 5, a switch that already settled:** besides the detector,
+  the stop is **re-asserted** (prevention first; the detector stays the
+  backstop if Stripe bills anyway).
+- **§ 2.5 point 5, the detector:** an overlap on **both** bounds
+  (`other.end > this.start AND other.start < this.end`; "end > start" alone
+  would flag a later, non-overlapping prepaid period) and never a $0 row (a
+  trialing subscription's first invoice, a credit-covered order paid
+  nothing twice). Counted `vaultaire_payments_double_period_total{provider}`,
+  audited `billing.double_period`, mailed to the support address; rule
+  `PaymentDoublePeriod`.
+- **§ 4.3 resume:** only rows whose **last** renewal change was the bulk
+  stop (audit `reason = bulk`), period still running, no pending switch —
+  a customer who stopped their own renewal is never resumed by the owner.
+  Bulk = a manual job (`stripe_bulk_renewals`): dry run by default (200 +
+  the list), `dry_run:false` = 202, 409 while one runs; one audit row and
+  one mail (`renewal_stopped.html`) per tenant; never cancels a period.
+- **§ 4.2** is RP24-1's path with purpose `switch`: `trial_end =
+  paid_through` (≥ 48 h, else starts now and the page says the prepaid
+  days are forfeited); the completed trialing subscription flips the row to
+  stripe/auto, the date kept.
+
 ## 5. Accounts, privacy, abuse (Part E)
 
 - **Who may pay in crypto (F-25, recommendation)**: **every identified

@@ -101,6 +101,7 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	var invalid error
 	var invalidSub *stripe.Subscription
 	var granted payments.Granted
+	var uncancelled bool
 	if subID := invoiceSubscriptionID(inv); subID != "" && h.quotas != nil {
 		sub, err := h.fetchSubscription(ctx, subID)
 		switch {
@@ -110,23 +111,30 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		case err != nil:
 			return fmt.Errorf("fetch subscription %s of paid invoice %s: %w", subID, inv.ID, err)
 		default:
+			away, err := h.switchedAway(ctx, tenantID, sub)
+			if err != nil {
+				return err
+			}
 			if order, ok := h.stripe.HouseFromSubscription(sub); ok {
 				o := order
 				p.Order = &o
-				if sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing {
+				// A subscription a switch took the house from never takes it
+				// back (WP-PAY-5): the payment is recorded — and the
+				// double-period detector sees it — but nothing is granted.
+				if !away && (sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing) {
 					paidThrough := h.paidThrough(sub)
 					renewal := payments.RenewalAuto
 					if sub.CancelAtPeriodEnd {
 						renewal = payments.RenewalPrepaid
 					}
 					grant = func(tx *sql.Tx) error {
-						g, err := payments.GrantRecorded(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
+						g, u, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub.ID, renewal)
 						if errors.Is(err, payments.ErrInvalidOrder) {
 							// Refused before any statement: the transaction is intact.
 							invalid, invalidSub = err, sub
 							return nil
 						}
-						granted = g
+						granted, uncancelled = g, u
 						return err
 					}
 				}
@@ -177,6 +185,9 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		h.houseInvalid(ctx, tenantID, invalidSub, *p.Order, invalid)
 	} else if grant != nil {
 		h.auditGrant(ctx, tenantID, granted, invoiceSubscriptionID(inv))
+		if uncancelled {
+			h.afterUncancel(ctx, tenantID, invoiceSubscriptionID(inv))
+		}
 	}
 	if settled.Newly && len(early) > 0 {
 		// After the commit: a failure here is not retried by Stripe (the
@@ -186,6 +197,13 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 			h.logger.Error("stripe webhook: refunds of a newly settled charge not recorded — record them by hand",
 				zap.String("tenant", tenantID), zap.String("invoice", inv.ID), zap.String("charge", chargeID), zap.Error(err))
 		}
+	}
+	if err := payments.ReportDoublePeriod(ctx, h.stripe.db, h.receipts, tenantID, settled); err != nil {
+		h.logger.Warn("stripe webhook: double period not mailed to the operator", zap.String("tenant", tenantID), zap.Error(err))
+	}
+	if settled.DoublePeriod != nil {
+		h.logger.Error("stripe webhook: the customer paid twice for overlapping dates — granted; refund one by hand",
+			zap.String("tenant", tenantID), zap.String("invoice", inv.ID), zap.String("other", settled.DoublePeriod.OtherProvider+":"+settled.DoublePeriod.OtherProviderID))
 	}
 	outcome := payments.OutcomeSettled
 	if !settled.Newly {

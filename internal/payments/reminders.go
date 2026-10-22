@@ -62,6 +62,9 @@ type DueReminder struct {
 	GraceEnds   time.Time
 	Order       Order
 	Provider    string
+	// PendingProvider: the provider the customer asked to switch to
+	// (WP-PAY-5) — the mail offers paying the next period that way.
+	PendingProvider string
 	// DaysLeft: until paid_through for the before-steps, until the end of
 	// grace for the grace steps (rounded up).
 	DaysLeft int
@@ -106,7 +109,7 @@ func daysUp(d time.Duration) int {
 func DueReminders(ctx context.Context, db *sql.DB, grace time.Duration, now time.Time) ([]DueReminder, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT e.tenant_id, COALESCE(t.email, ''), e.paid_through, e.std_tb, e.vault_tb, e.pin_hot_tb, e.period, e.provider,
-		       e.reminders_sent
+		       COALESCE(e.pending_provider, ''), e.reminders_sent
 		  FROM entitlements e JOIN tenants t ON t.id = e.tenant_id
 		 WHERE e.renewal = 'prepaid' AND e.lapsed_at IS NULL
 		   AND e.paid_through > $1::timestamptz - $2 * INTERVAL '1 second'
@@ -122,7 +125,7 @@ func DueReminders(ctx context.Context, db *sql.DB, grace time.Duration, now time
 		var d DueReminder
 		var period string
 		var sent []byte
-		if err := rows.Scan(&d.TenantID, &d.Email, &d.PaidThrough, &d.Order.Std, &d.Order.Vault, &d.Order.PinHot, &period, &d.Provider, &sent); err != nil {
+		if err := rows.Scan(&d.TenantID, &d.Email, &d.PaidThrough, &d.Order.Std, &d.Order.Vault, &d.Order.PinHot, &period, &d.Provider, &d.PendingProvider, &sent); err != nil {
 			return nil, fmt.Errorf("due reminders: scan: %w", err)
 		}
 		d.Order.Period = Period(period)

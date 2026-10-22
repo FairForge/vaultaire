@@ -122,6 +122,11 @@ func (s *Server) initMetrics() {
 		if s.entitlementLapse != nil && s.db != nil {
 			reg.MustRegister(newLapseSkippedCollector(s.db, s.entitlementLapse.JobName, s.logger))
 		}
+		// WP-PAY-5: subscriptions a provider switch took the house from whose
+		// stop is not confirmed (RenewalStopsPending).
+		if s.db != nil {
+			reg.MustRegister(payments.NewRenewalStopsCollector(s.db))
+		}
 		// WP-CAP-1: the vendor capacity gauges — the last backend_capacity
 		// run from job_runs.result and the backend_plans rows, on scrape.
 		if s.backendCapacity != nil && s.db != nil {

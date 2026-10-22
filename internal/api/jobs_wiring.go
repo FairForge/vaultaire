@@ -151,6 +151,13 @@ func (s *Server) registerJobs() {
 	if s.paymentReminders != nil {
 		s.jobs.Register(s.paymentReminders.spec())
 	}
+	if s.payments != nil && s.db != nil {
+		// WP-PAY-5: stops a provider switch has not had confirmed yet.
+		s.jobs.Register(renewalStopsSpec(s.payments))
+	}
+	if s.stripeBulk != nil {
+		s.jobs.Register(s.stripeBulk.spec())
+	}
 	if s.vaultParity != nil {
 		// Needs a free leg to write to; without one (a local build, a
 		// deployment with neither permafrost nor lyve) it is not a job of

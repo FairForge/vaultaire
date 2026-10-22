@@ -130,9 +130,11 @@ type applied struct {
 	granted *payments.Granted
 	settled *payments.Settled
 	marked  string // the invoice marked Settled by the paid-late automation
-	credit  int64  // the change in the tenant's credit
-	purpose string
-	invoice string
+	// switched: the grant took the house from another provider (WP-PAY-5).
+	switched *switched
+	credit   int64 // the change in the tenant's credit
+	purpose  string
+	invoice  string
 }
 
 // after counts, audits and mails what the committed delivery did.
@@ -150,10 +152,38 @@ func (a applied) after(ctx context.Context, p *Provider) {
 	if a.granted != nil {
 		payments.AuditGranted(ctx, p.db, a.tenantID, *a.granted, webhookActor)
 	}
+	if sw := a.switched; sw != nil {
+		audit.Record(ctx, p.db, audit.Entry{TenantID: a.tenantID, EventType: "billing", Action: "billing.provider_switched",
+			Resource: "tenant:" + a.tenantID, Metadata: map[string]any{"tenant": a.tenantID, "actor": webhookActor,
+				"from": sw.from, "to": payments.ProviderBTCPay, "previous_ref": sw.ref, "invoice": a.invoice, "implicit": sw.implicit}})
+		if sw.implicit {
+			p.logger.Warn("btcpay: a payment settled over a house another provider renews by itself — implicit switch, its renewal is being stopped",
+				zap.String("tenant", a.tenantID), zap.String("from", sw.from), zap.String("subscription", sw.ref), zap.String("invoice", a.invoice))
+			if p.stopper != nil {
+				// After the commit, bounded, best effort: the renewal_stops job
+				// retries what this does not finish.
+				sctx, cancel := payments.Detached(ctx)
+				run, err := p.stopper.StopPendingRenewals(sctx, a.tenantID)
+				cancel()
+				if err != nil || run.Failed > 0 || run.Unconfigured > 0 {
+					p.logger.Warn("btcpay: the other provider's renewal is not stopped yet — the renewal_stops job retries",
+						zap.String("tenant", a.tenantID), zap.String("subscription", sw.ref), zap.Error(err), zap.Strings("errors", run.Errors))
+				}
+			}
+		}
+	}
 	if a.marked != "" {
 		audit.Record(ctx, p.db, audit.Entry{TenantID: a.tenantID, EventType: "billing", Action: "billing.invoice_marked",
 			Resource: "btcpay-invoice:" + a.marked, Metadata: map[string]any{"tenant": a.tenantID, "actor": webhookActor,
 				"invoice": a.marked, "status": StatusSettled, "reason": "paid_late_in_full"}})
+	}
+	if a.settled != nil && a.settled.DoublePeriod != nil {
+		if err := payments.ReportDoublePeriod(ctx, p.db, p.receipts, a.tenantID, *a.settled); err != nil {
+			p.logger.Warn("btcpay: double period not mailed to the operator", zap.String("tenant", a.tenantID), zap.Error(err))
+		}
+		p.logger.Error("btcpay: the customer paid twice for overlapping dates — granted; refund one by hand",
+			zap.String("tenant", a.tenantID), zap.String("invoice", a.invoice),
+			zap.String("other", a.settled.DoublePeriod.OtherProvider+":"+a.settled.DoublePeriod.OtherProviderID))
 	}
 	if a.settled != nil && a.settled.Newly {
 		p.logger.Info("btcpay: payment recorded", zap.String("tenant", a.tenantID), zap.String("invoice", a.invoice),
@@ -392,7 +422,7 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		var start, end time.Time
 		var granted *payments.Granted
 		if row.Status != payments.StatusSettled && row.Status != payments.StatusRefunded {
-			s, e, g, err := p.grantSettled(ctx, tx, row, inv.ID)
+			s, e, g, err := p.grantSettled(ctx, tx, a, row, inv.ID)
 			if err != nil {
 				return err
 			}
@@ -483,12 +513,13 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 }
 
 // grantSettled applies a newly settled invoice's order.
-func (p *Provider) grantSettled(ctx context.Context, tx *sql.Tx, row payments.Opened, invoiceID string) (time.Time, time.Time, *payments.Granted, error) {
+func (p *Provider) grantSettled(ctx context.Context, tx *sql.Tx, a *applied, row payments.Opened, invoiceID string) (time.Time, time.Time, *payments.Granted, error) {
 	before, _ := payments.Get(ctx, tx, row.TenantID)
-	start, end, err := p.applyOrder(ctx, tx, row.TenantID, row.Purpose, *row.Order, invoiceID)
+	start, end, sw, err := p.applyOrder(ctx, tx, row.TenantID, row.Purpose, *row.Order, invoiceID)
 	if err != nil {
 		return start, end, nil, err
 	}
+	a.switched = sw
 	if row.Purpose == payments.PurposeResize {
 		return start, end, nil, nil
 	}

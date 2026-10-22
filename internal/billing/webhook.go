@@ -63,7 +63,17 @@ type WebhookHandler struct {
 	flags payments.FlagSource
 	// receipts mails the receipt of a NEWLY settled invoice (nil = none).
 	receipts ReceiptSender
+	// invoices marks a tenant's open prepaid invoices Invalid when the
+	// portal race withdraws a switch (nil = none; BTCPay in production).
+	invoices payments.InvoiceInvalidator
+	// stops asserts the stop of a subscription a switch took the house
+	// from (nil = the Stripe service itself; tests replace it).
+	stops payments.RefRenewalStopper
 }
+
+// SetInvoiceInvalidator wires the prepaid provider whose open invoices the
+// portal race invalidates (WP-PAY-5 item 2).
+func (h *WebhookHandler) SetInvoiceInvalidator(i payments.InvoiceInvalidator) { h.invoices = i }
 
 // SetFlags wires the flag source: with entitlement_lapse ON for a tenant a
 // terminal Stripe status stops the renewal and keeps the house — the date
@@ -588,15 +598,19 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 	}
 	switch sub.Status {
 	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue:
+		if away, err := h.switchedAway(ctx, tenantID, sub); err != nil || away {
+			return true, err
+		}
 		paidThrough := h.paidThrough(sub)
 		renewal := payments.RenewalAuto
 		if sub.CancelAtPeriodEnd {
 			renewal = payments.RenewalPrepaid // nobody will extend it
 		}
 		var granted payments.Granted
+		var uncancelled bool
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			g, err := payments.GrantRecorded(ctx, tx, tenantID, order, paidThrough, payments.ProviderStripe, sub.ID, renewal)
-			granted = g
+			g, u, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub.ID, renewal)
+			granted, uncancelled = g, u
 			return err
 		}); errors.Is(err, payments.ErrInvalidOrder) {
 			h.houseInvalid(ctx, tenantID, sub, order, err)
@@ -605,6 +619,9 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}
 		h.auditGrant(ctx, tenantID, granted, sub.ID)
+		if uncancelled {
+			h.afterUncancel(ctx, tenantID, sub.ID)
+		}
 		h.logger.Info("house granted",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID),
 			zap.Int("std_tb", order.Std), zap.Int("vault_tb", order.Vault), zap.Int("pin_hot_tb", order.PinHot),
