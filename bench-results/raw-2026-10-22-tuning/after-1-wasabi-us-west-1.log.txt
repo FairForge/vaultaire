@@ -1,0 +1,42 @@
+Host:      slc-after-1 (linux/amd64)
+Output:    after-1/wasabi-us-west-1.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] wasabi-us-west-1  (https://s3.us-west-1.wasabisys.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vaultaire
+  cold_dial_put_1kb        1433ms  p50=146ms p95=169ms p99=169ms
+  warm_put_4kb             4563ms     22 ops/s  p50=42ms p95=66ms p99=134ms
+  warm_get_4kb             3241ms     31 ops/s  p50=30ms p95=43ms p99=51ms
+  warm_head_4kb            1706ms     29 ops/s  p50=29ms p95=66ms p99=96ms
+  warm_copy_4kb             526ms     19 ops/s  p50=50ms p95=64ms p99=64ms
+  warm_delete_single       1354ms     22 ops/s  p50=42ms p95=51ms p99=89ms
+  delete_batch_100         1478ms     68 ops/s
+  list_100                  183ms  returned=100
+  list_prefix                37ms  returned=30
+  medium_put_1mb            550ms     9.1 MB/s  p50=68ms p95=288ms p99=288ms
+  medium_get_1mb            440ms    11.3 MB/s  p50=62ms p95=182ms p99=182ms
+  medium_put_16mb          1858ms    43.0 MB/s  p50=316ms p95=633ms p99=633ms
+  medium_get_16mb          1524ms    52.5 MB/s  p50=288ms p95=378ms p99=378ms
+  large_put_64mb           1212ms    52.8 MB/s
+  large_get_64mb            994ms    64.4 MB/s
+  multipart_put_256mb      1973ms   129.7 MB/s
+  multipart_put_256mb_16p    912ms   280.6 MB/s
+  large_put_64mb_h1        1056ms    60.6 MB/s
+  multipart_put_256mb_h1_16p    908ms   281.7 MB/s
+  mpu_abort                 527ms      9 ops/s  p50=80ms p95=199ms p99=199ms
+  concurrent_ingest_20s    1524ms   752.9 MB/s    188 ops/s  p50=130ms p95=404ms p99=425ms
+  concurrent_download_20s   2101ms   546.3 MB/s    137 ops/s  p50=160ms p95=408ms p99=547ms
+  range_get_1mb_chunks     1406ms    11.4 MB/s     11 ops/s  p50=80ms p95=208ms p99=208ms
+  burst_small_files_500    2341ms     0.8 MB/s    214 ops/s  p50=39ms p95=72ms p99=142ms
+  integrity_16mb           1036ms  ✓ checksum match
+  integrity_robust_16mb    1174ms    13.6 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    836ms    19.1 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   2335ms  p50=54ms p95=82ms p99=82ms  ✓ 20/20 consistent
+  consistency_overwrite    1807ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write   1062ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     944ms    339 ops/s  max_clean=128 | ✓8w:126ops/s(0e) ✓16w:223ops/s(0e) ✓32w:300ops/s(0e) ✓64w:606ops/s(0e) ✓128w:935ops/s(0e)
+
+
+✅ Done in 1m57s. Results: after-1/wasabi-us-west-1.json

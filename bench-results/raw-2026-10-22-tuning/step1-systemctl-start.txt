@@ -1,0 +1,11 @@
+
+[before] 2026-10-22T01:53:35Z gov=performance, epp=performance, ring=4096/4096/ carrier_changes=4 irq_map=3f099c5e active=inactive
+start exit=0
+[after] 2026-10-22T01:53:35Z gov=performance, epp=performance, ring=4096/4096/ carrier_changes=4 irq_map=3f099c5e active=active
+Result=success
+ExecMainStartTimestamp=Thu 2026-10-22 01:53:35 UTC
+ExecMainExitTimestamp=Thu 2026-10-22 01:53:35 UTC
+ExecMainStatus=0
+Starting vaultaire-host-tuning.service - Vaultaire host tuning (CPU governor, NIC rings, NIC IRQ affinity)...
+Finished vaultaire-host-tuning.service - Vaultaire host tuning (CPU governor, NIC rings, NIC IRQ affinity).
+health 200

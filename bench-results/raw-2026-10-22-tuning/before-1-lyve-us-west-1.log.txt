@@ -1,0 +1,43 @@
+Host:      slc-before-1 (linux/amd64)
+Output:    before-1/lyve-us-west-1.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] lyve-us-west-1  (https://s3.us-west-1.global.lyve.seagate.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-lyve-us-west-1
+  cold_dial_put_1kb        1130ms  p50=111ms p95=170ms p99=170ms
+  warm_put_4kb             6020ms     17 ops/s  p50=50ms p95=165ms p99=378ms
+  warm_get_4kb             4549ms     22 ops/s  p50=47ms p95=56ms p99=365ms
+  warm_head_4kb            1992ms     25 ops/s  p50=45ms p95=50ms p99=52ms
+  warm_copy_4kb             479ms     21 ops/s  p50=53ms p95=63ms p99=63ms
+  warm_delete_single       1332ms     23 ops/s  p50=49ms p95=56ms p99=56ms
+  delete_batch_100          162ms    617 ops/s
+  list_100                  242ms  returned=100
+  list_prefix                52ms  returned=30
+  medium_put_1mb            420ms    11.9 MB/s  p50=55ms p95=212ms p99=212ms
+  medium_get_1mb            555ms     9.0 MB/s  p50=68ms p95=264ms p99=264ms
+  medium_put_16mb           734ms   108.8 MB/s  p50=106ms p95=327ms p99=327ms
+  medium_get_16mb           790ms   101.1 MB/s  p50=132ms p95=272ms p99=272ms
+  large_put_64mb            513ms   124.6 MB/s
+  large_get_64mb            569ms   112.3 MB/s
+  multipart_put_256mb      1371ms   186.6 MB/s
+  multipart_put_256mb_16p   1105ms   231.5 MB/s
+  large_put_64mb_h1         458ms   139.6 MB/s
+  multipart_put_256mb_h1_16p   1087ms   235.4 MB/s
+  mpu_abort                2244ms      2 ops/s  p50=386ms p95=721ms p99=721ms
+  concurrent_ingest_20s    1250ms   918.3 MB/s    230 ops/s  p50=113ms p95=298ms p99=308ms
+  concurrent_download_20s   2565ms   447.4 MB/s    112 ops/s  p50=130ms p95=574ms p99=1165ms
+  range_get_1mb_chunks     1145ms    14.0 MB/s     14 ops/s  p50=56ms p95=245ms p99=245ms
+  burst_small_files_500    2441ms     0.8 MB/s    205 ops/s  p50=49ms p95=71ms p99=137ms
+  integrity_16mb            592ms  ✓ checksum match
+  integrity_robust_16mb     742ms    21.6 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    630ms    25.4 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1899ms  p50=47ms p95=84ms p99=84ms  ✓ 20/20 consistent
+  consistency_overwrite    1513ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    974ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation    1793ms    178 ops/s  max_clean=128 | ✓8w:117ops/s(0e) ✓16w:103ops/s(0e) ✓32w:85ops/s(0e) ✓64w:154ops/s(0e) ✓128w:996ops/s(0e)
+  sustained_upload_60s    60000ms   594.7 MB/s     37 ops/s  p50=108ms p95=127ms p99=185ms  00s:574MB/s 10s:595MB/s 20s:602MB/s 30s:598MB/s 40s:594MB/s 50s:605MB/s
+
+
+✅ Done in 2m2s. Results: before-1/lyve-us-west-1.json

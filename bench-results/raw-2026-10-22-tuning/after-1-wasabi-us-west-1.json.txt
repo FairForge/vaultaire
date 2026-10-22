@@ -1,0 +1,328 @@
+{
+  "host": "slc-after-1",
+  "os_arch": "linux/amd64",
+  "started_at": "2026-10-22T01:57:46Z",
+  "finished_at": "2026-10-22T01:59:43Z",
+  "duration_sec": 116.938265533,
+  "smoke": false,
+  "endpoints": [
+    {
+      "name": "wasabi-us-west-1",
+      "provider": "wasabi",
+      "region": "us-west-1",
+      "url": "https://s3.us-west-1.wasabisys.com",
+      "bucket": "vaultaire",
+      "started_at": "2026-10-22T01:57:46Z",
+      "finished_at": "2026-10-22T01:59:43Z",
+      "duration_sec": 116.938261646,
+      "workloads": [
+        {
+          "name": "cold_dial_put_1kb",
+          "description": "10× fresh-client 1KB PUT (TLS+TCP+TTFB)",
+          "ops": 10,
+          "duration_ms": 1433,
+          "p50_ms": 146,
+          "p95_ms": 169,
+          "p99_ms": 169,
+          "max_ms": 169
+        },
+        {
+          "name": "warm_put_4kb",
+          "description": "100× warm 4KB PUT serial",
+          "bytes": 409600,
+          "ops": 100,
+          "duration_ms": 4563,
+          "p50_ms": 42,
+          "p95_ms": 66,
+          "p99_ms": 134,
+          "max_ms": 134,
+          "ops_per_sec": 21.912433561487745
+        },
+        {
+          "name": "warm_get_4kb",
+          "description": "100× warm 4KB GET serial",
+          "bytes": 409600,
+          "ops": 100,
+          "duration_ms": 3241,
+          "p50_ms": 30,
+          "p95_ms": 43,
+          "p99_ms": 51,
+          "max_ms": 51,
+          "ops_per_sec": 30.851726948601023
+        },
+        {
+          "name": "warm_head_4kb",
+          "description": "50× HEAD on 4KB objects",
+          "ops": 50,
+          "duration_ms": 1706,
+          "p50_ms": 29,
+          "p95_ms": 66,
+          "p99_ms": 96,
+          "max_ms": 96,
+          "ops_per_sec": 29.300448149592636
+        },
+        {
+          "name": "warm_copy_4kb",
+          "description": "10× CopyObject (server-side)",
+          "ops": 10,
+          "duration_ms": 526,
+          "p50_ms": 50,
+          "p95_ms": 64,
+          "p99_ms": 64,
+          "max_ms": 64,
+          "ops_per_sec": 18.995372979780587
+        },
+        {
+          "name": "warm_delete_single",
+          "description": "30× single DeleteObject",
+          "ops": 30,
+          "duration_ms": 1354,
+          "p50_ms": 42,
+          "p95_ms": 51,
+          "p99_ms": 89,
+          "max_ms": 89,
+          "ops_per_sec": 22.145585324477295
+        },
+        {
+          "name": "delete_batch_100",
+          "description": "1× DeleteObjects with 100 keys",
+          "ops": 100,
+          "duration_ms": 1478,
+          "ops_per_sec": 67.65219035558479
+        },
+        {
+          "name": "list_100",
+          "description": "ListObjectsV2 MaxKeys=100",
+          "ops": 100,
+          "duration_ms": 183,
+          "note": "returned=100"
+        },
+        {
+          "name": "list_prefix",
+          "description": "ListObjectsV2 Prefix= (seeded 30)",
+          "ops": 30,
+          "duration_ms": 37,
+          "note": "returned=30"
+        },
+        {
+          "name": "medium_put_1mb",
+          "description": "5 × 1MB PUT",
+          "bytes": 5242880,
+          "ops": 5,
+          "duration_ms": 550,
+          "p50_ms": 68,
+          "p95_ms": 288,
+          "p99_ms": 288,
+          "max_ms": 288,
+          "mb_per_sec": 9.090331987050925
+        },
+        {
+          "name": "medium_get_1mb",
+          "description": "5 × 1MB GET",
+          "bytes": 5242880,
+          "ops": 5,
+          "duration_ms": 440,
+          "p50_ms": 62,
+          "p95_ms": 182,
+          "p99_ms": 182,
+          "max_ms": 182,
+          "mb_per_sec": 11.345266417669231
+        },
+        {
+          "name": "medium_put_16mb",
+          "description": "5 × 16MB PUT",
+          "bytes": 83886080,
+          "ops": 5,
+          "duration_ms": 1858,
+          "p50_ms": 316,
+          "p95_ms": 633,
+          "p99_ms": 633,
+          "max_ms": 633,
+          "mb_per_sec": 43.04871262636552
+        },
+        {
+          "name": "medium_get_16mb",
+          "description": "5 × 16MB GET",
+          "bytes": 83886080,
+          "ops": 5,
+          "duration_ms": 1524,
+          "p50_ms": 288,
+          "p95_ms": 378,
+          "p99_ms": 378,
+          "max_ms": 378,
+          "mb_per_sec": 52.472413753346544
+        },
+        {
+          "name": "large_put_64mb",
+          "description": "1× 64MB PUT",
+          "bytes": 67108864,
+          "ops": 1,
+          "duration_ms": 1212,
+          "mb_per_sec": 52.786775191965546
+        },
+        {
+          "name": "large_get_64mb",
+          "description": "1× 64MB GET",
+          "bytes": 67108864,
+          "ops": 1,
+          "duration_ms": 994,
+          "mb_per_sec": 64.36005751476202
+        },
+        {
+          "name": "multipart_put_256mb",
+          "description": "256MB MPU, 16×16MB parts, parallel=4",
+          "bytes": 268435456,
+          "ops": 16,
+          "duration_ms": 1973,
+          "mb_per_sec": 129.7257496254003
+        },
+        {
+          "name": "multipart_put_256mb_16p",
+          "description": "256MB MPU, 16×16MB parts, parallel=16",
+          "bytes": 268435456,
+          "ops": 16,
+          "duration_ms": 912,
+          "mb_per_sec": 280.6362045998464
+        },
+        {
+          "name": "large_put_64mb_h1",
+          "description": "1× 64MB PUT (HTTP/1.1)",
+          "bytes": 67108864,
+          "ops": 1,
+          "duration_ms": 1056,
+          "mb_per_sec": 60.60604568411754
+        },
+        {
+          "name": "multipart_put_256mb_h1_16p",
+          "description": "256MB MPU (HTTP/1.1), 16×16MB parts, parallel=16",
+          "bytes": 268435456,
+          "ops": 16,
+          "duration_ms": 908,
+          "mb_per_sec": 281.7399379450838
+        },
+        {
+          "name": "mpu_abort",
+          "description": "5× CreateMPU + AbortMPU round-trip",
+          "ops": 5,
+          "duration_ms": 527,
+          "p50_ms": 80,
+          "p95_ms": 199,
+          "p99_ms": 199,
+          "max_ms": 199,
+          "ops_per_sec": 9.482626423067705
+        },
+        {
+          "name": "concurrent_ingest_20s",
+          "description": "32 parallel × 4MB PUT for 20s (cap 1024MB)",
+          "bytes": 1203765248,
+          "ops": 287,
+          "duration_ms": 1524,
+          "p50_ms": 130,
+          "p95_ms": 404,
+          "p99_ms": 425,
+          "max_ms": 431,
+          "mb_per_sec": 752.8588462096511,
+          "ops_per_sec": 188.21471155241278
+        },
+        {
+          "name": "concurrent_download_20s",
+          "description": "32 parallel × 4MB GET for 20s (cap 1024MB)",
+          "bytes": 1203765248,
+          "ops": 287,
+          "duration_ms": 2101,
+          "p50_ms": 160,
+          "p95_ms": 408,
+          "p99_ms": 547,
+          "max_ms": 1082,
+          "mb_per_sec": 546.2677697152277,
+          "ops_per_sec": 136.56694242880693
+        },
+        {
+          "name": "range_get_1mb_chunks",
+          "description": "16 × 1MB Range GET on 16MB object",
+          "bytes": 16777216,
+          "ops": 16,
+          "duration_ms": 1406,
+          "p50_ms": 80,
+          "p95_ms": 208,
+          "p99_ms": 208,
+          "max_ms": 208,
+          "mb_per_sec": 11.37588089969163,
+          "ops_per_sec": 11.37588089969163
+        },
+        {
+          "name": "burst_small_files_500",
+          "description": "500 × 4KB PUT, 10 workers",
+          "bytes": 2048000,
+          "ops": 500,
+          "duration_ms": 2341,
+          "p50_ms": 39,
+          "p95_ms": 72,
+          "p99_ms": 142,
+          "max_ms": 387,
+          "mb_per_sec": 0.8341864026908651,
+          "ops_per_sec": 213.55171908886146
+        },
+        {
+          "name": "integrity_16mb",
+          "description": "16MB SHA256 round-trip",
+          "bytes": 16777216,
+          "ops": 1,
+          "duration_ms": 1036,
+          "note": "✓ checksum match"
+        },
+        {
+          "name": "integrity_robust_16mb",
+          "description": "16MB verified PUT + Range-GET round-trip (Vaultaire resilience demo)",
+          "bytes": 16777216,
+          "ops": 1,
+          "duration_ms": 1174,
+          "mb_per_sec": 13.62044253469874,
+          "note": "✓ verified (put_retries=0, get_retries=0)"
+        },
+        {
+          "name": "integrity_chunked_16mb",
+          "description": "16MB via 8x2MB chunks + manifest (BitTorrent-style)",
+          "bytes": 16777216,
+          "ops": 9,
+          "duration_ms": 836,
+          "mb_per_sec": 19.128781877041995,
+          "note": "✓ verified chunks (put_retries=0, get_retries=0)"
+        },
+        {
+          "name": "consistency_read_after_write",
+          "description": "20 × PUT-then-immediate-GET, check SHA256",
+          "ops": 20,
+          "duration_ms": 2335,
+          "p50_ms": 54,
+          "p95_ms": 82,
+          "p99_ms": 82,
+          "max_ms": 82,
+          "note": "✓ 20/20 consistent"
+        },
+        {
+          "name": "consistency_overwrite",
+          "description": "10 × PUT-PUT-GET same key, verify latest version",
+          "ops": 30,
+          "duration_ms": 1807,
+          "note": "✓ 10/10 overwrites correct"
+        },
+        {
+          "name": "consistency_list_after_write",
+          "description": "10 × PUT-then-immediate-List, check object appears",
+          "ops": 20,
+          "duration_ms": 1062,
+          "note": "✓ 10/10 immediately visible in listing"
+        },
+        {
+          "name": "rate_limit_escalation",
+          "description": "PUT 4KB at [8 16 32 64 128] workers × 6 ops each",
+          "ops": 320,
+          "duration_ms": 944,
+          "ops_per_sec": 338.7802252081142,
+          "note": "max_clean=128 | ✓8w:126ops/s(0e) ✓16w:223ops/s(0e) ✓32w:300ops/s(0e) ✓64w:606ops/s(0e) ✓128w:935ops/s(0e)"
+        }
+      ]
+    }
+  ]
+}

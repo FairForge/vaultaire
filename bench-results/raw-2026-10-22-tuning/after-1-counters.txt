@@ -1,0 +1,6 @@
+2026-10-22T01:53:41Z start idrive-us-central-1 rx_missed=1156 rx_dropped=498721 carrier_changes=4 gov=performance ring=4096 load=0.06
+2026-10-22T01:55:35Z end   idrive-us-central-1 rx_missed=1156 rx_dropped=498778 carrier_changes=4 gov=performance ring=4096 load=0.16
+2026-10-22T01:55:35Z start lyve-us-west-1 rx_missed=1156 rx_dropped=498778 carrier_changes=4 gov=performance ring=4096 load=0.16
+2026-10-22T01:57:46Z end   lyve-us-west-1 rx_missed=1156 rx_dropped=498843 carrier_changes=4 gov=performance ring=4096 load=0.11
+2026-10-22T01:57:46Z start wasabi-us-west-1 rx_missed=1156 rx_dropped=498843 carrier_changes=4 gov=performance ring=4096 load=0.11
+2026-10-22T01:59:43Z end   wasabi-us-west-1 rx_missed=1156 rx_dropped=498900 carrier_changes=4 gov=performance ring=4096 load=0.07
