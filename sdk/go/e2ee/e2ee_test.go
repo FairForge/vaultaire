@@ -71,12 +71,49 @@ func TestBox_SealOpen(t *testing.T) {
 	tampered[len(tampered)-1] ^= 1
 	_, err = Open(k, tampered, ad)
 	assert.ErrorIs(t, err, ErrOpen)
-	// The format byte is authenticated: a box re-labelled as a chunk fails.
-	relabel := append([]byte{FormatChunk}, a[1:]...)
-	_, err = Open(k, relabel, ad)
-	assert.Error(t, err)
 	_, err = Seal(k[:31], msg, ad)
 	assert.ErrorIs(t, err, ErrKeySize)
+}
+
+// TestBox_GoldenBytes pins the 0x01 wire: 01 ‖ nonce ‖ XChaCha20-Poly1305
+// under AD = 01 ‖ the caller's AD (recomputed by testdata/vectors_check.py
+// with libsodium). Both directions: the fixed nonce seals to these bytes,
+// and the public Open opens them.
+func TestBox_GoldenBytes(t *testing.T) {
+	v := loadVectors(t).Box
+	require.NotNil(t, v)
+	got, err := seal(FormatBox, v.Key, v.Nonce, v.Plaintext, v.AD)
+	require.NoError(t, err)
+	assert.Equal(t, hex.EncodeToString(v.Msg), hex.EncodeToString(got))
+	pt, err := Open(v.Key, v.Msg, v.AD)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(v.Plaintext), pt)
+}
+
+// TestBox_RelabelledFormatDoesNotOpen: the format byte is in the AEAD's
+// associated data, not only checked as msg[0]. The relabelled messages carry
+// the CORRECT leading byte for the function that opens them, both have the
+// same (nil) caller AD, so only the AD binding can refuse them (RP37-12: the
+// old relabel test passed on the msg[0] check).
+func TestBox_RelabelledFormatDoesNotOpen(t *testing.T) {
+	k := key(t, 7)
+	pt := []byte("bytes sealed as one kind, presented as another")
+
+	chunk, err := SealChunk(k, pt)
+	require.NoError(t, err)
+	_, err = OpenChunk(k, chunk)
+	require.NoError(t, err, "the original opens")
+	asBox := append([]byte{FormatBox}, chunk[1:]...)
+	_, err = Open(k, asBox, nil)
+	assert.ErrorIs(t, err, ErrOpen, "a chunk re-labelled 0x01 does not open as a box")
+
+	box, err := Seal(k, pt, nil)
+	require.NoError(t, err)
+	_, err = Open(k, box, nil)
+	require.NoError(t, err, "the original opens")
+	asChunk := append([]byte{FormatChunk}, box[1:]...)
+	_, err = OpenChunk(k, asChunk)
+	assert.ErrorIs(t, err, ErrOpen, "a box re-labelled 0x02 does not open as a chunk")
 }
 
 // TestChunk_ConvergentWithinASpace_NeverAcross is F-12's change 1: a space
@@ -206,4 +243,31 @@ func TestSealedBox_RoundTripAndBinding(t *testing.T) {
 	assert.ErrorIs(t, err, ErrOpen)
 	_, err = SealTo(pub[:100], []byte("x"), info, ad)
 	assert.Error(t, err)
+}
+
+// TestSealedBox_GoldenOpens pins the 0x03 wire from the OPEN side (HPKE's
+// encapsulation is random, so a sealed box cannot be reproduced): a fixed
+// X-Wing seed and a message sealed once (vectors.json "sealed") open through
+// the public OpenSealed with the fixed info and ad. It fails when the label
+// changes (M2), when the label is dropped (M3) and when the format byte
+// leaves HPKE's info — the KAT above opens below the label and pins none of
+// them (RP37-12).
+func TestSealedBox_GoldenOpens(t *testing.T) {
+	v := loadVectors(t).Sealed
+	require.NotNil(t, v)
+	pub, err := PublicKey(v.Seed)
+	require.NoError(t, err)
+	assert.Equal(t, hex.EncodeToString(v.Pub), hex.EncodeToString(pub))
+
+	pt, err := OpenSealed(v.Seed, v.Msg, v.Info, v.AD)
+	require.NoError(t, err)
+	assert.Equal(t, []byte(v.Plaintext), pt)
+
+	// The layout, said explicitly: HPKE info = label ‖ 0x03 ‖ info.
+	info := append(append([]byte("stored.cloud/e2ee/v1/sealed/"), FormatSealed), v.Info...)
+	_, err = openSealed(v.Seed, v.Msg, info, v.AD)
+	require.NoError(t, err)
+	info[len("stored.cloud/e2ee/v1/sealed/")] = 0x04
+	_, err = openSealed(v.Seed, v.Msg, info, v.AD)
+	assert.ErrorIs(t, err, ErrOpen, "the same HPKE context under another format byte does not open")
 }

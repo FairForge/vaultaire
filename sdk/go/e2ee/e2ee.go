@@ -21,7 +21,8 @@
 //	              key = ChunkKey(space key, SHA-256(chunk)); nonce derived
 //	              from the key AND the sealed bytes (R8-01)
 //	0x03 sealed  HPKE base mode, X-Wing:          03 ‖ enc(1120) ‖ ciphertext ‖ tag(16)
-//	              sharing a key to a member's public key (F-12 change 2)
+//	              sharing a key to a member's public key (F-12 change 2);
+//	              HPKE info = label ‖ 03 ‖ the caller's info
 //
 // A change to any of these bytes is a new format byte, never a silent change:
 // convergent chunks are a dedup contract (TestChunk_… pins one).
@@ -210,8 +211,8 @@ func PublicKey(priv []byte) ([]byte, error) {
 }
 
 // SealTo seals plaintext to a public key (HPKE base mode, one message):
-// info names the purpose (prefixed with this package's label), ad is bound
-// as associated data.
+// info names the purpose (HPKE's info is this package's label ‖ 0x03 ‖
+// info), ad is bound as associated data.
 func SealTo(pub, plaintext, info, ad []byte) ([]byte, error) {
 	pk, err := kem.NewPublicKey(pub)
 	if err != nil {
@@ -255,6 +256,14 @@ func openSealed(priv, msg, info, ad []byte) ([]byte, error) {
 	return pt, nil
 }
 
-// sealedInfo prefixes the caller's info with the package label, so a box
-// sealed here never opens in another protocol using the same keys.
-func sealedInfo(info []byte) []byte { return append([]byte(labelSealed), info...) }
+// sealedInfo is HPKE's info: the package label ‖ the format byte ‖ the
+// caller's info. The label keeps a box sealed here from opening in another
+// protocol using the same keys; the format byte keeps a later envelope that
+// reuses HPKE from ever opening as 0x03 (RP37-12). Pinned by
+// TestSealedBox_GoldenOpens.
+func sealedInfo(info []byte) []byte {
+	out := make([]byte, 0, len(labelSealed)+1+len(info))
+	out = append(out, labelSealed...)
+	out = append(out, FormatSealed)
+	return append(out, info...)
+}
