@@ -144,6 +144,7 @@ var boundSites = map[string]string{
 	"WithTimeout dns_cache.go:attemptContext":        "one address's share of the loop's budget: the time left over the addresses left, ≥ 2 s",
 	"WithTimeout onedrive.go:NewOneDriveFleetDriver": "boot only: the fleet's first token and drive ids, 30 s",
 	"WithTimeout onedrive_fleet.go:recheckFleet":     "the probe path: one fingerprint re-check after an unknown verdict or an hour, 10 s inside the probe's 15 s (RP18-1)",
+	"WithTimeout geyser_multipart.go:abortMultipart": "the abort of a failed Geyser multipart upload, detached from the caller's context (often why it failed), 30 s",
 	"WithTimeout quotaless.go:HealthCheck":           "the quotaless probe, 10 s",
 	"WithTimeout tenant_walk.go:s3WalkPrefix":        "a job (the erasure sweep): one listing page, 60 s over a 15 s transport bound",
 	"WithTimeout list_page.go:s3ListPage":            "a job (the chunk orphan sweep, WP-R8-2 B.2): one listing page, 60 s over a 15 s transport bound",

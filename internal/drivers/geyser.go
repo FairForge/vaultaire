@@ -52,6 +52,10 @@ type GeyserDriver struct {
 	// one range (geyser_get_ranges.go).
 	getConcurrency int
 	getRangeSize   int64
+	// put is the multipart shape of a Put of a known length
+	// (geyser_multipart.go); parts the part buffers and their budget.
+	put   geyserPutConfig
+	parts *geyserParts
 }
 
 // GeyserOption configures a GeyserDriver.
@@ -118,11 +122,15 @@ func NewGeyserDriver(accessKey, secretKey, bucket, tenantID string, logger *zap.
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(opts.endpoint)
+		o.UsePathStyle = true // Geyser requires path-style
+	})
+	putCfg := geyserPutConfigFromEnv(logger)
 	return &GeyserDriver{
-		client: s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(opts.endpoint)
-			o.UsePathStyle = true // Geyser requires path-style
-		}),
+		client:         client,
+		put:            putCfg,
+		parts:          newGeyserParts(putCfg.budget),
 		bucket:         bucket,
 		tenantID:       tenantID,
 		logger:         logger,
@@ -282,9 +290,14 @@ func (d *GeyserDriver) Put(ctx context.Context, container, artifact string, data
 	// Geyser's Spectra Vail gateway requires Content-Length on every PUT
 	// (HTTP 411 otherwise). A caller that knows the length (every Vault
 	// write path passes engine.WithContentLength) streams the body through
-	// in ONE attempt (WP-R7-2); only an unknown length is materialised to
-	// learn it — into RAM up to 64 MiB, else a temp file — and counted.
+	// in ONE attempt (WP-R7-2) — from GEYSER_MULTIPART_MIN as parallel
+	// multipart parts (geyser_multipart.go); only an unknown length is
+	// materialised to learn it — into RAM up to 64 MiB, else a temp file —
+	// and counted.
 	if n := engine.ApplyPutOptions(opts...).ContentLength; n > 0 {
+		if d.useMultipart(n) {
+			return d.putMultipart(ctx, tenantID, key, data, n)
+		}
 		return d.putStreamed(ctx, tenantID, key, data, n)
 	}
 	geyserPutMaterialized.WithLabelValues("unknown_length").Inc()
@@ -336,6 +349,7 @@ func (d *GeyserDriver) putStreamed(ctx context.Context, tenantID, key string, da
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.APIOptions = append(o.APIOptions, v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
 	})
+	start := time.Now()
 	if _, err := d.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(d.bucket),
 		Key:           aws.String(key),
@@ -344,6 +358,7 @@ func (d *GeyserDriver) putStreamed(ctx context.Context, tenantID, key string, da
 	}, opts...); err != nil {
 		return fmt.Errorf("geyser put %s: %w", key, err)
 	}
+	observeGeyserPut("streamed", n, start)
 	return nil
 }
 

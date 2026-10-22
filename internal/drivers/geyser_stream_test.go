@@ -101,8 +101,11 @@ func TestGeyserPut_AKnownLengthStreamsTheBodyThroughOnce(t *testing.T) {
 	// re-read; TMPDIR is this test's own, empty directory.
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
+	// The streamed path itself: multipart off (from 64 MiB a known length
+	// goes as parallel parts, geyser_multipart_test.go).
 	f := &discardS3{}
 	d := newGeyserAgainst(t, f)
+	d.put.multipartMin = 0
 	body := randomBody(t, 65<<20)
 	src := &onceReader{r: bytes.NewReader(body)}
 	before := totalAlloc()

@@ -37,7 +37,7 @@ var callsWithoutTenant = prometheus.NewCounterVec(prometheus.CounterOpts{
 // Collectors are the package's Prometheus collectors, for the server's
 // registry.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries, geyserPutMaterialized,
+	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries, geyserPutMaterialized, geyserPutMultipart, geyserPutBytesPerSecond,
 		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads, webdavDeleteElsewhere, webdavFolderFilesMax, webdavFolderFull,
 		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans, driverHedges, driverHedgesWon, driverDNSRefreshes, lyveBucketLockEnabled, permafrostFleetMismatch,
 		swiftRequests, swiftRetries, swiftAuths, siaReadResumes, siaReadBudgetRate, siaReadBudgetWait,
