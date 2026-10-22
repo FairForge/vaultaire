@@ -1,0 +1,70 @@
+# promtool unit test of vaultaire-backends.yml's BackendProbeFailing and
+# PrimaryBackendProbeFailing (RP37-17, Stage 1a Prompt 30 Part 0c).
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-backends.yml deploy/monitoring/tests/vaultaire-backends_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-backends_test.yml'
+#
+# The real pattern, 2026-10-22: Geyser LA1's signed probe failed every 30 s
+# from 18:07:39 to 19:38:56 UTC. BackendProbeFailing fired at 18:13:39 and
+# reached ntfy, then a slot switch at 19:10:39 booted a process whose
+# backends are seeded healthy (RegisterBackend) until their first probe:
+# one scrape read vaultaire_backend_health 1, the alert resolved (ntfy
+# "resolved" at 19:13:39 for an outage still running) and paged again only
+# at 19:16:24, after a fresh 5 m pending. keep_firing_for rides over it.
+rule_files:
+  - vaultaire-backends.yml
+
+evaluation_interval: 15s
+
+tests:
+  # 15 s scrapes: healthy 2 min; down from 2m15s; ONE healthy sample at
+  # 27m30s (the new slot); down again to 52m45s; healthy from 53m.
+  - interval: 15s
+    input_series:
+      - series: 'vaultaire_backend_health{backend="geyser",instance="slc",job="vaultaire"}'
+        values: '1x8 0x100 1 0x100 1x40'
+      - series: 'vaultaire_backend_health{backend="lyve",instance="slc",job="vaultaire"}'
+        values: '1x8 0x100 1 0x100 1x40'
+      - series: 'vaultaire_primary_backend{backend="lyve",instance="slc",job="vaultaire"}'
+        values: '1x250'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: BackendProbeFailing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: BackendProbeFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, backend: geyser, instance: slc, job: vaultaire}
+            exp_annotations:
+              summary: "Backend geyser failing authenticated probe"
+              description: "geyser has failed its signed health probe for 5+ minutes (dead key? account suspended? outage? an object canary HEAD refused = the key sees the bucket but not its objects). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+      # The one healthy sample of the slot switch, and the scrape after it:
+      # still firing (it resolved here on 2026-10-22).
+      - eval_time: 27m30s
+        alertname: BackendProbeFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, backend: geyser, instance: slc, job: vaultaire}
+            exp_annotations:
+              summary: "Backend geyser failing authenticated probe"
+              description: "geyser has failed its signed health probe for 5+ minutes (dead key? account suspended? outage? an object canary HEAD refused = the key sees the bucket but not its objects). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+      - eval_time: 28m
+        alertname: BackendProbeFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, backend: geyser, instance: slc, job: vaultaire}
+            exp_annotations:
+              summary: "Backend geyser failing authenticated probe"
+              description: "geyser has failed its signed health probe for 5+ minutes (dead key? account suspended? outage? an object canary HEAD refused = the key sees the bucket but not its objects). Check `curl -s localhost:8000/health/backends` on the box for last_error."
+      - eval_time: 28m
+        alertname: PrimaryBackendProbeFailing
+        exp_alerts:
+          - exp_labels: {severity: critical, backend: lyve, instance: slc, job: vaultaire}
+            exp_annotations:
+              summary: "The primary backend lyve is failing its probe"
+              description: "lyve is the write primary (STORAGE_MODE) and has failed its signed probe (HeadBucket + object canary) for 5+ minutes: PUTs fall over or 503, reads of its objects 503. Check `curl -s localhost:8000/health/backends` for last_error; switching STORAGE_MODE is the owner's call (docs/DEPLOY.md)."
+      # Recovered at 53m: resolved once keep_firing_for has passed.
+      - eval_time: 59m
+        alertname: BackendProbeFailing
+        exp_alerts: []
+      - eval_time: 59m
+        alertname: PrimaryBackendProbeFailing
+        exp_alerts: []
