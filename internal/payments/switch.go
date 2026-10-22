@@ -98,14 +98,21 @@ func openPrepaidInvoice(ctx context.Context, tx *sql.Tx, tenantID, except string
 }
 
 // SwitchToPrepaid is "Switch to <to> at renewal" (docs/PAYMENTS.md § 4.1
-// step 1): under the tenant's entitlement lock the provider that renews the
-// house is told to stop (Stripe: cancel_at_period_end — the house runs to
-// its paid date), the row becomes renewal 'prepaid' with pending_provider =
-// to, and paid_through is not touched. `to` must be a prepaid provider the
-// tenant may use now (flag on, ready). A house already prepaid only gets
-// its pending provider (no provider call). Audited after the commit:
-// billing.provider_switch_requested (+ billing.renewal_stopped when the
-// renewal was stopped here).
+// step 1): the row becomes renewal 'prepaid' with pending_provider = to
+// (paid_through not touched) under the tenant's entitlement lock, and
+// AFTER that commit the provider that renewed the house is told to stop
+// (Stripe: cancel_at_period_end — the house runs to its paid date). `to`
+// must be a prepaid provider the tenant may use now (flag on, ready). A
+// house already prepaid only gets its pending provider (no provider call).
+//
+// The provider call is outside the transaction (RP31-6): inside it, a
+// commit that failed after Stripe had stopped left a house that renews in
+// our record and runs out at Stripe. A stop that fails now puts the row
+// back (revertSwitch: a second short transaction under the lock, only if
+// the row is still what the switch wrote — a webhook that changed it
+// meanwhile stands) and the error is the caller's. Audited after the
+// stop: billing.provider_switch_requested (+ billing.renewal_stopped when
+// the renewal was stopped here).
 func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor string) (Entitlement, error) {
 	target, err := r.For(ctx, tenantID, to)
 	if err != nil {
@@ -118,15 +125,9 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 		return Entitlement{}, errors.New("switch: no database")
 	}
 	var e Entitlement
-	var stopped bool
+	var cur Provider
 	err = InTx(ctx, r.db, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", checkoutLockTimeout.Milliseconds())); err != nil {
-			return fmt.Errorf("set lock_timeout: %w", err)
-		}
-		if err := Lock(ctx, tx, tenantID); err != nil {
-			if lockTimedOut(err) {
-				return fmt.Errorf("tenant %s: the entitlement lock was not free within %s: %w", tenantID, checkoutLockTimeout, ErrProviderUnavailable)
-			}
+		if err := lockWithin(ctx, tx, tenantID); err != nil {
 			return err
 		}
 		var err error
@@ -139,26 +140,32 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 			return fmt.Errorf("tenant %s: house lapsed or already paid with %s: %w", tenantID, to, ErrNothingToSwitch)
 		}
 		if e.Renewal == RenewalAuto {
-			cur := r.Provider(e.Provider)
-			if cur == nil {
+			if cur = r.Provider(e.Provider); cur == nil {
 				return fmt.Errorf("%w: %q renews the house", ErrUnknownProvider, e.Provider)
 			}
-			if err := cur.StopRenewal(ctx, tenantID); err != nil {
-				return fmt.Errorf("stop the renewal with %s: %w", e.Provider, err)
-			}
-			stopped = true
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE entitlements SET renewal = 'prepaid', pending_provider = $2, updated_at = NOW() WHERE tenant_id = $1`,
 			tenantID, to); err != nil {
 			return fmt.Errorf("switch tenant %s to %s: %w", tenantID, to, err)
 		}
-		e.Renewal = RenewalPrepaid
 		return nil
 	})
 	if err != nil {
 		return Entitlement{}, err
 	}
+	stopped := false
+	if cur != nil {
+		if err := cur.StopRenewal(ctx, tenantID); err != nil {
+			if rerr := revertSwitch(ctx, r.db, tenantID, to, e); rerr != nil {
+				r.logger.Error("payments: a switch whose renewal stop failed could not be put back — the house shows prepaid while the provider still renews it; fix the row by hand",
+					zap.String("tenant", tenantID), zap.String("provider", e.Provider), zap.String("to", to), zap.Error(rerr))
+			}
+			return Entitlement{}, fmt.Errorf("stop the renewal with %s: %w", e.Provider, err)
+		}
+		stopped = true
+	}
+	e.Renewal = RenewalPrepaid
 	audit.Record(ctx, r.db, audit.Entry{Actor: actor, TenantID: tenantID, EventType: "billing", Action: "billing.provider_switch_requested",
 		Resource: "tenant:" + tenantID, Metadata: map[string]any{"tenant": tenantID, "actor": actor, "from": e.Provider, "to": to,
 			"paid_through": e.PaidThrough.UTC().Format(time.RFC3339), "renewal_stopped": stopped}})
@@ -166,6 +173,41 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 		AuditRenewal(ctx, r.db, tenantID, RenewalPrepaid, actor, e.Provider, e.ProviderRef)
 	}
 	return e, nil
+}
+
+// lockWithin takes the tenant's entitlement lock waiting at most
+// checkoutLockTimeout (55P03 = ErrProviderUnavailable).
+func lockWithin(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", checkoutLockTimeout.Milliseconds())); err != nil {
+		return fmt.Errorf("set lock_timeout: %w", err)
+	}
+	if err := Lock(ctx, tx, tenantID); err != nil {
+		if lockTimedOut(err) {
+			return fmt.Errorf("tenant %s: the entitlement lock was not free within %s: %w", tenantID, checkoutLockTimeout, ErrProviderUnavailable)
+		}
+		return err
+	}
+	return nil
+}
+
+// revertSwitch puts back a switch whose provider stop failed: renewal
+// 'auto', no pending provider — only while the row is still what
+// SwitchToPrepaid wrote over `was` (same provider and reference, prepaid,
+// pending `to`).
+func revertSwitch(ctx context.Context, db *sql.DB, tenantID, to string, was Entitlement) error {
+	return InTx(ctx, db, func(tx *sql.Tx) error {
+		if err := lockWithin(ctx, tx, tenantID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			UPDATE entitlements SET renewal = $5, pending_provider = NULL, updated_at = NOW()
+			 WHERE tenant_id = $1 AND renewal = 'prepaid' AND pending_provider = $2 AND provider = $3 AND COALESCE(provider_ref, '') = $4`,
+			tenantID, to, was.Provider, was.ProviderRef, string(was.Renewal))
+		if err != nil {
+			return fmt.Errorf("revert the switch of tenant %s: %w", tenantID, err)
+		}
+		return nil
+	})
 }
 
 // SwitchToPrepaid is the package function on the registry (the dashboard's
