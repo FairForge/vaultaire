@@ -42,6 +42,9 @@ type OpenInvoiceError struct {
 	Provider, Invoice string
 	// Until: after it the invoice can no longer settle.
 	Until time.Time
+	// Paid: the provider says the invoice holds money, so the customer
+	// cannot cancel it (RP31-5) — errors.Is ErrInvoicePaid too.
+	Paid bool
 }
 
 func (e *OpenInvoiceError) Error() string {
@@ -49,7 +52,28 @@ func (e *OpenInvoiceError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrCryptoInvoiceOpen) true.
-func (e *OpenInvoiceError) Is(target error) bool { return target == ErrCryptoInvoiceOpen }
+func (e *OpenInvoiceError) Is(target error) bool {
+	return target == ErrCryptoInvoiceOpen || e.Paid && target == ErrInvoicePaid
+}
+
+// OpenInvoiceOf is the tenant's open charge of provider by its id as the
+// guard sees it (its Until), ErrNoSuchPayment when the tenant has none.
+func OpenInvoiceOf(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, tenantID, provider, invoiceID string) (*OpenInvoiceError, error) {
+	var created time.Time
+	err := q.QueryRowContext(ctx, `
+		SELECT created_at FROM payments
+		 WHERE tenant_id = $1 AND provider = $2 AND provider_id = $3 AND kind = 'charge'
+		   AND status IN ('pending', 'processing', 'expired', 'expired_partial')`, tenantID, provider, invoiceID).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("invoice %s of tenant %s: %w", invoiceID, tenantID, ErrNoSuchPayment)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read invoice %s of tenant %s: %w", invoiceID, tenantID, err)
+	}
+	return &OpenInvoiceError{Provider: provider, Invoice: invoiceID, Until: created.Add(PrepaidInvoiceWindow).UTC()}, nil
+}
 
 // openPrepaidInvoice is the tenant's newest charge of another provider than
 // `except` that can still settle (pending, processing, or expired inside

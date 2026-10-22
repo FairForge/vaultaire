@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"net/http"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -404,7 +405,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 				return
 			}
 			out, err := svc.Resize(r.Context(), sd.TenantID, order)
-			if refusedForProvider(w, err) {
+			if refusedForProvider(w, r, err) {
 				return
 			}
 			if err != nil {
@@ -432,7 +433,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			TenantID: sd.TenantID, Email: sd.Email, Order: order, Purpose: payments.PurposeNew,
 			ReturnURL: base + "/dashboard/billing?upgraded=1", CancelURL: base + "/dashboard/billing",
 		})
-		if refusedForProvider(w, err) {
+		if refusedForProvider(w, r, err) {
 			return
 		}
 		switch {
@@ -525,7 +526,7 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 		base := strings.TrimRight(baseURL, "/")
 		co.ReturnURL, co.CancelURL = base+"/dashboard/billing?renewed=1", base+"/dashboard/billing"
 		checkoutURL, err := svc.StartCheckout(r.Context(), provider, co)
-		if refusedForProvider(w, err) {
+		if refusedForProvider(w, r, err) {
 			return
 		}
 		switch {
@@ -556,9 +557,13 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 // refusedForProvider answers the provider refusals as 409 with the
 // page's message (docs/PAYMENTS.md § 2.3, § 2.5) — rendered in the
 // dashboard's error look (WP-PAY-3; the status and X-Error-Code are what
-// WP-PAY-2's tests pin) — and reports whether it did.
-func refusedForProvider(w http.ResponseWriter, err error) bool {
+// WP-PAY-2's tests pin) — and reports whether it did. The
+// crypto_invoice_open page of a checkout the customer can continue offers
+// "Cancel the bitcoin invoice" (RP31-5, cryptoCancelForm); one whose invoice
+// holds a payment says so and keeps only its date.
+func refusedForProvider(w http.ResponseWriter, r *http.Request, err error) bool {
 	var code, title, msg string
+	var extra template.HTML
 	switch {
 	case errors.Is(err, payments.ErrProviderDisabled):
 		code, title, msg = "provider_disabled", "This way of paying is switched off", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
@@ -570,8 +575,18 @@ func refusedForProvider(w http.ResponseWriter, err error) bool {
 		if errors.As(err, &open) {
 			until = open.Until.UTC().Format("2 Jan 2006 15:04 UTC")
 		}
-		code, title, msg = "crypto_invoice_open", "A bitcoin invoice is still open", "A bitcoin invoice on your account can still be paid until "+until+
-			". Pay it, or wait until then, before paying by card — otherwise you could pay twice. Nothing was started or charged."
+		code, title = "crypto_invoice_open", "A bitcoin invoice is still open"
+		switch {
+		case open != nil && open.Paid:
+			msg = "The bitcoin invoice on your account already holds a payment, so it can't be cancelled — it is left to settle, and its period is added to your house. " +
+				"It can settle until " + until + "; wait until then before paying by card, otherwise you could pay twice. Nothing was started or charged."
+		default:
+			msg = "A bitcoin invoice on your account can still be paid until " + until +
+				". Pay it, or wait until then, before paying by card — otherwise you could pay twice. Nothing was started or charged."
+			if open != nil {
+				extra = cryptoCancelForm(r, open)
+			}
+		}
 	default:
 		return false
 	}
@@ -579,8 +594,109 @@ func refusedForProvider(w http.ResponseWriter, err error) bool {
 	w.Header().Set("X-Error-Code", code)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusConflict)
-	_, _ = fmt.Fprintf(w, refusalPageHTML, template.HTMLEscapeString(title), template.HTMLEscapeString(title), template.HTMLEscapeString(msg))
+	_, _ = fmt.Fprintf(w, refusalPageHTML, template.HTMLEscapeString(title), template.HTMLEscapeString(title), template.HTMLEscapeString(msg), extra)
 	return true
+}
+
+// cryptoContinuations are the forms a crypto_invoice_open refusal can come
+// from, by the last element of their path: after the invoice is cancelled
+// the same request continues there (HandleCancelCryptoInvoice).
+var cryptoContinuations = []string{"house", "renew", "switch"}
+
+// cryptoCancelForm is the "Cancel the bitcoin invoice" button of the 409
+// page (RP31-5): it posts the invoice, where to continue, and the refused
+// form's own fields back, so that after the cancel the checkout proceeds
+// as the customer asked. Empty when the refused request is not one the
+// cancel can continue.
+func cryptoCancelForm(r *http.Request, open *payments.OpenInvoiceError) template.HTML {
+	if r == nil {
+		return ""
+	}
+	then := path.Base(r.URL.Path)
+	if !slices.Contains(cryptoContinuations, then) {
+		return ""
+	}
+	_ = r.ParseForm()
+	var b strings.Builder
+	field := func(name, value string) {
+		fmt.Fprintf(&b, `<input type="hidden" name="%s" value="%s">`, template.HTMLEscapeString(name), template.HTMLEscapeString(value))
+	}
+	b.WriteString(`<form method="post" action="/dashboard/billing/crypto-invoice/cancel">`)
+	field("csrf_token", middleware.Token(r.Context()))
+	field(cancelInvoiceField, open.Invoice)
+	field(cancelProviderField, open.Provider)
+	field(cancelThenField, then)
+	names := make([]string, 0, len(r.PostForm))
+	for k := range r.PostForm {
+		if k != "csrf_token" && !strings.HasPrefix(k, "cancel_") {
+			names = append(names, k)
+		}
+	}
+	slices.Sort(names)
+	for _, k := range names {
+		for _, v := range r.PostForm[k] {
+			field(k, v)
+		}
+	}
+	b.WriteString(`<button type="submit">Cancel the bitcoin invoice and continue</button></form>`)
+	b.WriteString(`<p class="small">Only an invoice nobody has paid can be cancelled. If a payment is on its way, wait for it instead.</p>`)
+	return template.HTML(b.String()) // #nosec G203 -- every value escaped above
+}
+
+// The cancel form's own fields (prefixed so they never collide with the
+// refused form's).
+const (
+	cancelInvoiceField  = "cancel_invoice"
+	cancelProviderField = "cancel_provider"
+	cancelThenField     = "cancel_then"
+)
+
+// InvoiceCancelling is what the cancel needs (*payments.Registry).
+type InvoiceCancelling interface {
+	CancelUnpaidInvoice(ctx context.Context, tenantID, provider, invoiceID, actor string) error
+}
+
+// HandleCancelCryptoInvoice is POST /dashboard/billing/crypto-invoice/cancel
+// (RP31-5): the session's tenant withdraws its open bitcoin invoice — only
+// one nobody paid (the provider fetches it: New or Expired, nothing paid;
+// it is marked Invalid and our row closed, audited billing.invoice_marked)
+// — and the checkout the 409 refused continues with the same form (next,
+// by cancel_then). An invoice holding a payment keeps the 409 with its
+// date.
+func HandleCancelCryptoInvoice(svc InvoiceCancelling, next map[string]http.Handler, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		if sd == nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		back := func(category, msg string) {
+			middleware.SetFlash(w, category, msg)
+			http.Redirect(w, r, "/dashboard/billing", http.StatusSeeOther)
+		}
+		invoice, provider, then := r.FormValue(cancelInvoiceField), r.FormValue(cancelProviderField), r.FormValue(cancelThenField)
+		h, ok := next[then]
+		if svc == nil || invoice == "" || provider == "" || !ok {
+			back("error", "That invoice can't be cancelled from here. Email "+hosts.Get().SupportEmail()+" and we will help.")
+			return
+		}
+		err := svc.CancelUnpaidInvoice(r.Context(), sd.TenantID, provider, invoice, sd.UserID)
+		if refusedForProvider(w, r, err) {
+			return
+		}
+		switch {
+		case errors.Is(err, payments.ErrNoSuchPayment):
+			back("error", "That invoice is no longer open — nothing to cancel.")
+			return
+		case err != nil:
+			logger.Error("cancel crypto invoice", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("invoice", invoice))
+			back("error", "The invoice couldn't be cancelled right now. Nothing was changed; please try again in a minute.")
+			return
+		}
+		logger.Info("crypto invoice cancelled by the customer", zap.String("tenant", sd.TenantID), zap.String("invoice", invoice),
+			zap.String("then", then))
+		h.ServeHTTP(w, r)
+	}
 }
 
 // refusalPageHTML is the 409 page: self-contained, the dashboard's error
@@ -598,12 +714,15 @@ h1{font-size:1.4rem;margin:0 0 0.75rem;color:#fbbf24}
 p{color:#94a3b8;line-height:1.6}
 a{color:#60a5fa;text-decoration:none}
 a:hover{text-decoration:underline}
+button{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:0.6rem 1rem;font-size:0.95rem;cursor:pointer}
+.small{font-size:0.85rem}
 </style>
 </head>
 <body>
 <div class="card">
 <h1>%s</h1>
 <p>%s</p>
+%s
 <p><a href="/dashboard/billing">&larr; Back to billing</a></p>
 </div>
 </body>

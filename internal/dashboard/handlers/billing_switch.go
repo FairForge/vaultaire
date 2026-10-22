@@ -86,7 +86,7 @@ func HandleSwitchProvider(svc HouseBilling, db *sql.DB, baseURL string, logger *
 			return
 		}
 		e, err := svc.SwitchToPrepaid(r.Context(), sd.TenantID, to, sd.UserID)
-		if refusedForProvider(w, err) {
+		if refusedForProvider(w, r, err) {
 			return
 		}
 		switch {
@@ -125,7 +125,7 @@ func switchToCard(w http.ResponseWriter, r *http.Request, svc HouseBilling, sd *
 		forfeits = time.Until(e.PaidThrough) < payments.MinDeferredStart
 	}
 	url, err := svc.StartCheckout(r.Context(), payments.ProviderStripe, co)
-	if refusedForProvider(w, err) {
+	if refusedForProvider(w, r, err) {
 		return
 	}
 	switch {

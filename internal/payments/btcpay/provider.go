@@ -533,7 +533,8 @@ const ReasonCustomerCancel = "customer_cancel"
 // CancelUnpaidInvoice withdraws an open invoice of the tenant nobody paid
 // (payments.InvoiceCanceller, RP31-5): our open row must be the tenant's
 // (else ErrNoSuchPayment), BTCPay's invoice provably unpaid
-// (unpaidForInvalid; else ErrInvoicePaid — it is left to settle), then it
+// (unpaidForInvalid; else ErrInvoicePaid, an *OpenInvoiceError with its
+// date and Paid set — it is left to settle), then it
 // is marked Invalid at BTCPay and — under the tenant's entitlement lock —
 // our row is closed (invalid) at once, so the card checkout's guard lets
 // the customer through without waiting for BTCPay's delivery. Audited
@@ -544,12 +545,9 @@ func (p *Provider) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID,
 	if p.db == nil {
 		return errors.New("btcpay: no database")
 	}
-	row, err := payments.PendingOf(ctx, p.db, payments.ProviderBTCPay, invoiceID)
+	open, err := payments.OpenInvoiceOf(ctx, p.db, tenantID, payments.ProviderBTCPay, invoiceID)
 	if err != nil {
 		return err
-	}
-	if row.TenantID != tenantID || row.Kind != payments.KindCharge || !row.Open() {
-		return fmt.Errorf("invoice %s of tenant %s: %w", invoiceID, tenantID, payments.ErrNoSuchPayment)
 	}
 	inv, err := p.client.GetInvoice(ctx, invoiceID)
 	if err != nil {
@@ -561,7 +559,8 @@ func (p *Provider) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID,
 	}
 	if !unpaid {
 		payments.CountWebhook(payments.ProviderBTCPay, payments.WebhookInvalidateSkippedPaid)
-		return fmt.Errorf("invoice %s is %s with %s paid: %w", invoiceID, inv.Status, inv.PaidAmount, payments.ErrInvoicePaid)
+		open.Paid = true
+		return fmt.Errorf("invoice %s is %s with %s paid: %w", invoiceID, inv.Status, inv.PaidAmount, open)
 	}
 	if !p.markInvalid(ctx, tenantID, invoiceID, ReasonCustomerCancel, actor) {
 		return fmt.Errorf("mark invoice %s invalid: %w", invoiceID, payments.ErrProviderUnavailable)
