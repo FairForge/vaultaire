@@ -406,6 +406,23 @@ handling (none exists — § 3.4).
   new `deliveryId`). Retry policy is BTCPay's `automaticRedelivery` ("after 10
   seconds, 1 minute and up to 6 times after 10 minutes" — the OpenAPI field
   description); our handler answers 5xx to be retried, exactly as with Stripe.
+  **The queue (BTCPay 2.4.5 `WebhookSender.cs`, read 2026-10-21 — RP30-4):**
+  deliveries of one webhook go through ONE queue (`MultiProcessingQueue`
+  keyed by the webhook id), one at a time, on an `HttpClient` with no
+  timeout set (.NET's 100 s); the automatic redelivery's waits run INSIDE
+  the queued task — so one 5xx holds **every other invoice's events of the
+  store for up to ~71 min**. Our handler therefore answers 5xx only for what
+  a retry can fix (a database error, a Greenfield 5xx or no answer, the
+  entitlement lock not free within 15 s); a permanent Greenfield refusal (a
+  4xx: `MarkStatus` 422 outside `availableStatusesForManualMarking`, a 403
+  without `canmodifyinvoices`, a 401 wrong key) is **200 + an Error line +
+  `vaultaire_payment_webhook_total{provider="btcpay",outcome=mark_refused|
+  fetch_refused}`** (rule `BTCPayPaymentNotApplied`, pages), its claim
+  rolled back so the redelivery after the fix applies. A second webhook on
+  the store has a queue of its own and delivery ids of its own — its
+  deliveries of the same invoice can overlap ours (RP30-1, handled under
+  the lock), so the store keeps **ONE webhook, ever**: delete the old URL
+  before adding a new one (WP-DOMAIN-1).
 - **API key**: a Greenfield key scoped to one store: `btcpay.store.
   cancreateinvoice`, `btcpay.store.canviewinvoices`, `btcpay.store.
   canmodifyinvoices` (mark + refund). Never the server admin key.
@@ -431,8 +448,14 @@ Where the lab and the text above differ, the lab wins:
 - **No 404 for an unknown invoice**: `GET …/invoices/<unknown>` answers
   **403 `missing-permission` (canviewinvoices)**, even to an unrestricted
   key; a wrong key is 401. The handler reads that 403 as "no such invoice"
-  (200 + Warn); a key that really lost the permission is caught by the
-  readiness check below.
+  (200 + Warn, counted `foreign`); a key that really lost the permission is
+  caught by the readiness check below. **Corrected (RP30-3, Prompt 25):**
+  RP29-4's remedy ("re-deliver from the BTCPay UI") did not work while the
+  claim of a non-applied delivery was committed — a redelivery carries the
+  original's `originalDeliveryId` and was a duplicate. Since Part 0 of
+  Prompt 25 a verdict that applied nothing **rolls its claim back** and
+  answers 200, so a redelivery (automatic or from the UI after the fix) is
+  handled fresh.
 - **The scoped key cannot read the store** (`GET /api/v1/stores/{s}` → 403,
   `canviewstoresettings`): readiness reads `GET …/invoices?take=1`
   (canviewinvoices) instead. `GET /api/v1/health` answers **200
@@ -469,7 +492,10 @@ Where the lab and the text above differ, the lab wins:
 | **Lab:** a double spend / RBF replacement **before** confirmation | the invoice silently returns `Processing → New` (no event), then `InvoiceExpired{partiallyPaid:false}` → `expired` | — (it never becomes `Invalid`: Processing is not monotonic, nothing acts on it) |
 | **Lab:** `InvoiceInvalid` after a hand-marked `Settled` (an operator's act) | stays `settled` | the grant stands, a Warn; the operator adjusts by hand |
 | `InvoicePaymentSettled` | the `payments[]` entry marked confirmed | — |
-| Any event for an invoice our `payments` table does not know, or whose `metadata.tenant_id` ≠ the row's tenant | 200, Warn, counted `foreign` | — |
+| Any event for an invoice our `payments` table does not know, or whose `metadata.tenant_id` ≠ the row's tenant | 200, Warn, counted `foreign` — the claim **released** (RP30-3: a redelivery is handled fresh) | — |
+| **Prompt 25 Part 0:** two deliveries of one invoice that overlap (InvoiceSettled + InvoicePaymentSettled; two webhooks on the store; one outliving 100 s) | the second takes the tenant's lock after the first committed and re-reads the row (`LockedPending`, FOR UPDATE) — a replay | granted ONCE (RP30-1); an `Expired` fetch on a row no longer open (settled, refunded) writes neither a status nor a `partial:` credit |
+| `Settled` with `paidAmount` < `amount` | unchanged, the claim released | no grant, an Error, counted `settled_unpaid` (pages — RP30-5) |
+| Paid late in full, `MarkStatus` refused with a 4xx | unchanged, the claim released | no grant, an Error, counted `mark_refused` (pages); an operator marks it by hand |
 
 **Confirmation policy** (`checkout.speedPolicy` per invoice): `MediumSpeed`
 (1 confirmation) for invoices under $200, `LowMediumSpeed` (2) at or above.

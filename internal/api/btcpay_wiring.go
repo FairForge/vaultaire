@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/FairForge/vaultaire/internal/payments/btcpay"
@@ -12,12 +13,20 @@ import (
 // BTCPAY_WEBHOOK_SECRET are set (the two secrets by credential → _FILE →
 // env, as IDRIVE_RESELLER_API_KEY). None set = BTCPay off, one Info line;
 // some set = one Error line naming the missing ones (never a value), not
-// registered; a secret source that is set but unusable = a refused boot,
+// registered; BTCPAY_URL plain http to a host that is not loopback = one
+// Error line naming it, not registered (RP30-6); a secret source that is set but unusable = a refused boot,
 // never "BTCPay off". The webhook route is mounted by registerBTCPayRoute
 // whatever the pay_btcpay flag (late notifications must land); the flag
 // gates new checkouts only (payments.Registry.For).
 func (s *Server) setupBTCPay(getenv func(string) string, readFile func(string) ([]byte, error)) {
 	cfg, missing, err := btcpay.LoadConfig(getenv, readFile)
+	if errors.Is(err, btcpay.ErrInsecureURL) {
+		// The store key would travel in clear (RP30-6): not registered, no
+		// route — a misconfiguration to fix, not a reason to refuse boot.
+		s.logger.Error("btcpay provider NOT registered: BTCPAY_URL is plain http to a host that is not loopback — use https",
+			zap.String("setting", "BTCPAY_URL"))
+		return
+	}
 	if err != nil {
 		s.logger.Fatal("BTCPay configuration: refusing to start", zap.Error(err))
 	}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -28,11 +29,17 @@ const (
 // boot, never "BTCPay off".
 var ErrSecretSource = errors.New("BTCPay secret source unusable")
 
+// ErrInsecureURL: BTCPAY_URL is plain http to a host that is not loopback —
+// the store key would cross the network in clear (RP30-6, the Blomp
+// lesson). The caller logs an Error and does not register the provider.
+var ErrInsecureURL = errors.New("BTCPAY_URL is plain http to a host that is not loopback — https required")
+
 // LoadConfig reads BTCPAY_URL, BTCPAY_STORE_ID, BTCPAY_API_KEY and
 // BTCPAY_WEBHOOK_SECRET (the two secrets by credential → _FILE → env).
 // missing lists the names of the settings that are not set, in that order;
-// complete = none missing and BTCPAY_URL is an absolute http(s) URL. Values
-// are never in an error.
+// complete = none missing and BTCPAY_URL is an absolute https URL (plain
+// http only to a loopback host — the lab; else ErrInsecureURL). Values are
+// never in an error.
 func LoadConfig(getenv func(string) string, readFile func(string) ([]byte, error)) (cfg Config, missing []string, err error) {
 	cfg.URL = strings.TrimRight(strings.TrimSpace(getenv("BTCPAY_URL")), "/")
 	cfg.StoreID = strings.TrimSpace(getenv("BTCPAY_STORE_ID"))
@@ -55,8 +62,20 @@ func LoadConfig(getenv func(string) string, readFile func(string) ([]byte, error
 		if perr != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 			return cfg, missing, fmt.Errorf("BTCPAY_URL must be an absolute http(s) URL")
 		}
+		if u.Scheme == "http" && !loopback(u.Hostname()) {
+			return cfg, missing, ErrInsecureURL
+		}
 	}
 	return cfg, missing, nil
+}
+
+// loopback reports localhost or a loopback IP (127.0.0.0/8, ::1).
+func loopback(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func loadSecret(getenv func(string) string, readFile func(string) ([]byte, error), name, credential string) (string, error) {

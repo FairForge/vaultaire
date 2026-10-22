@@ -7,11 +7,15 @@ const (
 	OutcomeSettled  = "settled"
 	OutcomeFailed   = "failed"
 	OutcomeReplayed = "replayed"
+	// OutcomeMismatch: a provider's refund notice that disagrees with the
+	// refund already in the ledger under its id (another amount, another
+	// charge) — acknowledged, not recorded (RP30-7).
+	OutcomeMismatch = "mismatch"
 )
 
 var paymentsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_payments_total",
-	Help: "Money events written to the payments ledger, by provider, kind and outcome (settled, failed, replayed — a notification for a row already settled).",
+	Help: "Money events written to the payments ledger, by provider, kind and outcome (settled, failed, replayed — a notification for a row already settled; mismatch — a provider refund notice that disagrees with the ledger, not recorded).",
 }, []string{"provider", "kind", "outcome"})
 
 // providerReady is 1 while a provider can take a payment (configured ∧
@@ -42,14 +46,17 @@ const (
 	// WebhookForeign: verified, but for an invoice our ledger does not know
 	// or whose metadata names another tenant — 200, never applied (BTCPay,
 	// docs/PAYMENTS.md § 3.3).
-	WebhookForeign = "foreign"
+	WebhookForeign       = "foreign"
+	WebhookSettledUnpaid = "settled_unpaid"
+	WebhookMarkRefused   = "mark_refused"
+	WebhookFetchRefused  = "fetch_refused"
 )
 
 // webhookTotal counts provider webhook deliveries by outcome: the series
 // PaymentWebhookFailing reads (no per-route HTTP series exists — D-P20-A2).
 var webhookTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_payment_webhook_total",
-	Help: "Payment-provider webhook deliveries by provider and outcome: ok (applied), duplicate (already applied), rejected (bad signature or body), error (500, the provider retries).",
+	Help: "Payment-provider webhook deliveries by provider and outcome: ok (applied), duplicate (already applied), rejected (bad signature or body), error (500, the provider retries), foreign (not ours), settled_unpaid, mark_refused, fetch_refused (BTCPay: 200, nothing applied — RP30-4/5).",
 }, []string{"provider", "outcome"})
 
 // providerEnabledDesc: 1 while the provider's pay_<name> flag is on
@@ -99,6 +106,8 @@ func init() {
 	for _, p := range []string{ProviderStripe, ProviderManual} {
 		paymentsTotal.WithLabelValues(p, KindRefund, OutcomeSettled)
 	}
+	// A Stripe refund notice that disagrees with the ledger (RP30-7).
+	paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeMismatch)
 	for _, s := range ReminderSteps {
 		for _, o := range []string{OutcomeSent, OutcomeFailed} {
 			remindersTotal.WithLabelValues(string(s), o)
@@ -111,7 +120,8 @@ func init() {
 	// charge outcomes, the credits it keeps (an overpayment, a partial
 	// payment of an expired invoice) and the refunds of its charges an
 	// operator records — every pair at 0 from boot, registered or not.
-	for _, o := range []string{WebhookOK, WebhookDuplicate, WebhookRejected, WebhookError, WebhookForeign} {
+	for _, o := range []string{WebhookOK, WebhookDuplicate, WebhookRejected, WebhookError, WebhookForeign,
+		WebhookSettledUnpaid, WebhookMarkRefused, WebhookFetchRefused} {
 		webhookTotal.WithLabelValues(ProviderBTCPay, o)
 	}
 	for _, o := range []string{OutcomeSettled, OutcomeReplayed} {

@@ -290,3 +290,32 @@ func TestChargeRefundUpdated_PendingThenSucceeded_RecordedOnce(t *testing.T) {
 	assert.Equal(t, int64(400), f.refundSum(t))
 	assert.Equal(t, 1, f.audits(t, "billing.refund_recorded"))
 }
+
+// RP30-7 (Stage 1a Prompt 25 Part 0): an operator who recorded re_x first
+// with another amount is not silently confirmed by Stripe's delivery — the
+// disagreement is an Error line and a counted mismatch, acknowledged.
+func TestRefund_AdminFormOtherAmountThenWebhook_MismatchCounted(t *testing.T) {
+	// Arrange: a $10.00 charge; the operator records re_x as $4.00.
+	f := setupHouseFixture(t)
+	inv := f.paidInvoice(t, 1000)
+	re := "re_mm_" + f.tenantID
+	w := f.adminForm(t, url.Values{"payment_id": {f.chargeRow(t, inv.ID)}, "amount": {"4.00"}, "provider_ref": {re}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	mismatch := paymentsCount(t, payments.ProviderStripe, payments.KindRefund, payments.OutcomeMismatch)
+
+	// Act: Stripe says re_x was $5.00.
+	code := f.postCode(t, "refunded-mm", "charge.refunded",
+		f.refundedCharge(inv.ID, &stripe.Refund{ID: re, Amount: 500, Status: stripe.RefundStatusSucceeded}))
+
+	// Assert: acknowledged, counted, the ledger keeps the one row the
+	// operator wrote (their number is the one to correct by hand).
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, mismatch+1, paymentsCount(t, payments.ProviderStripe, payments.KindRefund, payments.OutcomeMismatch))
+	assert.Equal(t, 1, f.refundRows(t))
+	assert.Equal(t, int64(400), f.refundSum(t))
+
+	// The same amount is the plain "already recorded" — not a mismatch.
+	f.postCode(t, "refunded-same", "charge.refunded",
+		f.refundedCharge(inv.ID, &stripe.Refund{ID: re, Amount: 400, Status: stripe.RefundStatusSucceeded}))
+	assert.Equal(t, mismatch+1, paymentsCount(t, payments.ProviderStripe, payments.KindRefund, payments.OutcomeMismatch))
+}

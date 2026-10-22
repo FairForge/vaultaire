@@ -95,3 +95,76 @@ tests:
             exp_annotations:
               summary: "entitlement_lapse skipped 2 house(s) as provider_unready on two runs running"
               description: "A house past paid_through + grace is kept while its provider was unready in the last 24 h (by design — a house is never lost because our processor was down), but two days running means the provider is not coming back by itself. GET /api/v1/admin/jobs → entitlement_lapse.result.errors names the tenants and the provider; see PaymentProviderDown."
+
+  # RP30-5: one settled_unpaid pages within the hour; a flat series does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_webhook_total{provider="btcpay",outcome="settled_unpaid"}'
+        values: '0x30 1x30'
+      - series: 'vaultaire_payment_webhook_total{provider="btcpay",outcome="mark_refused"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BTCPayPaymentNotApplied
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BTCPayPaymentNotApplied
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: settled_unpaid
+            exp_annotations:
+              summary: "A BTCPay delivery was acknowledged without being applied (settled_unpaid)"
+              description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' names the invoice and the tenant. settled_unpaid: BTCPay says Settled but paidAmount < amount — check the store's payment tolerance (must be 0 %) and whether an operator marked it; record a manual payment if the money is real. mark_refused: mark the late-paid invoice Settled by hand in BTCPay (the InvoiceSettled that follows grants it). fetch_refused: the store key is wrong or lost a permission (cancreateinvoice, canviewinvoices, canmodifyinvoices) — fix it, then redeliver the delivery from the BTCPay UI (it is handled fresh)."
+
+  # A refused mark pages too.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_webhook_total{provider="btcpay",outcome="mark_refused"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BTCPayPaymentNotApplied
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: mark_refused
+            exp_annotations:
+              summary: "A BTCPay delivery was acknowledged without being applied (mark_refused)"
+              description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' names the invoice and the tenant. settled_unpaid: BTCPay says Settled but paidAmount < amount — check the store's payment tolerance (must be 0 %) and whether an operator marked it; record a manual payment if the money is real. mark_refused: mark the late-paid invoice Settled by hand in BTCPay (the InvoiceSettled that follows grants it). fetch_refused: the store key is wrong or lost a permission (cancreateinvoice, canviewinvoices, canmodifyinvoices) — fix it, then redeliver the delivery from the BTCPay UI (it is handled fresh)."
+
+  # foreign warns; at 0 it is silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payment_webhook_total{provider="btcpay",outcome="foreign"}'
+        values: '0x30 2x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BTCPayWebhookForeign
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BTCPayWebhookForeign
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "BTCPay deliveries for invoices the ledger does not match (last hour)"
+              description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' gives the invoice and why (unknown here, unknown at BTCPay, metadata tenant, amount). The store must have ONE webhook, ever (delete the old URL before adding a new one). Nothing was applied; a redelivery after a fix is handled fresh."
+
+  # RP30-7: a refund mismatch warns.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payments_total{provider="stripe",kind="refund",outcome="mismatch"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: StripeRefundMismatch
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: StripeRefundMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "A Stripe refund disagrees with the ledger's row under its id"
+              description: "journalctl -u 'vaultaire@*' -o cat | grep 'refund disagrees' names the tenant, the re_ id and both amounts. Correct the ledger by hand (an adjustment) to what Stripe actually refunded."

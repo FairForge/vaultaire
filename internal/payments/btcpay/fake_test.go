@@ -45,6 +45,7 @@ type fakeBTCPay struct {
 	healthErr int // a status to answer /health with (0 = 200 synchronized)
 	storeErr  int
 	fetchErr  int // a status to answer every invoice GET with
+	markErr   int // a status to answer every MarkStatus with (0 = the invoice)
 	nextID    int
 	calls     map[string]int
 	unknown   []byte
@@ -120,6 +121,11 @@ func (f *fakeBTCPay) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			_, _ = w.Write(pm)
 		case len(parts) == 2 && parts[1] == "status" && r.Method == http.MethodPost:
+			if f.markErr != 0 {
+				w.WriteHeader(f.markErr)
+				_, _ = io.WriteString(w, `{"code":"invalid-state","message":"x"}`)
+				return
+			}
 			f.marked = append(f.marked, id)
 			_, _ = w.Write(f.invoices[id])
 		default:

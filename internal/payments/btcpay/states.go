@@ -23,6 +23,21 @@ import (
 // entitlement lock: the claim, the ledger and the entitlement commit
 // together, and any failure rolls all three back for BTCPay to redeliver.
 // Every transition is idempotent on (invoice id, fetched status).
+//
+// The row that decides a write is read again UNDER the lock, and the
+// invoice is fetched after it (RP30-1): two overlapping deliveries of one
+// invoice — two webhooks on the store, or one outliving BTCPay's 100 s —
+// apply one after the other, the second seeing what the first wrote.
+//
+// BTCPay sends one delivery at a time per webhook, and its automatic
+// redelivery waits (10 s, 1 min, 6 × 10 min) INSIDE that queue: a 5xx
+// stalls every other invoice's events for up to ~71 min (RP30-4). So a 5xx
+// is only for what a retry can fix — a database error, a Greenfield 5xx or
+// no answer, the lock not free in time. A permanent Greenfield refusal (a
+// 4xx), and every verdict that applies nothing (foreign, settled unpaid),
+// is 200 with its own outcome, and its claim is NOT kept (RP30-3): BTCPay's
+// redelivery of it — automatic or from the UI after the fix — carries the
+// same originalDeliveryId and is handled fresh.
 
 // webhookActor is the audit actor of what the webhook writes.
 const webhookActor = "btcpay-webhook"
@@ -88,6 +103,13 @@ func (p *Provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if res.verdict != "" {
+		// Nothing applied: acknowledged, the claim released (RP30-3).
+		claim.Rollback()
+		outcome = res.verdict
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if err := claim.Commit(ctx, res.tenantID); err != nil {
 		p.logger.Error("btcpay webhook: commit failed", zap.String("delivery", ev.DeliveryID), zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
@@ -95,22 +117,22 @@ func (p *Provider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	res.after(ctx, p)
 	outcome = payments.WebhookOK
-	if res.foreign {
-		outcome = payments.WebhookForeign
-	}
 	w.WriteHeader(http.StatusOK)
 }
 
 // applied is what a delivery did, for the work after the commit.
 type applied struct {
 	tenantID string
-	foreign  bool
-	granted  *payments.Granted
-	settled  *payments.Settled
-	marked   string // the invoice marked Settled by the paid-late automation
-	credit   int64  // the change in the tenant's credit
-	purpose  string
-	invoice  string
+	// verdict is set when the delivery applied nothing (WebhookForeign,
+	// WebhookSettledUnpaid, WebhookMarkRefused, WebhookFetchRefused): the
+	// claim is rolled back and the delivery answered 200 under it.
+	verdict string
+	granted *payments.Granted
+	settled *payments.Settled
+	marked  string // the invoice marked Settled by the paid-late automation
+	credit  int64  // the change in the tenant's credit
+	purpose string
+	invoice string
 }
 
 // after counts, audits and mails what the committed delivery did.
@@ -146,6 +168,12 @@ func (a applied) after(ctx context.Context, p *Provider) {
 	}
 }
 
+// webhookLockWait bounds the wait for the tenant's entitlement lock (the
+// claim's own lock_timeout is 5 s): a checkout holds it across
+// CreateInvoice (≤ 10 s per Greenfield call), and a lock timeout is a 5xx
+// that stalls the store's queue (RP30-4). Well inside BTCPay's 100 s.
+const webhookLockWait = 15 * time.Second
+
 // handle resolves and applies one claimed delivery in tx.
 func (p *Provider) handle(ctx context.Context, tx *sql.Tx, ev Event) (applied, error) {
 	var a applied
@@ -159,22 +187,16 @@ func (p *Provider) handle(ctx context.Context, tx *sql.Tx, ev Event) (applied, e
 		return a, nil
 	}
 	a.invoice = ev.InvoiceID
+	// The tenant first, from our row — a plain read: a row's tenant never
+	// changes; everything else is read again under the lock.
 	row, err := payments.PendingOf(ctx, tx, payments.ProviderBTCPay, ev.InvoiceID)
-	var inv Invoice
-	fetched := false
 	if errors.Is(err, payments.ErrNoSuchPayment) {
 		// The invoice id may not be on its row yet (the crash window of
 		// startCheckout): adopt the row the invoice's metadata names.
-		if inv, err = p.client.GetInvoice(ctx, ev.InvoiceID); err != nil {
-			if IsUnknownInvoice(err) {
-				p.logger.Warn("btcpay webhook: invoice unknown here and at BTCPay — acknowledged",
-					zap.String("invoice", ev.InvoiceID), zap.String("type", ev.Type))
-				a.foreign = true
-				return a, nil
-			}
-			return a, fmt.Errorf("fetch invoice %s: %w", ev.InvoiceID, err)
+		inv, ferr := p.client.GetInvoice(ctx, ev.InvoiceID)
+		if ferr != nil {
+			return a, p.fetchFailed(&a, ev, "", ferr, "invoice unknown here and at BTCPay")
 		}
-		fetched = true
 		row, err = p.adopt(ctx, tx, inv)
 		if err != nil && !errors.Is(err, payments.ErrNoSuchPayment) {
 			return a, err
@@ -183,45 +205,72 @@ func (p *Provider) handle(ctx context.Context, tx *sql.Tx, ev Event) (applied, e
 	if errors.Is(err, payments.ErrNoSuchPayment) || row.Kind != payments.KindCharge || row.TenantID == "" {
 		p.logger.Warn("btcpay webhook: invoice our ledger does not know — acknowledged, not applied",
 			zap.String("invoice", ev.InvoiceID), zap.String("type", ev.Type))
-		a.foreign = true
+		a.verdict = payments.WebhookForeign
 		return a, nil
 	}
 	if err != nil {
 		return a, err
 	}
-	if !fetched {
-		if inv, err = p.client.GetInvoice(ctx, ev.InvoiceID); err != nil {
-			if IsUnknownInvoice(err) {
-				p.logger.Warn("btcpay webhook: our invoice is gone at BTCPay — acknowledged",
-					zap.String("invoice", ev.InvoiceID), zap.String("tenant", row.TenantID))
-				a.tenantID = row.TenantID
-				return a, nil
-			}
-			return a, fmt.Errorf("fetch invoice %s: %w", ev.InvoiceID, err)
-		}
+	tenantID := row.TenantID
+
+	// RP30-1: the lock, then the row as it is now, then BTCPay's invoice.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", webhookLockWait.Milliseconds())); err != nil {
+		return a, fmt.Errorf("set lock_timeout: %w", err)
+	}
+	if err := payments.Lock(ctx, tx, tenantID); err != nil {
+		return a, err
+	}
+	if row, err = payments.LockedPending(ctx, tx, payments.ProviderBTCPay, ev.InvoiceID); err != nil {
+		return a, err
+	}
+	if row.TenantID != tenantID {
+		return a, fmt.Errorf("invoice %s: the ledger row changed tenant under the lock", ev.InvoiceID)
+	}
+	inv, err := p.client.GetInvoice(ctx, ev.InvoiceID)
+	if err != nil {
+		return a, p.fetchFailed(&a, ev, tenantID, err, "our invoice is gone at BTCPay")
 	}
 	if mt := metadataTenant(inv.Metadata); mt != row.TenantID || inv.StoreID != "" && inv.StoreID != p.cfg.StoreID {
 		p.logger.Warn("btcpay webhook: invoice metadata names another tenant than our row — acknowledged, not applied",
 			zap.String("invoice", ev.InvoiceID), zap.String("row_tenant", row.TenantID), zap.String("metadata_tenant", mt))
-		a.foreign = true
+		a.verdict = payments.WebhookForeign
 		return a, nil
 	}
 	if cents, err := usdToCents(inv.Amount); err != nil || !strings.EqualFold(inv.Currency, "USD") || cents != row.AmountCents {
 		p.logger.Error("btcpay webhook: invoice amount differs from our row — acknowledged, not applied",
 			zap.String("invoice", ev.InvoiceID), zap.String("tenant", row.TenantID), zap.String("currency", inv.Currency),
 			zap.Int64("row_cents", row.AmountCents))
-		a.foreign = true
+		a.verdict = payments.WebhookForeign
 		return a, nil
 	}
 	a.tenantID, a.purpose = row.TenantID, row.Purpose
 	pms, err := p.client.GetPaymentMethods(ctx, ev.InvoiceID)
 	if err != nil {
-		return a, fmt.Errorf("fetch payment methods of %s: %w", ev.InvoiceID, err)
-	}
-	if err := payments.Lock(ctx, tx, row.TenantID); err != nil {
-		return a, err
+		return a, p.fetchFailed(&a, ev, tenantID, fmt.Errorf("fetch payment methods of %s: %w", ev.InvoiceID, err), "")
 	}
 	return a, p.apply(ctx, tx, &a, row, inv, pms)
+}
+
+// fetchFailed classifies a Greenfield read that failed: BTCPay's "no such
+// invoice" (403 missing-permission — unknownWhat names the case) is a
+// foreign verdict with a Warn; any other 4xx is permanent until an operator
+// acts (a wrong key, a permission removed) — the fetch_refused verdict with
+// an Error, so the store's queue is not stalled for it (RP30-4); a 5xx or no
+// answer is returned, a retry can fix it.
+func (p *Provider) fetchFailed(a *applied, ev Event, tenantID string, err error, unknownWhat string) error {
+	if unknownWhat != "" && IsUnknownInvoice(err) {
+		p.logger.Warn("btcpay webhook: "+unknownWhat+" — acknowledged, not applied (a redelivery is handled fresh)",
+			zap.String("invoice", ev.InvoiceID), zap.String("type", ev.Type), zap.String("tenant", tenantID))
+		a.verdict = payments.WebhookForeign
+		return nil
+	}
+	if IsPermanent(err) {
+		p.logger.Error("btcpay webhook: BTCPay refused a read — acknowledged, not applied; fix the store key and redeliver from the BTCPay UI",
+			zap.String("invoice", ev.InvoiceID), zap.String("type", ev.Type), zap.String("tenant", tenantID), zap.Error(err))
+		a.verdict = payments.WebhookFetchRefused
+		return nil
+	}
+	return fmt.Errorf("fetch invoice %s: %w", ev.InvoiceID, err)
 }
 
 // adopt finds the pending row the invoice's metadata names (payment_id,
@@ -335,6 +384,7 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 			p.logger.Error("btcpay webhook: invoice Settled without its amount paid (marked by hand?) — not granted",
 				zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.String("additional_status", inv.AdditionalStatus),
 				zap.Int64("paid_cents", paid), zap.Int64("amount_cents", row.AmountCents))
+			a.verdict = payments.WebhookSettledUnpaid
 			return nil
 		}
 		// Granted only on a NEW settle: a replay (redelivery, a later
@@ -374,12 +424,28 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		return err
 
 	case StatusExpired:
+		if !row.Open() {
+			// A concurrent delivery settled (or an operator refunded) the row
+			// before this one took the lock: an Expired fetch is not a reason
+			// to mark anything or to credit money that paid it (RP30-1).
+			p.logger.Info("btcpay webhook: invoice reads Expired but our row is no longer open — nothing to do",
+				zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.String("row_status", row.Status))
+			return nil
+		}
 		// An expired invoice whose payments reached its amount was paid late
 		// (§ 3.3; the lab: Expired/PaidLate — a full payment inside the
 		// window makes it Processing): mark it Settled; BTCPay's
 		// InvoiceSettled{manuallyMarked} that follows grants it.
 		if paid > 0 && paid >= row.AmountCents {
 			if _, err := p.client.MarkStatus(ctx, inv.ID, StatusSettled); err != nil {
+				if IsPermanent(err) {
+					// 422 (not in availableStatusesForManualMarking), 403 (the
+					// key lacks canmodifyinvoices): no retry changes it.
+					p.logger.Error("btcpay webhook: BTCPay refused to mark a late-paid invoice Settled — acknowledged, not granted; mark it by hand",
+						zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.Error(err))
+					a.verdict = payments.WebhookMarkRefused
+					return nil
+				}
 				return fmt.Errorf("mark late-paid invoice %s settled: %w", inv.ID, err)
 			}
 			a.marked = inv.ID
