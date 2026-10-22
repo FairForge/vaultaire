@@ -72,7 +72,7 @@ All reads were made on the box: sudo password on stdin, the journal read as JSON
   - An unauthenticated ceremony POST answers **401**.
   - `vaultaire_translog_size 1`, both `append_failures_total` series 0, `signing_key_loaded 0`.
   - **0 `"level":"error"` lines in 90 min**, across both switches.
-- **K2 #885, `d70e5b4`**: Deploy, CI, Security and CodeQL all green. The build has no server code path.
+- **K2 #885, `d70e5b4`**: Deploy, CI, Security and CodeQL all green on its own merge commit. The build has no server code path.
 
 ## Rules installed
 
@@ -92,6 +92,7 @@ After the reload: **17 groups, 103 rules**, all `health=ok` after the first eval
 - **RP35-3 (note).** The K2 WASM is 3.8 MB raw and 1.1 MB gzip (the Go runtime). TinyGo or a split build is a later K2 concern, not a blocker.
 - **RP35-4 (note).** The signing key and the verifier key are not on prod: every checkpoint waits for the owner's ceremony. Until then the log appends and nothing signs, by design.
 - **RP35-5 (note).** The first ceremony entry must be appended after the key is loaded, so that the first signed checkpoint covers it. The order is in `docs/TRANSPARENCY.md`.
+- **RP35-6 (P3, fixed by #888).** The Security workflow on `83ef6c9` (#884) failed: gosec G705 (XSS taint) at `internal/translog/serve.go:119`, the read handler's `w.Write`. It is a false positive (a signed note or tile bytes, non-HTML content types, `nosniff`); #888 adds a `#nosec G705` with that reason, and its gosec job passes. It was missed because the ground rule's `make gosec` never really ran: the Mac had no `gosec` on PATH, and `go run …gosec@latest` skips SSA ("type errors") in every package there, so taint rules never run locally. The Security job on the PR is the only real gosec gate; check it before arming.
 
 ## K4b (not in this prompt)
 
