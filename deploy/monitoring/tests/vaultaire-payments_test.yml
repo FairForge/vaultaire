@@ -168,3 +168,40 @@ tests:
             exp_annotations:
               summary: "A Stripe refund disagrees with the ledger's row under its id"
               description: "journalctl -u 'vaultaire@*' -o cat | grep 'refund disagrees' names the tenant, the re_ id and both amounts. Correct the ledger by hand (an adjustment) to what Stripe actually refunded."
+
+  # WP-PAY-5: a double period warns, per provider.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_payments_double_period_total{provider="stripe"}'
+        values: '0x10 1x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PaymentDoublePeriod
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PaymentDoublePeriod
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              provider: stripe
+            exp_annotations:
+              summary: "A customer paid twice for overlapping dates (stripe)"
+              description: "The audit row billing.double_period names both ledger rows (GET /api/v1/admin/tenants/<tenant>/payments). Refund one of them with the provider, then record it with POST /api/v1/admin/tenants/<tenant>/refunds. journalctl -u 'vaultaire@*' -o cat | grep 'paid twice'."
+
+  # WP-PAY-5: a stop pending for an hour warns; a shorter one does not.
+  - interval: 5m
+    input_series:
+      - series: 'vaultaire_payment_renewal_stops_pending'
+        values: '0x3 1x6 0x3 1x20'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: RenewalStopsPending
+        exp_alerts: []
+      - eval_time: 150m
+        alertname: RenewalStopsPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "1 subscription(s) a provider switch replaced are not confirmed stopped"
+              description: "GET /api/v1/admin/jobs → renewal_stops.result.errors names each provider:subscription and why (Stripe not configured, an API error). Stop it by hand in the Stripe dashboard (cancel at period end) — the next run then reads it as stopped. While pending it may bill a period the customer already paid (PaymentDoublePeriod)."

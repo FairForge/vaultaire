@@ -1,6 +1,12 @@
 package payments
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"context"
+	"database/sql"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // Payment outcomes counted on vaultaire_payments_total.
 const (
@@ -17,6 +23,14 @@ var paymentsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_payments_total",
 	Help: "Money events written to the payments ledger, by provider, kind and outcome (settled, failed, replayed — a notification for a row already settled; mismatch — a provider refund notice that disagrees with the ledger, not recorded).",
 }, []string{"provider", "kind", "outcome"})
+
+// doublePeriodTotal counts settled charges that bought dates another
+// provider's settled charge also bought (WP-PAY-5 item 3), by the provider
+// of the charge that made the overlap.
+var doublePeriodTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_payments_double_period_total",
+	Help: "Settled charges whose period overlaps another provider's settled charge of the same tenant (the customer paid twice for the same dates — refund by hand), by the provider of the later charge. Every provider at 0 from boot.",
+}, []string{"provider"})
 
 // providerReady is 1 while a provider can take a payment (configured ∧
 // verified), recorded every 60 s by Registry.StartReadiness and at
@@ -106,6 +120,9 @@ func init() {
 	for _, p := range []string{ProviderStripe, ProviderManual} {
 		paymentsTotal.WithLabelValues(p, KindRefund, OutcomeSettled)
 	}
+	for _, p := range []string{ProviderStripe, ProviderBTCPay, ProviderManual} {
+		doublePeriodTotal.WithLabelValues(p)
+	}
 	// A Stripe refund notice that disagrees with the ledger (RP30-7).
 	paymentsTotal.WithLabelValues(ProviderStripe, KindRefund, OutcomeMismatch)
 	for _, s := range ReminderSteps {
@@ -154,5 +171,37 @@ func CountPayment(provider, kind, outcome string) {
 // Collectors are the package's series, registered by
 // internal/api/prom_metrics.go.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{paymentsTotal, providerReady, remindersTotal, webhookTotal}
+	return []prometheus.Collector{paymentsTotal, providerReady, remindersTotal, webhookTotal, doublePeriodTotal}
+}
+
+// renewalStopsPendingDesc: renewal_stop rows whose provider has not
+// confirmed the stop (WP-PAY-5), read from payment_events on scrape — a
+// subscription that may still bill beside the house that replaced it.
+var renewalStopsPendingDesc = prometheus.NewDesc("vaultaire_payment_renewal_stops_pending",
+	"Subscriptions a provider switch took the house from whose renewal stop the provider has not confirmed yet (payment_events renewal_stop rows, status pending) — they may still bill. Read from the table on scrape.",
+	nil, nil)
+
+// RenewalStopsCollector exports vaultaire_payment_renewal_stops_pending.
+type RenewalStopsCollector struct{ db *sql.DB }
+
+// NewRenewalStopsCollector builds one over db.
+func NewRenewalStopsCollector(db *sql.DB) *RenewalStopsCollector {
+	return &RenewalStopsCollector{db: db}
+}
+
+// Describe implements prometheus.Collector.
+func (c *RenewalStopsCollector) Describe(ch chan<- *prometheus.Desc) { ch <- renewalStopsPendingDesc }
+
+// Collect implements prometheus.Collector: nothing when the count cannot
+// be read (a missing series, never a false 0).
+func (c *RenewalStopsCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var n int
+	if err := c.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM payment_events
+		 WHERE event_type = $1 AND data->>'status' = 'pending' AND tenant_id IS NOT NULL`, EventRenewalStop).Scan(&n); err != nil {
+		return
+	}
+	ch <- prometheus.MustNewConstMetric(renewalStopsPendingDesc, prometheus.GaugeValue, float64(n))
 }

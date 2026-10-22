@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -86,6 +87,9 @@ func (m *Mailer) SendReminder(ctx context.Context, d DueReminder) error {
 	data := email.ReminderMail{BaseURL: m.BaseURL, Email: d.Email, House: d.Order.Words(),
 		PaidThrough: d.PaidThrough.UTC().Format("2 Jan 2006"), GraceEnds: d.GraceEnds.UTC().Format("2 Jan 2006"),
 		RenewURL: m.renewURL(), DaysLeft: d.DaysLeft, InGrace: d.Step == StepInGrace, LastDay: d.Step == StepLastDay}
+	if d.PendingProvider == ProviderBTCPay {
+		data.SwitchTo = "bitcoin" // WP-PAY-5: the switch the customer asked for
+	}
 	html, text, err := email.RenderRenewalReminder(data)
 	if err != nil {
 		return fmt.Errorf("render reminder %s: %w", d.Step, err)
@@ -116,6 +120,37 @@ func (m *Mailer) SendHouseLapsed(ctx context.Context, tenantID string, e Entitle
 		return fmt.Errorf("render house lapsed: %w", err)
 	}
 	return m.Sender.Send(ctx, to, "Your Stored house has ended — nothing was deleted", html, text)
+}
+
+// SendRenewalStopped mails the bulk stop of card renewals (resumed =
+// false) or their resumption (WP-PAY-5 item 5).
+func (m *Mailer) SendRenewalStopped(ctx context.Context, tenantID string, e Entitlement, resumed bool) error {
+	if m == nil || m.Sender == nil || m.DB == nil {
+		return nil
+	}
+	to, err := m.tenantEmail(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	html, text, err := email.RenderRenewalStopped(email.RenewalStoppedMail{BaseURL: m.BaseURL, Email: to, House: e.Order.Words(),
+		PaidThrough: e.PaidThrough.UTC().Format("2 Jan 2006"), BillingURL: m.renewURL(), Support: m.Legal.Email, Resumed: resumed})
+	if err != nil {
+		return fmt.Errorf("render renewal stopped: %w", err)
+	}
+	subject := "Your Stored house: your card will not be charged again"
+	if resumed {
+		subject = "Your Stored house renews by card again"
+	}
+	return m.Sender.Send(ctx, to, subject, html, text)
+}
+
+// NotifyOperator mails a plain note to the operator — the support address
+// of the legal entity (OperatorNotifier: the double-period detector).
+func (m *Mailer) NotifyOperator(ctx context.Context, subject, body string) error {
+	if m == nil || m.Sender == nil || m.Legal.Email == "" {
+		return nil
+	}
+	return m.Sender.Send(ctx, m.Legal.Email, subject, "<pre>"+html.EscapeString(body)+"</pre>", body)
 }
 
 // Detached returns a context for a send after the caller's request has

@@ -52,6 +52,22 @@
             <span class="card-detail text-muted">the same house, one more {{if eq .House.Period "monthly"}}month{{else}}year{{end}} on the date</span>
         </form>
         {{end}}
+        {{if .House.SwitchToCrypto}}
+        <form method="POST" action="/dashboard/billing/switch" style="margin-top:0.75rem">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="to" value="btcpay">
+            <button type="submit" class="btn">Switch to bitcoin at renewal</button>
+            <span class="card-detail text-muted">the card stops renewing; you keep every day already paid and pay the next period in bitcoin, from that date</span>
+        </form>
+        {{end}}
+        {{if .House.SwitchToCard}}
+        <form method="POST" action="/dashboard/billing/switch" style="margin-top:0.75rem">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <input type="hidden" name="to" value="stripe">
+            <button type="submit" class="btn">Switch to card</button>
+            <span class="card-detail text-muted">{{if .House.SwitchToCardStartsNow}}the paid date is less than two days away: card billing starts today and the remaining prepaid days are forfeited{{else}}the card is charged first on the day your prepaid time ends, then renews by itself{{end}}</span>
+        </form>
+        {{end}}
     </div>
     <div class="card">
         <div class="card-title">Storage Used</div>

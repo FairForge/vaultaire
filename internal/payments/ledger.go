@@ -79,6 +79,19 @@ type Settled struct {
 	InvoiceNumber string
 	// Newly is false when the row was already settled (a replay).
 	Newly bool
+	// DoublePeriod is set when this newly settled charge bought dates
+	// another provider's settled charge also bought (WP-PAY-5 item 3,
+	// docs/PAYMENTS.md § 2.5 point 5): the caller reports it after its
+	// commit (ReportDoublePeriod). The settle itself stands — paid is paid.
+	DoublePeriod *DoublePeriod
+}
+
+// DoublePeriod names the two charges whose periods overlap.
+type DoublePeriod struct {
+	ThisID, ThisProvider, ThisProviderID    string
+	ThisStart, ThisEnd                      time.Time
+	OtherID, OtherProvider, OtherProviderID string
+	OtherStart, OtherEnd                    time.Time
 }
 
 // InvoiceNumber formats our receipt number: ST-<year>-<six digits>.
@@ -215,7 +228,42 @@ func Settle(ctx context.Context, tx *sql.Tx, p Payment, at time.Time) (Settled, 
 		nullTime(p.PeriodStart), nullTime(p.PeriodEnd), std, vault, pin, period); err != nil {
 		return Settled{}, fmt.Errorf("settle payment %s: %w", id, err)
 	}
-	return Settled{ID: id, InvoiceNumber: number, Newly: true}, nil
+	out := Settled{ID: id, InvoiceNumber: number, Newly: true}
+	if p.Kind == KindCharge && p.AmountCents > 0 {
+		if out.DoublePeriod, err = doublePeriodOf(ctx, tx, id); err != nil {
+			return Settled{}, err
+		}
+	}
+	return out, nil
+}
+
+// doublePeriodOf is the double-period detector (WP-PAY-5 item 3): another
+// provider's settled charge of the same tenant whose period overlaps the
+// charge id just settled — both bounds (other.end > this.start AND
+// other.start < this.end; the design's one-sided "end > start" would flag a
+// later prepaid period that does not overlap). $0 rows on either side (a
+// trialing subscription's first invoice, a credit-covered order) paid
+// nothing twice and are never a match.
+func doublePeriodOf(ctx context.Context, tx *sql.Tx, id string) (*DoublePeriod, error) {
+	var d DoublePeriod
+	err := tx.QueryRowContext(ctx, `
+		SELECT t.id::text, t.provider, t.provider_id, t.period_start, t.period_end,
+		       o.id::text, o.provider, o.provider_id, o.period_start, o.period_end
+		  FROM payments t
+		  JOIN payments o ON o.tenant_id = t.tenant_id AND o.provider <> t.provider AND o.kind = 'charge'
+		                 AND o.status = 'settled' AND o.amount_cents > 0
+		                 AND o.period_end > t.period_start AND o.period_start < t.period_end
+		 WHERE t.id = $1::uuid AND t.tenant_id IS NOT NULL AND t.period_start IS NOT NULL AND t.period_end IS NOT NULL
+		 ORDER BY o.period_end DESC LIMIT 1`, id).
+		Scan(&d.ThisID, &d.ThisProvider, &d.ThisProviderID, &d.ThisStart, &d.ThisEnd,
+			&d.OtherID, &d.OtherProvider, &d.OtherProviderID, &d.OtherStart, &d.OtherEnd)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("double-period check of payment %s: %w", id, err)
+	}
+	return &d, nil
 }
 
 // Fail records a payment attempt that failed (a Stripe invoice whose charge

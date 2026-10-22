@@ -53,3 +53,15 @@ func TestRenderHouseLapsed(t *testing.T) {
 	assert.Contains(t, html, "1 TB in the attic")
 	assert.Contains(t, text, "Renew the house")
 }
+
+// WP-PAY-5: a customer who asked to switch to bitcoin is reminded with the
+// switch offer — the next period paid the new way, from the paid date.
+func TestRenderRenewalReminder_SwitchOffer(t *testing.T) {
+	d := ReminderMail{BaseURL: "https://stored.test", Email: "a@b.test", House: "2 TB downstairs", PaidThrough: "1 Nov 2026",
+		GraceEnds: "15 Nov 2026", RenewURL: "https://stored.test/dashboard/billing", DaysLeft: 13, SwitchTo: "bitcoin"}
+	html, text, err := RenderRenewalReminder(d)
+	require.NoError(t, err)
+	assert.Contains(t, html, "Pay the next period in bitcoin")
+	assert.Contains(t, html, "you chose to pay in bitcoin")
+	assert.Contains(t, text, "bitcoin")
+}

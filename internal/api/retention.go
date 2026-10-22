@@ -82,9 +82,11 @@ func defaultRetentionPolicies() []retentionPolicy {
 		// ledger itself is an accounting record and is never pruned.
 		// An invalid house's subscription (payments.EventInvalidHouse) is
 		// kept until the account's erasure anonymises it: the deletion
-		// runner cancels it from that row (RP22-3, WP-PAY-7).
+		// runner cancels it from that row (RP22-3, WP-PAY-7). So is a
+		// renewal_stop row (WP-PAY-5): the subscription a provider switch
+		// took the house from, which the runner cancels too.
 		{Table: "payment_events", Column: "received_at", MaxAge: retentionStripeEvents,
-			Extra: "(event_type <> 'invalid_house' OR tenant_id IS NULL)"},
+			Extra: "(event_type NOT IN ('invalid_house', 'renewal_stop') OR tenant_id IS NULL)"},
 		{Table: "cdn_access_log", Column: "accessed_at", MaxAge: retentionCDNAccessLog},
 		{Table: "webhook_deliveries", Column: "created_at", MaxAge: retentionWebhookDeliv},
 		// The outbox (WP-R11-3): a row is terminal within ~3 minutes of its

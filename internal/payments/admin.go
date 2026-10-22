@@ -109,6 +109,7 @@ func RecordManualPayment(ctx context.Context, db *sql.DB, p ManualPayment) (Manu
 	}
 	now := time.Now().UTC()
 	var granted Granted
+	var manualSettled Settled
 	var order Order
 	err := InTx(ctx, db, func(tx *sql.Tx) error {
 		if err := Lock(ctx, tx, p.TenantID); err != nil {
@@ -156,12 +157,16 @@ func RecordManualPayment(ctx context.Context, db *sql.DB, p ManualPayment) (Manu
 			return err
 		}
 		res.PaymentID, res.InvoiceNumber = settled.ID, settled.InvoiceNumber
+		manualSettled = settled
 		return nil
 	})
 	if err != nil {
 		return res, err
 	}
 	CountPayment(ProviderManual, KindCharge, OutcomeSettled)
+	// A wire over dates another provider was paid for: counted and audited
+	// (the operator recording it is the one to see the page).
+	_ = ReportDoublePeriod(ctx, db, nil, p.TenantID, manualSettled)
 	audit.Record(ctx, db, audit.Entry{Actor: p.Actor, TenantID: p.TenantID, EventType: "billing", Action: "billing.payment_recorded_manual",
 		Resource: "payment:" + res.PaymentID, Metadata: map[string]any{
 			"tenant": p.TenantID, "actor": p.Actor, "payment_id": res.PaymentID, "invoice_number": res.InvoiceNumber, "amount_cents": p.AmountCents,

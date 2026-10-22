@@ -109,6 +109,11 @@ type jobSpec struct {
 	MaxRunTime time.Duration
 	// Run does one run. A returned error makes the outcome "error".
 	Run func(ctx context.Context) (jobReport, error)
+	// Manual: never scheduled — run only by its own admin endpoint
+	// (StartDetachedWith with the work it was asked for: the bulk Stripe
+	// renewal stop/resume, WP-PAY-5). It has the lock, the job_runs row and
+	// the counters of every job; the generic trigger refuses it.
+	Manual bool
 	// Again, on a DAILY job: asked at every hourly check after the day's
 	// run has succeeded — true runs the job again (work the last run left
 	// due at a later hour: the account erasure waiting for a lagging
@@ -116,9 +121,12 @@ type jobSpec struct {
 	Again func(ctx context.Context) (bool, error)
 }
 
-func (sp jobSpec) daily() bool { return sp.Every <= 0 }
+func (sp jobSpec) daily() bool { return !sp.Manual && sp.Every <= 0 }
 
 func (sp jobSpec) schedule() string {
+	if sp.Manual {
+		return "manual (admin endpoint)"
+	}
 	if sp.daily() {
 		return fmt.Sprintf("daily %02d:%02d UTC", sp.Hour, sp.Minute)
 	}
@@ -243,6 +251,9 @@ func (j *scheduledJob) loop(ctx context.Context) {
 	// did not finish (a deploy stopped it): say so at once, instead of
 	// showing a run that is not running until the job's next start.
 	j.markInterrupted(ctx)
+	if j.spec.Manual {
+		return
+	}
 	select {
 	case <-ctx.Done():
 		return
@@ -295,6 +306,9 @@ func (j *scheduledJob) lastScheduled(now time.Time) time.Time {
 
 // nextRun is when the job is next expected to run (zero when unknown).
 func (j *scheduledJob) nextRun(now, lastStart time.Time) time.Time {
+	if j.spec.Manual {
+		return time.Time{}
+	}
 	if j.spec.daily() {
 		return j.lastScheduled(now).Add(24 * time.Hour)
 	}
@@ -383,6 +397,16 @@ func (j *scheduledJob) StartDetached(ctx context.Context, done func(jobReport, e
 	if j == nil {
 		return errors.New("job not configured")
 	}
+	return j.StartDetachedWith(ctx, j.spec.Run, done)
+}
+
+// StartDetachedWith is StartDetached with the work supplied by the caller
+// (a Manual job's endpoint: the work it was asked for) — the same lock,
+// job_runs row and counters.
+func (j *scheduledJob) StartDetachedWith(ctx context.Context, run func(context.Context) (jobReport, error), done func(jobReport, error)) error {
+	if j == nil {
+		return errors.New("job not configured")
+	}
 	release, err := j.acquire(ctx)
 	if err != nil {
 		return err
@@ -391,7 +415,7 @@ func (j *scheduledJob) StartDetached(ctx context.Context, done func(jobReport, e
 	base := j.sched.base
 	j.sched.mu.Unlock()
 	go func() {
-		rep, runErr := j.execute(base, release, j.spec.Run)
+		rep, runErr := j.execute(base, release, run)
 		if done != nil {
 			done(rep, runErr)
 		}

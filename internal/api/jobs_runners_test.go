@@ -313,6 +313,9 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"access_log_delivery": "every 5m0s",
 		"account_export":      "every 1m0s",
 		"retired_blobs":       "every 10m0s",
+		"renewal_stops":       "every 10m0s",
+		// WP-PAY-5: never scheduled — its admin endpoint runs it.
+		"stripe_bulk_renewals": "manual (admin endpoint)",
 	}
 	got := map[string]string{}
 	daily := map[string]string{"04:30": "account_deletion"}
@@ -320,7 +323,9 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		sp := s.jobs.job(name).spec
 		got[name] = sp.schedule()
 		assert.Greater(t, sp.MaxRunTime, time.Duration(0), "%s has a ceiling", name)
-		assert.Greater(t, sp.BootDelay, time.Duration(0), "%s does not run in the first instant of a boot", name)
+		if !sp.Manual {
+			assert.Greater(t, sp.BootDelay, time.Duration(0), "%s does not run in the first instant of a boot", name)
+		}
 		if sp.daily() {
 			at := fmt.Sprintf("%02d:%02d", sp.Hour, sp.Minute)
 			assert.Empty(t, daily[at], "%s and %s are both due at %s", name, daily[at], at)

@@ -119,6 +119,9 @@ type Entitlement struct {
 	Renewal     Renewal
 	Provider    string
 	ProviderRef string
+	// PendingProvider is the provider the customer asked to switch to at
+	// renewal (WP-PAY-5: SwitchToPrepaid), "" when none.
+	PendingProvider string
 	// LapsedAt is set when the house was cleared (nil = granted).
 	LapsedAt  *time.Time
 	CreatedAt time.Time
@@ -396,21 +399,21 @@ func Get(ctx context.Context, q interface {
 }, tenantID string) (Entitlement, error) {
 	var e Entitlement
 	var period, renewal string
-	var ref sql.NullString
+	var ref, pending sql.NullString
 	var lapsed sql.NullTime
 	err := q.QueryRowContext(ctx, `
 		SELECT tenant_id, std_tb, vault_tb, pin_hot_tb, period, paid_through, renewal, provider, provider_ref,
-		       lapsed_at, created_at, updated_at
+		       pending_provider, lapsed_at, created_at, updated_at
 		  FROM entitlements WHERE tenant_id = $1`, tenantID).Scan(
 		&e.TenantID, &e.Order.Std, &e.Order.Vault, &e.Order.PinHot, &period, &e.PaidThrough, &renewal,
-		&e.Provider, &ref, &lapsed, &e.CreatedAt, &e.UpdatedAt)
+		&e.Provider, &ref, &pending, &lapsed, &e.CreatedAt, &e.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, ErrNoEntitlement
 	}
 	if err != nil {
 		return e, fmt.Errorf("read entitlement of tenant %s: %w", tenantID, err)
 	}
-	e.Order.Period, e.Renewal, e.ProviderRef = Period(period), Renewal(renewal), ref.String
+	e.Order.Period, e.Renewal, e.ProviderRef, e.PendingProvider = Period(period), Renewal(renewal), ref.String, pending.String
 	if lapsed.Valid {
 		t := lapsed.Time
 		e.LapsedAt = &t

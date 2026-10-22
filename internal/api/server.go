@@ -83,6 +83,7 @@ type Server struct {
 	// (never Ready without STRIPE_SECRET_KEY).
 	payments         *payments.Registry
 	paymentReminders *PaymentRemindersRunner // the payment_reminders job (WP-PAY-3)
+	stripeBulk       *BulkRenewals           // the bulk stop/resume of Stripe renewals (WP-PAY-5)
 	webhookHandler   *billing.WebhookHandler
 	// btcpay is the BTCPay provider (WP-PAY-4); nil unless all four
 	// BTCPAY_* settings are set (btcpay_wiring.go).
@@ -643,6 +644,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.payments.Register(billing.NewUnconfiguredStripe(logger))
 	}
 	s.setupBTCPay(os.Getenv, os.ReadFile)
+	if s.btcpay != nil {
+		// WP-PAY-5: a BTCPay settle that took a house from a renewing
+		// provider stops that renewal through the registry after its commit;
+		// the portal race marks BTCPay's open invoices Invalid.
+		s.btcpay.SetRenewalStopper(s.payments)
+		if s.webhookHandler != nil {
+			s.webhookHandler.SetInvoiceInvalidator(s.btcpay)
+		}
+	}
 
 	// Bandwidth threshold alerter (Phase 4.3). Active whenever a DB is present;
 	// the alerter skips tenants with no bandwidth_limit_bytes.
@@ -671,6 +681,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			s.entitlementLapse.Mailer = mailer
 		}
 		s.paymentReminders = NewPaymentRemindersRunner(s.db, logger, grace, mailer, s.flags)
+		if s.stripeBulk = NewBulkRenewals(s.db, s.payments, logger); s.stripeBulk != nil {
+			s.stripeBulk.Mailer = mailer
+		}
 	}
 	s.bandwidthAlerter.SetEmailSender(s.emailSender)
 	if googleID := os.Getenv("GOOGLE_CLIENT_ID"); googleID != "" {

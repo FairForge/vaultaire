@@ -1473,6 +1473,8 @@ func generateAdminPaths() map[string]*PathItem {
 					"reason":               str("Required (audited)"),
 				}, "payment_id", "reason")))),
 		},
+		"/api/v1/admin/payments/stripe/stop-renewals":   bulkRenewalsPath(false),
+		"/api/v1/admin/payments/stripe/resume-renewals": bulkRenewalsPath(true),
 		"/api/v1/admin/dedup-gc": {
 			Post: admin(jsonOp("Admin", "Start one dedup GC run", "AdminDedupGC",
 				"The same call as `POST /api/v1/admin/jobs/dedup_gc/run`: reconciles chunk reference counts and sweeps unreferenced chunks past their 7-day grace. "+
@@ -2506,3 +2508,38 @@ const swaggerUIHTML = `<!DOCTYPE html>
     </script>
 </body>
 </html>`
+
+// bulkRenewalsPath is the owner's bulk stop / resume of Stripe renewals
+// (WP-PAY-5, docs/PAYMENTS.md § 4.3).
+func bulkRenewalsPath(resume bool) *PathItem {
+	summary, op, what := "Stop every Stripe renewal", "AdminStripeStopRenewals",
+		"every granted house Stripe renews by itself: `cancel_at_period_end` — never a cancel; each house runs to its paid date"
+	if resume {
+		summary, op, what = "Resume the Stripe renewals the bulk stopped", "AdminStripeResumeRenewals",
+			"every granted Stripe house whose renewal the bulk stop stopped (its last renewal change), whose date still runs and with no pending switch"
+	}
+	return &PathItem{
+		Post: adminOnly(withBody(jsonOp("Admin", summary, op,
+			"Lists "+what+". `dry_run` is **true by default**: the answer is the list and nothing is written. `dry_run: false` starts the "+
+				"`stripe_bulk_renewals` job (202; 409 while a bulk run holds it): per tenant under its entitlement lock the provider is told, the renewal written, "+
+				"one audit row (`billing.renewal_stopped|_resumed`, reason `bulk`) and one e-mail. The result is in `GET /api/v1/admin/jobs`.",
+			map[string]Response{
+				"200": jsonResp("The dry run: the rows it would change", objectPtr("", map[string]*Schema{
+					"object":  str("`list`"),
+					"action":  str("`stop` or `resume`"),
+					"dry_run": {Type: "boolean"},
+					"tenants": {Type: "array", Items: objectPtr("", map[string]*Schema{
+						"tenant_id":    str("Tenant id"),
+						"paid_through": dateTime("The date the house is paid through"),
+						"provider_ref": str("The Stripe subscription"),
+					}, "tenant_id", "paid_through")},
+				}, "object", "action", "dry_run", "tenants")),
+				"202": jsonResp("The run was started", ref("JobStarted")),
+				"409": jsonResp("A bulk run is already in progress", ref("JobAlreadyRunning")),
+				"503": textResp("Payments are not configured on this server"),
+			}),
+			jsonBody("Optional", objectPtr("", map[string]*Schema{
+				"dry_run": {Type: "boolean", Default: true, Description: "List only (the default)"},
+			})))),
+	}
+}
