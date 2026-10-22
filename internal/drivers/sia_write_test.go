@@ -101,19 +101,31 @@ func TestSiaWriteBudget_PacesThePutBody(t *testing.T) {
 
 // The wait is on the SOURCE, before the request to s3d: a PUT deadline far
 // shorter than the paced upload never fires and nothing is retried.
+// Margins a loaded CI runner cannot break (RP34-11): the deadline covers
+// only the fake's answer to one small loopback PUT, the pacing is several
+// deadlines long. It was 1.5 MiB against 50 ms and failed 31 % of runs at
+// 64 race-built copies on 10 cores; there an unpaced 256 KiB PUT took
+// p99 110 ms, max 158 ms (4 MiB: max 1 s — so the body stays small). Now:
+// 256 KiB at 64 KiB/s = ~3.5 s of pacing past the 32 KiB burst, against a
+// 1 s deadline.
 func TestSiaWriteBudget_PacingIsNeverAStalledS3d(t *testing.T) {
+	const deadline = time.Second
 	prev := putDeadlineFloor
-	putDeadlineFloor = 50 * time.Millisecond
+	putDeadlineFloor = deadline
 	t.Cleanup(func() { putDeadlineFloor = prev })
-	body := siaTestBody(1536 << 10)
+	body := siaTestBody(256 << 10)
 	f := &siaPutFake{}
-	d := newSiaPutDriver(t, f, 2<<20)
-	d.setPutTimeout(100 * time.Millisecond)
+	d := newSiaPutDriver(t, f, 64<<10)
+	d.setPutTimeout(deadline)
+	require.Equal(t, deadline, s3PutDeadline(deadline, int64(len(body))), "the deadline under test")
 	retries := testutil.ToFloat64(driverPutRetries.WithLabelValues("sia"))
 
+	start := time.Now()
 	err := d.Put(siaCtx(), "tnt_b", "k.bin", onlyReader{bytes.NewReader(body)}, engine.WithContentLength(int64(len(body))))
+	took := time.Since(start)
 
 	require.NoError(t, err)
+	assert.GreaterOrEqual(t, took, 3*deadline, "the paced wait is far longer than the deadline")
 	puts, got := f.state()
 	assert.Equal(t, 1, puts, "one PUT: the deadline timed s3d, not our wait")
 	assert.True(t, bytes.Equal(body, got))

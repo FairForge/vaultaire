@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -272,12 +273,17 @@ func testDashDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func cleanupDashBucketData(t *testing.T, db *sql.DB) {
+// cleanupDashBucketData deletes the rows of the ONE tenant the calling test
+// created — never a pattern: packages run in parallel on one database, and
+// a `LIKE 'test-dash-%'` deleted another test's tenant mid-run (RP34-7, the
+// R15 rule in CLAUDE.md).
+func cleanupDashBucketData(t *testing.T, db *sql.DB, tenantID string) {
 	t.Helper()
-	_, _ = db.Exec(`DELETE FROM buckets WHERE tenant_id LIKE 'test-dash-%'`)
-	_, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id LIKE 'test-dash-%'`)
-	_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id LIKE 'test-dash-%'`)
-	_, _ = db.Exec(`DELETE FROM tenants WHERE id LIKE 'test-dash-%'`)
+	require.True(t, strings.HasPrefix(tenantID, "test-dash-"), "a test tenant: %s", tenantID)
+	_, _ = db.Exec(`DELETE FROM buckets WHERE tenant_id = $1`, tenantID)
+	_, _ = db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, tenantID)
+	_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenantID)
+	_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
 }
 
 func injectSessionWithTenant(req *http.Request, tenantID string) *http.Request {
@@ -340,8 +346,8 @@ func TestHandleBucketObjects_CDNData(t *testing.T) {
 	useProdHosts(t)
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-cdn-1")
+	defer cleanupDashBucketData(t, db, "test-dash-cdn-1")
 
 	tenantID := "test-dash-cdn-1"
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
@@ -391,8 +397,8 @@ func TestHandleBucketObjects_NoCDNForPrivate(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-cdn-2")
+	defer cleanupDashBucketData(t, db, "test-dash-cdn-2")
 
 	tenantID := "test-dash-cdn-2"
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
@@ -442,8 +448,8 @@ func TestListBuckets_Dashboard_IncludesEmptyBuckets(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-2")
+	defer cleanupDashBucketData(t, db, "test-dash-2")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-2', 'Test Co 2', 'testdash2@test.com', 'VK-d2', 'SK-d2') ON CONFLICT DO NOTHING`)
 	require.NoError(t, err)
@@ -471,8 +477,8 @@ func TestListBuckets_CountsRetainedVersions(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-v")
+	defer cleanupDashBucketData(t, db, "test-dash-v")
 	defer func() { _, _ = db.Exec(`DELETE FROM object_versions WHERE tenant_id = 'test-dash-v'`) }()
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-dash-v', 'V', 'testdashv@test.com', 'VK-dv', 'SK-dv') ON CONFLICT DO NOTHING`)
@@ -496,4 +502,29 @@ func TestListBuckets_CountsRetainedVersions(t *testing.T) {
 	assert.Equal(t, int64(800), rows[0].TotalSize, "500 current + 300 retained")
 	assert.Equal(t, int64(300), rows[0].VersionBytes)
 	assert.Equal(t, 1, rows[0].ObjectCount)
+}
+
+// RP34-7: the cleanup of one test leaves another session's test-dash-
+// tenant alone (it used to delete every `test-dash-%` row).
+func TestCleanupDashBucketData_LeavesOtherTenants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("needs a database")
+	}
+	db := testDashDB(t)
+	defer func() { _ = db.Close() }()
+	other := fmt.Sprintf("test-dash-other-%d", time.Now().UnixNano())
+	defer cleanupDashBucketData(t, db, other) // runs before the deferred db.Close
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'Other', $2, $3, $4)`,
+		other, other+"@test.com", "VK-"+other, "SK-"+other)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name) VALUES ($1, 'other-bucket')`, other)
+	require.NoError(t, err)
+
+	cleanupDashBucketData(t, db, "test-dash-s1")
+
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM buckets WHERE tenant_id = $1`, other).Scan(&n))
+	assert.Equal(t, 1, n, "another test's bucket survives")
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM tenants WHERE id = $1`, other).Scan(&n))
+	assert.Equal(t, 1, n, "another test's tenant survives")
 }
