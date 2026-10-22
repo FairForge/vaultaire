@@ -158,14 +158,6 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 	writeListResponse(w, items, hasMore, nextCursor, countResult)
 }
 
-// creatableModes are the modes a bucket can be created in through the API:
-// the developer surface's (modes.json — standard, private). Public is made
-// from the dashboard (F-32).
-func creatableModes() []string {
-	sf := modes.All().Surfaces["developer"]
-	return append([]string{sf.Default}, sf.Also...)
-}
-
 // createdMode is the mode a create answers: the one asked for, else
 // Standard (a bucket is born Standard, docs/reviews/K3-PROBE.md W1).
 func createdMode(asked string) string {
@@ -193,9 +185,9 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
-	if req.Mode != "" && !slices.Contains(creatableModes(), req.Mode) {
+	if req.Mode != "" && !slices.Contains(modes.DeveloperModes(), req.Mode) {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_mode",
-			fmt.Sprintf("mode must be one of %s; a public bucket is made public from its settings in the dashboard", strings.Join(creatableModes(), ", ")), "mode")
+			fmt.Sprintf("mode must be one of %s; a public bucket is made public from its settings in the dashboard", strings.Join(modes.DeveloperModes(), ", ")), "mode")
 		return
 	}
 

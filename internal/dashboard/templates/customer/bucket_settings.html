@@ -86,6 +86,9 @@
             </label>
         </div>
         <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">{{.ModePublic.Name}}: {{.ModePublic.Sentence}} {{.ModePrivate.Name}}: {{.ModePrivate.How}}</p>
+        {{if eq .Visibility "public-read"}}
+        <p class="text-muted" style="font-size: 0.85rem;">Turning public access off stops new downloads at once, but copies our CDN has already cached may still be served for up to {{.CacheMaxAge}} seconds plus 10 minutes: cached copies are not purged.</p>
+        {{end}}
         {{end}}
     </div>
     {{else}}
@@ -116,6 +119,9 @@
         <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">
             Public buckets serve objects without authentication via the CDN.
         </p>
+        {{if eq .Visibility "public-read"}}
+        <p class="text-muted" style="font-size: 0.85rem;">Turning public access off stops new downloads at once, but copies our CDN has already cached may still be served for up to {{.CacheMaxAge}} seconds plus 10 minutes: cached copies are not purged.</p>
+        {{end}}
         {{end}}
     </div>
 
@@ -131,9 +137,10 @@
             On, every upload into this bucket must bring its own AES-256 key (the SSE-C headers);
             an upload without one is refused and nothing is stored. We never keep the key: it passes
             through our servers on each request, and names, sizes, timestamps and access logs stay
-            readable to us. Objects written before you turn this on stay exactly as they were. A public
-            bucket cannot require a key, and a bucket that does cannot receive access logs or inventory
-            reports.
+            readable to us. It can be turned on only while the bucket holds nothing we can read: every
+            file in it written with your key, and no upload without one in progress — otherwise create a
+            new bucket that requires your key and copy the data into it. A public bucket cannot require a
+            key, and a bucket that does cannot receive access logs or inventory reports.
         </p>
     </div>
 

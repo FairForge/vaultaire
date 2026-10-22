@@ -157,6 +157,14 @@ func Get(id string) (Mode, bool) {
 	return m, ok
 }
 
+// DeveloperModes are the modes the developer surface offers — its default,
+// then the others (modes.json: standard, private): what a bucket can be
+// created in through the API (RP33-1 c). Public is the dashboard's (F-32).
+func DeveloperModes() []string {
+	sf := All().Surfaces["developer"]
+	return append([]string{sf.Default}, sf.Also...)
+}
+
 // Name is the customer-facing name of a mode id ("" when unknown).
 func Name(id string) string {
 	m, _ := Get(id)
