@@ -163,7 +163,7 @@ func TestSwift_LargeObject(t *testing.T) {
 			assert.Equal(t, body[seg-10:seg+10], readAll(t, rc, err))
 
 			if !tg.live { // a container listing lags on Blomp
-				assert.Equal(t, 3, countWalk(t, tg.drv, tenant, "_segments"), "three pieces under _segments")
+				assert.Equal(t, 4, countWalk(t, tg.drv, tenant, "_segments"), "three pieces and their generation's marker under _segments")
 				keys, err := tg.drv.List(ctx, "b1", "")
 				require.NoError(t, err)
 				assert.Equal(t, []string{"big"}, keys, "the pieces are not in the object's container")
@@ -232,7 +232,7 @@ func TestSwift_ShortOrLongBodyIsRefused(t *testing.T) {
 	assert.ErrorIs(t, err, engine.ErrInvalidInput)
 	err = d.Put(ctx, "b1", "shortbig", bytes.NewReader(make([]byte, 2000)), engine.WithContentLength(3000))
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
-	assert.Empty(t, f.names(), "nothing stored, the pieces of the large one removed")
+	assert.Empty(t, unmarked(f), "nothing stored, the pieces of the large one removed (its marker is the reaper's)")
 }
 
 func TestSwift_FailedManifestRemovesItsPieces(t *testing.T) {
@@ -241,12 +241,12 @@ func TestSwift_FailedManifestRemovesItsPieces(t *testing.T) {
 	require.NoError(t, err)
 	ctx := swiftCtx("t1")
 	body := randomBytes(t, 2500)
-	// three segment PUTs pass, the manifest PUT (and its two retries) 503
-	d.client.Transport = &failNthPut{rt: d.client.Transport, n: 4, f: f}
+	// three segment PUTs and the marker pass, the manifest PUT (and its two retries) 503
+	d.client.Transport = &failNthPut{rt: d.client.Transport, n: 5, f: f} // + the generation marker
 
 	err = d.Put(ctx, "b1", "k", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
 	require.Error(t, err)
-	assert.Empty(t, f.names(), "the pieces were bulk-deleted")
+	assert.Empty(t, unmarked(f), "the pieces were bulk-deleted")
 	assert.Equal(t, 1, f.count("POST bulk-delete"))
 }
 
@@ -444,7 +444,7 @@ func TestSwift_FullAccountIsBackendFull(t *testing.T) {
 	ctx := swiftCtx("t1")
 	require.NoError(t, d.Put(ctx, "b1", "first", bytes.NewReader(make([]byte, 3000))))
 	f.quotaBytes = 4000
-	before := f.names()
+	before := unmarked(f)
 
 	err = d.Put(ctx, "b1", "small", bytes.NewReader(make([]byte, 1500)))
 	assert.ErrorIs(t, err, engine.ErrBackendFull)
@@ -452,7 +452,7 @@ func TestSwift_FullAccountIsBackendFull(t *testing.T) {
 	err = d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
 	assert.ErrorIs(t, err, engine.ErrBackendFull)
 	d.waitCleanups()
-	assert.Equal(t, before, f.names(), "the refused uploads' pieces were removed")
+	assert.Equal(t, before, unmarked(f), "the refused uploads' pieces were removed")
 
 	rc, err := d.Get(ctx, "b1", "first")
 	assert.Len(t, readAll(t, rc, err), 3000, "reads still work on a full account")
@@ -650,7 +650,7 @@ func TestSwift_PutBudgetBoundsPiecesInFlight(t *testing.T) {
 	}
 	wg.Wait()
 	assert.LessOrEqual(t, f.peakSegmentPuts(), 2)
-	assert.Len(t, f.names(), 3*6+3)
+	assert.Len(t, f.names(), 3*(6+1)+3, "6 pieces, a marker and a manifest each")
 }
 
 // A piece is held in memory, so a 5xx on it is retried.
@@ -688,7 +688,9 @@ func TestSwift_FailedPieceRemovesTheOthers(t *testing.T) {
 	var se *SwiftError
 	require.ErrorAs(t, err, &se)
 	assert.Equal(t, http.StatusServiceUnavailable, se.Status)
-	assert.Empty(t, f.names(), "every piece written was bulk-deleted")
+	for _, n := range f.names() {
+		assert.True(t, strings.HasSuffix(n, "/"+swiftGenerationMarker), "every piece written was bulk-deleted; only the generation's marker is left for the reaper: %s", n)
+	}
 	// The pieces the stop cut before they were sent are "not found" by the
 	// first bulk delete, so it is sent once more for a piece landing late.
 	assert.Equal(t, 2, f.count("POST bulk-delete"))
@@ -777,7 +779,7 @@ func TestSwift_ThousandPieceLimit(t *testing.T) {
 	big := randomBytes(t, swiftPeekBytes+1500) // 8 MiB of 1 KiB pieces
 	err = d.Put(ctx, "b1", "unknown", struct{ io.Reader }{bytes.NewReader(big)})
 	assert.ErrorIs(t, err, engine.ErrInvalidInput)
-	assert.Empty(t, f.names(), "the pieces of the refused upload were removed")
+	assert.Empty(t, unmarked(f), "the pieces of the refused upload were removed")
 }
 
 // GetRangeInfo (engine.VersionedRangeGetter): every range of one object
@@ -860,6 +862,18 @@ func TestSwift_APieceThatLandsAfterTheCleanupIsRemoved(t *testing.T) {
 	err = d.Put(ctx, "b1", "big", bytes.NewReader(body), engine.WithContentLength(int64(len(body))))
 
 	require.Error(t, err)
-	assert.Empty(t, f.names(), "the piece that landed after the first bulk delete went with the second")
+	assert.Empty(t, unmarked(f), "the piece that landed after the first bulk delete went with the second")
 	assert.Equal(t, 2, f.count("POST bulk-delete"))
+}
+
+// unmarked is every stored name but the generation markers a failed large
+// upload leaves for the segment reaper.
+func unmarked(f *fakeSwift) []string {
+	out := []string{}
+	for _, n := range f.names() {
+		if !strings.HasSuffix(n, "/"+swiftGenerationMarker) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
