@@ -102,6 +102,9 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	daily, periodic := jobsIn(rules["JobStale"].expr), jobsIn(rules["PeriodicJobStale"].expr)
 	wantDaily, wantPeriodic := map[string]bool{}, map[string]bool{}
 	for _, name := range s.jobs.names() {
+		if s.jobs.job(name).spec.Manual {
+			continue // never scheduled, so never stale (WP-PAY-5's bulk job)
+		}
 		if s.jobs.job(name).spec.daily() {
 			wantDaily[name] = true
 		} else {

@@ -121,7 +121,7 @@ type jobSpec struct {
 	Again func(ctx context.Context) (bool, error)
 }
 
-func (sp jobSpec) daily() bool { return sp.Every <= 0 }
+func (sp jobSpec) daily() bool { return !sp.Manual && sp.Every <= 0 }
 
 func (sp jobSpec) schedule() string {
 	if sp.Manual {
