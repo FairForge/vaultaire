@@ -131,7 +131,7 @@ version:
 # Remove every build output, including the tool binaries that used to pile up
 # in the repo root (WP-R0-5: ~35 gitignored files). Keeps bench-results/*.md.
 clean:
-	rm -rf bin/ dist/ coverage.out coverage.html cov.out
+	rm -rf bin/ dist/ sdk/wasm/dist/ coverage.out coverage.html cov.out
 	rm -f vaultaire vaultaire-bin vaultaire-linux vaultaire-darwin vaultaire-windows.exe
 	rm -f backend-matrix backend-matrix-linux bench bench-linux bench-compare bench-compare-linux
 	rm -f dedup-migrate dedup-migrate-linux erasure-bench erasure-bench-linux
@@ -147,4 +147,13 @@ clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	go clean
 
-.PHONY: build version clean landing landing-browser og dash-shots dash-lighthouse
+.PHONY: build version clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
+
+# The Private-mode key core for the browser (keystone K2): sdk/go/e2ee compiled
+# to WebAssembly, with the SAME toolchain's wasm_exec.js beside it (they must
+# match). sdk/js/e2ee/index.mjs loads the pair. TestE2EE_WASMMatchesNative
+# builds it too and runs it in node against native Go.
+sdk-wasm:
+	mkdir -p sdk/wasm/dist
+	GOOS=js GOARCH=wasm go build -trimpath -ldflags=-s -o sdk/wasm/dist/e2ee.wasm ./sdk/wasm
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" sdk/wasm/dist/wasm_exec.js

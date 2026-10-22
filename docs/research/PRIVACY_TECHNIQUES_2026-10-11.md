@@ -14,11 +14,17 @@ term is 20 years from its earliest non-provisional filing; "expired" below means
    ciphertexts plus public auxiliary data; Grubbs et al. (2016/2017) recovered most names and birthdates
    from ORE columns. Replace with **bucketed blind indexes** (HMAC under a client key of day / month /
    year tokens and of size buckets; range = union of buckets). Equality blind indexes stay.
-2. **F-12's hybrid must be a generic KEM combiner, not X-Wing as published.** The X-Wing draft (still an
+2. ~~**F-12's hybrid must be a generic KEM combiner, not X-Wing as published.** The X-Wing draft (still an
    Internet-Draft at -11, September 2026) states it "should not be used outside TLS, because it relies on
-   the TLS transcript to prevent malleability". Our sealed box has no transcript: hash BOTH KEM
-   ciphertexts and both shared secrets into the KDF (the CFRG KEM-combiner shape), or use HPKE (RFC 9180)
-   with a hybrid KEM once a draft is stable.
+   the TLS transcript to prevent malleability".~~ **Corrected 2026-10-22: this misread the draft.** X-Wing
+   (draft-connolly-cfrg-xwing-kem-11) is "a general-purpose post-quantum/traditional hybrid key
+   encapsulation mechanism" and aims "to be usable for most applications, including specifically HPKE"
+   (§ 1.2); "X-Wing hashes the shared secrets, to be usable outside of HPKE" (§ 1.5.1). The sentence "This
+   one should not be used outside of TLS, as it assumes the presence of the TLS transcript" (§ 1.5.1) is
+   about the earlier X25519Kyber768Draft00. X-Wing omits the ML-KEM ciphertext from its combiner safely
+   only because of ML-KEM's Fujisaki–Okamoto transform (§ 6) — never reuse its combiner with another KEM.
+   The sealed box is HPKE (RFC 9180) with MLKEM768-X25519 (draft-ietf-hpke-pq), Go 1.26 `crypto/hpke`
+   (`sdk/go/e2ee`).
 3. **Sizes leak; pad with Padmé.** PURBs (Nikitin et al., PoPETs 2019): padding to the Padmé schedule
    leaks O(log log M) bits of the length at ≤ 12 % overhead, shrinking with size. This is the answer to
    10.7's open "chunk-size fingerprint" question for vault manifests and whole-object vault blobs
@@ -93,7 +99,7 @@ cited precedent), restic / borg / Kopia / Duplicacy (Duplicacy's lock-free fossi
 | **HSM / enclave PIN recovery** | WhatsApp Backup Key Vault 2021 (HSMs, OPAQUE, NCC Group audit; Meta 2026 whitepaper "Security of End-To-End Encrypted Backups" with Cloudflare-signed fleet keys); Signal SVR3 (OSDI '24: trust split across enclaves of different clouds); **Juicebox** (open source: OPRF + secret sharing across realms, HSM realm on GCP) | Human-memorable recovery with hardware attempt limits — the missing consumer path in Ente's model | 10.0.3, later |
 | **Shamir secret sharing** | Shamir 1979; **SLIP-0039** (Trezor: two-level group/member mnemonic shares); BIP-93 codex32 | Split the recovery key across trusted contacts (2-of-3) instead of wrapping it to one — 10.0.3 Legacy; and split the OPERATOR master key (32.6) | 10.0.3, 32.6 | no patent |
 | **FROST** | **RFC 9591, June 2024** (two-round threshold Schnorr) | Threshold signing for operator custody (release builds, the master-key ceremony) without a single key anywhere | 32.6, release pipeline |
-| **Hybrid PQ KEM** | ML-KEM FIPS 203 (2024); X-Wing draft-11 (TLS-only caveat above); HPKE RFC 9180 | F-12's sharing primitive; Go `crypto/mlkem` already in the binary; browser needs a vetted JS/WASM ML-KEM | 10.0.3 |
+| **Hybrid PQ KEM** | ML-KEM FIPS 203 (2024); X-Wing draft-11 (general-purpose; correction 2 above); HPKE RFC 9180 + draft-ietf-hpke-pq (Go 1.26 `crypto/hpke`) | F-12's sharing primitive; Go `crypto/mlkem` already in the binary; browser needs a vetted JS/WASM ML-KEM | 10.0.3 |
 | **Key transparency** | WhatsApp (auditable key directory, 2023–24); Signal Automatic Key Verification (2026, Cloudflare + Trail of Bits as auditors); IETF KEYTRANS | Replaces hand-compared Verification IDs for shared vaults: the server's public-key directory is a Merkle log audited by a third party | 10.0.3 later, 36.2 |
 | **Deterministic AEAD for names** | AES-SIV RFC 5297 (2008), AES-GCM-SIV RFC 8452, HCTR2 (2021) | Encrypted names where plain-S3 List must still work (sort, prefix) | SDK names mode |
 
