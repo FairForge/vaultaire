@@ -19,7 +19,22 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 | `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing |
 | `key_ceremony` | `ceremony` (`master_key_install`, `master_key_rewrap`, `escrow_share_rotation`, `recovery_realm`, `translog_key_install`), `key_fingerprint` (`sha256:<hex>` — never the key), `participants`, `statement` (≤ 2000 bytes; no e-mail, IP, UUID, tenant id or object path) | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, audited `admin.translog_ceremony`) |
 
-Not yet (K4b): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build.
+Not yet (K4b): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; the external witness, OpenTimestamps anchoring, the Rekor mirror and trust.stored.cloud.
+
+On prod since 2026-10-22 16:07 UTC (`83ef6c9`): entry 0 is that build's `server_build`, its `binary_sha256` equal to `sha256sum /opt/vaultaire/bin/vaultaire-8001`.
+
+## Reading the log
+
+Behind the flag **`translog_public`** (default OFF, global; OFF = 404, owner decision to flip): `GET /translog/checkpoint` (the signed note, `Cache-Control: no-store`) and `GET /translog/tile/<L>/<N>[.p/<W>]`, `/translog/tile/entries/<N>[.p/<W>]` in the [c2sp.org/tlog-tiles](https://c2sp.org/tlog-tiles) layout (`internal/translog/serve.go`). Only what the newest signed checkpoint commits to is served: no checkpoint (no signing key) = 404 everywhere, even with the flag on. A full tile is `public, max-age=31536000, immutable`; a partial tile is `no-store`. A request on those paths that carries a SigV4 signature or a presigned query goes to the S3 API, so a customer bucket named `translog` still works through signed calls (an anonymous GET of a public bucket of that name is shadowed — RP35-1).
+
+Verify from outside with `cmd/tools/translog-verify` (any machine; nothing of ours trusted but the pinned key):
+
+```sh
+go run ./cmd/tools/translog-verify -url https://stored.cloud/translog -vkey @translog.vkey            # signature + consistency with the last run
+go run ./cmd/tools/translog-verify -url https://stored.cloud/translog -vkey @translog.vkey -entry 0   # + inclusion of entry 0, printed
+```
+
+It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you are the witness until K4b's external one exists.
 
 ## The signing key
 
