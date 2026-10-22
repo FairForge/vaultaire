@@ -42,6 +42,7 @@ type fixedBucketDriver struct {
 	failDelete    atomic.Bool  // Delete fails
 	dropPut       atomic.Bool  // Put answers success and writes nothing
 	failPut       atomic.Bool  // Put drains the body, then fails (a backend 5xx)
+	storeThenFail atomic.Bool  // Put stores the body, then answers 503 (a proxy in front of the store: Blomp, 2026-10-21)
 	noTenant      atomic.Int32 // calls refused because the context named no tenant
 	onObject      func(n int)  // called before object n of a walk is handed out
 	// failGetUnder: reads under this tenant's prefix fail (not a miss).
@@ -147,7 +148,13 @@ func (d *fixedBucketDriver) Put(ctx context.Context, container, artifact string,
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o600)
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		return err
+	}
+	if d.storeThenFail.Load() {
+		return backendAnswer{status: http.StatusServiceUnavailable, msg: "fixed bucket: 503 Service Unavailable"}
+	}
+	return nil
 }
 
 // Delete answers like S3: removing a key that is not there is a success.

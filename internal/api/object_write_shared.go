@@ -22,6 +22,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
+	"go.uber.org/zap"
 )
 
 // objectAttrs is everything the head row records about an object besides
@@ -200,7 +201,34 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 // residency breach recorded as normal); everything else goes through the
 // engine, which maps the storage class in opts to a backend. Returns the
 // backend that took the bytes — the head row's backend_name.
-func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, blob string,
+//
+// A failed write queues blob on every backend that was sent it, answered or
+// not (engine.PutOutcome.Sent): a store can keep a body behind an error
+// answer (Blomp's proxy 503'd two 64 MiB PUTs on 2026-10-21 and both
+// stayed, no row naming them), and the address is this write's own, so the
+// collector's delete is at worst a miss — and its blobNamedBy re-check keeps
+// an address an active upload's retry (Complete reuses it) commits.
+func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap.Logger, tenantID, bucket, container, blob string,
+	body io.Reader, opts ...engine.PutOption) (string, error) {
+	outcome := &engine.PutOutcome{}
+	opts = append(opts[:len(opts):len(opts)], engine.WithPutOutcome(outcome))
+	backend, err := placeOn(ctx, db, eng, tenantID, bucket, container, blob, body, opts...)
+	if err != nil && isBlobAddress(blob) {
+		if logger == nil {
+			logger = zap.NewNop()
+		}
+		for _, b := range outcome.Sent() {
+			logger.Warn("write failed after its body was sent — the address is queued for the collector in case the backend kept it",
+				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("storage_key", blob),
+				zap.String("backend", b), zap.Error(err))
+			retireOrphanWrite(ctx, db, logger, tenantID, bucket, blob, b)
+		}
+	}
+	return backend, err
+}
+
+// placeOn is placeObject's placement: the region driver or the engine.
+func placeOn(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, blob string,
 	body io.Reader, opts ...engine.PutOption) (string, error) {
 	regionDriver, err := bucketRegionDriver(ctx, db, eng, tenantID, bucket)
 	if err != nil {

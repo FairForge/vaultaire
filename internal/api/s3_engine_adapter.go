@@ -1316,7 +1316,7 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// shared helper so multipart complete and CopyObject cannot drift from
 	// it again (R3-08).
 	var backendName string
-	backendName, err = placeObject(r.Context(), a.db, a.engine, t.ID, bucket, container, blob, hashingBody, putOpts...)
+	backendName, err = placeObject(r.Context(), a.db, a.engine, a.logger, t.ID, bucket, container, blob, hashingBody, putOpts...)
 	if err != nil {
 		switch {
 		case errors.Is(err, errRegionDriverUnavailable):

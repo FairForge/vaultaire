@@ -141,6 +141,7 @@ func (e *CoreEngine) PutOn(ctx context.Context, backend, container, artifact str
 		if srcErr := src.sourceErr(); perr != nil && srcErr != nil && !errors.Is(perr, ErrCallerAborted) {
 			perr = fmt.Errorf("%w: %w (%w)", ErrCallerAborted, srcErr, perr)
 		}
+		ApplyPutOptions(opts...).Outcome.record(backend, perr)
 		return perr
 	})
 	if err != nil {

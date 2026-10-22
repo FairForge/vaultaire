@@ -225,9 +225,12 @@ func TestPut_Sealed_ShortBodyAndBadDigest(t *testing.T) {
 	w = f.putWith(t, "digest.bin", body, map[string]string{"Content-MD5": "AAAAAAAAAAAAAAAAAAAAAA=="})
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), ErrBadDigest)
-	var orphans int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM retired_blobs WHERE tenant_id = $1 AND reason = 'orphan_write'`, f.tenantID).Scan(&orphans))
+	var orphans, short int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE storage_key LIKE 'digest.bin@%'),
+		COUNT(*) FILTER (WHERE storage_key LIKE 'short.bin@%')
+		FROM retired_blobs WHERE tenant_id = $1 AND reason = 'orphan_write'`, f.tenantID).Scan(&orphans, &short))
 	assert.Equal(t, 1, orphans, "the written blob is queued for the collector")
+	assert.Equal(t, 1, short, "the short body went out: its address is queued too (placeObject)")
 }
 
 func TestGet_SealedObject_RangeBySegment(t *testing.T) {

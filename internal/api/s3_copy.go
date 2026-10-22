@@ -539,7 +539,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		return
 	}
 	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
-	backendName, err := placeObject(putCtx, s.db, s.engine, t.ID, destBucket, destContainer, destBlob, tee, putOpts...)
+	backendName, err := placeObject(putCtx, s.db, s.engine, s.logger, t.ID, destBucket, destContainer, destBlob, tee, putOpts...)
 	putCancel()
 	if err != nil {
 		releaseReservation()

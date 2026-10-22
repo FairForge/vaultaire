@@ -84,7 +84,7 @@ func TestPlaceObject_RegionDriver_BreakerAndStrictRules(t *testing.T) {
 	eng.AddDriver("idrive-eu-west-1", region)
 	ctx := common.WithTenantID(context.Background(), tenantID)
 	put := func(ctx context.Context, body io.Reader) (string, error) {
-		return placeObject(ctx, db, eng, tenantID, "eu", tenantID+"_eu", "k@00000000000000000000000000", body)
+		return placeObject(ctx, db, eng, zap.NewNop(), tenantID, "eu", tenantID+"_eu", "k@00000000000000000000000000", body)
 	}
 
 	// A body the client stopped sending: the caller's, never a breaker charge.
