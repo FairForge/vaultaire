@@ -305,6 +305,8 @@ overrides, as every flag — a canary tenant pays in crypto first.
 | New checkout | not offered on the billing page; `POST` → 409 `provider_disabled` |
 | Renewal | **nothing happens by itself** — a Stripe subscription keeps renewing until an operator runs the bulk stop (§ 4.3). The flag is "no new business", not "cancel everyone" |
 | Resize | 409 for the off provider; the page says to switch |
+
+**Downsize while the provider is off (RP22-6 / RP31-8) — owner decision line, recommended:** a downsize is not new business: it is **allowed while the provider's flag is off, taking effect at the period end** (`paid_through`), never a refund now. Not built: it needs the scheduled change of § 1.2 (`next_*` columns) — well over the ~40 lines Prompt 26 allowed for it. Until built, the 409 stands and the page says to email support. *Owner: confirm or change this line (F-row for the owner batch).*
 | Webhook route | **stays mounted** while the secrets are set: late notifications (a final invoice, a refund, a settle after the flip) must land. Only an unset secret unmounts a route (R10-01 unchanged) |
 | Billing page | shows the entitlement sentence ("paid through 2027-03-01 via Stripe — renewal stopped") and the providers that ARE on |
 | Deletion runner | unaffected: `Cancel` is a stop-money action and always allowed when the provider is configured; a `renewal='auto'` row whose provider is **unconfigured** still defers the tenant (today's rule); a `prepaid` row has nothing to cancel |
@@ -798,6 +800,14 @@ does not pay anyone loses the **house** (quota) after grace, never a byte.
   Bulk = a manual job (`stripe_bulk_renewals`): dry run by default (200 +
   the list), `dry_run:false` = 202, 409 while one runs; one audit row and
   one mail (`renewal_stopped.html`) per tenant; never cancels a period.
+- **Prompt 26 Part 0 (#873, the WP-P25 review's RP31-1…7):**
+  - **RP31-1:** `InvalidateOpenInvoices` (the portal race, the bulk resume) FETCHES each open invoice and marks it Invalid only when **provably unpaid** — New or Expired with `paidAmount` 0. Processing (= paid) and partly-paid invoices are left to settle (their settle is an implicit switch, which re-asserts the Stripe stop), counted `vaultaire_payment_webhook_total{btcpay,invalidate_skipped_paid}`. **§ 3.3's Invalid row now credits:** money on an Invalid invoice that never settled is the tenant's credit (`partial:<invoice>`), never lost.
+  - **RP31-2, the detector:** a `resize` row on either side never matches (a top-up prices the rest of a period already bought); a period that starts inside `MinDeferredStart` of another provider's end is the designed forfeit (the switch to card, or a renew, inside 48 h) — `billing.prepaid_forfeited` {days}, no counter, no mail.
+  - **RP31-3:** the "switched away" check is read inside the grant transaction after the entitlement lock.
+  - **RP31-4:** an implicit switch from a `past_due` / `unpaid` / `incomplete` subscription **cancels it now** (no proration, no final invoice): its period was never paid, and `cancel_at_period_end` left Stripe's dunning retrying. A paid period still runs out.
+  - **RP31-5:** the `crypto_invoice_open` 409 offers **"Cancel the bitcoin invoice and continue"** — only for an invoice nobody paid (RP31-1's rule); it is marked Invalid, our row closed at once, and the refused checkout continues. One holding a payment keeps the 409 with its date.
+  - **RP31-6:** `SwitchToPrepaid` commits the row, then stops the renewal; a refused stop puts the row back (only if unchanged).
+  - **RP31-7:** with `entitlement_lapse` OFF a Stripe house whose renewal is off ends at Stripe's deletion on the date, no grace; the billing page and the reminders say "Your house ends on <date> unless the bitcoin payment arrives" (or "unless you renew") instead of promising grace.
 - **§ 4.2** is RP24-1's path with purpose `switch`: `trial_end =
   paid_through` (≥ 48 h, else starts now and the page says the prepaid
   days are forfeited); the completed trialing subscription flips the row to
