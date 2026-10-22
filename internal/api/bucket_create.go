@@ -164,36 +164,25 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 	if opts.objectLock {
 		versioning = "Enabled"
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	var inserted bool
-	if err := tx.QueryRowContext(ctx, `
-		WITH ins AS (
-			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
-				object_lock_enabled, versioning_status)
-			VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
-			ON CONFLICT (tenant_id, name) DO NOTHING
-			RETURNING 1)
-		SELECT EXISTS (SELECT 1 FROM ins)
-	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning).Scan(&inserted); err != nil {
-		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
-	}
-	if !inserted {
-		// A concurrent create of the same name won: nothing of ours to set.
-		out.alreadyOwned = true
-	} else if opts.private {
-		if _, err := modes.SetBucket(ctx, tx, tenantID, bucket, modes.Change{SSECRequired: &opts.private}); err != nil {
-			return out, fmt.Errorf("make bucket %s private: %w", bucket, err)
+	if opts.private {
+		// Born Standard and made Private through the door in ONE
+		// transaction (RP33-1 c): no write can land between the two.
+		inserted, err := s.createPrivateBucketRow(ctx, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning)
+		if err != nil {
+			return out, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
+		if !inserted {
+			// A concurrent create of the same name won: nothing of ours to set.
+			out.alreadyOwned = true
+			return out, nil
+		}
+	} else if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
+			object_lock_enabled, versioning_status)
+		VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
+		ON CONFLICT (tenant_id, name) DO NOTHING
+	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning); err != nil {
 		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
-	}
-	if out.alreadyOwned {
-		return out, nil
 	}
 	auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
 
@@ -213,6 +202,40 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 		zap.String("bucket", bucket), zap.String("tenant", tenantID), zap.String("region", out.region),
 		zap.Bool("object_lock", opts.objectLock))
 	return out, nil
+}
+
+// createPrivateBucketRow inserts the bucket's row (born Standard, as every
+// create) and makes it Private through the door in the same transaction.
+// inserted is false when the name already existed (nothing changed).
+func (s *Server) createPrivateBucketRow(ctx context.Context, tenantID, bucket string, sseDefault bool, region, residency string,
+	objectLock bool, versioning string) (inserted bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.QueryRowContext(ctx, `
+		WITH ins AS (
+			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
+				object_lock_enabled, versioning_status)
+			VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
+			ON CONFLICT (tenant_id, name) DO NOTHING
+			RETURNING 1)
+		SELECT EXISTS (SELECT 1 FROM ins)
+	`, tenantID, bucket, sseDefault, region, residency, objectLock, versioning).Scan(&inserted); err != nil {
+		return false, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	if !inserted {
+		return false, nil
+	}
+	private := true
+	if _, err := modes.SetBucket(ctx, tx, tenantID, bucket, modes.Change{SSECRequired: &private}); err != nil {
+		return false, fmt.Errorf("make bucket %s private: %w", bucket, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("persist bucket %s: %w", bucket, err)
+	}
+	return true, nil
 }
 
 // dashboardBucketCreator adapts createBucketRegistry to the dashboard's

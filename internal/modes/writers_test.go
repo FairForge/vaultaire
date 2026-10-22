@@ -35,7 +35,7 @@ var (
 var doorCallers = map[string]string{
 	"internal/dashboard/handlers/bucket_settings.go": "",
 	"internal/api/management_routes.go":              "",
-	"internal/api/bucket_create.go":                  "modes.Change{SSECRequired: &opts.private}",
+	"internal/api/bucket_create.go":                  "modes.Change{SSECRequired: &private}",
 }
 
 // modeDoor is the one file allowed to UPDATE the mode columns.
