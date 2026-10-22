@@ -653,9 +653,11 @@ func (c *GeyserAdminClient) CreateBucket(ctx context.Context, name string) (*Gey
 		Size:             1,
 		DatacenterID:     c.provConfig.DatacenterID,
 		CustomerID:       c.provConfig.CustomerID,
-		Versioning:       "SUSPENDED",
-		Icon:             "hard-drive-icon-outline",
-		Color:            "#3146FF",
+		// Never versioned: a Suspended bucket cannot go back, and a plain
+		// delete on it leaves a delete marker (Stored3Lib, 11,629 of them).
+		Versioning: "DISABLED",
+		Icon:       "hard-drive-icon-outline",
+		Color:      "#3146FF",
 	}
 
 	var created createBucketResponse

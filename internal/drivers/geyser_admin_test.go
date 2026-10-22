@@ -640,6 +640,42 @@ func TestCreateBucket_AcceptsCreatedStatus(t *testing.T) {
 	}
 }
 
+// A bucket is created never-versioned. Versioning "SUSPENDED" (what this
+// client sent) can never go back to unversioned, and on a Suspended bucket a
+// plain delete leaves a delete marker — how Stored3Lib piled up 11,629 of them.
+// The collection is the configured one: a bucket may be created into an
+// existing collection (live on LA2, 2026-10-22: no new slot, no size change).
+func TestCreateBucket_SendsVersioningDisabledInTheConfiguredCollection(t *testing.T) {
+	var sent createBucketRequest
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/buckets":
+			if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+				t.Errorf("decode create body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"bkt-1","status":"PROVISIONING"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/buckets/bkt-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"bkt-1","bucketName":"la2rot2-bkt-1","status":"CREATED"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+
+	client := newTestClient(t, handler)
+	_, err := client.CreateBucket(context.Background(), "la2rot2")
+	if err != nil {
+		t.Fatalf("CreateBucket returned error: %v", err)
+	}
+	if sent.Versioning != "DISABLED" {
+		t.Errorf("expected versioning DISABLED, got %q", sent.Versioning)
+	}
+	if sent.TapeCollectionID != "test-collection-id" {
+		t.Errorf("expected the configured collection, got %q", sent.TapeCollectionID)
+	}
+}
+
 func TestGetBucketAccess_ListsValidKeys(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/buckets/bkt-1/access" {
