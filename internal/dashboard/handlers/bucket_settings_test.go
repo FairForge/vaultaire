@@ -734,7 +734,7 @@ func TestHandleUpdateBucketSettings_PrivateOverReadable_FlashesCopyAdvice(t *tes
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	}
 	clean()
-	t.Cleanup(clean)
+	defer clean() // before the deferred db.Close: a t.Cleanup ran on a closed handle and left the head row (RP20-A6)
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'P27', 'p27@test.com', 'VK-p27', 'SK-p27')`, tenant)
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'has-plain', 'private')`, tenant)

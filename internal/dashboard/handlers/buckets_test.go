@@ -513,7 +513,7 @@ func TestCleanupDashBucketData_LeavesOtherTenants(t *testing.T) {
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
 	other := fmt.Sprintf("test-dash-other-%d", time.Now().UnixNano())
-	t.Cleanup(func() { cleanupDashBucketData(t, db, other) })
+	defer cleanupDashBucketData(t, db, other) // runs before the deferred db.Close
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'Other', $2, $3, $4)`,
 		other, other+"@test.com", "VK-"+other, "SK-"+other)
 	require.NoError(t, err)
