@@ -49,7 +49,7 @@ Measured 2026-07-29 against the prod bucket:
 - **Bench caveat**: `bench-compare`'s default client forces h2, so its
   `sustained_upload`/`concurrent_ingest` numbers under-report Geyser ~9×.
   Trust the `*_h1_*` workloads (or aws-cli) for this backend.
-- Safe on archived objects: `DELETE` (so restic prune works), `PUT` overwrite
+- Safe on archived objects: `DELETE` (so restic prune works — but a delete frees no tape space: see the delete notes below), `PUT` overwrite
   (immediately readable), range-GET on *restored* copies (so restic pack reads
   work post-restore).
 - Server-side lifecycle auto-aborts multipart uploads older than 7 days (set by
@@ -118,7 +118,7 @@ console credentials should mint a JWT.
 
 | Feature | Notes |
 |---|---|
-| Versioning | Enable/suspend — works, but leaves delete markers on every delete that require versioned-delete to purge. Leave suspended on prod. |
+| Versioning | Enable/suspend — works, but a Suspended bucket (prod's Stored3Lib) leaves a null delete marker on every plain delete, even of a key that never existed, and Geyser's `ExpiredObjectDeleteMarker` rule did not reap them. The driver deletes `VersionId=null`, which leaves nothing on a Suspended and on a never-versioned bucket (delete-method matrix on LA1 + LA2, 2026-10-22). A Suspended bucket can never go back to unversioned: never enable versioning on a new Geyser bucket. |
 | Bucket tagging | Set/get/delete |
 | CORS | Set/get/delete |
 | Bucket policy | Read AND write — we can re-PUT the existing policy |

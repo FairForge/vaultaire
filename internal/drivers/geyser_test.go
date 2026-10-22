@@ -25,6 +25,9 @@ type geyserS3Mock struct {
 	mu      sync.RWMutex
 	objects map[string][]byte // key -> data
 	headers map[string]http.Header
+	// deleteVersions is the versionId query of every DELETE, "<none>" when
+	// the request named no version.
+	deleteVersions []string
 }
 
 func newGeyserS3Mock() *geyserS3Mock {
@@ -64,6 +67,11 @@ func (m *geyserS3Mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		m.mu.Lock()
+		v := "<none>"
+		if r.URL.Query().Has("versionId") {
+			v = r.URL.Query().Get("versionId")
+		}
+		m.deleteVersions = append(m.deleteVersions, v)
 		delete(m.objects, key)
 		m.mu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
@@ -165,6 +173,29 @@ func TestGeyser_PutGetDeleteRoundtrip(t *testing.T) {
 	// Get after delete should fail
 	_, err = driver.Get(ctx, "photos", "cat.jpg")
 	require.Error(t, err)
+}
+
+// ── Delete names the null version ────────────────────────────────────────────
+
+// Geyser's bucket is versioning-Suspended (LA1 Stored3Lib; a bucket can never
+// go back to unversioned): a plain DeleteObject leaves a null delete marker —
+// even for a key that was never written — and Geyser's ExpiredObjectDeleteMarker
+// rule did not reap them (11,629 piled up). Deleting VersionId "null" removes
+// the object with no marker, on a Suspended bucket and on a never-versioned one
+// (LA2) alike — the delete-method matrix of 2026-10-22. Every write goes to a
+// fresh <key>@<id> address, so there is no older version to bring back.
+func TestGeyser_DeleteNamesTheNullVersion(t *testing.T) {
+	mock := newGeyserS3Mock()
+	driver := newTestGeyserDriver(t, mock)
+	ctx := context.Background()
+
+	require.NoError(t, driver.Put(ctx, "photos", "cat.jpg", strings.NewReader("meow")))
+	require.NoError(t, driver.Delete(ctx, "photos", "cat.jpg"))
+	require.NoError(t, driver.Delete(ctx, "photos", "never-written.jpg"))
+
+	mock.mu.RLock()
+	defer mock.mu.RUnlock()
+	assert.Equal(t, []string{"null", "null"}, mock.deleteVersions)
 }
 
 // ── Put materializes Content-Length ──────────────────────────────────────────
