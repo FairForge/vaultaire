@@ -14,6 +14,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -323,9 +324,35 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 		ssecRequired = *req.SSECRequired
 	}
 
-	_, err = s.db.ExecContext(r.Context(),
-		`UPDATE buckets SET metadata = $1, ssec_required = $4, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
-		merged, tenantID, name, ssecRequired)
+	// ssec_required is a mode column: it changes only through the one door
+	// (internal/modes, K3), which enforces the 096 rule in its statement —
+	// the metadata in the same transaction.
+	err = func() error {
+		tx, err := s.db.BeginTx(r.Context(), nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if req.SSECRequired != nil {
+			if _, err := modes.SetBucket(r.Context(), tx, tenantID, name, modes.Change{SSECRequired: req.SSECRequired}); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(r.Context(),
+			`UPDATE buckets SET metadata = $1, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
+			merged, tenantID, name); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}()
+	switch {
+	case errors.Is(err, modes.ErrPublicSSEC):
+		writeManagementError(w, ErrTypeConflict, "bucket_public", "a public bucket cannot require a customer-provided key; make it private first", "ssec_required")
+		return
+	case errors.Is(err, modes.ErrNoBucket):
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
 	if err != nil {
 		s.logger.Error("update bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update the bucket", "")

@@ -395,7 +395,7 @@ const (
 		 ORDER BY created_at, id::text
 		 LIMIT $4`
 	sqlExportBuckets = `
-		SELECT name, visibility, region, data_residency, versioning_status AS versioning, object_lock_enabled,
+		SELECT name, mode, visibility, ssec_required, region, data_residency, versioning_status AS versioning, object_lock_enabled,
 		       default_retention_mode, default_retention_days, mfa_delete_enabled, sse_enabled,
 		       cors_origins, cors_rules, cache_max_age_secs, bandwidth_budget_bytes, cdn_force_download, tier_preference,
 		       logging_enabled, logging_target_bucket, logging_prefix,
