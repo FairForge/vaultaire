@@ -1374,6 +1374,28 @@ func generateAdminPaths() map[string]*PathItem {
 				}),
 				queryParam("dry_run", "`smart_demotion` only: report, move nothing", &Schema{Type: "boolean", Default: false}))),
 		},
+		"/api/v1/admin/translog/ceremony": {
+			Post: admin(withBody(jsonOp("Admin", "Append a key ceremony to the transparency log", "AdminTranslogCeremony",
+				"Appends a `key_ceremony` entry to the transparency log (keystone K4, `docs/TRANSPARENCY.md`): the F-14 master-key install, a re-wrap, an escrow share rotation, "+
+					"a recovery-realm ceremony or this log's own signing key. Needs the admin's JWT AND a fresh TOTP code of the admin's own MFA in `mfa_code` (an admin "+
+					"without MFA enrolled is refused; a code is accepted once). The entry is PUBLIC once the log is: it names the key by fingerprint only, and the statement "+
+					"may not contain an e-mail, an IP address, a UUID, a tenant id or an object path. Every call — refusals included — is audited `admin.translog_ceremony`.",
+				map[string]Response{
+					"201": jsonResp("Appended", objectPtr("", map[string]*Schema{
+						"index": integer("The entry's index in the log"), "kind": strEnum("", "key_ceremony"),
+					}, "index", "kind")),
+					"400": jsonResp("A refused entry (the reason) or invalid JSON", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+					"401": jsonResp("`mfa_code: wrong, expired or already used`", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+					"403": textResp("`admin access required`, or no MFA enrolled on this admin account"),
+					"503": jsonResp("The log or the MFA state cannot be read; nothing was written", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+				}), jsonBody("The ceremony", objectPtr("", map[string]*Schema{
+				"ceremony":        strEnum("", "master_key_install", "master_key_rewrap", "escrow_share_rotation", "recovery_realm", "translog_key_install"),
+				"key_fingerprint": str("`sha256:` + 64 lowercase hex — never the key"),
+				"participants":    integer("How many people took part (1–20)"),
+				"statement":       str("What was done, plain text (≤ 2000 bytes)"),
+				"mfa_code":        str("A current 6-digit TOTP code of the calling admin"),
+			}, "ceremony", "key_fingerprint", "participants", "statement", "mfa_code")))),
+		},
 		"/api/v1/admin/backends/{backend}/plan": {
 			Parameters: []Parameter{pathParam("backend", "A registered backend driver name (idrive, lyve, geyser, wasabi, r2, ...)")},
 			Get: admin(jsonOp("Admin", "A backend's vendor plan row", "AdminGetBackendPlan",

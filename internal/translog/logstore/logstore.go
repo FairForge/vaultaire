@@ -310,3 +310,13 @@ func checkExtends(old translog.Checkpoint, size int64, root translog.Hash, prove
 	}
 	return nil
 }
+
+// CheckpointNote is the newest signed checkpoint as the read side serves
+// it (translog.Source).
+func (s *Store) CheckpointNote(ctx context.Context) ([]byte, int64, bool, error) {
+	c, ok, err := s.LatestCheckpoint(ctx)
+	if err != nil || !ok {
+		return nil, 0, false, err
+	}
+	return []byte(c.Note), c.Size, true, nil
+}

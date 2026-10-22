@@ -109,3 +109,7 @@ func (c *StateCollector) read() *[3]float64 {
 	c.vals = &v
 	return c.vals
 }
+
+// CountAppendFailure counts a failure that happened before Append could be
+// called (a producer that could not build its entry).
+func CountAppendFailure(kind string) { appendFailures.WithLabelValues(kind).Inc() }

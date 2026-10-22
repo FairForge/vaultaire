@@ -158,6 +158,9 @@ type Server struct {
 	// without a database. translogCheckpoint is its job.
 	translog           *logstore.Store
 	translogCheckpoint *translogCheckpointer
+	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
+	// signed request to it (translog_read.go); nil = handleS3Request.
+	s3Fallback http.HandlerFunc
 	// entitlementLapse is the entitlement_lapse job (WP-PAY-1,
 	// entitlement_lapse.go); nil without a database.
 	entitlementLapse *EntitlementLapseRunner
@@ -962,6 +965,8 @@ func (s *Server) setupRoutes() {
 	// CDN path-based routes — before dashboard and S3 catch-all.
 	s.logger.Info("Registering CDN routes")
 	s.router.Get("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
+	// The transparency log's read side (K4): dark behind translog_public.
+	s.registerTranslogReadRoutes()
 	s.router.Head("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 	s.router.Options("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 
@@ -1174,6 +1179,8 @@ func (s *Server) registerComplianceRoutes() {
 		// call audited with the actor and a required reason.
 		s.registerAdminPaymentRoutes(r)
 		s.registerAdminBackendPlanRoutes(r)
+		// The transparency log's ceremony entries (K4): admin + a fresh TOTP.
+		s.registerTranslogAdminRoutes(r)
 	})
 }
 
@@ -1554,6 +1561,10 @@ func (s *Server) Start() error {
 	s.httpServer.RegisterOnShutdown(cancel)
 
 	go s.startHealthChecks(ctx)
+
+	// The transparency log's server_build entry (K4): once per distinct
+	// binary, in the background — never blocks the boot.
+	s.startServerBuildEntry()
 
 	// Every payment provider's readiness, every 60 s: the gauge
 	// vaultaire_payment_provider_ready and the entitlement_lapse job's

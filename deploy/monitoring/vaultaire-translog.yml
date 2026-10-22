@@ -46,4 +46,4 @@ groups:
           severity: warning
         annotations:
           summary: "Transparency log: {{ $value | humanize }} {{ $labels.kind }} append(s) failed in the last hour"
-          description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again by hand (cmd/tools/translog-append)."
+          description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
