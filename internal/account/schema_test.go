@@ -61,7 +61,9 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 	// rule: payment_provider_readiness (098) is infrastructure — when a
 	// payment provider was last up or down — not tenant data; backend_plans
 	// (099, WP-CAP-1) the same — what WE bought from a storage vendor and
-	// when it renews, keyed by backend, no customer in it.
+	// when it renews, keyed by backend, no customer in it. The transparency
+	// log's tables (103) are the same and are pinned by
+	// TestTranslogTablesAreInfrastructure below.
 
 	// Every rule names a table that exists (a typo would silently skip).
 	exists := map[string]bool{}
@@ -84,5 +86,38 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 		stmt, err := db.PrepareContext(ctx, r.SQL)
 		require.NoError(t, err, "rule for %s does not prepare: %s", r.Table, r.SQL)
 		_ = stmt.Close()
+	}
+}
+
+// translogTables are the transparency log's tables (migration 103, K4):
+// public infrastructure. They carry no tenant or user column, so the
+// erasure and the export never walk them, and no erase rule may name them —
+// an entry is append-only and public, and its kinds name no tenant
+// (internal/translog TestTranslog_EntriesNeverNameATenant).
+var translogTables = []string{"translog_entries", "translog_hashes", "translog_checkpoints"}
+
+func TestTranslogTablesAreInfrastructure(t *testing.T) {
+	db, err := sql.Open("postgres", testutil.DSN())
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	if err := db.PingContext(ctx); err != nil {
+		t.Skipf("test database unreachable (%v) — create it with `make test-db`", err)
+	}
+	for _, table := range translogTables {
+		var exists bool
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists))
+		require.True(t, exists, "%s is missing — migration 103", table)
+		var personal int
+		require.NoError(t, db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM information_schema.columns
+			 WHERE table_schema = 'public' AND table_name = $1
+			   AND (column_name IN ('tenant_id', 'user_id', 'admin_user_id', 'granted_by', 'performed_by')
+			        OR column_name ILIKE '%email%' OR column_name ILIKE '%ip%addr%' OR column_name = 'ip'
+			        OR column_name ILIKE '%tenant%' OR column_name ILIKE '%user%')`, table).Scan(&personal))
+		assert.Zero(t, personal, "%s grew a tenant/user/e-mail/IP column: the log is public infrastructure", table)
+		for _, r := range append(append([]Rule{}, Deleted...), Kept...) {
+			assert.NotEqual(t, table, r.Table, "an erase rule names %s: the log is append-only and holds no tenant data", table)
+		}
 	}
 }

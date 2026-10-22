@@ -39,6 +39,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/payments/btcpay"
 	"github.com/FairForge/vaultaire/internal/sitestats"
+	"github.com/FairForge/vaultaire/internal/translog/logstore"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -153,6 +154,10 @@ type Server struct {
 	accountSvc         *account.Service       // the one deletion state machine (WP-R10-3)
 	accountDeletion    *AccountDeletionRunner // daily erasure of accounts past their grace period (WP-R10-3)
 	synthetic          *syntheticChecker      // customer-path canary (Review R13-13, checklist item 4)
+	// translog is the transparency log's store (K4, translog.go); nil
+	// without a database. translogCheckpoint is its job.
+	translog           *logstore.Store
+	translogCheckpoint *translogCheckpointer
 	// entitlementLapse is the entitlement_lapse job (WP-PAY-1,
 	// entitlement_lapse.go); nil without a database.
 	entitlementLapse *EntitlementLapseRunner
@@ -333,6 +338,15 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			modes.SetMasterKeyLoaded(true)
 			checkTenantKeysAtBoot(context.Background(), keys, logger)
 		}
+	}
+
+	// The transparency log (K4): its signing key follows the master key's
+	// rules (a source set but unusable refuses the boot); without one,
+	// entries append and nothing is signed.
+	translogSigner := translogSigningKeyOrFatal(logger, os.Getenv, os.ReadFile)
+	if s.db != nil {
+		s.translog = logstore.New(s.db, translogSigner)
+		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
 	}
 
 	s.allowUnsealedCleartext = allowUnsealedCleartextFromEnv(os.Getenv, logger)

@@ -314,6 +314,8 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"account_export":      "every 1m0s",
 		"retired_blobs":       "every 10m0s",
 		"renewal_stops":       "every 10m0s",
+		// K4: signs a transparency-log checkpoint when the tree grew.
+		"translog_checkpoint": "every 10m0s",
 		// WP-PAY-5: never scheduled — its admin endpoint runs it.
 		"stripe_bulk_renewals": "manual (admin endpoint)",
 	}

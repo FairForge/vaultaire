@@ -7,6 +7,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/packstore"
 	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/FairForge/vaultaire/internal/translog/logstore"
 	"net/http"
 	"sort"
 	"sync/atomic"
@@ -135,6 +136,13 @@ func (s *Server) initMetrics() {
 		// Invalid houses from Stripe, acknowledged not retried (RP20-4).
 		reg.MustRegister(billing.Collectors()...)
 		reg.MustRegister(entitlementsLapsed)
+		// The transparency log (K4): append failures by kind and the
+		// signing key (process state), size and newest checkpoint (from the
+		// tables on scrape — right after a restart).
+		reg.MustRegister(logstore.Collectors()...)
+		if s.db != nil {
+			reg.MustRegister(logstore.NewStateCollector(s.db, s.log()))
+		}
 		if s.db != nil {
 			reg.MustRegister(newEntitlementsExpiringCollector(s.db, s.log()))
 		}

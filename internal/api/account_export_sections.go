@@ -128,6 +128,7 @@ var exportNeverColumns = map[string]string{
 	"tenant_chunk_refs.ciphertext_hash":    "dedup index, not customer data",
 	"tenant_chunk_refs.plaintext_hash":     "dedup index, not customer data",
 	"retired_chunk_blobs.plaintext_hash":   "re-encrypt bookkeeping (WP-R8-1), not customer data; no tenant column — never a section",
+	"translog_hashes.hash":                 "the transparency log's Merkle nodes (103, K4): public infrastructure, no tenant column — never a section",
 	"object_metadata.content_hash":         "dedup index, not customer data",
 	"deletion_requests.proof_hash":         "D-12 scaffolding, no writer",
 	"pseudonym_mappings.original_hash":     "D-12 scaffolding, no writer",

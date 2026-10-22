@@ -53,6 +53,7 @@ import (
 //	stripe_gc            1 h    +9 m    (orphan pieces of striped objects, drivers/webdav_stripe.go; only with the sync backend)
 //	swift_segment_gc     1 h    +11 m   (orphan pieces of Blomp's large objects, drivers/swift_segment_gc.go; only with the blomp backend)
 //	webhook_retry        30 s   +25 s   (due webhook_outbox rows back to the delivery pool, WP-R11-3)
+//	translog_checkpoint  10 m   +90 s   (signs a transparency-log checkpoint when the tree grew, K4; ok and unsigned without a key)
 //
 // The three cleanups used to wait a full hour after every start before
 // their first pass.
@@ -147,6 +148,9 @@ func (s *Server) registerJobs() {
 	}
 	if s.webhookRetry != nil {
 		s.jobs.Register(s.webhookRetry.spec())
+	}
+	if s.translogCheckpoint != nil {
+		s.jobs.Register(s.translogCheckpoint.spec())
 	}
 	if s.paymentReminders != nil {
 		s.jobs.Register(s.paymentReminders.spec())
