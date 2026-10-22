@@ -487,13 +487,15 @@ Where the lab and the text above differ, the lab wins:
 | `InvoiceProcessing` (`overPaid` recorded) | `processing` | — |
 | **`InvoiceSettled`** (`manuallyMarked`, `overPaid` recorded) | `settled`, `settled_at`, `rate`, `crypto_amount`, `invoice_number` assigned | **Grant/Extend**: `paid_through = GREATEST(paid_through, now()) + period`; `provider = 'btcpay'`, `renewal = 'prepaid'`, `pending_provider` cleared; a resize applies `Order`; `overPaid` → `credit_cents` = the excess at the invoice rate (§ 3.4) |
 | `InvoiceExpired` (`partiallyPaid=false`) | `expired` | — (nothing was paid; the customer may start again — a new invoice at a new rate) |
-| `InvoiceExpired` (`partiallyPaid=true`) | `expired_partial`, `credit_cents` = what arrived at the invoice rate | — ; e-mail: "we received $X of $Y; it is a credit on your next invoice, or ask for a refund" (§ 3.4) |
-| `InvoiceReceivedPayment` with `afterExpiration=true` ("paid late") | the payment recorded on the expired row | **automation**: when the fetched `paidAmount ≥ amount` (the lab: the fetched invoice is `Expired/PaidLate`; departure: the crypto amount at the invoice's rate, not a then-rate — BTCPay records none), we `POST …/status Settled` (audit `billing.invoice_marked`, reason `paid_late_in_full`) → BTCPay sends `InvoiceSettled (manuallyMarked)` → the grant above. Less than due → credit, as a partial |
-| `InvoiceInvalid` (`manuallyMarked`, or the monitoring window of 24 h passed without confirmation: a double-spend, an RBF replacement, a dropped transaction) | `invalid` | — ; if a grant had been made from this invoice (impossible in the table above: we grant on `Settled` only) nothing to undo |
+| `InvoiceExpired` (`partiallyPaid=true`) | `expired_partial`, `credit_cents` = what arrived **and confirmed** (§ 3.4 "Only confirmed bitcoin is value"; 0 while the payment is unconfirmed — the `InvoicePaymentSettled` of its confirmation sets it) | — ; e-mail: "we received $X of $Y; it is a credit on your next invoice, or ask for a refund" (§ 3.4) |
+| `InvoiceReceivedPayment` with `afterExpiration=true` ("paid late") | the payment recorded on the expired row | **automation**: when the CONFIRMED amount ≥ `amount` (RP33-2, Stage 1a Prompt 27: the late payment's own status Settled — the lab: `Expired/PaidLate` with the payment `Processing` until it is mined, then `InvoicePaymentSettled` with the invoice still `Expired/PaidLate` and the payment `Settled`; departure kept: the crypto amount at the invoice's rate, not a then-rate — BTCPay records none), we `POST …/status Settled` (audit `billing.invoice_marked`, reason `paid_late_in_full`) → BTCPay sends `InvoiceSettled (manuallyMarked)` → the grant above. Seen but unconfirmed → **nothing yet** (the `InvoicePaymentSettled` of its confirmation fetches the invoice again and marks it). Less than due → credit of the confirmed part, as a partial |
+| `InvoiceInvalid` (`manuallyMarked`, or the monitoring window of 24 h passed without confirmation: a double-spend, an RBF replacement, a dropped transaction) | `invalid`; `credit_cents` = what arrived **and confirmed** (RP31-1 b, RP33-2 — an unconfirmed payment credits nothing: `paidAmount` still counts it after the window) | — ; if a grant had been made from this invoice (impossible in the table above: we grant on `Settled` only) nothing to undo |
+| **Lab (Prompt 27):** paid in full in time, never mined, the monitoring window passes | BTCPay makes the invoice `Invalid/None` (`paidAmount` 10.00, the payment `Processing`) — and sent **no `InvoiceInvalid` delivery** (2.4.5; the change was seen only after a BTCPay restart, 6 min past the window — open question RP34) | our row stays `processing` until another delivery fetches it; whatever fetches it credits 0 |
+| **Lab (Prompt 27, RP33-11):** that payment is mined AFTER the Invalid | BTCPay still delivers **`InvoicePaymentSettled`** (the invoice stays `Invalid/None`, the payment `Settled`) | the fetched state closes the row `invalid` and credits the confirmed amount (1000 cents) — never a grant |
 | **Lab:** `InvoiceSettled` with `manuallyMarked` and `paidAmount` < `amount` (an operator marked an UNPAID invoice Settled — BTCPay sends it with `paidAmount` 0) | unchanged | **no grant**, an Error line (an operator who means it records a manual payment) |
 | **Lab:** a double spend / RBF replacement **before** confirmation | the invoice silently returns `Processing → New` (no event), then `InvoiceExpired{partiallyPaid:false}` → `expired` | — (it never becomes `Invalid`: Processing is not monotonic, nothing acts on it) |
 | **Lab:** `InvoiceInvalid` after a hand-marked `Settled` (an operator's act) | stays `settled` | the grant stands, a Warn; the operator adjusts by hand |
-| `InvoicePaymentSettled` | the `payments[]` entry marked confirmed | — |
+| `InvoicePaymentSettled` | the `payments[]` entry marked confirmed; the fetched invoice is applied again (an Expired invoice paid late is marked Settled once confirmed; an Expired or Invalid invoice's credit grows to the confirmed amount) | — |
 | Any event for an invoice our `payments` table does not know, or whose `metadata.tenant_id` ≠ the row's tenant | 200, Warn, counted `foreign` — the claim **released** (RP30-3: a redelivery is handled fresh) | — |
 | **Prompt 25 Part 0:** two deliveries of one invoice that overlap (InvoiceSettled + InvoicePaymentSettled; two webhooks on the store; one outliving 100 s) | the second takes the tenant's lock after the first committed and re-reads the row (`LockedPending`, FOR UPDATE) — a replay | granted ONCE (RP30-1); an `Expired` fetch on a row no longer open (settled, refunded) writes neither a status nor a `partial:` credit |
 | `Settled` with `paidAmount` < `amount` | unchanged, the claim released | no grant, an Error, counted `settled_unpaid` (pages — RP30-5) |
@@ -538,6 +540,25 @@ pays inside the window.
   next invoice. Under $1 is kept (network fees make a refund absurd) — stated
   in the terms (F-28).
 - **Late payment**: § 3.3 — settled in full = granted; short = credit.
+- **Only confirmed bitcoin is value (RP33-2, Stage 1a Prompt 27).**
+  `paidAmount` counts a payment the moment BTCPay sees it (`Processing` =
+  "paid in full, unconfirmed"); an unconfirmed payment can still be
+  replaced (RBF) or dropped. Everything that turns money into value
+  WITHOUT BTCPay's own `Settled` — the `partial:` credit of an Expired or
+  Invalid invoice, the paid-late mark — uses the CONFIRMED amount, from the
+  invoice's `GET …/payment-methods` (`payments[].status` ∈ `Invalid` |
+  `Processing` | `Settled`), each payment at its method's `rate` (USD/BTC),
+  in cents, rounded half up once per sum (`btcpay.confirmedCents`):
+
+  `confirmed = max(0, min(paidAmount − Σ value × rate over the payments not
+  Settled and not Invalid, Σ value × rate over the Settled payments))`
+
+  The first term keeps BTCPay's own net figure (a second payment's network
+  fee — `MultiplePaymentsOnly` — counts toward nothing); the second never
+  exceeds what the Settled payments are worth. Lab: 0.0001181 BTC × 84675 =
+  10.0001 → 1000 cents once `Settled`, 0 while `Processing`; Prompt 27's
+  regtest 0.00012249 × 81642 = 10.0003 → 1000. A grant still waits for
+  BTCPay's `InvoiceSettled` with `paidAmount ≥ amount` (unchanged).
 - **Refunds**: manual, in the coin paid (BTCPay pull payment), at the rate of
   the original payment (`RateThen`) for a refund of a purchase, at the
   current rate (`CurrentRate`) for returning an overpayment's excess —
@@ -715,8 +736,12 @@ The customer-id stripping the second paragraph promises is implemented in
 ### 4.1 Stripe → crypto, per tenant
 
 1. Customer clicks "Switch to crypto at renewal". Under the tenant lock:
-   `StopRenewal` on Stripe (`cancel_at_period_end = true`); `renewal =
-   'prepaid'`, `pending_provider = 'btcpay'`; audit `billing.renewal_stopped`.
+   `renewal = 'prepaid'`, `pending_provider = 'btcpay'` and a pending
+   `renewal_stop` row for the subscription, in one transaction; after the
+   commit Stripe is told to stop by the subscription's id
+   (`StopRenewalRef`: `cancel_at_period_end = true`, or cancelled now when
+   the period is in dunning — Stage 1a Prompt 27, RP33-3/RP33-7; the
+   build's departures in § 4.4); audit `billing.renewal_stopped`.
    `paid_through` is untouched — they keep what they paid for.
 2. From T−14 d the reminders and the page offer the crypto invoice
    (`purpose='switch'`, priced at the current `prices.json`); paying early
