@@ -3,6 +3,8 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -112,4 +114,71 @@ func TestDoublePeriod_OverlapPast48h_StillDetected(t *testing.T) {
 
 	assert.Equal(t, before+1, doublePeriods())
 	assert.Zero(t, f.audits(t, "billing.prepaid_forfeited"))
+}
+
+// waitForLockWaiter polls pg_locks until a backend other than the test's
+// waits on an advisory lock (the webhook queued behind the held
+// entitlement lock).
+func waitForLockWaiter(t *testing.T, db *sql.DB) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&n))
+		if n > 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the webhook never waited on the entitlement lock")
+}
+
+// RP31-3 (P3): the switched-away check reads the renewal_stop row UNDER the
+// entitlement lock — an implicit switch that commits while a Stripe event
+// waits on the lock is seen, and the house is not taken back.
+func TestStripeEvent_ImplicitSwitchCommitsWhileWaiting_NeverTakesTheHouse(t *testing.T) {
+	// Arrange: Stripe renews the house; a bitcoin settle (the implicit
+	// switch) holds the tenant's entitlement lock with its grant and its
+	// renewal_stop row written, not committed yet.
+	f := setupHouseFixture(t)
+	ctx := context.Background()
+	start := time.Now().Add(-24 * time.Hour).Truncate(time.Second)
+	end := start.Add(30 * 24 * time.Hour)
+	sub := f.houseSub("active", start, end)
+	f.post(t, "granted", "customer.subscription.updated", f.stripeHas(sub))
+	require.Equal(t, payments.ProviderStripe, f.entitlement(t).Provider)
+	btcPT := end.Add(30 * 24 * time.Hour)
+	tx, err := f.db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	require.NoError(t, payments.Lock(ctx, tx, f.tenantID))
+	require.NoError(t, payments.Grant(ctx, tx, f.tenantID, payments.Order{Std: 2, Vault: 1, Period: payments.PeriodMonthly}, btcPT,
+		payments.ProviderBTCPay, "BtcImplicit_"+f.tenantID, payments.RenewalPrepaid))
+	require.NoError(t, payments.RecordRenewalStop(ctx, tx, f.tenantID, payments.ProviderStripe, sub.ID, payments.ReasonImplicitSwitch,
+		payments.RenewalStopPending, nil))
+	stops := &fakeStops{}
+	f.handler.stops = stops
+
+	// Act: Stripe's update of the same subscription arrives and waits on
+	// the lock; the switch commits.
+	body := eventBody(t, "evt_"+f.tenantID+"_race", "customer.subscription.updated", f.stripeHas(sub))
+	req := signedRequest(t, testWebhookSecret, time.Now(), body)
+	done := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, req)
+		done <- w.Code
+	}()
+	waitForLockWaiter(t, f.db)
+	require.NoError(t, tx.Commit())
+	code := <-done
+
+	// Assert: the house stays bitcoin's; the stop is asserted again.
+	require.Equal(t, http.StatusOK, code)
+	e := f.entitlement(t)
+	assert.Equal(t, payments.ProviderBTCPay, e.Provider, "the Stripe grant must not take the house back")
+	assert.True(t, btcPT.Equal(e.PaidThrough))
+	stops.mu.Lock()
+	assert.Equal(t, []string{sub.ID}, stops.refs)
+	stops.mu.Unlock()
 }

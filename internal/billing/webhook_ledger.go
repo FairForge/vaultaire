@@ -100,8 +100,8 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	var grant func(*sql.Tx) error
 	var invalid error
 	var invalidSub *stripe.Subscription
-	var granted payments.Granted
-	var uncancelled bool
+	var res stripeGrant
+	var grantSub *stripe.Subscription
 	if subID := invoiceSubscriptionID(inv); subID != "" && h.quotas != nil {
 		sub, err := h.fetchSubscription(ctx, subID)
 		switch {
@@ -111,30 +111,29 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 		case err != nil:
 			return fmt.Errorf("fetch subscription %s of paid invoice %s: %w", subID, inv.ID, err)
 		default:
-			away, err := h.switchedAway(ctx, tenantID, sub)
-			if err != nil {
-				return err
-			}
 			if order, ok := h.stripe.HouseFromSubscription(sub); ok {
 				o := order
 				p.Order = &o
 				// A subscription a switch took the house from never takes it
-				// back (WP-PAY-5): the payment is recorded — and the
-				// double-period detector sees it — but nothing is granted.
-				if !away && (sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing) {
+				// back (WP-PAY-5) — grantStripe reads that under the lock
+				// (RP31-3): the payment is recorded — and the double-period
+				// detector sees it — but nothing is granted.
+				if sub.Status == stripe.SubscriptionStatusActive || sub.Status == stripe.SubscriptionStatusTrialing {
 					paidThrough := h.paidThrough(sub)
 					renewal := payments.RenewalAuto
 					if sub.CancelAtPeriodEnd {
 						renewal = payments.RenewalPrepaid
 					}
+					grantSub = sub
 					grant = func(tx *sql.Tx) error {
-						g, u, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub.ID, renewal)
+						r, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal)
 						if errors.Is(err, payments.ErrInvalidOrder) {
-							// Refused before any statement: the transaction is intact.
+							// Refused before any statement but the lock: the
+							// transaction is intact.
 							invalid, invalidSub = err, sub
 							return nil
 						}
-						granted, uncancelled = g, u
+						res = r
 						return err
 					}
 				}
@@ -183,9 +182,11 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 	}
 	if invalid != nil {
 		h.houseInvalid(ctx, tenantID, invalidSub, *p.Order, invalid)
+	} else if grant != nil && res.away {
+		h.afterSwitchedAway(ctx, tenantID, grantSub, res)
 	} else if grant != nil {
-		h.auditGrant(ctx, tenantID, granted, invoiceSubscriptionID(inv))
-		if uncancelled {
+		h.auditGrant(ctx, tenantID, res.Granted, invoiceSubscriptionID(inv))
+		if res.uncancelled {
 			h.afterUncancel(ctx, tenantID, invoiceSubscriptionID(inv))
 		}
 	}

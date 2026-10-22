@@ -598,19 +598,15 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 	}
 	switch sub.Status {
 	case stripe.SubscriptionStatusActive, stripe.SubscriptionStatusTrialing, stripe.SubscriptionStatusPastDue:
-		if away, err := h.switchedAway(ctx, tenantID, sub); err != nil || away {
-			return true, err
-		}
 		paidThrough := h.paidThrough(sub)
 		renewal := payments.RenewalAuto
 		if sub.CancelAtPeriodEnd {
 			renewal = payments.RenewalPrepaid // nobody will extend it
 		}
-		var granted payments.Granted
-		var uncancelled bool
+		var res stripeGrant
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
-			g, u, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub.ID, renewal)
-			granted, uncancelled = g, u
+			var err error
+			res, err = grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal)
 			return err
 		}); errors.Is(err, payments.ErrInvalidOrder) {
 			h.houseInvalid(ctx, tenantID, sub, order, err)
@@ -618,8 +614,12 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		} else if err != nil {
 			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}
-		h.auditGrant(ctx, tenantID, granted, sub.ID)
-		if uncancelled {
+		if res.away {
+			h.afterSwitchedAway(ctx, tenantID, sub, res)
+			return true, nil
+		}
+		h.auditGrant(ctx, tenantID, res.Granted, sub.ID)
+		if res.uncancelled {
 			h.afterUncancel(ctx, tenantID, sub.ID)
 		}
 		h.logger.Info("house granted",
