@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/audit"
@@ -21,13 +22,26 @@ type OperatorNotifier interface {
 // note to the operator when notifier is an OperatorNotifier (the refund is
 // by hand — docs/PAYMENTS.md § 2.5 point 5). Nothing when there is nothing
 // to report; the notifier's error is returned for the caller's log line.
+//
+// A designed overlap (Settled.Forfeit — RP31-2) is no double period: it is
+// audited billing.prepaid_forfeited with the days the customer gave up,
+// nothing counted, nobody mailed.
 func ReportDoublePeriod(ctx context.Context, db *sql.DB, notifier any, tenantID string, s Settled) error {
+	f := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+	if d := s.Forfeit; d != nil && s.Newly {
+		audit.Record(ctx, db, audit.Entry{TenantID: tenantID, EventType: "billing", Action: "billing.prepaid_forfeited",
+			Resource: "payment:" + d.ThisID, Metadata: map[string]any{"tenant": tenantID,
+				"days": math.Round(d.Days()*100) / 100, "until": f(d.OtherEnd),
+				"payment": map[string]any{"id": d.ThisID, "provider": d.ThisProvider, "provider_id": d.ThisProviderID,
+					"period_start": f(d.ThisStart), "period_end": f(d.ThisEnd)},
+				"prepaid": map[string]any{"id": d.OtherID, "provider": d.OtherProvider, "provider_id": d.OtherProviderID,
+					"period_start": f(d.OtherStart), "period_end": f(d.OtherEnd)}}})
+	}
 	d := s.DoublePeriod
 	if d == nil || !s.Newly {
 		return nil
 	}
 	doublePeriodTotal.WithLabelValues(d.ThisProvider).Inc()
-	f := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 	audit.Record(ctx, db, audit.Entry{TenantID: tenantID, EventType: "billing", Action: "billing.double_period", Severity: "error",
 		Resource: "payment:" + d.ThisID, Metadata: map[string]any{"tenant": tenantID,
 			"payment": map[string]any{"id": d.ThisID, "provider": d.ThisProvider, "provider_id": d.ThisProviderID,

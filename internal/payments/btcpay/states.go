@@ -177,10 +177,12 @@ func (a applied) after(ctx context.Context, p *Provider) {
 			Resource: "btcpay-invoice:" + a.marked, Metadata: map[string]any{"tenant": a.tenantID, "actor": webhookActor,
 				"invoice": a.marked, "status": StatusSettled, "reason": "paid_late_in_full"}})
 	}
-	if a.settled != nil && a.settled.DoublePeriod != nil {
+	if a.settled != nil {
 		if err := payments.ReportDoublePeriod(ctx, p.db, p.receipts, a.tenantID, *a.settled); err != nil {
 			p.logger.Warn("btcpay: double period not mailed to the operator", zap.String("tenant", a.tenantID), zap.Error(err))
 		}
+	}
+	if a.settled != nil && a.settled.DoublePeriod != nil {
 		p.logger.Error("btcpay: the customer paid twice for overlapping dates — granted; refund one by hand",
 			zap.String("tenant", a.tenantID), zap.String("invoice", a.invoice),
 			zap.String("other", a.settled.DoublePeriod.OtherProvider+":"+a.settled.DoublePeriod.OtherProviderID))

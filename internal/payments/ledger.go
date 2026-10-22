@@ -84,6 +84,26 @@ type Settled struct {
 	// docs/PAYMENTS.md § 2.5 point 5): the caller reports it after its
 	// commit (ReportDoublePeriod). The settle itself stands — paid is paid.
 	DoublePeriod *DoublePeriod
+	// Forfeit is set instead when the overlap is a designed one: a new
+	// period that starts inside MinDeferredStart of another provider's
+	// prepaid end (the switch to card, or a renew, inside 48 h — Stripe's
+	// trial_end needs 48 h, so card billing starts now and the page said the
+	// remaining prepaid days are forfeited). No detector hit; the caller
+	// audits billing.prepaid_forfeited with the days (RP31-2).
+	Forfeit *DoublePeriod
+}
+
+// Days is the overlap of the two periods, in days.
+func (d DoublePeriod) Days() float64 {
+	end := d.ThisEnd
+	if d.OtherEnd.Before(end) {
+		end = d.OtherEnd
+	}
+	start := d.ThisStart
+	if d.OtherStart.After(start) {
+		start = d.OtherStart
+	}
+	return end.Sub(start).Hours() / 24
 }
 
 // DoublePeriod names the two charges whose periods overlap.
@@ -230,7 +250,7 @@ func Settle(ctx context.Context, tx *sql.Tx, p Payment, at time.Time) (Settled, 
 	}
 	out := Settled{ID: id, InvoiceNumber: number, Newly: true}
 	if p.Kind == KindCharge && p.AmountCents > 0 {
-		if out.DoublePeriod, err = doublePeriodOf(ctx, tx, id); err != nil {
+		if out.DoublePeriod, out.Forfeit, err = doublePeriodOf(ctx, tx, id); err != nil {
 			return Settled{}, err
 		}
 	}
@@ -244,26 +264,53 @@ func Settle(ctx context.Context, tx *sql.Tx, p Payment, at time.Time) (Settled, 
 // later prepaid period that does not overlap). $0 rows on either side (a
 // trialing subscription's first invoice, a credit-covered order) paid
 // nothing twice and are never a match.
-func doublePeriodOf(ctx context.Context, tx *sql.Tx, id string) (*DoublePeriod, error) {
-	var d DoublePeriod
-	err := tx.QueryRowContext(ctx, `
+//
+// Designed overlaps are never a double period (RP31-2 — the mail tells the
+// operator to refund one by hand, so a false hit instructs a wrong refund):
+// a resize on either side (a top-up prices the rest of a period that was
+// already bought, by design inside it), and a period that starts inside
+// MinDeferredStart of the other's end (the switch to card or a renew inside
+// 48 h: the page said the remaining days are forfeited) — that one is
+// returned as forfeit for the caller's audit.
+func doublePeriodOf(ctx context.Context, tx *sql.Tx, id string) (double, forfeit *DoublePeriod, err error) {
+	rows, err := tx.QueryContext(ctx, `
 		SELECT t.id::text, t.provider, t.provider_id, t.period_start, t.period_end,
 		       o.id::text, o.provider, o.provider_id, o.period_start, o.period_end
 		  FROM payments t
 		  JOIN payments o ON o.tenant_id = t.tenant_id AND o.provider <> t.provider AND o.kind = 'charge'
 		                 AND o.status = 'settled' AND o.amount_cents > 0
+		                 AND o.purpose IS DISTINCT FROM 'resize'
 		                 AND o.period_end > t.period_start AND o.period_start < t.period_end
 		 WHERE t.id = $1::uuid AND t.tenant_id IS NOT NULL AND t.period_start IS NOT NULL AND t.period_end IS NOT NULL
-		 ORDER BY o.period_end DESC LIMIT 1`, id).
-		Scan(&d.ThisID, &d.ThisProvider, &d.ThisProviderID, &d.ThisStart, &d.ThisEnd,
-			&d.OtherID, &d.OtherProvider, &d.OtherProviderID, &d.OtherStart, &d.OtherEnd)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		   AND t.purpose IS DISTINCT FROM 'resize'
+		 ORDER BY o.period_end DESC`, id)
 	if err != nil {
-		return nil, fmt.Errorf("double-period check of payment %s: %w", id, err)
+		return nil, nil, fmt.Errorf("double-period check of payment %s: %w", id, err)
 	}
-	return &d, nil
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var d DoublePeriod
+		if err := rows.Scan(&d.ThisID, &d.ThisProvider, &d.ThisProviderID, &d.ThisStart, &d.ThisEnd,
+			&d.OtherID, &d.OtherProvider, &d.OtherProviderID, &d.OtherStart, &d.OtherEnd); err != nil {
+			return nil, nil, fmt.Errorf("double-period check of payment %s: %w", id, err)
+		}
+		if d.ThisStart.After(d.OtherStart) && d.OtherEnd.Sub(d.ThisStart) <= MinDeferredStart {
+			if forfeit == nil {
+				f := d
+				forfeit = &f
+			}
+			continue
+		}
+		double = &d
+		break
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("double-period check of payment %s: %w", id, err)
+	}
+	if double != nil {
+		forfeit = nil
+	}
+	return double, forfeit, nil
 }
 
 // Fail records a payment attempt that failed (a Stripe invoice whose charge
