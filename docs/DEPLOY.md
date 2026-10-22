@@ -196,6 +196,11 @@ seals a stream). The large-GET failures of the "before" run were Lyve answering
 `500 InternalError` to chunk blobs written 2026-10-12/14 (HEAD 200, GET 500 —
 a vendor fault under investigation), not the host.
 
+**Re-checked 2026-10-22** (`bench-results/HOST-TUNING-CHECK-2026-10-22.md`): the boot unit
+run under systemd (`systemctl start`, exit 0, no link reset), raw iDrive / Lyve / Wasabi
+unchanged before and after it, the customer path at the 10-21 "after" numbers. A reboot
+has not tested its boot ordering yet.
+
 ## The pipeline: push to `main`
 
 `main` is protected: no direct pushes, CI must pass, merges are squash merges

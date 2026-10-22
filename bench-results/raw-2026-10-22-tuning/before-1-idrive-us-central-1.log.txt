@@ -1,0 +1,43 @@
+Host:      slc-before-1 (linux/amd64)
+Output:    before-1/idrive-us-central-1.json
+Transport: tuned (MaxIdleConnsPerHost=200, 4MB buffers, compression=off)
+Endpoints: 1 (smoke=false)
+
+[1/1] idrive-us-central-1  (https://s3.us-central-1.idrivee2.com)
+─────────────────────────────────────────────────────────────────
+  ✓ bucket: vbench-tune-20261022
+  cold_dial_put_1kb         987ms  p50=87ms p95=124ms p99=124ms
+  warm_put_4kb             3170ms     32 ops/s  p50=31ms p95=32ms p99=83ms
+  warm_get_4kb             2885ms     35 ops/s  p50=27ms p95=35ms p99=41ms
+  warm_head_4kb            1358ms     37 ops/s  p50=27ms p95=27ms p99=27ms
+  warm_copy_4kb             320ms     31 ops/s  p50=32ms p95=33ms p99=33ms
+  warm_delete_single       1293ms     23 ops/s  p50=32ms p95=104ms p99=148ms
+  delete_batch_100         1022ms     98 ops/s
+  list_100                  111ms  returned=100
+  list_prefix                28ms  returned=30
+  medium_put_1mb            500ms    10.0 MB/s  p50=62ms p95=259ms p99=259ms
+  medium_get_1mb            383ms    13.0 MB/s  p50=45ms p95=205ms p99=205ms
+  medium_put_16mb          1029ms    77.7 MB/s  p50=147ms p95=415ms p99=415ms
+  medium_get_16mb          1015ms    78.8 MB/s  p50=199ms p95=318ms p99=318ms
+  large_put_64mb            569ms   112.3 MB/s
+  large_get_64mb            529ms   120.9 MB/s
+  multipart_put_256mb      1176ms   217.7 MB/s
+  multipart_put_256mb_16p   1041ms   245.8 MB/s
+  large_put_64mb_h1         594ms   107.6 MB/s
+  multipart_put_256mb_h1_16p    868ms   294.8 MB/s
+  mpu_abort                 546ms      9 ops/s  p50=100ms p95=154ms p99=154ms
+  concurrent_ingest_20s    8869ms   129.4 MB/s     32 ops/s  p50=151ms p95=3714ms p99=4949ms
+  concurrent_download_20s   2908ms   394.7 MB/s     99 ops/s  p50=160ms p95=456ms p99=1069ms
+  range_get_1mb_chunks     1149ms    13.9 MB/s     14 ops/s  p50=32ms p95=448ms p99=448ms
+  burst_small_files_500    1620ms     1.2 MB/s    309 ops/s  p50=30ms p95=32ms p99=84ms
+  integrity_16mb            696ms  ✓ checksum match
+  integrity_robust_16mb     974ms    16.4 MB/s  ✓ verified (put_retries=0, get_retries=0)
+  integrity_chunked_16mb    778ms    20.6 MB/s  ✓ verified chunks (put_retries=0, get_retries=0)
+  consistency_read_after_write   1745ms  p50=29ms p95=80ms p99=80ms  ✓ 20/20 consistent
+  consistency_overwrite    2158ms  ✓ 10/10 overwrites correct
+  consistency_list_after_write    629ms  ✓ 10/10 immediately visible in listing
+  rate_limit_escalation     598ms    534 ops/s  max_clean=128 | ✓8w:181ops/s(0e) ✓16w:337ops/s(0e) ✓32w:827ops/s(0e) ✓64w:917ops/s(0e) ✓128w:1549ops/s(0e)
+  sustained_upload_60s    60000ms   328.0 MB/s     20 ops/s  p50=141ms p95=265ms p99=991ms  00s:107MB/s 10s:154MB/s 20s:459MB/s 30s:437MB/s 40s:411MB/s 50s:400MB/s
+
+
+✅ Done in 2m2s. Results: before-1/idrive-us-central-1.json

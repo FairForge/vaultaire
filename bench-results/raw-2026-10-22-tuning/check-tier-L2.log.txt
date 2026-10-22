@@ -1,0 +1,16 @@
+std-L2-check   small_put_4k                 n=50 p50 34 ms  p95 48 ms  max 280 ms
+std-L2-check   small_get_4k                 n=50 p50 29 ms  p95 36 ms  max 83 ms  ok
+std-L2-check   small_head_4k                n=50 p50 0 ms  p95 0 ms  max 1 ms
+std-L2-check   list_prefix                  0.00 s  [50 keys listed]
+std-L2-check   small_delete                 n=50 p50 31 ms  p95 36 ms  max 62 ms
+std-L2-check   single_put_8mb               0.17 s  49.8 MB/s
+std-L2-check   get_single_8mb               0.35 s  24.2 MB/s  ttfb 89 ms  ok
+std-L2-check   single_put_64mb              0.64 s  105.0 MB/s
+std-L2-check   get_single_64mb              0.54 s  123.9 MB/s  ttfb 476 ms  ok
+std-L2-check   single_put_256mb             1.22 s  220.8 MB/s
+std-L2-check   get_single_256mb             2.39 s  112.3 MB/s  ttfb 491 ms  ok
+std-L2-check   mpu_put_256mb                1.59 s  168.7 MB/s  [16 parts x 16 MiB, 8 wide, complete 0.6 s]
+std-L2-check   get_mpu_256mb                4.12 s  65.2 MB/s  ttfb 541 ms  ok
+std-L2-check   mpu_put_1024mb               4.78 s  224.7 MB/s  [64 parts x 16 MiB, 8 wide, complete 2.3 s]
+std-L2-check   get_mpu_1024mb               6.69 s  160.6 MB/s  ttfb 462 ms  ok
+std-L2-check   range_get_1mb                n=30 p50 186 ms  p95 295 ms  max 631 ms  [of mpu-1024mb.bin]
