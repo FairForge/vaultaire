@@ -19,6 +19,12 @@ import (
 	"github.com/FairForge/vaultaire/internal/api/landing"
 )
 
+// FlagModesCopy turns on the mode copy generated from modes.json (K3 PR 3,
+// default OFF, per tenant first): the dashboard's bucket labels and — read
+// globally — the privacy page's per-mode table. The owner flips it globally
+// after reading the privacy table (a legal page).
+const FlagModesCopy = "modes_copy"
+
 // Mode ids — the values of buckets.mode (migration 102). Their names and
 // sentences are modes.json's.
 const (

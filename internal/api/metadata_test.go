@@ -157,8 +157,8 @@ func TestManagementBucketMetadata_Get(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT name, COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required"}).
-			AddRow("my-bucket", []byte(`{"color":"blue","env":"prod"}`), now, false))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required", "mode"}).
+			AddRow("my-bucket", []byte(`{"color":"blue","env":"prod"}`), now, false, "standard"))
 
 	req := httptest.NewRequest("GET", "/api/v1/manage/buckets/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -202,8 +202,8 @@ func TestManagementBucketMetadata_Patch(t *testing.T) {
 
 	mock.ExpectQuery(`SELECT COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"metadata", "created_at", "visibility", "ssec_required"}).
-			AddRow([]byte(`{"color":"blue"}`), now, "private", false))
+		WillReturnRows(sqlmock.NewRows([]string{"metadata", "created_at", "visibility", "ssec_required", "mode"}).
+			AddRow([]byte(`{"color":"blue"}`), now, "private", false, "standard"))
 
 	// Metadata only: no mode change, so the door (modes.SetBucket) is not
 	// asked; one transaction.

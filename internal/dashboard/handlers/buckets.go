@@ -22,8 +22,12 @@ import (
 
 // BucketRow is a single bucket for the bucket list template.
 type BucketRow struct {
-	Name            string
-	Visibility      string
+	Name       string
+	Visibility string
+	// Mode is buckets.mode (K3); ModeLabel its name and sentence from
+	// modes.json, shown while modes_copy is on for the tenant.
+	Mode            string
+	ModeLabel       ModeLabel
 	ObjectCount     int
 	TotalSize       int64
 	LastModified    time.Time
@@ -314,6 +318,7 @@ func withRegionPicker(data map[string]any, regionUp RegionAvailable) {
 
 func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Template, db *sql.DB, sd *dashauth.SessionData, data map[string]any, regionUp RegionAvailable, logger *zap.Logger) {
 	withRegionPicker(data, regionUp)
+	data["ModesCopy"] = modesCopy(sd.TenantID)
 	if db != nil {
 		buckets := listBuckets(r.Context(), db, sd.TenantID)
 		data["Buckets"] = buckets
@@ -334,6 +339,7 @@ func renderBucketList(w http.ResponseWriter, r *http.Request, tmpl *template.Tem
 // versions, which keep their bytes (WP-R2-1 C2).
 const listBucketsSQL = `SELECT b.name,
 		        b.visibility,
+		        b.mode,
 		        b.tier_preference,
 		        COALESCE(o.object_count, 0),
 		        COALESCE(o.total_size, 0) + COALESCE(ver.version_size, 0),
@@ -372,10 +378,11 @@ func listBuckets(ctx context.Context, db *sql.DB, tenantID string) []BucketRow {
 	for rows.Next() {
 		var b BucketRow
 		var lastMod time.Time
-		if err := rows.Scan(&b.Name, &b.Visibility, &b.TierPreference, &b.ObjectCount, &b.TotalSize, &b.AtticBytes, &b.VersionBytes, &lastMod); err != nil {
+		if err := rows.Scan(&b.Name, &b.Visibility, &b.Mode, &b.TierPreference, &b.ObjectCount, &b.TotalSize, &b.AtticBytes, &b.VersionBytes, &lastMod); err != nil {
 			continue
 		}
 		b.LastModified = lastMod
+		b.ModeLabel = modeLabel(b.Mode)
 		b.SizeFmt = formatBytes(b.TotalSize)
 		b.AtticFmt = formatBytes(b.AtticBytes)
 		b.VersionFmt = formatBytes(b.VersionBytes)

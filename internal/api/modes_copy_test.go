@@ -58,7 +58,7 @@ func modeCopySources(t *testing.T) map[string]string {
 	}))
 	for _, p := range []string{
 		"landing/landing.src.html", "landing/builder.html", "landing/builder.js", "landing/page.js",
-		"docs_getting_started.md", "docs_rclone.md", "docs_faq.md", "llms_txt.go", "../docs/openapi.go",
+		"docs_getting_started.md", "docs_rclone.md", "docs_faq.md", "llms_txt.go", "../docs/openapi.go", "../docs/openapi_modes.go",
 	} {
 		b, err := os.ReadFile(filepath.FromSlash(p))
 		require.NoError(t, err)
@@ -123,4 +123,27 @@ func allowedKey(path, hit string) string {
 		hit = strings.ToLower(hit)
 	}
 	return path + "|" + hit
+}
+
+// featuresWithoutADeclaredMode is docs/STATUS.md's convergence number
+// "Features without a declared mode", counted: the customer surfaces that
+// still print a bucket's mode from a hand-typed label instead of
+// modes.json — the files of modeCopyAllowed's legacy entries (each renders
+// modes.Name while modes_copy is on and its legacy label until the flag is
+// flipped globally and the legacy branch removed). Target 0.
+func featuresWithoutADeclaredMode() int {
+	files := map[string]bool{}
+	for k, reason := range modeCopyAllowed {
+		if strings.HasPrefix(reason, "legacy") {
+			files[strings.SplitN(k, "|", 2)[0]] = true
+		}
+	}
+	return len(files)
+}
+
+func TestFeaturesWithoutADeclaredMode_Count(t *testing.T) {
+	n := featuresWithoutADeclaredMode()
+	t.Logf("features without a declared mode: %d (docs/STATUS.md convergence checklist)", n)
+	// The number docs/STATUS.md states; change both together.
+	assert.Equal(t, 2, n)
 }

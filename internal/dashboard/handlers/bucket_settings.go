@@ -53,12 +53,13 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		tierPref := "auto"
 		var dataResidency sql.NullString
 		ssecRequired := false
+		mode := modes.Standard
 
 		if db != nil {
 			_ = db.QueryRowContext(r.Context(),
-				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference, data_residency, ssec_required
+				`SELECT visibility, cors_origins, cache_max_age_secs, region, tier_preference, data_residency, ssec_required, mode
 				 FROM buckets WHERE tenant_id = $1 AND name = $2`,
-				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref, &dataResidency, &ssecRequired)
+				sd.TenantID, bucketName).Scan(&vis, &corsOrigins, &cacheMaxAge, &region, &tierPref, &dataResidency, &ssecRequired, &mode)
 
 			_ = db.QueryRowContext(r.Context(),
 				`SELECT COALESCE(slug, '') FROM tenants WHERE id = $1`,
@@ -83,6 +84,12 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["Region"] = region
 		data["TierPreference"] = tierPref
 		data["SSECRequired"] = ssecRequired
+		// K3 PR 3: the bucket's mode from modes.json, while modes_copy is on.
+		data["ModesCopy"] = modesCopy(sd.TenantID)
+		data["Mode"] = modeLabel(mode)
+		data["ModeStandard"] = modeLabel(modes.Standard)
+		data["ModePublic"] = modeLabel(modes.Public)
+		data["ModePrivate"] = modeLabel(modes.Private)
 		data["RegionDisplay"] = drivers.RegionDisplayName(region)
 		data["IsEURegion"] = drivers.IsEURegion(region)
 		if dataResidency.Valid {

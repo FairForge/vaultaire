@@ -7,6 +7,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/modes"
 )
 
 // /llms.txt, the plain-text summary an AI assistant reads before it writes
@@ -56,7 +57,8 @@ HEAD   /<bucket>/<key>                metadata from cache (~1 ms, never touches 
 DELETE /<bucket>/<key>                delete; POST /<bucket>?delete batch delete
 PUT    /<bucket>/<key>  + x-amz-copy-source   copy
 POST   /<bucket>/<key>?uploads        create multipart; PUT ?partNumber=&uploadId= ; POST ?uploadId= complete
-Sub-resources: ?versioning ?object-lock ?retention ?legal-hold ?tagging ?cors ?notification ?acl (public-read)
+Sub-resources: ?versioning ?object-lock ?retention ?legal-hold ?tagging ?cors ?notification ?acl (owner-only: a public-read ACL is refused, 400 AccessControlListNotSupported)
+{MODES}
 
 ### S3 features
 - Presigned URLs (GET and PUT, SigV4 query auth)
@@ -116,7 +118,7 @@ func llmsTxtBody(h hosts.Hosts) string {
 		money(p.Vault.Annual), money(p.Vault.Monthly), money(p.Vault.MonthlyMinimum),
 		money(p.PinHot), ratio(p.Egress.StandardFreeRatio), ratio(p.Egress.VaultRestoreFreeRatio),
 		p.Egress.PastAllowance, p.Egress.OneAllowance)
-	return strings.NewReplacer("{S3}", h.S3, "{WEB}", h.Canonical, "{CDN}", h.CDNBase()).Replace(body)
+	return strings.NewReplacer("{S3}", h.S3, "{WEB}", h.Canonical, "{CDN}", h.CDNBase(), "{MODES}", llmsModes()).Replace(body)
 }
 
 func (s *Server) handleLlmsTxt(w http.ResponseWriter, r *http.Request) {
@@ -130,4 +132,15 @@ func (s *Server) handleLlmsTxt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write([]byte(body))
+}
+
+// llmsModes is llms.txt's bucket-mode line, generated from modes.json (K3):
+// every mode's id, name and how a bucket gets it (docs/reviews/K3-PROBE.md
+// R12 — the line used to promise ?acl public-read, which the server refuses).
+func llmsModes() string {
+	var parts []string
+	for _, m := range modes.All().Modes {
+		parts = append(parts, m.ID+" ("+m.Name+": "+m.How.Render(modes.MasterKeyLoaded())+")")
+	}
+	return "Bucket modes (the management API's `mode`): " + strings.Join(parts, "; ")
 }

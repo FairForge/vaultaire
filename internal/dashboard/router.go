@@ -21,6 +21,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
@@ -227,6 +228,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(bucketSettingsTmpl.ParseFS(Templates,
 			"templates/customer/bucket_settings.html",
 		))
+		// K3 PR 3: the bucket mode labels from modes.json, per tenant.
+		handlers.SetModesCopy(func(tenantID string) bool {
+			return deps.Flags != nil && deps.Flags.Enabled(modes.FlagModesCopy, tenantID)
+		})
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.RegionAvailable, deps.Logger))
 		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.RegionAvailable, deps.Logger))
 		// A system bucket (tenant.ExportsBucket, WP-R10-3b) has no page: 404
