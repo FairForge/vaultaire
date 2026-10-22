@@ -131,8 +131,8 @@ func TestHandleBucketSettings_ReadsFromDB(t *testing.T) {
 	useProdHosts(t)
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s1")
+	defer cleanupDashBucketData(t, db, "test-dash-s1")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s1', 'Settings Co', 'settings@test.com', 'VK-s1', 'SK-s1', 'settings-co')
@@ -168,8 +168,8 @@ func TestHandleBucketSettings_CDNHiddenForPrivate(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s2")
+	defer cleanupDashBucketData(t, db, "test-dash-s2")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s2', 'Private Co', 'private@test.com', 'VK-s2', 'SK-s2', 'private-co')
@@ -202,8 +202,8 @@ func TestHandleUpdateBucketSettings_ToggleToPublic(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s3")
+	defer cleanupDashBucketData(t, db, "test-dash-s3")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s3', 'Toggle Co', 'toggle@test.com', 'VK-s3', 'SK-s3', 'toggle-co')
@@ -254,8 +254,8 @@ func TestHandleUpdateBucketSettings_ArchiveTierBlocked(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s4")
+	defer cleanupDashBucketData(t, db, "test-dash-s4")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s4', 'Archive Co', 'archive@test.com', 'VK-s4', 'SK-s4', 'archive-co')
@@ -298,8 +298,8 @@ func TestHandleUpdateBucketSettings_ToggleToPrivate(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s5")
+	defer cleanupDashBucketData(t, db, "test-dash-s5")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s5', 'Revoke Co', 'revoke@test.com', 'VK-s5', 'SK-s5', 'revoke-co')
@@ -341,8 +341,8 @@ func TestHandleBucketSettings_ArchiveTierShowsRestriction(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s6")
+	defer cleanupDashBucketData(t, db, "test-dash-s6")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s6', 'Geyser Co', 'geyser@test.com', 'VK-s6', 'SK-s6', 'geyser-co')
@@ -379,8 +379,8 @@ func TestHandleUpdateBucketSettings_CacheMaxAgeClamped(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s7")
+	defer cleanupDashBucketData(t, db, "test-dash-s7")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s7', 'Clamp Co', 'clamp@test.com', 'VK-s7', 'SK-s7', 'clamp-co')
@@ -425,8 +425,8 @@ func TestHandleBucketSettings_TierPreference(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-tp1")
+	defer cleanupDashBucketData(t, db, "test-dash-tp1")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-tp1', 'Tier Co', 'tier@test.com', 'VK-tp1', 'SK-tp1', 'tier-co')
@@ -458,8 +458,8 @@ func TestHandleUpdateBucketSettings_TierPreference(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-tp2")
+	defer cleanupDashBucketData(t, db, "test-dash-tp2")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-tp2', 'Update Tier Co', 'utier@test.com', 'VK-tp2', 'SK-tp2', 'utier-co')
@@ -504,8 +504,8 @@ func TestHandleUpdateBucketSettings_InvalidTier(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-tp3")
+	defer cleanupDashBucketData(t, db, "test-dash-tp3")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-tp3', 'Bad Tier Co', 'btier@test.com', 'VK-tp3', 'SK-tp3', 'btier-co')
@@ -550,8 +550,8 @@ func TestHandleUpdateBucketSettings_BucketNotFound(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s8")
+	defer cleanupDashBucketData(t, db, "test-dash-s8")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s8', 'Ghost Co', 'ghost@test.com', 'VK-s8', 'SK-s8', 'ghost-co')
@@ -580,8 +580,8 @@ func TestHandleBucketSettings_DataResidency(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-dr1")
+	defer cleanupDashBucketData(t, db, "test-dash-dr1")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-dr1', 'EU Co', 'eu@test.com', 'VK-dr1', 'SK-dr1', 'eu-co')
@@ -616,8 +616,8 @@ func TestHandleUpdateBucketSettings_ResilientNotOfferedByTheForm(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-tp4")
+	defer cleanupDashBucketData(t, db, "test-dash-tp4")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-tp4', 'Res Co', 'res@test.com', 'VK-tp4', 'SK-tp4', 'res-co') ON CONFLICT DO NOTHING`)
@@ -663,8 +663,8 @@ func TestHandleUpdateBucketSettings_RequireCustomerKey(t *testing.T) {
 	}
 	db := testDashDB(t)
 	defer func() { _ = db.Close() }()
-	cleanupDashBucketData(t, db)
-	defer cleanupDashBucketData(t, db)
+	cleanupDashBucketData(t, db, "test-dash-s3")
+	defer cleanupDashBucketData(t, db, "test-dash-s3")
 
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, slug)
 		VALUES ('test-dash-s3', 'Toggle Co', 'toggle@test.com', 'VK-s3', 'SK-s3', 'toggle-co')
@@ -734,7 +734,7 @@ func TestHandleUpdateBucketSettings_PrivateOverReadable_FlashesCopyAdvice(t *tes
 		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenant)
 	}
 	clean()
-	t.Cleanup(clean)
+	defer clean() // before the deferred db.Close: a t.Cleanup ran on a closed handle and left the head row (RP20-A6)
 	_, err := db.Exec(`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ($1, 'P27', 'p27@test.com', 'VK-p27', 'SK-p27')`, tenant)
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, 'has-plain', 'private')`, tenant)
