@@ -171,8 +171,16 @@ func (s *StripeService) ResumeRenewal(ctx context.Context, tenantID string) erro
 // (payments.RefRenewalStopper, WP-PAY-5): one the entitlement no longer
 // names because a BTCPay payment took the house. Read first, so a repeat is
 // free: already stopping = nil; missing, cancelled or expired =
-// payments.ErrRefGone. Never an immediate cancel — the period it was paid
-// for runs out.
+// payments.ErrRefGone. A paid period is never cancelled — it runs out.
+//
+// A subscription whose current period was never paid — past_due, unpaid,
+// incomplete — is cancelled NOW instead (RP31-4): cancel_at_period_end
+// would leave Stripe's dunning retrying the card, and a later success would
+// bill the period the customer paid another way. No proration and no final
+// invoice (stripe-go v75.11.0 subscription.go:633-643
+// SubscriptionCancelParams.InvoiceNow / .Prorate; DELETE
+// /v1/subscriptions/{id}, subscription/client.go:68-77); answered
+// payments.ErrRefGone, so the renewal_stop row is closed gone.
 func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string) error {
 	if !s.configured {
 		return payments.ErrProviderUnconfigured
@@ -187,6 +195,15 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 	switch {
 	case sub.Status == stripe.SubscriptionStatusCanceled || sub.Status == stripe.SubscriptionStatusIncompleteExpired:
 		return fmt.Errorf("subscription %s is %s: %w", ref, sub.Status, payments.ErrRefGone)
+	case sub.Status == stripe.SubscriptionStatusPastDue || sub.Status == stripe.SubscriptionStatusUnpaid ||
+		sub.Status == stripe.SubscriptionStatusIncomplete:
+		if _, err := subscription.Cancel(ref, &stripe.SubscriptionCancelParams{Params: stripe.Params{Context: ctx},
+			InvoiceNow: stripe.Bool(false), Prorate: stripe.Bool(false)}); err != nil {
+			return fmt.Errorf("cancel unpaid subscription %s (%s): %w", ref, sub.Status, err)
+		}
+		s.logger.Warn("stripe: a subscription whose period was never paid is cancelled now — the house is paid another way",
+			zap.String("tenant", tenantID), zap.String("subscription", ref), zap.String("status", string(sub.Status)))
+		return fmt.Errorf("subscription %s was %s, cancelled now: %w", ref, sub.Status, payments.ErrRefGone)
 	case sub.CancelAtPeriodEnd:
 		return nil
 	}

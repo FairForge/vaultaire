@@ -3,8 +3,13 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v75"
+	"go.uber.org/zap"
 )
 
 // Stage 1a Prompt 26 Part 0 — the WP-P25 review's findings at the Stripe
@@ -181,4 +187,92 @@ func TestStripeEvent_ImplicitSwitchCommitsWhileWaiting_NeverTakesTheHouse(t *tes
 	stops.mu.Lock()
 	assert.Equal(t, []string{sub.ID}, stops.refs)
 	stops.mu.Unlock()
+}
+
+// fakeSubAPI is Stripe's subscription endpoints behind stripe-go's own
+// backend: GET answers the subscription in the given status; DELETE (cancel
+// now) and POST (update) are recorded with their forms.
+type fakeSubAPI struct {
+	mu      sync.Mutex
+	status  string
+	deletes []url.Values
+	updates []url.Values
+}
+
+func (f *fakeSubAPI) install(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasPrefix(r.URL.Path, "/v1/subscriptions/") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"fake"}}`))
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/subscriptions/")
+		// stripe-go sends a DELETE's params as a form body (stripe.go
+		// bodyMethod), which r.ParseForm ignores for DELETE.
+		raw, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(raw))
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		status := f.status
+		switch r.Method {
+		case http.MethodDelete:
+			f.deletes = append(f.deletes, form)
+			status = "canceled"
+		case http.MethodPost:
+			f.updates = append(f.updates, form)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "object": "subscription", "status": status})
+	}))
+	t.Cleanup(srv.Close)
+	prev := stripe.GetBackend(stripe.APIBackend)
+	stripe.SetBackend(stripe.APIBackend, stripe.GetBackendWithConfig(stripe.APIBackend, &stripe.BackendConfig{
+		URL: stripe.String(srv.URL), MaxNetworkRetries: stripe.Int64(0), LeveledLogger: &stripe.LeveledLogger{Level: stripe.LevelNull},
+	}))
+	t.Cleanup(func() { stripe.SetBackend(stripe.APIBackend, prev) })
+}
+
+// RP31-4 (P3): an implicit switch from a subscription whose current period
+// was never paid (past_due / unpaid / incomplete) cancels it now — with
+// cancel_at_period_end, Stripe's dunning would keep retrying the card and a
+// later success would bill the period the customer paid in bitcoin.
+func TestImplicitSwitch_FromPastDue_CancelsNow(t *testing.T) {
+	for _, status := range []string{"past_due", "unpaid", "incomplete"} {
+		t.Run(status, func(t *testing.T) {
+			// Arrange
+			f := setupHouseFixture(t)
+			api := &fakeSubAPI{status: status}
+			api.install(t)
+			svc := NewStripeService("sk_test_fake", f.db, zap.NewNop())
+
+			// Act
+			err := svc.StopRenewalRef(context.Background(), f.tenantID, "sub_dunning_"+f.tenantID)
+
+			// Assert: cancelled now, no proration, no final invoice; the
+			// renewal_stop row is closed as gone.
+			assert.ErrorIs(t, err, payments.ErrRefGone)
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			require.Len(t, api.deletes, 1)
+			assert.Equal(t, "false", api.deletes[0].Get("invoice_now"))
+			assert.Equal(t, "false", api.deletes[0].Get("prorate"))
+			assert.Empty(t, api.updates, "never cancel_at_period_end on an unpaid period")
+		})
+	}
+}
+
+func TestImplicitSwitch_FromActive_StopsAtPeriodEnd(t *testing.T) {
+	f := setupHouseFixture(t)
+	api := &fakeSubAPI{status: "active"}
+	api.install(t)
+	svc := NewStripeService("sk_test_fake", f.db, zap.NewNop())
+
+	require.NoError(t, svc.StopRenewalRef(context.Background(), f.tenantID, "sub_paid_"+f.tenantID))
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	assert.Empty(t, api.deletes, "a paid period runs out")
+	require.Len(t, api.updates, 1)
+	assert.Equal(t, "true", api.updates[0].Get("cancel_at_period_end"))
 }
