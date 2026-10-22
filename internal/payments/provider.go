@@ -152,6 +152,18 @@ type InvoiceInvalidator interface {
 // (RP31-5: the crypto_invoice_open 409 stays, with its date).
 var ErrInvoicePaid = errors.New("invoice_paid")
 
+// ErrProviderRefused: the provider answered a call with a PERMANENT
+// refusal (a Stripe 4xx other than 404/408/409/429) — no retry changes
+// it. SwitchToPrepaid reverts only on it; anything else is retried
+// (RP33-3).
+var ErrProviderRefused = errors.New("provider_refused")
+
+// ErrInvoiceCancelPending: the provider accepted the cancel (the invoice is
+// Invalid there) but our ledger row could not be closed in the same breath
+// — the provider's own delivery closes it (RP33-8b). The customer is told
+// the invoice was cancelled, never "nothing was changed".
+var ErrInvoiceCancelPending = errors.New("invoice_cancel_pending")
+
 // InvoiceCanceller is a prepaid provider that lets the customer withdraw
 // an invoice nobody paid (RP31-5 — the way out of crypto_invoice_open):
 // fetched, provably unpaid, marked Invalid at the provider and the ledger

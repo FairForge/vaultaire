@@ -143,7 +143,10 @@ func InvalidHouseRefs(ctx context.Context, db *sql.DB, tenantID string) ([]strin
 // — the caller's transaction, so the row commits with the grant that made
 // it necessary. status is RenewalStopPending (a provider call is due) or
 // RenewalStopStopped (already confirmed). A row that exists is updated: a
-// pending status re-opens a stopped one (the stop is asserted again).
+// pending status re-opens a stopped one (the stop is asserted again); a
+// stopped status never closes a pending one (RP33-3: a settle after a
+// switch whose stop did not finish must not mark Stripe stopped — only the
+// provider's answer closes a row, MarkRenewalStop).
 func RecordRenewalStop(ctx context.Context, tx *sql.Tx, tenantID, provider, ref, reason, status string, detail map[string]any) error {
 	if ref == "" {
 		return errors.New("renewal stop: no reference")
@@ -161,10 +164,26 @@ func RecordRenewalStop(ctx context.Context, tx *sql.Tx, tenantID, provider, ref,
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (provider, event_id) DO UPDATE
 		   SET tenant_id = EXCLUDED.tenant_id, received_at = NOW(),
-		       data = payment_events.data || jsonb_build_object('status', EXCLUDED.data->'status',
-		                                                       'reason', EXCLUDED.data->'reason')`,
+		       data = payment_events.data || jsonb_build_object(
+		           'status', CASE WHEN payment_events.data->>'status' = 'pending' THEN payment_events.data->'status'
+		                          ELSE EXCLUDED.data->'status' END,
+		           'reason', EXCLUDED.data->'reason')`,
 		provider, eventID(EventRenewalStop, ref), EventRenewalStop, tenantID, raw); err != nil {
 		return fmt.Errorf("record renewal stop %s for tenant %s: %w", ref, tenantID, err)
+	}
+	return nil
+}
+
+// WithdrawRenewalStop deletes the PENDING renewal_stop row of ref in tx:
+// the switch that owed it was put back (revertSwitch) or withdrawn by the
+// customer re-enabling the renewal (the Stripe webhook's portal race). A
+// stopped or gone row is history and stays.
+func WithdrawRenewalStop(ctx context.Context, tx *sql.Tx, tenantID, provider, ref string) error {
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM payment_events
+		 WHERE provider = $1 AND event_id = $2 AND tenant_id = $3 AND data->>'status' = 'pending'`,
+		provider, eventID(EventRenewalStop, ref), tenantID); err != nil {
+		return fmt.Errorf("withdraw renewal stop %s of tenant %s: %w", ref, tenantID, err)
 	}
 	return nil
 }

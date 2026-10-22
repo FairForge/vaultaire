@@ -58,7 +58,20 @@ func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Or
 	if err != nil {
 		return out, err
 	}
+	// A row for the subscription the entitlement STILL names is the stop a
+	// customer's switch owes (SwitchToPrepaid writes it with the switch,
+	// RP33-3) — the house was not taken from it yet: the event applies as
+	// before, and a portal un-cancel withdraws the switch and its stop
+	// below.
+	owed := false
 	if found {
+		cur, gerr := payments.Get(ctx, tx, tenantID)
+		if gerr != nil && !errors.Is(gerr, payments.ErrNoEntitlement) {
+			return out, gerr
+		}
+		owed = gerr == nil && cur.Provider == payments.ProviderStripe && cur.ProviderRef == sub.ID
+	}
+	if found && !owed {
 		out.away, out.stop = true, st
 		if !sub.CancelAtPeriodEnd && st.Status != payments.RenewalStopGone {
 			out.reassert = true
@@ -80,6 +93,13 @@ func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Or
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE entitlements SET pending_provider = NULL WHERE tenant_id = $1 AND pending_provider IS NOT NULL`, tenantID); err != nil {
 		return out, fmt.Errorf("withdraw the pending switch of tenant %s: %w", tenantID, err)
+	}
+	if owed {
+		// The renewal is on again by the customer's hand: the switch's
+		// stop is no longer owed (a stopped row stays as history).
+		if err := payments.WithdrawRenewalStop(ctx, tx, tenantID, payments.ProviderStripe, sub.ID); err != nil {
+			return out, err
+		}
 	}
 	out.uncancelled = true
 	return out, nil

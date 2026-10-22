@@ -1,0 +1,38 @@
+{
+ "path": "/hook",
+ "received": 1792677289.989585,
+ "headers": {
+  "Host": "capture:8080",
+  "User-Agent": "BTCPayServer/2.4.5",
+  "Content-Type": "application/json",
+  "BTCPay-Sig": "sha256=9e5201d7c7098a9ad06253e64939aeb0092df1589210a05fefcce30f55c5fdf6",
+  "Content-Length": "814"
+ },
+ "body_b64": "ewogICJhZnRlckV4cGlyYXRpb24iOiB0cnVlLAogICJwYXltZW50TWV0aG9kSWQiOiAiQlRDLUNIQUlOIiwKICAicGF5bWVudCI6IHsKICAgICJpZCI6ICIzNjExYWYzYWVmNmIyMzdmMTNhYTA1NjNmODVlYmRhZGJlZmJlN2EzODJiNGM1MzNkNDQzY2QzNTY0MmVjODBiLTAiLAogICAgInJlY2VpdmVkRGF0ZSI6IDE3OTI2NzY3NDksCiAgICAidmFsdWUiOiAiMC4wMDAxMjI0OSIsCiAgICAiZmVlIjogIjAiLAogICAgInN0YXR1cyI6ICJTZXR0bGVkIiwKICAgICJkZXN0aW5hdGlvbiI6ICJiY3J0MXFmZTBwNncyeDN6OWxoa2pxNjc3dHJkajNzcDN6Mm1meDl1YXlsZyIKICB9LAogICJkZWxpdmVyeUlkIjogIkFEdGlLa2pRZXFTRmhNMlk3cDk1dWsiLAogICJ3ZWJob29rSWQiOiAiRG52ckc0ZDJjdUtqcUdRR1ZBNzhETSIsCiAgIm9yaWdpbmFsRGVsaXZlcnlJZCI6ICJBRHRpS2tqUWVxU0ZoTTJZN3A5NXVrIiwKICAiaXNSZWRlbGl2ZXJ5IjogZmFsc2UsCiAgInR5cGUiOiAiSW52b2ljZVBheW1lbnRTZXR0bGVkIiwKICAidGltZXN0YW1wIjogMTc5MjY3NzI4OSwKICAic3RvcmVJZCI6ICJIRks4VjJrWGVqTXJNSmRIWmJBMW9vVGtVamVpVXVrM1hkVDl5VUxHeWVISyIsCiAgImludm9pY2VJZCI6ICJNemkxSnJjcjlQY2lvUkZuRTZwMkJLIiwKICAibWV0YWRhdGEiOiB7CiAgICAib3JkZXIiOiAiMSBUQiBzdGFuZGFyZCB5ZWFybHkiLAogICAgInB1cnBvc2UiOiAibmV3IiwKICAgICJ0ZW5hbnRfaWQiOiAidC1sYWIiLAogICAgInBheW1lbnRfaWQiOiAiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIgogIH0KfQ==",
+ "body": {
+  "afterExpiration": true,
+  "paymentMethodId": "BTC-CHAIN",
+  "payment": {
+   "id": "3611af3aef6b237f13aa0563f85ebdadbefbe7a382b4c533d443cd35642ec80b-0",
+   "receivedDate": 1792676749,
+   "value": "0.00012249",
+   "fee": "0",
+   "status": "Settled",
+   "destination": "bcrt1qfe0p6w2x3z9lhkjq677trdj3sp3z2mfx9uaylg"
+  },
+  "deliveryId": "ADtiKkjQeqSFhM2Y7p95uk",
+  "webhookId": "DnvrG4d2cuKjqGQGVA78DM",
+  "originalDeliveryId": "ADtiKkjQeqSFhM2Y7p95uk",
+  "isRedelivery": false,
+  "type": "InvoicePaymentSettled",
+  "timestamp": 1792677289,
+  "storeId": "HFK8V2kXejMrMJdHZbA1ooTkUjeiUuk3XdT9yULGyeHK",
+  "invoiceId": "Mzi1Jrcr9PcioRFnE6p2BK",
+  "metadata": {
+   "order": "1 TB standard yearly",
+   "purpose": "new",
+   "tenant_id": "t-lab",
+   "payment_id": "00000000-0000-0000-0000-000000000000"
+  }
+ }
+}

@@ -110,6 +110,7 @@ func TestInvoiceInvalid_WithPaidAmount_Credited(t *testing.T) {
 	f := newFixture(t).lab(t)
 	inv := f.openRow(t, "InvoiceInvalid_marked", payments.PurposeNew)
 	f.serveAs(t, "InvoiceInvalid_marked", StatusInvalid, "10.00")
+	f.serveMethods(t, "InvoiceInvalid_marked", "InvoiceSettled_exact") // the payment confirmed (RP33-2)
 
 	// Act
 	require.Equal(t, http.StatusOK, f.deliver(t, "InvoiceInvalid_marked"))

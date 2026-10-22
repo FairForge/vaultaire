@@ -565,7 +565,9 @@ func (p *Provider) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID,
 	if !p.markInvalid(ctx, tenantID, invoiceID, ReasonCustomerCancel, actor) {
 		return fmt.Errorf("mark invoice %s invalid: %w", invoiceID, payments.ErrProviderUnavailable)
 	}
-	return payments.InTx(ctx, p.db, func(tx *sql.Tx) error {
+	// BTCPay has it Invalid now: a failure from here on is not "nothing
+	// changed" (RP33-8b) — the InvoiceInvalid delivery closes our row.
+	err = payments.InTx(ctx, p.db, func(tx *sql.Tx) error {
 		if err := payments.Lock(ctx, tx, tenantID); err != nil {
 			return err
 		}
@@ -579,6 +581,12 @@ func (p *Provider) CancelUnpaidInvoice(ctx context.Context, tenantID, invoiceID,
 		}
 		return nil
 	})
+	if err != nil {
+		p.logger.Warn("btcpay: invoice marked Invalid at BTCPay, our row not closed yet — its InvoiceInvalid delivery closes it",
+			zap.String("tenant", tenantID), zap.String("invoice", invoiceID), zap.Error(err))
+		return fmt.Errorf("invoice %s cancelled at BTCPay, row not closed: %w: %w", invoiceID, payments.ErrInvoiceCancelPending, err)
+	}
+	return nil
 }
 
 // StopRenewal: nothing renews a prepaid house by itself.

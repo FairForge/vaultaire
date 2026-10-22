@@ -27,6 +27,15 @@ const (
 	AddPaidOver    = "PaidOver"
 )
 
+// Payment statuses (Greenfield payment-methods payments[].status): a
+// payment is Processing until the store's speed policy counts it
+// confirmed (Settled); Invalid = double-spent / replaced.
+const (
+	PaymentInvalid    = "Invalid"
+	PaymentProcessing = "Processing"
+	PaymentSettled    = "Settled"
+)
+
 // Speed policies (checkout.speedPolicy): how many confirmations make an
 // invoice Settled.
 const (

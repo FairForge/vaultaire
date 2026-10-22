@@ -1,0 +1,37 @@
+{
+ "path": "/hook",
+ "received": 1792677289.9573421,
+ "headers": {
+  "Host": "capture:8080",
+  "User-Agent": "BTCPayServer/2.4.5",
+  "Content-Type": "application/json",
+  "BTCPay-Sig": "sha256=415595cc78827d8c439433b1a87b4a805e04ff816a617e4eca3bbc4273394de7",
+  "Content-Length": "777"
+ },
+ "body_b64": "ewogICJhZnRlckV4cGlyYXRpb24iOiB0cnVlLAogICJwYXltZW50TWV0aG9kSWQiOiAiQlRDLUNIQUlOIiwKICAicGF5bWVudCI6IHsKICAgICJpZCI6ICI2NjU5NzY5NWJiYjIzODBlZmVhYWU5OWRjZGM1NGZiMzE3ZWQwZWQ1NmU4NTA5YTAxZWE1YThmZDdkYWUzNDhhLTAiLAogICAgInJlY2VpdmVkRGF0ZSI6IDE3OTI2NzY2ODUsCiAgICAidmFsdWUiOiAiMC4wMDAxMjI0OSIsCiAgICAiZmVlIjogIjAiLAogICAgInN0YXR1cyI6ICJTZXR0bGVkIiwKICAgICJkZXN0aW5hdGlvbiI6ICJiY3J0MXF0MDB1dGpzZnBlcWZhZjR6bnpwMzJjcWszZTkyZHJna2tybGxndiIKICB9LAogICJkZWxpdmVyeUlkIjogIlBqbW1mMmRESHhDdUN5WGFiWllkdzEiLAogICJ3ZWJob29rSWQiOiAiRG52ckc0ZDJjdUtqcUdRR1ZBNzhETSIsCiAgIm9yaWdpbmFsRGVsaXZlcnlJZCI6ICJQam1tZjJkREh4Q3VDeVhhYlpZZHcxIiwKICAiaXNSZWRlbGl2ZXJ5IjogZmFsc2UsCiAgInR5cGUiOiAiSW52b2ljZVBheW1lbnRTZXR0bGVkIiwKICAidGltZXN0YW1wIjogMTc5MjY3NzI4OSwKICAic3RvcmVJZCI6ICJIRks4VjJrWGVqTXJNSmRIWmJBMW9vVGtVamVpVXVrM1hkVDl5VUxHeWVISyIsCiAgImludm9pY2VJZCI6ICI5UUhTUlpFZmJwc0JXd1d3d2ZWWVJaIiwKICAibWV0YWRhdGEiOiB7CiAgICAicHVycG9zZSI6ICJuZXciLAogICAgInRlbmFudF9pZCI6ICJ0LWxhYiIsCiAgICAicGF5bWVudF9pZCI6ICIwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDEiCiAgfQp9",
+ "body": {
+  "afterExpiration": true,
+  "paymentMethodId": "BTC-CHAIN",
+  "payment": {
+   "id": "66597695bbb2380efeaae99dcdc54fb317ed0ed56e8509a01ea5a8fd7dae348a-0",
+   "receivedDate": 1792676685,
+   "value": "0.00012249",
+   "fee": "0",
+   "status": "Settled",
+   "destination": "bcrt1qt00utjsfpeqfaf4znzp32cqk3e92drgkkrllgv"
+  },
+  "deliveryId": "Pjmmf2dDHxCuCyXabZYdw1",
+  "webhookId": "DnvrG4d2cuKjqGQGVA78DM",
+  "originalDeliveryId": "Pjmmf2dDHxCuCyXabZYdw1",
+  "isRedelivery": false,
+  "type": "InvoicePaymentSettled",
+  "timestamp": 1792677289,
+  "storeId": "HFK8V2kXejMrMJdHZbA1ooTkUjeiUuk3XdT9yULGyeHK",
+  "invoiceId": "9QHSRZEfbpsBWwWwwfVYRZ",
+  "metadata": {
+   "purpose": "new",
+   "tenant_id": "t-lab",
+   "payment_id": "00000000-0000-0000-0000-000000000001"
+  }
+ }
+}

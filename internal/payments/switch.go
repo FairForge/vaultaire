@@ -101,18 +101,34 @@ func openPrepaidInvoice(ctx context.Context, tx *sql.Tx, tenantID, except string
 // step 1): the row becomes renewal 'prepaid' with pending_provider = to
 // (paid_through not touched) under the tenant's entitlement lock, and
 // AFTER that commit the provider that renewed the house is told to stop
-// (Stripe: cancel_at_period_end — the house runs to its paid date). `to`
-// must be a prepaid provider the tenant may use now (flag on, ready). A
-// house already prepaid only gets its pending provider (no provider call).
+// (Stripe, by the subscription's id — StopRenewalRef: cancel_at_period_end
+// on a paid period, the house runs to its paid date; cancelled now when the
+// period is in dunning — past_due / unpaid / incomplete, RP33-7 = RP31-4's
+// path). `to` must be a prepaid provider the tenant may use now (flag on,
+// ready). A house already prepaid only gets its pending provider (no
+// provider call).
 //
-// The provider call is outside the transaction (RP31-6): inside it, a
-// commit that failed after Stripe had stopped left a house that renews in
-// our record and runs out at Stripe. A stop that fails now puts the row
-// back (revertSwitch: a second short transaction under the lock, only if
-// the row is still what the switch wrote — a webhook that changed it
-// meanwhile stands) and the error is the caller's. Audited after the
-// stop: billing.provider_switch_requested (+ billing.renewal_stopped when
-// the renewal was stopped here).
+// The stop is DURABLE (RP33-3, RP33-8a): its intent is a pending
+// renewal_stop row written in the switch's own transaction, so a switch
+// that committed always carries the stop it owes. The provider call is
+// outside the transaction (RP31-6: a commit that failed after Stripe had
+// stopped left a house that renews in our record and runs out at Stripe)
+// and detached from the request (Detached: a client that leaves cannot
+// cancel it; 15 s). Its outcome:
+//   - stopped (or the reference gone) — the row is closed, audited
+//     billing.renewal_stopped;
+//   - a PERMANENT refusal (ErrProviderRefused: a Stripe 4xx) — the switch
+//     is put back (revertSwitch: a second short transaction under the
+//     lock, only if the row is still what the switch wrote — a webhook
+//     that changed it meanwhile stands — and the pending stop with it) and
+//     the error is the caller's;
+//   - anything else (a 5xx, no answer, the deadline, the process killed)
+//     — the switch stands and the row stays pending: the renewal_stops job
+//     (10 min) finishes the stop.
+//
+// A provider without RefRenewalStopper, or a house with no reference, has
+// no durable row: StopRenewal(tenant), and any failure reverts. Audited
+// after the stop: billing.provider_switch_requested.
 func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor string) (Entitlement, error) {
 	target, err := r.For(ctx, tenantID, to)
 	if err != nil {
@@ -126,6 +142,7 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 	}
 	var e Entitlement
 	var cur Provider
+	var byRef RefRenewalStopper
 	err = InTx(ctx, r.db, func(tx *sql.Tx) error {
 		if err := lockWithin(ctx, tx, tenantID); err != nil {
 			return err
@@ -143,6 +160,13 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 			if cur = r.Provider(e.Provider); cur == nil {
 				return fmt.Errorf("%w: %q renews the house", ErrUnknownProvider, e.Provider)
 			}
+			if rs, ok := cur.(RefRenewalStopper); ok && e.ProviderRef != "" {
+				byRef = rs
+				if err := RecordRenewalStop(ctx, tx, tenantID, e.Provider, e.ProviderRef, ReasonSwitch, RenewalStopPending,
+					map[string]any{"switch_to": to, "paid_through_before": e.PaidThrough.UTC().Format(time.RFC3339)}); err != nil {
+					return err
+				}
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE entitlements SET renewal = 'prepaid', pending_provider = $2, updated_at = NOW() WHERE tenant_id = $1`,
@@ -154,23 +178,55 @@ func SwitchToPrepaid(ctx context.Context, r *Registry, tenantID, to, actor strin
 	if err != nil {
 		return Entitlement{}, err
 	}
-	stopped := false
+	stop := "none"
 	if cur != nil {
-		if err := cur.StopRenewal(ctx, tenantID); err != nil {
-			if rerr := revertSwitch(ctx, r.db, tenantID, to, e); rerr != nil {
-				r.logger.Error("payments: a switch whose renewal stop failed could not be put back — the house shows prepaid while the provider still renews it; fix the row by hand",
+		sctx, cancel := Detached(ctx)
+		var serr error
+		if byRef != nil {
+			serr = byRef.StopRenewalRef(sctx, tenantID, e.ProviderRef)
+		} else {
+			serr = cur.StopRenewal(sctx, tenantID)
+		}
+		switch {
+		case serr == nil || byRef != nil && errors.Is(serr, ErrRefGone):
+			stop = RenewalStopStopped
+			if byRef != nil {
+				if errors.Is(serr, ErrRefGone) {
+					stop = RenewalStopGone
+				}
+				if err := MarkRenewalStop(sctx, r.db, e.Provider, e.ProviderRef, stop, ""); err != nil {
+					// The row stays pending: the job asks again, and a stopped
+					// reference answers at once.
+					r.logger.Warn("payments: renewal stopped but not recorded — the renewal_stops job closes it",
+						zap.String("tenant", tenantID), zap.String("ref", e.ProviderRef), zap.Error(err))
+				}
+			}
+		case byRef != nil && !errors.Is(serr, ErrProviderRefused):
+			stop = RenewalStopPending
+			if err := MarkRenewalStop(sctx, r.db, e.Provider, e.ProviderRef, RenewalStopPending, serr.Error()); err != nil {
+				r.logger.Warn("payments: renewal stop outcome not recorded", zap.String("ref", e.ProviderRef), zap.Error(err))
+			}
+			r.logger.Warn("payments: switch recorded, the provider's renewal is not stopped yet — the renewal_stops job finishes it",
+				zap.String("tenant", tenantID), zap.String("provider", e.Provider), zap.String("ref", e.ProviderRef), zap.Error(serr))
+		default:
+			if rerr := revertSwitch(sctx, r.db, tenantID, to, e, byRef != nil); rerr != nil {
+				r.logger.Error("payments: a switch whose renewal stop was refused could not be put back — the house shows prepaid while the provider still renews it; fix the row by hand",
 					zap.String("tenant", tenantID), zap.String("provider", e.Provider), zap.String("to", to), zap.Error(rerr))
 			}
-			return Entitlement{}, fmt.Errorf("stop the renewal with %s: %w", e.Provider, err)
+			cancel()
+			return Entitlement{}, fmt.Errorf("stop the renewal with %s: %w", e.Provider, serr)
 		}
-		stopped = true
+		cancel()
 	}
 	e.Renewal = RenewalPrepaid
-	audit.Record(ctx, r.db, audit.Entry{Actor: actor, TenantID: tenantID, EventType: "billing", Action: "billing.provider_switch_requested",
+	actx, cancel := Detached(ctx)
+	defer cancel()
+	audit.Record(actx, r.db, audit.Entry{Actor: actor, TenantID: tenantID, EventType: "billing", Action: "billing.provider_switch_requested",
 		Resource: "tenant:" + tenantID, Metadata: map[string]any{"tenant": tenantID, "actor": actor, "from": e.Provider, "to": to,
-			"paid_through": e.PaidThrough.UTC().Format(time.RFC3339), "renewal_stopped": stopped}})
-	if stopped {
-		AuditRenewal(ctx, r.db, tenantID, RenewalPrepaid, actor, e.Provider, e.ProviderRef)
+			"paid_through": e.PaidThrough.UTC().Format(time.RFC3339), "renewal_stopped": stop == RenewalStopStopped || stop == RenewalStopGone,
+			"renewal_stop": stop}})
+	if stop == RenewalStopStopped || stop == RenewalStopGone {
+		AuditRenewal(actx, r.db, tenantID, RenewalPrepaid, actor, e.Provider, e.ProviderRef)
 	}
 	return e, nil
 }
@@ -190,23 +246,28 @@ func lockWithin(ctx context.Context, tx *sql.Tx, tenantID string) error {
 	return nil
 }
 
-// revertSwitch puts back a switch whose provider stop failed: renewal
+// revertSwitch puts back a switch whose provider stop was refused: renewal
 // 'auto', no pending provider — only while the row is still what
 // SwitchToPrepaid wrote over `was` (same provider and reference, prepaid,
-// pending `to`).
-func revertSwitch(ctx context.Context, db *sql.DB, tenantID, to string, was Entitlement) error {
+// pending `to`) — and, with withStop, its pending renewal_stop row in the
+// same transaction (the job must not stop a house that renews again). A
+// row a webhook changed meanwhile keeps its stop.
+func revertSwitch(ctx context.Context, db *sql.DB, tenantID, to string, was Entitlement, withStop bool) error {
 	return InTx(ctx, db, func(tx *sql.Tx) error {
 		if err := lockWithin(ctx, tx, tenantID); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			UPDATE entitlements SET renewal = $5, pending_provider = NULL, updated_at = NOW()
 			 WHERE tenant_id = $1 AND renewal = 'prepaid' AND pending_provider = $2 AND provider = $3 AND COALESCE(provider_ref, '') = $4`,
 			tenantID, to, was.Provider, was.ProviderRef, string(was.Renewal))
 		if err != nil {
 			return fmt.Errorf("revert the switch of tenant %s: %w", tenantID, err)
 		}
-		return nil
+		if n, _ := res.RowsAffected(); n == 0 || !withStop {
+			return nil
+		}
+		return WithdrawRenewalStop(ctx, tx, tenantID, was.Provider, was.ProviderRef)
 	})
 }
 
