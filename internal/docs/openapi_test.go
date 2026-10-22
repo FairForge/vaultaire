@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/FairForge/vaultaire/internal/hosts"
+	"github.com/FairForge/vaultaire/internal/modes"
 )
 
 func TestOpenAPISpec_Generation(t *testing.T) {
@@ -352,4 +353,41 @@ func TestOpenAPI_ServersCanonicalThenAlias(t *testing.T) {
 	// A development host set lists only the local server.
 	dev := GenerateOpenAPISpec(hosts.Defaults(8000))
 	assert.Equal(t, []Server{{URL: "http://localhost:8000", Description: "Local development"}}, dev.Servers)
+}
+
+// K3 PR 3: the bucket mode enum and the encryption header text come from
+// modes.json; without a master key the spec never says "keys we hold".
+func TestOpenAPI_ModeTextFromModesJSON(t *testing.T) {
+	for _, loaded := range []bool{false, true} {
+		modes.SetMasterKeyLoaded(loaded)
+		spec := GenerateOpenAPISpec(hosts.Get())
+
+		mode := spec.Components.Schemas["ManagedBucket"].Properties["mode"]
+		require.NotNil(t, mode)
+		var enum []string
+		for _, v := range mode.Enum {
+			enum = append(enum, v.(string))
+		}
+		assert.Equal(t, []string{modes.Private, modes.Standard, modes.Public}, enum)
+		for _, m := range modes.All().Modes {
+			assert.Contains(t, mode.Description, m.Name)
+			assert.Contains(t, mode.Description, m.Customer.Render(loaded))
+		}
+		var sse string
+		for _, p := range spec.Paths["/{bucket}/{key}"].Put.Parameters {
+			if p.Name == "x-amz-server-side-encryption" {
+				sse = p.Description
+			}
+		}
+		require.NotEmpty(t, sse)
+		raw, err := json.Marshal(spec)
+		require.NoError(t, err)
+		if loaded {
+			assert.Contains(t, sse, "keys we hold")
+		} else {
+			assert.NotContains(t, strings.ToLower(string(raw)), "keys we hold", "no master key: the spec never claims it")
+			assert.Contains(t, sse, "refused (503)")
+		}
+	}
+	modes.SetMasterKeyLoaded(false)
 }

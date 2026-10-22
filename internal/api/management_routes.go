@@ -71,6 +71,10 @@ type mgmtBucket struct {
 	Name     string            `json:"name"`
 	Region   string            `json:"region,omitempty"`
 	Metadata map[string]string `json:"metadata"`
+	// Mode is the bucket's mode — private | standard | public (buckets.mode,
+	// migration 102; the names and sentences are modes.json's, K3). On every
+	// answer.
+	Mode string `json:"mode"`
 	// SSECRequired: every write into the bucket must carry a customer key
 	// (WP-SSEC-1 B.5, 096); present on get/patch.
 	SSECRequired *bool     `json:"ssec_required,omitempty"`
@@ -102,11 +106,11 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 	var dbErr error
 	if startingAfter != "" {
 		rows, dbErr = s.db.QueryContext(r.Context(),
-			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name > $2 ORDER BY name LIMIT $3`,
+			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name > $2 ORDER BY name LIMIT $3`,
 			tenantID, startingAfter, limit+1)
 	} else {
 		rows, dbErr = s.db.QueryContext(r.Context(),
-			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name LIMIT $2`,
+			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name LIMIT $2`,
 			tenantID, limit+1)
 	}
 	if dbErr != nil {
@@ -119,7 +123,7 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 	var buckets []mgmtBucket
 	for rows.Next() {
 		var b mgmtBucket
-		if err := rows.Scan(&b.Name, &b.CreatedAt); err != nil {
+		if err := rows.Scan(&b.Name, &b.CreatedAt, &b.Mode); err != nil {
 			s.logger.Error("scan bucket", zap.Error(err))
 			continue
 		}
@@ -217,6 +221,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		Object:    "bucket",
 		Name:      req.Name,
 		Region:    outcome.region,
+		Mode:      modes.Standard, // a bucket is born Standard (docs/reviews/K3-PROBE.md W1)
 		CreatedAt: time.Now().UTC(),
 		RequestID: getRequestID(w),
 	}
@@ -244,8 +249,8 @@ func (s *Server) handleMgmtGetBucket(w http.ResponseWriter, r *http.Request) {
 	var metaJSON []byte
 	var ssecRequired bool
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT name, COALESCE(metadata, '{}'), created_at, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, name).Scan(&b.Name, &metaJSON, &b.CreatedAt, &ssecRequired)
+		`SELECT name, COALESCE(metadata, '{}'), created_at, ssec_required, mode FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&b.Name, &metaJSON, &b.CreatedAt, &ssecRequired, &b.Mode)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found",
 			"bucket not found", "name")
@@ -294,11 +299,11 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 
 	var existing json.RawMessage
 	var createdAt time.Time
-	var visibility string
+	var visibility, mode string
 	var ssecRequired bool
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT COALESCE(metadata, '{}'), created_at, visibility, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, name).Scan(&existing, &createdAt, &visibility, &ssecRequired)
+		`SELECT COALESCE(metadata, '{}'), created_at, visibility, ssec_required, mode FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&existing, &createdAt, &visibility, &ssecRequired, &mode)
 	if err != nil {
 		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
 		return
@@ -334,9 +339,11 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() { _ = tx.Rollback() }()
 		if req.SSECRequired != nil {
-			if _, err := modes.SetBucket(r.Context(), tx, tenantID, name, modes.Change{SSECRequired: req.SSECRequired}); err != nil {
+			m, err := modes.SetBucket(r.Context(), tx, tenantID, name, modes.Change{SSECRequired: req.SSECRequired})
+			if err != nil {
 				return err
 			}
+			mode = m
 		}
 		if _, err := tx.ExecContext(r.Context(),
 			`UPDATE buckets SET metadata = $1, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
@@ -363,6 +370,7 @@ func (s *Server) handleMgmtPatchBucket(w http.ResponseWriter, r *http.Request) {
 		Object:       "bucket",
 		Name:         name,
 		Metadata:     make(map[string]string),
+		Mode:         mode,
 		SSECRequired: &ssecRequired,
 		CreatedAt:    createdAt,
 		RequestID:    getRequestID(w),

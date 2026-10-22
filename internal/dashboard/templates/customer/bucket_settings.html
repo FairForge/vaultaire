@@ -64,6 +64,31 @@
         </div>
     </div>
 
+    {{if .ModesCopy}}
+    <div class="card">
+        <div class="card-title">Mode</div>
+        <p style="margin-top: 0.5rem;"><span class="badge {{.Mode.Class}}">{{.Mode.Name}}</span> {{.Mode.Sentence}}</p>
+        <p class="text-muted" style="font-size: 0.85rem;">What we hold: {{.Mode.ServerHolds}}</p>
+        {{if .ArchiveRestricted}}
+        <div class="alert alert-error" style="margin-top: 0.5rem;">
+            {{.ArchiveReason}}
+        </div>
+        <input type="hidden" name="visibility" value="private">
+        {{else}}
+        <div class="toggle-group">
+            <label class="toggle-label">
+                <input type="radio" name="visibility" value="private" {{if eq .Visibility "private"}}checked{{end}}>
+                <span class="toggle-option{{if eq .Visibility "private"}} toggle-active{{end}}">{{.ModeStandard.Name}}</span>
+            </label>
+            <label class="toggle-label">
+                <input type="radio" name="visibility" value="public-read" {{if eq .Visibility "public-read"}}checked{{end}}>
+                <span class="toggle-option{{if eq .Visibility "public-read"}} toggle-active{{end}}">{{.ModePublic.Name}}</span>
+            </label>
+        </div>
+        <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">{{.ModePublic.Name}}: {{.ModePublic.Sentence}} {{.ModePrivate.Name}}: {{.ModePrivate.How}}</p>
+        {{end}}
+    </div>
+    {{else}}
     <div class="card">
         <div class="card-title">Visibility</div>
         {{if .ArchiveRestricted}}
@@ -93,6 +118,8 @@
         </p>
         {{end}}
     </div>
+
+    {{end}}
 
     <div class="card">
         <div class="card-title">Customer key</div>

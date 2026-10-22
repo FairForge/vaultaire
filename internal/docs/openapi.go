@@ -563,10 +563,10 @@ func generateS3Paths() map[string]*PathItem {
 				Description: "Uploads an object to a bucket",
 				OperationID: "PutObject",
 				Security:    sigv4(),
-				Parameters: []Parameter{
+				Parameters: append([]Parameter{
 					pathParam("bucket", "Bucket name"),
 					pathParam("key", "Object key"),
-				},
+				}, encryptionHeaderParams()...),
 				RequestBody: &RequestBody{
 					Description: "Object data",
 					Required:    true,
@@ -2002,6 +2002,7 @@ func generateJSONSchemas() map[string]Schema {
 			"name":          str(""),
 			"region":        str("Region the bucket is homed in; present on create"),
 			"metadata":      nullable(&Schema{Type: "object", Description: "User metadata map; present on get/patch (null in list items)", AdditionalProperties: &Schema{Type: "string"}}),
+			"mode":          strEnum(modeEnumDescription(), modeIDs()...),
 			"ssec_required": boolean("Every write must carry a customer-provided key (SSE-C); present on get/patch"),
 			"created_at":    dateTime(""),
 			"request_id":    str("Present on single-object responses"),

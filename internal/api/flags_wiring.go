@@ -9,6 +9,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/payments"
 )
 
@@ -125,6 +126,10 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")
 	fl.Register(flagPayBTCPay, false)
+	// K3 PR 3: the mode copy from modes.json — the dashboard's bucket
+	// labels per tenant, the privacy page's per-mode table globally (the
+	// owner flips it after reading: a legal page). Default OFF.
+	fl.Register(modes.FlagModesCopy, false)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

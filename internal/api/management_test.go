@@ -106,11 +106,11 @@ func TestManagementListBuckets(t *testing.T) {
 	defer cleanup()
 
 	now := time.Now()
-	mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+	mock.ExpectQuery(`SELECT name, created_at, mode FROM buckets WHERE tenant_id`).
 		WithArgs("test-tenant", 21).
-		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}).
-			AddRow("alpha", now).
-			AddRow("bravo", now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at", "mode"}).
+			AddRow("alpha", now, "standard").
+			AddRow("bravo", now, "standard"))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
@@ -240,8 +240,8 @@ func TestManagementGetBucket(t *testing.T) {
 	now := time.Now()
 	mock.ExpectQuery(`SELECT name, COALESCE`).
 		WithArgs("test-tenant", "my-bucket").
-		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required"}).
-			AddRow("my-bucket", []byte(`{}`), now, false))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "metadata", "created_at", "ssec_required", "mode"}).
+			AddRow("my-bucket", []byte(`{}`), now, false, "standard"))
 
 	req := httptest.NewRequest("GET", "/api/v1/manage/buckets/my-bucket", nil)
 	w := httptest.NewRecorder()
@@ -319,12 +319,12 @@ func TestManagementPagination(t *testing.T) {
 	now := time.Now()
 
 	// First page: limit=2, so query LIMIT 3 (n+1 for has_more detection)
-	mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+	mock.ExpectQuery(`SELECT name, created_at, mode FROM buckets WHERE tenant_id`).
 		WithArgs("test-tenant", 3).
-		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}).
-			AddRow("alpha", now).
-			AddRow("bravo", now).
-			AddRow("charlie", now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at", "mode"}).
+			AddRow("alpha", now, "standard").
+			AddRow("bravo", now, "standard").
+			AddRow("charlie", now, "standard"))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
@@ -344,12 +344,12 @@ func TestManagementPagination(t *testing.T) {
 	assert.Len(t, data, 2)
 
 	// Second page: starting_after=bravo
-	mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+	mock.ExpectQuery(`SELECT name, created_at, mode FROM buckets WHERE tenant_id`).
 		WithArgs("test-tenant", "bravo", 3).
-		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}).
-			AddRow("charlie", now).
-			AddRow("delta", now).
-			AddRow("echo", now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at", "mode"}).
+			AddRow("charlie", now, "standard").
+			AddRow("delta", now, "standard").
+			AddRow("echo", now, "standard"))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
@@ -368,10 +368,10 @@ func TestManagementPagination(t *testing.T) {
 	assert.Len(t, data2, 2)
 
 	// Third page: only 1 left
-	mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+	mock.ExpectQuery(`SELECT name, created_at, mode FROM buckets WHERE tenant_id`).
 		WithArgs("test-tenant", "delta", 3).
-		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}).
-			AddRow("echo", now))
+		WillReturnRows(sqlmock.NewRows([]string{"name", "created_at", "mode"}).
+			AddRow("echo", now, "standard"))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
@@ -393,9 +393,9 @@ func TestManagementRateLimit(t *testing.T) {
 	defer cleanup()
 
 	for i := 0; i < 15; i++ {
-		mock.ExpectQuery(`SELECT name, created_at FROM buckets WHERE tenant_id`).
+		mock.ExpectQuery(`SELECT name, created_at, mode FROM buckets WHERE tenant_id`).
 			WithArgs("test-tenant", 21).
-			WillReturnRows(sqlmock.NewRows([]string{"name", "created_at"}))
+			WillReturnRows(sqlmock.NewRows([]string{"name", "created_at", "mode"}))
 		mock.ExpectQuery(`SELECT COUNT`).
 			WithArgs("test-tenant").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
