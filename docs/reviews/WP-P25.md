@@ -87,3 +87,18 @@ Ops: the review installed `vaultaire-payments.yml` `40fe3ce0…` (#867) and `vau
 - **F-22…F-30** await decisions.
 - **BTCPay click-list items 2–4** only now that Part 0 is deployed — and **ONE webhook on the store, ever** (delete the old URL before adding a new one; a second webhook has its own queue and delivery ids).
 - A Stripe test-mode key for RP31-1.
+
+## Post-merge review
+
+*The meta-review of Prompt 25 (2026-10-22 ~03:00 UTC, run beside the worker) — its findings, as routed to Stage 1a Prompt 26. Ops done by the review: `vaultaire-payments.yml` 40fe3ce0 + `vaultaire-jobs.yml` dd5c6965 installed (99 rules), #866 queued. Prompt 26 Step 0 installed #869's versions (3ab8e79b / 9147a86a, 101 rules). Outcomes in `docs/reviews/WP-P26.md`.*
+
+| # | Sev | Finding | Outcome |
+|---|---|---|---|
+| RP31-1 | P2 proven | `InvalidateOpenInvoices` marks a paid (Processing) invoice Invalid; the Invalid branch grants and credits nothing | Fixed #873: fetched, provably unpaid only; Invalid credits `paidAmount` |
+| RP31-2 | P3 proven | the detector flags resize top-ups and the <48 h switch-to-card overlap; the mail instructs a wrong refund | Fixed #873: resize excluded, the forfeit audited `billing.prepaid_forfeited` |
+| RP31-3 | P3 | `switchedAway` reads renewal_stop outside the lock (RP30-1's class) | Fixed #873: read in the grant transaction after `payments.Lock` |
+| RP31-4 | P3 | implicit switch from past_due keeps Stripe dunning → a later double charge | Fixed #873: cancel now (no proration, no invoice), row gone |
+| RP31-5 | P3 | `crypto_invoice_open` 409 for 24 h after an abandoned unpaid invoice, no way out | Fixed #873: "Cancel the bitcoin invoice and continue" |
+| RP31-6 | P4 | `SwitchToPrepaid`'s Stripe call inside the transaction | Fixed #873: after the commit, revert on refusal |
+| RP31-7 | note | flag-OFF unpaid switch cleared at Stripe deletion; the test set the flag ON | Pinned by a flag-OFF test; page + reminders say "ends on <date>" |
+| RP31-8 | carried | RP22-6 downsize while the provider is off | Not built (> ~40 lines); owner decision line in PAYMENTS.md § 2.3 |
