@@ -17,7 +17,7 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 | Kind | Fields | Written by |
 |---|---|---|
 | `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing |
-| `key_ceremony` | `ceremony` (`master_key_install`, `master_key_rewrap`, `escrow_share_rotation`, `recovery_realm`, `translog_key_install`), `key_fingerprint` (`sha256:<hex>` — never the key), `participants`, `statement` (≤ 2000 bytes; no e-mail, IP, UUID, tenant id or object path) | `cmd/tools/translog-append` / the admin route |
+| `key_ceremony` | `ceremony` (`master_key_install`, `master_key_rewrap`, `escrow_share_rotation`, `recovery_realm`, `translog_key_install`), `key_fingerprint` (`sha256:<hex>` — never the key), `participants`, `statement` (≤ 2000 bytes; no e-mail, IP, UUID, tenant id or object path) | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, audited `admin.translog_ceremony`) |
 
 Not yet (K4b): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build.
 
@@ -46,7 +46,16 @@ cat /root/translog.vkey                     # the VERIFIER key: public
 1. **Publish the verifier key outside our infrastructure before the first signed checkpoint** — a signed git tag or a gist under the owner's account, a post, a printed copy — so a reader can pin it independently of anything we serve. Then add it to `docs/TRANSPARENCY.md` § Verifier key.
 2. Add `LoadCredentialEncrypted=translog_signing_key:/etc/vaultaire/credentials/translog_signing_key.cred` to `/etc/systemd/system/vaultaire@.service`, `systemctl daemon-reload`, `sudo vaultaire-switch restart`.
 3. Check the new slot's log: `translog signing key: credential` with the key ID; `vaultaire_translog_signing_key_loaded 1`; within ~12 min `translog checkpoint signed`.
-4. Append the ceremony itself: `translog-append -ceremony translog_key_install -fingerprint sha256:<sha256 of the verifier key line> -participants 1 -statement "…"`.
+4. Append the ceremony itself (the admin account must have MFA enrolled; the code is consumed once):
+
+   ```sh
+   FP=$(tr -d '\n' < /root/translog.vkey | sha256sum | cut -c1-64)
+   curl -s -X POST https://stored.ge/api/v1/admin/translog/ceremony -H "Authorization: Bearer $ADMIN_JWT" \
+     -d '{"ceremony":"translog_key_install","key_fingerprint":"sha256:'"$FP"'","participants":1,
+          "statement":"Checkpoint signing key generated on the box and sealed with systemd-creds (TPM).","mfa_code":"<6 digits>"}'
+   ```
+
+   The F-14 master-key install is the same call with `"ceremony":"master_key_install"` and the fingerprint of the master key (`sha256` of its 32 bytes, computed on the box — never the key). 201 `{"index": n}`.
 
 Losing the key loses nothing already signed: a new key is a new ceremony entry signed by the new key, and readers pin both. A leaked key is the same, plus a statement.
 

@@ -130,6 +130,9 @@ func registerFlags(fl *flags.Service) {
 	// labels per tenant, the privacy page's per-mode table globally (the
 	// owner flips it after reading: a legal page). Default OFF.
 	fl.Register(modes.FlagModesCopy, false)
+	// K4: the transparency log's public read side (GET /translog/…).
+	// Default OFF, global: flipped when trust.stored.cloud is decided.
+	fl.Register(flagTranslogPublic, false)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

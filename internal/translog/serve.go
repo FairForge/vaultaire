@@ -1,0 +1,152 @@
+package translog
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"golang.org/x/mod/sumdb/note"
+)
+
+// Source is what the read side serves: the newest signed checkpoint, the
+// stored hashes, the entry bodies. internal/translog/logstore.Store is the
+// database one; MemorySource the in-process one.
+type Source interface {
+	// CheckpointNote is the newest signed checkpoint (a signed note) and
+	// its tree size; ok = false when none was ever signed.
+	CheckpointNote(ctx context.Context) (note []byte, size int64, ok bool, err error)
+	HashReader(ctx context.Context) HashReader
+	Entries(ctx context.Context, from, n int64) ([][]byte, error)
+}
+
+// The cache rule (c2sp.org/tlog-tiles): a full tile never changes; a
+// partial tile and the checkpoint do.
+const (
+	cacheImmutable = "public, max-age=31536000, immutable"
+	cacheNone      = "no-store"
+)
+
+// NewHandler serves the layout of tiles.go — "checkpoint", "tile/<L>/<N>[.p/<W>]",
+// "tile/entries/<N>[.p/<W>]" — relative to where it is mounted (strip the
+// prefix first). Only what the newest checkpoint commits to is served: a
+// tile wider than its width at the checkpoint's size is 404 (a narrower
+// partial tile — an older checkpoint's — is served). No checkpoint = 404
+// everywhere: without a signature there is nothing a reader could check.
+func NewHandler(src Source) http.Handler {
+	return &handler{src: src}
+}
+
+type handler struct{ src Source }
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := r.Context()
+	p := strings.TrimPrefix(r.URL.Path, "/")
+	var (
+		level, width int
+		n            int64
+	)
+	if p != "checkpoint" {
+		var err error
+		if level, n, width, err = ParseTilePath(p); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	msg, size, ok, err := h.src.CheckpointNote(ctx)
+	if err != nil {
+		w.Header().Set("Cache-Control", cacheNone)
+		http.Error(w, "the log cannot be read right now", http.StatusServiceUnavailable)
+		return
+	}
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if p == "checkpoint" {
+		write(w, "text/plain; charset=utf-8", cacheNone, msg)
+		return
+	}
+	if width > TileWidthAt(level, n, size) {
+		http.NotFound(w, r)
+		return
+	}
+	var data []byte
+	if level == EntriesLevel {
+		bodies, err := h.src.Entries(ctx, n*TileWidth, int64(width))
+		if err == nil && len(bodies) != width {
+			err = errShortRead
+		}
+		if err == nil {
+			data, err = EntryBundle(bodies)
+		}
+		if err != nil {
+			w.Header().Set("Cache-Control", cacheNone)
+			http.Error(w, "the log cannot be read right now", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		data, err = TileData(level, n, width, h.src.HashReader(ctx))
+		if err != nil {
+			w.Header().Set("Cache-Control", cacheNone)
+			http.Error(w, "the log cannot be read right now", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	cache := cacheNone
+	if width == TileWidth {
+		cache = cacheImmutable
+	}
+	write(w, "application/octet-stream", cache, data)
+}
+
+type readErr string
+
+func (e readErr) Error() string { return string(e) }
+
+const errShortRead = readErr("translog: fewer entries than the tile width")
+
+func write(w http.ResponseWriter, contentType, cache string, b []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", cache)
+	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(b)
+}
+
+// MemorySource serves a Memory log, signing a checkpoint of its current
+// size on every read (tests and tools; nil Signer = never signed).
+type MemorySource struct {
+	Log    *Memory
+	Signer note.Signer
+}
+
+// CheckpointNote implements Source.
+func (s *MemorySource) CheckpointNote(context.Context) ([]byte, int64, bool, error) {
+	if s.Signer == nil || s.Log.Size() == 0 {
+		return nil, 0, false, nil
+	}
+	root, err := Root(s.Log.Size(), s.Log)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	msg, err := SignCheckpoint(s.Signer, s.Log.Size(), root)
+	return msg, s.Log.Size(), err == nil, err
+}
+
+// HashReader implements Source.
+func (s *MemorySource) HashReader(context.Context) HashReader { return s.Log }
+
+// Entries implements Source.
+func (s *MemorySource) Entries(_ context.Context, from, n int64) ([][]byte, error) {
+	var out [][]byte
+	for i := from; i < from+n && i < s.Log.Size(); i++ {
+		out = append(out, s.Log.Entry(i))
+	}
+	return out, nil
+}
