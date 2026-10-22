@@ -65,6 +65,11 @@ type DueReminder struct {
 	// PendingProvider: the provider the customer asked to switch to
 	// (WP-PAY-5) — the mail offers paying the next period that way.
 	PendingProvider string
+	// NoGrace: the house ends on paid_through itself — set by the job for
+	// a Stripe house while entitlement_lapse is off for the tenant (Stripe
+	// deletes the subscription at the date and the webhook clears the house;
+	// RP31-7).
+	NoGrace bool
 	// DaysLeft: until paid_through for the before-steps, until the end of
 	// grace for the grace steps (rounded up).
 	DaysLeft int

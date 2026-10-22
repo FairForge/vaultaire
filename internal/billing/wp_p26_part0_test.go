@@ -276,3 +276,40 @@ func TestImplicitSwitch_FromActive_StopsAtPeriodEnd(t *testing.T) {
 	require.Len(t, api.updates, 1)
 	assert.Equal(t, "true", api.updates[0].Get("cancel_at_period_end"))
 }
+
+// RP31-7 (note): with entitlement_lapse OFF, an unpaid switch to bitcoin is
+// cleared when Stripe deletes the subscription at the paid date — no grace
+// (WP-PAY-5's own test set the flag ON). The page and the T−3 reminder say
+// it for such a tenant.
+func TestSwitchToBitcoin_FlagOff_UnpaidSwitchClearedAtStripeDeletion(t *testing.T) {
+	// Arrange: the card renewal was stopped for a switch to bitcoin; the
+	// period ended an hour ago and no bitcoin payment arrived.
+	f := setupHouseFixture(t)
+	f.handler.SetFlags(lapseFlag{}) // OFF for the tenant
+	start, end := f.pastHouse(t)
+	_, err := f.db.Exec(`UPDATE entitlements SET renewal = 'prepaid', pending_provider = 'btcpay' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+
+	// Act: Stripe deletes the subscription at its period end.
+	deleted := f.houseSub("canceled", start, end)
+	f.post(t, "deleted", "customer.subscription.deleted", f.stripeHas(deleted))
+
+	// Assert: the house is cleared at once (data untouched) — what the
+	// page and the reminder warn about.
+	assert.False(t, f.hasHouse(t))
+	e := f.entitlement(t)
+	assert.NotNil(t, e.LapsedAt)
+}
+
+func TestSwitchToBitcoin_FlagOn_UnpaidSwitchKeptForGrace(t *testing.T) {
+	f := setupHouseFixture(t)
+	f.handler.SetFlags(lapseFlag{f.tenantID: true})
+	start, end := f.pastHouse(t)
+	_, err := f.db.Exec(`UPDATE entitlements SET renewal = 'prepaid', pending_provider = 'btcpay' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+
+	f.post(t, "deleted", "customer.subscription.deleted", f.stripeHas(f.houseSub("canceled", start, end)))
+
+	assert.True(t, f.hasHouse(t), "the lapse job decides after the grace")
+	assert.Nil(t, f.entitlement(t).LapsedAt)
+}

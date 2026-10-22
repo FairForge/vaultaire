@@ -97,6 +97,10 @@ type ReminderMail struct {
 	// SwitchTo names the way the customer chose to pay the next period
 	// ("bitcoin" — WP-PAY-5): the copy and the button offer it.
 	SwitchTo string
+	// NoGrace: the house ends ON the paid date — a card house whose Stripe
+	// subscription is deleted then, while entitlement_lapse is off for the
+	// tenant (RP31-7): the copy says so instead of promising a grace period.
+	NoGrace bool
 }
 
 // RenderRenewalReminder renders one reminder step.

@@ -155,3 +155,19 @@ func TestCancelCryptoInvoice_UnknownContinuation_NothingCancelled(t *testing.T) 
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Empty(t, btc.cancels)
 }
+
+// RP31-7: the page says a card house switching to bitcoin ends on its date
+// when entitlement_lapse is off for the tenant (Stripe's deletion clears
+// it — no grace).
+func TestHouseSentence_PendingBitcoin_NoGrace_SaysEndsUnlessPaid(t *testing.T) {
+	pt := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	st := payments.Status{Found: true, Granted: true, Entitlement: payments.Entitlement{Provider: payments.ProviderStripe,
+		Renewal: payments.RenewalPrepaid, PendingProvider: payments.ProviderBTCPay, PaidThrough: pt,
+		Order: payments.Order{Std: 1, Period: payments.PeriodMonthly}}}
+
+	off := houseSentence(st, endsAtDate(st, false))
+	on := houseSentence(st, endsAtDate(st, true))
+
+	assert.Contains(t, off, "Your house ends on 20 Nov 2026 unless the bitcoin payment arrives")
+	assert.NotContains(t, on, "unless the bitcoin payment arrives")
+}

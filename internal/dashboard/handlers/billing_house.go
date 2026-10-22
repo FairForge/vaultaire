@@ -107,7 +107,8 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 	if svc != nil && db != nil {
 		var err error
 		if st, err = svc.Status(ctx, tenantID); err == nil {
-			data["HouseSentence"] = houseSentence(st)
+			lapseOn := fl != nil && fl.Enabled(payments.FlagEntitlementLapse, tenantID)
+			data["HouseSentence"] = houseSentence(st, endsAtDate(st, lapseOn))
 			if p, label := renewOffer(ctx, svc, tenantID, st); p != "" {
 				v.CanRenew, v.RenewProvider, v.RenewLabel = true, p, label
 			}
@@ -213,7 +214,16 @@ func renewOffer(ctx context.Context, svc HouseBilling, tenantID string, st payme
 // houseSentence says the entitlement the way the page does: "Paid through
 // 1 Mar 2027 via card (Stripe), renews automatically." — "" for a tenant
 // that never bought.
-func houseSentence(st payments.Status) string {
+// endsAtDate: the house ends ON its paid date — a card house whose renewal
+// is off while entitlement_lapse is off for the tenant: Stripe deletes the
+// subscription at the date and the webhook clears the house, with no grace
+// (RP31-7). lapseOn is the flag for the tenant.
+func endsAtDate(st payments.Status, lapseOn bool) bool {
+	e := st.Entitlement
+	return !lapseOn && st.Found && st.Granted && e.Provider == payments.ProviderStripe && e.Renewal == payments.RenewalPrepaid
+}
+
+func houseSentence(st payments.Status, endsAtDate bool) string {
 	if !st.Found {
 		return ""
 	}
@@ -238,6 +248,11 @@ func houseSentence(st payments.Status) string {
 		s = fmt.Sprintf("Paid through %s via %s; its renewal is off — you chose to pay in %s from then on. The %s invoice opens here on %s and its period starts on the paid date.",
 			e.PaidThrough.UTC().Format("2 Jan 2006"), via, payWord(e.PendingProvider), payWord(e.PendingProvider),
 			e.PaidThrough.Add(-payments.ReminderLead).UTC().Format("2 Jan 2006"))
+		if endsAtDate {
+			s += fmt.Sprintf(" Your house ends on %s unless the %s payment arrives.", e.PaidThrough.UTC().Format("2 Jan 2006"), payWord(e.PendingProvider))
+		}
+	} else if endsAtDate {
+		s += fmt.Sprintf(" Your house ends on %s unless you renew.", e.PaidThrough.UTC().Format("2 Jan 2006"))
 	}
 	if st.InGrace {
 		s += fmt.Sprintf(" The date has passed: the house is kept until %s while payment catches up.", st.GraceEnds.UTC().Format("2 Jan 2006"))
