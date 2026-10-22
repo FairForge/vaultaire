@@ -142,11 +142,22 @@ Prerequisites (once): the build of WP-R8-5 Part A (streaming SSE: no size
 refused for encryption, sealed copies, sealed parity) deployed (`/version`)
 — it includes Stage 1a Prompt 2A;
 `deploy/systemd/vaultaire@.service` of the same commit installed;
-`apt install libtss2-rc0 ssss age` (systemd-creds needs the TPM library —
-`systemd-creds has-tpm2` must say `yes`, not `partial`); three age recipients
-whose identities are offline (a hardware token via `age-plugin-yubikey`, a
-paper identity in a safe, a third holder), their public `age1…` strings at
-hand. Decide whether the slots move off `user1` to a dedicated service user
+`apt install libtss2-rc0 ssss` (systemd-creds needs the TPM library —
+`systemd-creds has-tpm2` must say `yes`, not `partial`) and **age ≥ 1.3.0**
+from upstream (the release binary checked against its published checksum, or
+`GOOS=linux GOARCH=amd64 go install filippo.io/age/cmd/...@v1.3.2` on a laptop and copied): Ubuntu
+26.04's `age` package is 1.2.1, which has no post-quantum keys; three age
+recipients whose identities are offline (a hardware token via
+`age-plugin-yubikey`, a paper identity in a safe, a third holder), their
+public strings at hand. **Post-quantum escrow (2026-10-22):** the shares
+leave the box and are kept for years, so they are the one place a
+"harvest now, decrypt later" attacker could store what we encrypt today. At
+least TWO of the three recipients are hybrid post-quantum `age1pq1…` keys
+(`age-keygen -pq`: ML-KEM-768 + X25519 through HPKE, the same suite as the
+Private key core). A hardware token stays classical (`age-plugin-yubikey` is
+P-256, and age refuses to mix a PQ and a classical recipient in one file) —
+which is safe in a 2-of-3 split: one share alone reveals nothing, so a
+quantum attacker holding only the classical share learns nothing. Decide whether the slots move off `user1` to a dedicated service user
 first (the credential directory is readable by the unit's user only; `user1`
 is also the deploy SSH identity) — the ceremony works either way.
 
@@ -169,7 +180,7 @@ systemd-creds decrypt --name=encryption_master_key \
 # 2. Escrow: 2-of-3 Shamir shares, each encrypted to a different offline
 #    recipient. Only the encrypted shares leave the box.
 printf %s "$K" | ssss-split -t 2 -n 3 -x -q > /root/shares.txt
-i=0; for r in age1RECIPIENT_ONE age1RECIPIENT_TWO age1RECIPIENT_THREE; do
+i=0; for r in age1pq1RECIPIENT_ONE age1pq1RECIPIENT_TWO age1yubikey1RECIPIENT_THREE; do
   i=$((i+1)); sed -n "${i}p" /root/shares.txt | age -r "$r" -a > /root/master-key-share-$i.age
 done
 shred -u /root/shares.txt

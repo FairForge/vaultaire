@@ -157,3 +157,6 @@ pipeline-bench
 
 # python bytecode from the landing page generator
 __pycache__/
+
+# The key core compiled to WebAssembly (make sdk-wasm)
+sdk/wasm/dist/
