@@ -19,6 +19,8 @@
 #   vaultaire_entitlements_expiring{window}               7d / 30d / in_grace (the code's windows; the design wrote 14d/3d/grace)
 #   vaultaire_payments_double_period_total{provider}      WP-PAY-5: a settled charge whose period overlaps another provider's
 #                                                          settled charge of the tenant (paid twice; every provider at 0 from boot)
+#   vaultaire_btcpay_unconfirmable_total                  RP37-6: BTCPay fetches with paidAmount > 0 and no payments[] (unlabelled,
+#                                                          0 from boot) — nothing credited, a person must look
 #   vaultaire_payment_renewal_stops_pending               WP-PAY-5: subscriptions a provider switch took the house from whose
 #                                                          stop the provider has not confirmed (READ FROM payment_events on scrape)
 #
@@ -113,6 +115,19 @@ groups:
         annotations:
           summary: "A BTCPay delivery was acknowledged without being applied ({{ $labels.outcome }})"
           description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' names the invoice and the tenant. settled_unpaid: BTCPay says Settled but paidAmount < amount — check the store's payment tolerance (must be 0 %) and whether an operator marked it; record a manual payment if the money is real. mark_refused: mark the late-paid invoice Settled by hand in BTCPay (the InvoiceSettled that follows grants it). fetch_refused: the store key is wrong or lost a permission (cancreateinvoice, canviewinvoices, canmodifyinvoices) — fix it, then redeliver the delivery from the BTCPay UI (it is handled fresh)."
+
+      # RP37-6 (Stage 1a Prompt 30): a BTCPay invoice says money arrived
+      # (paidAmount > 0) but lists no payments — a 1.x-shaped answer — so
+      # no part of it can be shown confirmed and none is credited or
+      # granted. The money is stuck until a person looks.
+      - alert: BTCPayPaymentUnconfirmable
+        expr: sum(increase(vaultaire_btcpay_unconfirmable_total[1h])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A BTCPay invoice holds money that cannot be shown confirmed (no payments listed)"
+          description: "journalctl -u 'vaultaire@*' -o cat | grep 'lists no payments' names the invoice and the tenant. Nothing was credited or granted. Open the invoice in BTCPay: if its payments are confirmed, record a manual payment or credit; check that the server runs BTCPay 2.x (the Greenfield payment-methods answer must list payments[])."
 
       # A verified BTCPay delivery for an invoice our ledger does not know,
       # or whose metadata/amount disagrees with our row. One is a stray

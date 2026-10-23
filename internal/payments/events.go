@@ -263,7 +263,9 @@ func RenewalStopOf(ctx context.Context, q interface {
 
 // MarkRenewalStop records a provider call's outcome on a row: status
 // stopped / gone, or pending with the call's error (attempts counted).
-func MarkRenewalStop(ctx context.Context, db *sql.DB, provider, ref, status, lastError string) error {
+func MarkRenewalStop(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, provider, ref, status, lastError string) error {
 	if _, err := db.ExecContext(ctx, `
 		UPDATE payment_events
 		   SET data = data || jsonb_build_object('status', $3::text, 'last_error', $4::text,

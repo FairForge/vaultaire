@@ -280,6 +280,10 @@ func (r *Registry) SwitchToPrepaid(ctx context.Context, tenantID, to, actor stri
 // renewalStopBatch bounds one pass of StopPendingRenewals.
 const renewalStopBatch = 100
 
+// stopCallTimeout bounds one provider call of StopPendingRenewals — and so
+// how long it holds the tenant's entitlement lock (Detached's bound).
+const stopCallTimeout = 15 * time.Second
+
 // StopPendingRenewals asks each provider to stop the renewal of every
 // pending renewal_stop row (the tenant's, or every tenant's with "") —
 // after the commit of the BTCPay delivery that wrote one, and every 10
@@ -287,6 +291,19 @@ const renewalStopBatch = 100
 // longer has the reference) closes the row (stopped / gone, audited
 // billing.renewal_stopped); one that fails or is not configured leaves it
 // pending with the error for the next pass. Never cancels a period.
+//
+// Each row acts on fresh truth (RP37-5): under the tenant's entitlement
+// lock, held across the provider call (bounded by stopCallTimeout, 15 s), the row
+// and the entitlement are read again — a row withdrawn or closed since the
+// batch was listed (a portal un-cancel, a refused-stop revert, another
+// pass), or one whose subscription the house renews by again, is skipped
+// with no provider call (SkippedWithdrawn); every writer that withdraws a
+// stop takes the same lock, so none can slip between the read and the
+// call. A PERMANENT refusal (ErrProviderRefused: a 401 after a key change)
+// of a customer's switch reverts it exactly as the request path does
+// (revertSwitch: only while the row is still what the switch wrote — it
+// withdraws the stop with it), with an Error line; any other row stays
+// pending with the error.
 func (r *Registry) StopPendingRenewals(ctx context.Context, tenantID string) (StopRun, error) {
 	var run StopRun
 	if r == nil || r.db == nil {
@@ -297,39 +314,96 @@ func (r *Registry) StopPendingRenewals(ctx context.Context, tenantID string) (St
 		return run, err
 	}
 	for _, s := range rows {
-		var cerr error
-		p := r.Provider(s.Provider)
-		rs, ok := p.(RefRenewalStopper)
-		switch {
-		case p == nil || !ok:
-			cerr = ErrProviderUnconfigured
-		default:
-			cerr = rs.StopRenewalRef(ctx, s.TenantID, s.Ref)
-		}
-		status, last := RenewalStopStopped, ""
-		switch {
-		case cerr == nil:
-			run.Stopped++
-		case errors.Is(cerr, ErrRefGone):
-			status = RenewalStopGone
-			run.Stopped++
-		case errors.Is(cerr, ErrProviderUnconfigured):
-			status, last = RenewalStopPending, cerr.Error()
-			run.Unconfigured++
-			run.Errors = append(run.Errors, s.Provider+":"+s.Ref+": not configured")
-		default:
-			status, last = RenewalStopPending, cerr.Error()
-			run.Failed++
-			run.Errors = append(run.Errors, s.Provider+":"+s.Ref+": "+cerr.Error())
-		}
-		if err := MarkRenewalStop(ctx, r.db, s.Provider, s.Ref, status, last); err != nil {
+		if err := r.stopOne(ctx, s, &run); err != nil {
 			return run, err
-		}
-		if status != RenewalStopPending {
-			AuditRenewal(ctx, r.db, s.TenantID, RenewalPrepaid, "renewal-stops", s.Provider, s.Ref)
-			r.logger.Info("payments: renewal stopped for a subscription the house no longer names",
-				zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref), zap.String("status", status))
 		}
 	}
 	return run, nil
+}
+
+// stopOne is one row of StopPendingRenewals.
+func (r *Registry) stopOne(ctx context.Context, s RenewalStop, run *StopRun) error {
+	var (
+		cerr    error
+		skipped bool
+		revert  string // the pending provider of a refused switch, "" none
+	)
+	status, last := RenewalStopStopped, ""
+	err := InTx(ctx, r.db, func(tx *sql.Tx) error {
+		if err := Lock(ctx, tx, s.TenantID); err != nil {
+			return err
+		}
+		cur, found, err := RenewalStopOf(ctx, tx, s.TenantID, s.Provider, s.Ref)
+		if err != nil {
+			return err
+		}
+		e, err := Get(ctx, tx, s.TenantID)
+		if err != nil && !errors.Is(err, ErrNoEntitlement) {
+			return err
+		}
+		renewsAgain := err == nil && e.LapsedAt == nil && e.Provider == s.Provider && e.ProviderRef == s.Ref && e.Renewal == RenewalAuto
+		if !found || cur.Status != RenewalStopPending || renewsAgain {
+			skipped = true
+			return nil
+		}
+		p := r.Provider(s.Provider)
+		if rs, ok := p.(RefRenewalStopper); p != nil && ok {
+			cctx, cancel := context.WithTimeout(ctx, stopCallTimeout)
+			cerr = rs.StopRenewalRef(cctx, s.TenantID, s.Ref)
+			cancel()
+		} else {
+			cerr = ErrProviderUnconfigured
+		}
+		switch {
+		case cerr == nil:
+		case errors.Is(cerr, ErrRefGone):
+			status = RenewalStopGone
+		default:
+			status, last = RenewalStopPending, cerr.Error()
+			if errors.Is(cerr, ErrProviderRefused) && cur.Reason == ReasonSwitch && err == nil &&
+				e.Provider == s.Provider && e.ProviderRef == s.Ref && e.Renewal == RenewalPrepaid && e.PendingProvider != "" {
+				revert = e.PendingProvider
+			}
+		}
+		return MarkRenewalStop(ctx, tx, s.Provider, s.Ref, status, last)
+	})
+	if err != nil {
+		return err
+	}
+	switch {
+	case skipped:
+		run.SkippedWithdrawn++
+		r.logger.Info("payments: renewal stop no longer owed when read again — no provider call",
+			zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref))
+		return nil
+	case cerr == nil || errors.Is(cerr, ErrRefGone):
+		run.Stopped++
+		AuditRenewal(ctx, r.db, s.TenantID, RenewalPrepaid, "renewal-stops", s.Provider, s.Ref)
+		r.logger.Info("payments: renewal stopped for a subscription the house no longer names",
+			zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref), zap.String("status", status))
+		return nil
+	case errors.Is(cerr, ErrProviderUnconfigured):
+		run.Unconfigured++
+		run.Errors = append(run.Errors, s.Provider+":"+s.Ref+": not configured")
+		return nil
+	}
+	run.Failed++
+	run.Errors = append(run.Errors, s.Provider+":"+s.Ref+": "+cerr.Error())
+	if revert == "" {
+		return nil
+	}
+	// The request path's revert (SwitchToPrepaid's default case): the
+	// provider refuses for good, so the switch cannot finish — put it back
+	// while the row is still what the switch wrote, and its stop with it.
+	was := Entitlement{TenantID: s.TenantID, Provider: s.Provider, ProviderRef: s.Ref, Renewal: RenewalAuto}
+	if rerr := revertSwitch(ctx, r.db, s.TenantID, revert, was, true); rerr != nil {
+		r.logger.Error("payments: a switch whose renewal stop was refused for good could not be put back — the house shows prepaid while the provider still renews it; fix the row by hand",
+			zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref), zap.Error(rerr))
+		return nil
+	}
+	run.Reverted++
+	r.logger.Error("payments: the provider refused the renewal stop for good — the switch is put back, the house renews with it again",
+		zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref),
+		zap.String("switch_to", revert), zap.Error(cerr))
+	return nil
 }

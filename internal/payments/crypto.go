@@ -170,8 +170,17 @@ func MarkProcessing(ctx context.Context, tx *sql.Tx, provider, providerID string
 // SetCredit upserts the credit row (provider, providerID) of tenantID to
 // cents (≥ 0): a credit that tracks what arrived on an invoice that never
 // settled (it grows with a late partial payment, and goes to 0 when the
-// invoice settles after all — docs/PAYMENTS.md § 3.4). Unnumbered, like
-// every credit. Returns the change in the tenant's balance.
+// invoice settles after all — docs/PAYMENTS.md § 3.4), or what a settled
+// invoice was paid over. Unnumbered, like every credit. Returns the change
+// in the tenant's balance.
+//
+// A recomputation never takes back credit a checkout already spent
+// (D-P30-1, RP34-3's class): lowering the row would leave the ledger with
+// a negative balance that CreditBalance hides at 0. The row keeps the
+// spent part instead — it is lowered only to what keeps the tenant's raw
+// balance at 0 — and records what it did in its metadata
+// (spent_kept_cents: what it could not take back, recomputed_cents: the
+// value it was asked for); the caller logs it (CreditKept).
 func SetCredit(ctx context.Context, tx *sql.Tx, tenantID, provider, providerID string, cents int64, note string, at time.Time) (int64, error) {
 	if cents < 0 {
 		cents = 0
@@ -192,15 +201,84 @@ func SetCredit(ctx context.Context, tx *sql.Tx, tenantID, provider, providerID s
 		}
 		return cents, nil
 	}
-	if before.Int64 == cents {
+	kept := int64(0)
+	if cents < before.Int64 {
+		raw, err := rawCreditBalance(ctx, tx, tenantID)
+		if err != nil {
+			return 0, err
+		}
+		// What the tenant's balance would be after the change; below 0 it is
+		// credit a checkout spent, which stays on this row.
+		if after := raw - (before.Int64 - cents); after < 0 {
+			kept = min(-after, before.Int64-cents)
+		}
+	}
+	if before.Int64 == cents+kept {
+		if kept > 0 {
+			return 0, markSpentKept(ctx, tx, provider, providerID, kept, cents)
+		}
 		return 0, nil
 	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE payments SET amount_cents = $3 WHERE provider = $1 AND provider_id = $2 AND kind = 'credit'`,
-		provider, providerID, cents); err != nil {
+	// A row that no longer keeps anything drops the marks of an earlier
+	// recomputation (they describe the row as it is).
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE payments
+		   SET amount_cents = $3,
+		       metadata = CASE WHEN $4 THEN metadata ELSE metadata - 'spent_kept_cents' - 'recomputed_cents' END
+		 WHERE provider = $1 AND provider_id = $2 AND kind = 'credit'`,
+		provider, providerID, cents+kept, kept > 0); err != nil {
 		return 0, fmt.Errorf("set credit %s/%s: %w", provider, providerID, err)
 	}
-	return cents - before.Int64, nil
+	if kept > 0 {
+		if err := markSpentKept(ctx, tx, provider, providerID, kept, cents); err != nil {
+			return 0, err
+		}
+	}
+	return cents + kept - before.Int64, nil
+}
+
+// CreditKept reports what SetCredit kept on the credit row (provider,
+// providerID) because a checkout had spent it: the recomputed value it was
+// asked for and the part it could not take back (0 = none). Read after
+// SetCredit in the same transaction, for the caller's Error line.
+func CreditKept(ctx context.Context, tx *sql.Tx, provider, providerID string) (kept, recomputed int64, err error) {
+	var k, r sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT (metadata->>'spent_kept_cents')::bigint, (metadata->>'recomputed_cents')::bigint
+		  FROM payments WHERE provider = $1 AND provider_id = $2 AND kind = 'credit'`, provider, providerID).Scan(&k, &r)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read kept credit %s/%s: %w", provider, providerID, err)
+	}
+	return k.Int64, r.Int64, nil
+}
+
+// markSpentKept records on the credit row what a recomputation could not
+// take back (D-P30-1).
+func markSpentKept(ctx context.Context, tx *sql.Tx, provider, providerID string, kept, recomputed int64) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE payments
+		   SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('spent_kept_cents', $3::bigint,
+		                                                                        'recomputed_cents', $4::bigint)
+		 WHERE provider = $1 AND provider_id = $2 AND kind = 'credit'`, provider, providerID, kept, recomputed); err != nil {
+		return fmt.Errorf("record kept credit %s/%s: %w", provider, providerID, err)
+	}
+	return nil
+}
+
+// rawCreditBalance is CreditBalance without its floor at 0.
+func rawCreditBalance(ctx context.Context, tx *sql.Tx, tenantID string) (int64, error) {
+	var bal int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN kind = 'credit' THEN amount_cents ELSE -credit_cents END), 0)
+		  FROM payments
+		 WHERE tenant_id = $1 AND status IN ('settled', 'refunded') AND kind IN ('credit', 'charge')`,
+		tenantID).Scan(&bal); err != nil {
+		return 0, fmt.Errorf("credit balance of tenant %s: %w", tenantID, err)
+	}
+	return bal, nil
 }
 
 // AdoptPending renames a pending row's provisional id (pending:<uuid>,

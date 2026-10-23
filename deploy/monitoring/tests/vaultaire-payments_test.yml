@@ -133,6 +133,24 @@ tests:
               summary: "A BTCPay delivery was acknowledged without being applied (mark_refused)"
               description: "journalctl -u 'vaultaire@*' -o cat | grep 'btcpay webhook' names the invoice and the tenant. settled_unpaid: BTCPay says Settled but paidAmount < amount — check the store's payment tolerance (must be 0 %) and whether an operator marked it; record a manual payment if the money is real. mark_refused: mark the late-paid invoice Settled by hand in BTCPay (the InvoiceSettled that follows grants it). fetch_refused: the store key is wrong or lost a permission (cancreateinvoice, canviewinvoices, canmodifyinvoices) — fix it, then redeliver the delivery from the BTCPay UI (it is handled fresh)."
 
+  # RP37-6: an unconfirmable BTCPay invoice pages; at 0 it is silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_btcpay_unconfirmable_total'
+        values: '0x30 1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BTCPayPaymentUnconfirmable
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: BTCPayPaymentUnconfirmable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "A BTCPay invoice holds money that cannot be shown confirmed (no payments listed)"
+              description: "journalctl -u 'vaultaire@*' -o cat | grep 'lists no payments' names the invoice and the tenant. Nothing was credited or granted. Open the invoice in BTCPay: if its payments are confirmed, record a manual payment or credit; check that the server runs BTCPay 2.x (the Greenfield payment-methods answer must list payments[])."
+
   # foreign warns; at 0 it is silent.
   - interval: 1m
     input_series:

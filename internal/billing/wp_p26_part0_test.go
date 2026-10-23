@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -197,12 +198,21 @@ type fakeSubAPI struct {
 	status  string
 	deletes []url.Values
 	updates []url.Values
+	// open are the subscription's open invoices (GET /v1/invoices answers
+	// them while not voided); voided the ids POSTed to /v1/invoices/{id}/void.
+	open   []string
+	voided []string
+	lists  []url.Values
 }
 
 func (f *fakeSubAPI) install(t *testing.T) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/v1/invoices") {
+			f.invoices(w, r)
+			return
+		}
 		if !strings.HasPrefix(r.URL.Path, "/v1/subscriptions/") {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":{"type":"invalid_request_error","message":"fake"}}`))
@@ -231,6 +241,27 @@ func (f *fakeSubAPI) install(t *testing.T) {
 		URL: stripe.String(srv.URL), MaxNetworkRetries: stripe.Int64(0), LeveledLogger: &stripe.LeveledLogger{Level: stripe.LevelNull},
 	}))
 	t.Cleanup(func() { stripe.SetBackend(stripe.APIBackend, prev) })
+}
+
+// invoices answers the invoice list (status=open of a subscription) and
+// the void of one.
+func (f *fakeSubAPI) invoices(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := strings.CutSuffix(strings.TrimPrefix(r.URL.Path, "/v1/invoices/"), "/void"); ok && r.Method == http.MethodPost {
+		f.voided = append(f.voided, id)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "object": "invoice", "status": "void"})
+		return
+	}
+	f.lists = append(f.lists, r.URL.Query())
+	data := []any{}
+	for _, id := range f.open {
+		if !slices.Contains(f.voided, id) {
+			data = append(data, map[string]any{"id": id, "object": "invoice", "status": "open",
+				"subscription": r.URL.Query().Get("subscription")})
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "url": "/v1/invoices", "has_more": false, "data": data})
 }
 
 // RP31-4 (P3): an implicit switch from a subscription whose current period

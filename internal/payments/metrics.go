@@ -32,6 +32,19 @@ var doublePeriodTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Settled charges whose period overlaps another provider's settled charge of the same tenant (the customer paid twice for the same dates — refund by hand), by the provider of the later charge. Every provider at 0 from boot.",
 }, []string{"provider"})
 
+// unconfirmableTotal counts BTCPay invoices whose paidAmount is above 0
+// while their payment methods list no payments (a 1.x-shaped answer): no
+// part of the money can be shown confirmed, so none is credited — the
+// money is stuck until a person looks (RP37-6). Unlabelled: it exports 0
+// from registration.
+var unconfirmableTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "vaultaire_btcpay_unconfirmable_total",
+	Help: "BTCPay invoice fetches with paidAmount > 0 and no payments[] in any payment method: nothing can be shown confirmed, so nothing is credited or granted — look at the invoice in BTCPay (RP37-6). 0 from boot.",
+})
+
+// CountUnconfirmable counts one such fetch.
+func CountUnconfirmable() { unconfirmableTotal.Inc() }
+
 // providerReady is 1 while a provider can take a payment (configured ∧
 // verified), recorded every 60 s by Registry.StartReadiness and at
 // Register, so every registered provider's series exists from boot.
@@ -176,7 +189,7 @@ func CountPayment(provider, kind, outcome string) {
 // Collectors are the package's series, registered by
 // internal/api/prom_metrics.go.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{paymentsTotal, providerReady, remindersTotal, webhookTotal, doublePeriodTotal}
+	return []prometheus.Collector{paymentsTotal, providerReady, remindersTotal, webhookTotal, doublePeriodTotal, unconfirmableTotal}
 }
 
 // renewalStopsPendingDesc: renewal_stop rows whose provider has not

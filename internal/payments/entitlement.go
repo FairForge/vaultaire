@@ -346,6 +346,10 @@ type Ended struct {
 	PaidThrough time.Time
 	// Stopped: the renewal flipped to prepaid in this call (audit it).
 	Stopped bool
+	// Switched: kept because the subscription that ended is the one the
+	// customer's own switch to a prepaid provider stopped (EndByStatusOf,
+	// RP37-3) — whatever its date.
+	Switched bool
 }
 
 // EndByStatus applies a terminal provider status (a Stripe subscription
@@ -374,6 +378,41 @@ func EndByStatus(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time
 	}
 	stopped, err := StopRenewalChanged(ctx, tx, tenantID)
 	return Ended{PaidThrough: e.PaidThrough, Stopped: stopped}, err
+}
+
+// EndByStatusOf is EndByStatus for the terminal status of one provider
+// reference (the Stripe webhook's two call sites: a terminal status and a
+// deleted subscription). When that reference ended because the customer
+// switched the house to a prepaid provider — the entitlement still names
+// it, renewal 'prepaid' with a pending provider, and a renewal_stop row of
+// reason 'switch' names it (SwitchToPrepaid writes both in one
+// transaction) — nothing is ended (RP37-3, D-P30-2): RP33-7's switch from
+// a period in dunning cancels the subscription NOW, and its paid_through
+// (the unpaid period's start) is already behind us, so EndByStatus would
+// revoke a house the customer is paying another way. The house keeps its
+// date and waits for the prepaid invoice; the entitlement_lapse job ends
+// it at paid_through + ENTITLEMENT_GRACE like any house nobody renews
+// (with the flag off it is counted would_clear, as every kept house is).
+// Anything else: EndByStatus, unchanged.
+func EndByStatusOf(ctx context.Context, tx *sql.Tx, tenantID, provider, ref string, now time.Time) (Ended, error) {
+	if err := Lock(ctx, tx, tenantID); err != nil {
+		return Ended{}, err
+	}
+	e, err := Get(ctx, tx, tenantID)
+	if err != nil && !errors.Is(err, ErrNoEntitlement) {
+		return Ended{}, err
+	}
+	if err == nil && ref != "" && e.LapsedAt == nil && e.Provider == provider && e.ProviderRef == ref &&
+		e.Renewal == RenewalPrepaid && e.PendingProvider != "" {
+		s, found, err := RenewalStopOf(ctx, tx, tenantID, provider, ref)
+		if err != nil {
+			return Ended{}, err
+		}
+		if found && s.Reason == ReasonSwitch {
+			return Ended{Kept: true, PaidThrough: e.PaidThrough, Switched: true}, nil
+		}
+	}
+	return EndByStatus(ctx, tx, tenantID, now)
 }
 
 // Resize changes a granted house's lines, keeping its date (the dashboard's

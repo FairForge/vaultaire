@@ -9,6 +9,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/stripe/stripe-go/v75"
+	"github.com/stripe/stripe-go/v75/invoice"
 	"github.com/stripe/stripe-go/v75/subscription"
 	"go.uber.org/zap"
 )
@@ -193,7 +194,15 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 		return fmt.Errorf("read subscription %s: %w", ref, refusedOr(err))
 	}
 	switch {
-	case sub.Status == stripe.SubscriptionStatusCanceled || sub.Status == stripe.SubscriptionStatusIncompleteExpired:
+	case sub.Status == stripe.SubscriptionStatusCanceled:
+		// A cancel-now whose void did not finish (the process died between
+		// them, a Stripe 5xx) is finished by the next pass: the open invoices
+		// it left are voided before the row is closed gone.
+		if err := s.voidOpenInvoices(ctx, tenantID, ref); err != nil {
+			return err
+		}
+		return fmt.Errorf("subscription %s is %s: %w", ref, sub.Status, payments.ErrRefGone)
+	case sub.Status == stripe.SubscriptionStatusIncompleteExpired:
 		return fmt.Errorf("subscription %s is %s: %w", ref, sub.Status, payments.ErrRefGone)
 	case sub.Status == stripe.SubscriptionStatusPastDue || sub.Status == stripe.SubscriptionStatusUnpaid ||
 		sub.Status == stripe.SubscriptionStatusIncomplete:
@@ -203,12 +212,47 @@ func (s *StripeService) StopRenewalRef(ctx context.Context, tenantID, ref string
 		}
 		s.logger.Warn("stripe: a subscription whose period was never paid is cancelled now — the house is paid another way",
 			zap.String("tenant", tenantID), zap.String("subscription", ref), zap.String("status", string(sub.Status)))
+		if err := s.voidOpenInvoices(ctx, tenantID, ref); err != nil {
+			return err
+		}
 		return fmt.Errorf("subscription %s was %s, cancelled now: %w", ref, sub.Status, payments.ErrRefGone)
 	case sub.CancelAtPeriodEnd:
 		return nil
 	}
 	if _, err := subscription.Update(ref, renewalParams(ctx, true)); err != nil {
 		return fmt.Errorf("set cancel_at_period_end on %s: %w", ref, refusedOr(err))
+	}
+	return nil
+}
+
+// voidOpenInvoices voids every OPEN invoice of the subscription ref
+// (RP37-3): a cancel only turns Stripe's automatic collection off — "When
+// you cancel a subscription, all open and draft invoices for that
+// subscription have their auto_advance property set to false … You can
+// still manually attempt to collect payment" (docs.stripe.com/billing/
+// subscriptions/cancel) — so the past_due invoice the dunning mails link
+// to stays payable, and a card payment of it after the customer chose to
+// pay another way is the double charge docs/PAYMENTS.md § 4.4 forbids. A
+// void is final and keeps the paper trail. A failure is returned (never
+// ErrRefGone), so the stop stays owed and the next pass — which finds the
+// subscription canceled — voids what is left.
+func (s *StripeService) voidOpenInvoices(ctx context.Context, tenantID, ref string) error {
+	params := &stripe.InvoiceListParams{Subscription: stripe.String(ref), Status: stripe.String(string(stripe.InvoiceStatusOpen))}
+	params.Context = ctx
+	var open []string
+	iter := invoice.List(params)
+	for iter.Next() {
+		open = append(open, iter.Invoice().ID)
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("list the open invoices of %s: %w", ref, refusedOr(err))
+	}
+	for _, id := range open {
+		if _, err := invoice.VoidInvoice(id, &stripe.InvoiceVoidInvoiceParams{Params: stripe.Params{Context: ctx}}); err != nil {
+			return fmt.Errorf("void open invoice %s of %s: %w", id, ref, refusedOr(err))
+		}
+		s.logger.Warn("stripe: the open invoice of a subscription cancelled for a switch is voided — it can no longer be paid",
+			zap.String("tenant", tenantID), zap.String("subscription", ref), zap.String("invoice", id))
 	}
 	return nil
 }
