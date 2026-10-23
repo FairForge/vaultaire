@@ -79,7 +79,8 @@ Each session row in `dashboard_sessions` also tracks `ip_address`, `user_agent`,
 | `/dashboard/apikeys` | POST | session | Generate new API key (shows secret once) |
 | `/dashboard/apikeys/{id}/revoke` | POST | session | Revoke an API key |
 | `/dashboard/usage` | GET | session | Usage detail: storage, bandwidth, SVG chart, daily table |
-| `/dashboard/settings` | GET | session | Settings: profile, password, notifications |
+| `/dashboard/settings` | GET | session | Settings: profile, password, notifications; the "Access to your account" card while `translog_customer_view` is on for the tenant |
+| `/dashboard/settings/access` | GET | session | "Access to your account" (Stage 1a Prompt 34b): the tenant's own transparency-log entries in words (`adminread.Words`), with the checkpoint that includes each; behind `translog_customer_view` (OFF = 404); `Deps.AccessLog` = the API's `adminread` store. `TestAccessRoute_ThroughTheDashboardRouter` |
 | `/dashboard/settings/profile` | POST | session | Update company name |
 | `/dashboard/settings/password` | POST | session | Change password (validates current) |
 | `/dashboard/settings/notifications` | POST | session | Update notification preferences |

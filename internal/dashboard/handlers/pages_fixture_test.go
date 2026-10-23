@@ -13,6 +13,8 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/adminread"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -57,9 +59,26 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 
 	// Settings.
 	w = httptest.NewRecorder()
-	HandleSettings(page("settings.html"), auth.NewAuthService(nil, db), db, nil, nil, zap.NewNop()).ServeHTTP(w,
+	HandleSettings(page("settings.html"), auth.NewAuthService(nil, db), db, nil, nil, func(string) bool { return true }, zap.NewNop()).ServeHTTP(w,
 		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings", nil), id))
 	write("settings", w)
+
+	// Access to your account (Stage 1a Prompt 34b): reads and switch
+	// changes, some in a signed checkpoint, the newest not yet.
+	cp := int64(27)
+	on, off := true, false
+	at := func(m int) time.Time { return time.Date(2026, 10, 23, 15, m, 51, 0, time.UTC) }
+	access := &countingFinder{found: []adminread.Found{
+		{Index: 23, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantPayments, At: time.Date(2026, 10, 23, 11, 24, 0, 0, time.UTC), CheckpointSize: &cp},
+		{Index: 25, Kind: translog.KindLogPolicy, Flag: translog.FlagTranslogAdminReads, Action: translog.PolicyActionSet, Enabled: &off, At: at(13), CheckpointSize: &cp},
+		{Index: 26, Kind: translog.KindLogPolicy, Flag: translog.FlagTranslogAdminReads, Action: translog.PolicyActionSet, Enabled: &on, At: at(13), CheckpointSize: &cp},
+		{Index: 27, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantAudit, At: at(14)},
+	}}
+	w = httptest.NewRecorder()
+	HandleAccess(page("access.html"), func(string) bool { return true }, func(string) bool { return true }, access,
+		"https://trust.stored.cloud/translog/checkpoint", zap.NewNop()).ServeHTTP(w,
+		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings/access", nil), id))
+	write("access", w)
 
 	// Bucket settings, with the customer-key requirement on (WP-SSEC-1 B.5).
 	_, err := db.Exec(`UPDATE buckets SET ssec_required = TRUE WHERE tenant_id = $1 AND name = 'photos'`, id)
