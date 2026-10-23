@@ -313,8 +313,12 @@ func TestCheckpoint_DatabaseRestoredBehindHighwater_RefusesToSign(t *testing.T) 
 	}
 
 	// Restored to 2 entries, then new (different) entries up to 4: behind.
+	// Since RP42-1 the gated store refuses those appends (freeze_test.go);
+	// they come here from an appender without the file — a build before the
+	// gate, or SQL by hand — and the job still refuses: defence in depth.
+	ungated := New(restored, nil)
 	for i := 0; i < 2; i++ {
-		_, _, err := r.Append(ctx, ceremony(t))
+		_, _, err := ungated.Append(ctx, ceremony(t))
 		require.NoError(t, err)
 	}
 	res, err = r.Checkpoint(ctx)
@@ -325,7 +329,7 @@ func TestCheckpoint_DatabaseRestoredBehindHighwater_RefusesToSign(t *testing.T) 
 
 	// Grown to 5 and past it with different entries: not the tree the key signed.
 	for _, want := range []int64{5, 6} {
-		_, _, err := r.Append(ctx, ceremony(t))
+		_, _, err := ungated.Append(ctx, ceremony(t))
 		require.NoError(t, err)
 		res, err = r.Checkpoint(ctx)
 		require.Error(t, err, "size %d", want)

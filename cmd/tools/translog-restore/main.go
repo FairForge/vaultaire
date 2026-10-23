@@ -6,7 +6,6 @@
 // M … N-1 must be the very bytes the key signed — read from a witness's
 // cache (translog-witness -dir), never re-encoded.
 //
-//	sudo systemctl stop 'vaultaire@*'      # no slot appends meanwhile
 //	DATABASE_URL=postgres://… translog-restore -from ~/.translog-witness -highwater /opt/vaultaire/data/translog/highwater
 //
 // It reads the database's size M and the file's checkpoint N, loads
@@ -15,7 +14,9 @@
 // that commits only when the recomputed root at N is the file's
 // (logstore.ReAppend). It refuses — nothing written — when M ≥ N, when a
 // bundle it needs is missing (named), or when the root differs. It never
-// signs: the checkpoint job does, once the slots are started again.
+// signs: the checkpoint job does at its next run. The slots may run
+// meanwhile: while the database is behind the high-water every append is
+// refused (logstore.ErrLogFrozen, RP42-1), so nothing takes index M first.
 // Operator tool: never linked into cmd/vaultaire.
 package main
 

@@ -444,15 +444,22 @@ does not list yet goes on a later run).
   deleted fresh backups on 2026-10-07 (caught and fixed the same run).
 - **A restore puts the transparency log behind what its key signed** (RP37-11):
   the dump holds `translog_*` as of 03:00, the key may have signed up to 24 h
-  more. The checkpoint job refuses and pages (`TranslogCheckpointRefused`,
-  the high-water file `/opt/vaultaire/data/translog/highwater` is not in the
-  dump); **before the signing key is loaded again**, follow
-  `docs/TRANSPARENCY.md` § After a database restore: with the slots stopped,
-  `translog-restore -from <the witness's directory> -highwater <file>` puts the
-  lost entries back byte for byte from the off-box witness's cache (K4b) and the
-  job passes again under the same origin; without a witness cache that reaches
-  the file's size, the fallback is a new origin (F-33). Never delete the
-  high-water file to make the refusal go away.
+  more. The high-water file `/opt/vaultaire/data/translog/highwater` is not in
+  the dump, so **the log freezes** (RP42-1, Stage 1a Prompt 33): every append
+  is refused while the database holds fewer entries than the file
+  (`TranslogFrozen` pages; the boot's `server_build` waits and is retried by
+  the checkpoint job, a ceremony answers 503 `log_frozen`, an admin read is
+  refused) and the checkpoint job refuses to sign (`TranslogCheckpointRefused`).
+  **The slots may be started and serve customers meanwhile**; only the log
+  waits. Follow `docs/TRANSPARENCY.md` § After a database restore:
+  `translog-restore -from <the witness's directory> -highwater <file>` against
+  the live database puts the lost entries back byte for byte from the off-box
+  witness's cache (K4b), the log thaws and the job signs again under the same
+  origin; without a witness cache that reaches the file's size, the fallback is
+  a new origin (F-33). **The box lost too:** write the witness's `cosigned` body
+  as the high-water file BEFORE the first slot starts on the new box. Never
+  delete the high-water file to make the refusal go away: that unfreezes a log
+  that is not the one the key signed.
 - **Restore:** `set -a; . /opt/vaultaire/configs/sync-backup.env; set +a;
   rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
   → `zcat <dump> | psql` (plain SQL, psql ≥ 16.10 for the `\restrict` header).

@@ -21,6 +21,10 @@ var (
 		Name: "vaultaire_translog_checkpoint_refusals_total",
 		Help: "Checkpoint passes that refused to sign (rewritten: the log does not extend a signed tree; behind_highwater: the database was restored behind the newest tree this box signed; highwater_unreadable: the high-water file cannot be read).",
 	}, []string{"reason"})
+	appendRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_translog_append_refusals_total",
+		Help: "Transparency-log appends refused because the log is frozen (behind_highwater: the database was restored behind the newest tree this box signed; highwater_unreadable: the high-water file cannot be read). Nothing was written; translog-restore is the way out.",
+	}, []string{"reason"})
 	signingKeyLoaded = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vaultaire_translog_signing_key_loaded",
 		Help: "1 when this process has the checkpoint signing key (credential translog_signing_key, TRANSLOG_SIGNING_KEY_FILE or TRANSLOG_SIGNING_KEY); 0 = entries append, nothing is signed.",
@@ -33,6 +37,9 @@ func init() {
 	}
 	for _, r := range RefusalReasons() {
 		checkpointRefusals.WithLabelValues(r)
+	}
+	for _, r := range AppendRefusalReasons() {
+		appendRefusals.WithLabelValues(r)
 	}
 }
 
@@ -47,7 +54,7 @@ func SetSigningKeyLoaded(loaded bool) {
 
 // Collectors are the process-state series.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{appendFailures, checkpointRefusals, signingKeyLoaded}
+	return []prometheus.Collector{appendFailures, appendRefusals, checkpointRefusals, signingKeyLoaded}
 }
 
 const stateTTL = 15 * time.Second
@@ -120,3 +127,8 @@ func (c *StateCollector) read() *[3]float64 {
 // CountAppendFailure counts a failure that happened before Append could be
 // called (a producer that could not build its entry).
 func CountAppendFailure(kind string) { appendFailures.WithLabelValues(kind).Inc() }
+
+// AppendRefusalReasons lists why an append can be refused (the log frozen).
+func AppendRefusalReasons() []string {
+	return []string{RefusedBehindHighwater, RefusedHighwaterUnreadable}
+}

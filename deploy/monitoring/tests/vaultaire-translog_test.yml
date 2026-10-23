@@ -81,7 +81,7 @@ tests:
               kind: server_build
             exp_annotations:
               summary: "Transparency log: 1 server_build append(s) failed in the last hour"
-              description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
+              description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried by every translog_checkpoint run until it lands; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
 
   # A restore behind the high-water: the job refuses every 10 min — pages
   # at the first refusal, per reason; the reasons at 0 stay silent.
@@ -124,4 +124,33 @@ tests:
     alert_rule_test:
       - eval_time: 60m
         alertname: TranslogCheckpointRefused
+        exp_alerts: []
+
+  # RP42-1: a frozen log refuses producers — pages at the first refusal, per
+  # reason; the other reason at 0 stays silent; quiet again 30 min after the
+  # last refusal (the log repaired).
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_append_refusals_total{reason="behind_highwater"}'
+        values: '0 0 0 1 1 1 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2'
+      - series: 'vaultaire_translog_append_refusals_total{reason="highwater_unreadable"}'
+        values: '0x41'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TranslogFrozen
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TranslogFrozen
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              reason: behind_highwater
+            exp_annotations:
+              summary: "Transparency log: frozen — appends refused (behind_highwater)"
+              description: "Appends to the transparency log are refused: behind_highwater. The customers are served; only the log waits (server_build retried by the translog_checkpoint job, ceremonies answer 503 log_frozen, admin reads are refused). behind_highwater: re-append the lost entries with translog-restore — docs/TRANSPARENCY.md § After a database restore. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater); never delete it to unfreeze."
+      - eval_time: 40m
+        alertname: TranslogFrozen
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: TranslogAppendFailing
         exp_alerts: []

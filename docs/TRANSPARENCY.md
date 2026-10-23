@@ -16,7 +16,7 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 
 | Kind | Fields | Written by |
 |---|---|---|
-| `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing |
+| `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing; an append refused (a frozen log, the database down) is kept and retried by every `translog_checkpoint` run until it lands (RP42-1) |
 | `key_ceremony` | `action` (closed list: `key_generated`, `key_installed`, `key_rewrapped`, `key_rotated`, `key_retired`, `escrow_split`, `escrow_tested`, `realm_enrolled`, `log_restored`), `key_role` (`master_key`, `translog_signing_key`, `recovery_realm_key`), `key_fingerprint` (`sha256:<64 hex>` — never the key), `participants` (1–20), `shares` / `threshold` (the trustee shares written and how many recombine the key; 0/0 = none, else 2–20 and 1–shares), `signed_size` / `restored_size` / `new_origin` (`log_restored` only), `reference` (empty, or `https://github.com/FairForge/vaultaire/` + `pull/<n>`, `commit/<40 hex>` or `blob/<40 hex>/docs/<NAME>.md`). **No free text** (RP37-10): a person's name, an address, an e-mail, a tenant id cannot be written in any field — what a person would say goes in the referenced document, which we can correct; the entry cannot be (the tables refuse DELETE). An unknown field (the removed `statement` of #884 included — 0 ceremony entries existed when it went) is refused | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, consumed only after the entry validated; `Idempotency-Key` = a retry returns the first answer and appends nothing; audited `admin.translog_ceremony`, a non-admin's 403 included) |
 
 Not yet (K4c): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring, the Rekor mirror, and a co-signature by an independent third party. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log).
@@ -125,24 +125,32 @@ Losing the key loses nothing already signed: a new key is a new ceremony entry s
 - `rewritten` — the stored log does not extend a tree the key signed (the database's or the file's: a restore whose log has since grown with different entries, or edited rows);
 - `highwater_unreadable` — the file exists but cannot be read or is not a checkpoint of this log. Never taken as "first run".
 
-An absent file is the first run (`note: first run …`): it is written after the next signature. Every pass re-proves, so a refusal repeats every 10 min until it is resolved; `TranslogCheckpointRefused` **pages** at the first one.
+An absent file is the first run (`note: first run …`): it is written after the next signature. Every pass re-proves, so a refusal repeats every 10 min until it is resolved; `TranslogCheckpointRefused` **pages** at the first one. **The same file gates every append** (RP42-1): behind it, or unreadable, the log is frozen — § After a database restore.
 
 ## After a database restore
 
-Decided here (Stage 1a Prompt 30); the cost of the new origin is the owner's to confirm (F-33). **Before the signing key is loaded again** — that is, before any slot is started on the restored database with `LoadCredentialEncrypted=translog_signing_key` in the unit — compare the two:
+Decided in Stage 1a Prompt 30; the log's freeze since Prompt 33 (RP42-1); the cost of the new origin is the owner's to confirm (F-33).
+
+**The log freezes by itself.** `logstore.Append` reads the high-water file inside its transaction, under the log's lock, on every append: while the database holds fewer entries than the file (`behind_highwater`), or the file exists but is not a checkpoint of this log (`highwater_unreadable`), **every append is refused** (`ErrLogFrozen`, nothing written, `vaultaire_translog_append_refusals_total{reason}`, **TranslogFrozen** pages). An absent file is the first run and appends. So no entry the key never signed can take index M, and the re-append below always stays possible — before Prompt 33 a slot's boot `server_build` took index M and made it impossible for ever (the tables refuse DELETE). While frozen:
+- **the slots may run and serve customers**; only the log waits. Stopping them is no longer the precondition, and `translog-restore` runs against the live database;
+- the boot's `server_build` is kept in the process and retried by every `translog_checkpoint` run (before it checkpoints) until it lands — after the re-append, at N or later;
+- the ceremony route answers **503 `{"error":"log_frozen"}`** before the TOTP code is consumed (retry with the same code and `Idempotency-Key` once the log is repaired); an admin read of customer metadata (K4c-1) is refused while the `translog_admin_reads` flag is on for its tenant;
+- the checkpoint job refuses to sign (`behind_highwater`, **TranslogCheckpointRefused**);
+- `logstore.ReAppend` (the way out) is not gated: its own checks stand (the count, the size, the recomputed root).
+
+Compare the two:
 
 ```sh
 sudo cat /opt/vaultaire/data/translog/highwater          # stored.cloud/translog/v1 / N / root
 sudo -u postgres psql -At -d vaultaire -c "SELECT COALESCE(MAX(idx)+1,0) FROM translog_entries"   # M
 ```
 
-1. **M ≥ N and the job would pass** (the dump was taken after the newest signature): nothing happened to the log. Start the slots; the next pass proves it.
-2. **M < N** (entries the key signed are gone): the tree the key signed at N exists again only if entries M…N−1 come back **byte for byte**. Any other tree this database grows is not the one the key signed, and a signature over it would be the equivocation. Keep the credential line commented out (`systemctl edit vaultaire@` drop-in) until the steps below are done.
+1. **M ≥ N and the job would pass** (the dump was taken after the newest signature): nothing happened to the log. The next pass proves it.
+2. **M < N** (entries the key signed are gone; the log is frozen): the tree the key signed at N exists again only if entries M…N−1 come back **byte for byte**. Any other tree this database grows is not the one the key signed, and a signature over it would be the equivocation.
 
-   **Keep the origin: re-append from the witness** (K4b). This works when a witness — `translog-witness`, run off the box — saw a checkpoint at N or later, so its cache holds every entry up to N−1:
+   **Keep the origin: re-append from the witness** (K4b). This works when a witness — `translog-witness`, run off the box — saw a checkpoint at N or later, so its cache holds every entry up to N−1. The slots may be running:
 
    ```sh
-   sudo vaultaire-switch status; sudo systemctl stop 'vaultaire@*'      # no slot appends while the log is repaired
    # copy the witness's directory (its cache/ is what is read) to /root/translog-witness, and the tool:
    #   GOOS=linux GOARCH=amd64 go build -o translog-restore ./cmd/tools/translog-restore
    DATABASE_URL='postgres://…/vaultaire' /root/translog-restore \
@@ -151,33 +159,37 @@ sudo -u postgres psql -At -d vaultaire -c "SELECT COALESCE(MAX(idx)+1,0) FROM tr
    # re-appended entries M…N-1: the root at N is … = the high-water's
    ```
 
-   `translog-restore` (`logstore.ReAppend`) appends the cached bodies M…N−1 as they are, in ONE transaction under the log's lock, with their stored hashes. Kind and dedup key come from each body. It commits only when the root it recomputes at N is the file's root. It refuses, and writes nothing, when M ≥ N (that is case 1), when a bundle it needs is missing or narrower than N (it names the bundle), when a body does not decode, or when the root differs. It never signs.
+   `translog-restore` (`logstore.ReAppend`) appends the cached bodies M…N−1 as they are, in ONE transaction under the log's lock, with their stored hashes. Kind and dedup key come from each body. It commits only when the root it recomputes at N is the file's root. It refuses, and writes nothing, when M ≥ N (that is case 1), when a bundle it needs is missing or narrower than N (it names the bundle), when a body does not decode, or when the root differs. It never signs. Because the gate holds every append back, M is the dump's size, whatever ran in between.
 
    Then:
-   1. restore the credential line and start the slots (`sudo vaultaire-switch restart`);
-   2. the next `translog_checkpoint` run proves the restored log extends both the database's newest checkpoint and the file's, then signs: `refused` empty, `vaultaire_translog_checkpoint_refusals_total` unchanged;
-   3. append the ceremony `log_restored` with `key_role: translog_signing_key`, the key's fingerprint, `signed_size: N`, `restored_size: M`, **`new_origin: false`** and a `reference` to the incident's pull request.
+   1. the log thaws at once: the next `translog_checkpoint` run (≤ 10 min, or `POST /api/v1/admin/jobs/translog_checkpoint/run`) appends each running slot's waiting `server_build` after the re-appended entries, proves the restored log extends both the database's newest checkpoint and the file's, and signs: `refused` empty, the refusal counters unchanged from then on;
+   2. append the ceremony `log_restored` with `key_role: translog_signing_key`, the key's fingerprint, `signed_size: N`, `restored_size: M`, **`new_origin: false`** and a `reference` to the incident's pull request.
 
-   One thing the re-append cannot give back: a ceremony's `Idempotency-Key` dedup lives outside the body (RP37-14), so a re-appended ceremony entry has no dedup key. A retry of that very call after the restore would append it a second time. Within the idempotency window this is the operator's to avoid.
+   One thing the re-append cannot give back: a ceremony's `Idempotency-Key` dedup lives outside the body (RP37-14), so a re-appended ceremony entry has no dedup key (RP41-1). A retry of that very call after the restore would append it a second time. Within the idempotency window this is the operator's to avoid.
 
-   **The fallback: a new origin** (the cost is F-33, the owner's). Use it when no witness cache reaches N, or when `translog-restore` refuses because the root differs:
-   - comment out the credential line so no slot loads the key; the job then appends and signs nothing (it would refuse anyway, and page);
+   **The fallback: a new origin** (the cost is F-33, the owner's). Use it when no witness cache reaches N, or when `translog-restore` refuses because the root differs. The log stays frozen — refusing, paging, appending nothing — until it is done; the customers are served meanwhile:
    - keep the high-water file and the old verifier key public: the last tree of `stored.cloud/translog/v1` is the file's (size N, root);
-   - start a **new log**, `stored.cloud/translog/v2`. This is a code change of `translog.Origin` and a new key from the ceremony above; the old key is never loaded again. It starts on empty `translog_*` tables: export the restored v1 rows to a file and keep it, then the operator empties the tables with the triggers disabled, logged in `audit_logs`. Its **first entry** is a `key_ceremony` `log_restored` with `key_role: translog_signing_key`, the OLD key's fingerprint, `signed_size: N`, `restored_size: M`, `new_origin: true` and a `reference` to the incident's pull request. Then `key_retired` for the old key, and `key_generated` / `key_installed` for the new one;
+   - start a **new log**, `stored.cloud/translog/v2`. This is a code change of `translog.Origin` and a new key from the ceremony above; the old key is never loaded again. It starts on empty `translog_*` tables: export the restored v1 rows to a file and keep it, then the operator empties the tables with the triggers disabled, logged in `audit_logs`;
+   - **move the v1 high-water file aside before the v2 build starts: `sudo mv /opt/vaultaire/data/translog/highwater /opt/vaultaire/data/translog/highwater.v1`** (RP42-6). A file of another origin is never read as "archived" by itself: the job and the append gate refuse it as `highwater_unreadable`, and the error names this step. Keep `highwater.v1` with the export: it is v1's last signed tree;
+   - the v2 log's **first entry** is a `key_ceremony` `log_restored` with `key_role: translog_signing_key`, the OLD key's fingerprint, `signed_size: N`, `restored_size: M`, `new_origin: true` and a `reference` to the incident's pull request. Then `key_retired` for the old key, and `key_generated` / `key_installed` for the new one;
    - publish the new verifier key as in the ceremony; readers re-pin.
-3. **The box is lost too** (no high-water file): an absent file reads as "first run", so never start a slot with the key before this is settled. The witness holds the checkpoint the log must reach: its `cosigned` note (signed by the log's key, so take it only after checking it with the pinned verifier key). Its body is the high-water file:
+3. **The box is lost too** (no high-water file): an absent file reads as "first run" and would not freeze the log, so **write the high-water file BEFORE the first slot starts on the new box**. The witness holds the checkpoint the log must reach: its `cosigned` note (signed by the log's key, so take it only after checking it with the pinned verifier key). Its body is the high-water file:
 
    ```sh
+   install -d -m 0700 -o user1 -g user1 /opt/vaultaire/data/translog   # the slots' user (`stat -c %U /opt/vaultaire/data`)
    sed '/^$/,$d' ~/.translog-witness/cosigned > /opt/vaultaire/data/translog/highwater   # origin / N / root, nothing after
+   chown user1:user1 /opt/vaultaire/data/translog/highwater; chmod 0600 /opt/vaultaire/data/translog/highwater
    ```
 
-   Then follow case 2 with that file: re-append from the witness's cache. The size and root are the newest tree the witness proved, which may be older than the last one the box signed. A checkpoint signed after the witness's last pass is lost with the box. That window is the cron's interval: readers who fetched it hold a tree the restored log may not reach, so say so in the incident's write-up. With no witness, this case is case 2's fallback (RP38-5).
+   With the file in place the log is frozen from the first boot, exactly as in case 2, and the slots may start. Then follow case 2 with that file: re-append from the witness's cache. The size and root are the newest tree the witness proved, which may be older than the last one the box signed. A checkpoint signed after the witness's last pass is lost with the box. That window is the cron's interval: readers who fetched it hold a tree the restored log may not reach, so say so in the incident's write-up. With no witness, this case is case 2's fallback (RP38-5).
+
+**What closed RP41-5.** `translog-restore` still does not check that no slot runs, and no longer needs to: a running slot cannot append while the log is frozen, and a slot that loaded the key refuses to sign until the re-append. Stopping the slots was the only protection before the gate; it is not a step any more.
 
 `docs/DEPLOY.md` § Backups points here.
 
 ## Metrics and alerts
 
-`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`, `vaultaire_translog_checkpoint_refusals_total{reason}` (every reason at 0 from boot). Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointRefused** (page: any refusal in 30 min, per reason), **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**; the job is in `PeriodicJobStale`.
+`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`, `vaultaire_translog_checkpoint_refusals_total{reason}` (every reason at 0 from boot), `vaultaire_translog_append_refusals_total{reason}` (`behind_highwater`, `highwater_unreadable`, at 0 from boot; a frozen log's refusals are NOT in `append_failures_total`). Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointRefused** (page: any refusal in 30 min, per reason), **TranslogFrozen** (page: any append refused in 30 min, per reason — RP42-1), **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**; the job is in `PeriodicJobStale`.
 
 ## Verifier key
 
