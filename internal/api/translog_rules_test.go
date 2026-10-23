@@ -15,15 +15,18 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 	file, _ := readRuleFile(t, "vaultaire-translog.yml")
 	require.Len(t, file.Groups, 1)
 	rules := map[string]string{}
+	severity := map[string]string{}
 	for _, r := range file.Groups[0].Rules {
 		rules[r.Alert] = r.Expr
-		assert.Equal(t, "warning", r.Labels["severity"], r.Alert)
+		severity[r.Alert] = r.Labels["severity"]
 	}
-	require.Len(t, rules, 2)
+	require.Len(t, rules, 3)
+	assert.Equal(t, map[string]string{"TranslogCheckpointStale": "warning", "TranslogAppendFailing": "warning",
+		"TranslogCheckpointRefused": "page"}, severity, "a refusal to sign pages (RP37-11)")
 	exported := map[string]bool{
 		"vaultaire_translog_size": true, "vaultaire_translog_checkpoint_size": true,
 		"vaultaire_translog_checkpoint_timestamp_seconds": true, "vaultaire_translog_signing_key_loaded": true,
-		"vaultaire_translog_append_failures_total": true,
+		"vaultaire_translog_append_failures_total": true, "vaultaire_translog_checkpoint_refusals_total": true,
 	}
 	names := regexp.MustCompile(`vaultaire_[a-z_]+`)
 	for alert, expr := range rules {
@@ -38,7 +41,7 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 
 	raw, err := os.ReadFile("../../deploy/monitoring/tests/vaultaire-translog_test.yml")
 	require.NoError(t, err)
-	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing"} {
+	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing", "TranslogCheckpointRefused"} {
 		assert.Contains(t, string(raw), s)
 	}
 }

@@ -82,3 +82,46 @@ tests:
             exp_annotations:
               summary: "Transparency log: 1 server_build append(s) failed in the last hour"
               description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
+
+  # A restore behind the high-water: the job refuses every 10 min — pages
+  # at the first refusal, per reason; the reasons at 0 stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_checkpoint_refusals_total{reason="behind_highwater"}'
+        values: '0 0 0 1 1 1 1 1 1 1 1 1 1 2'
+      - series: 'vaultaire_translog_checkpoint_refusals_total{reason="rewritten"}'
+        values: '0x13'
+      - series: 'vaultaire_translog_checkpoint_refusals_total{reason="highwater_unreadable"}'
+        values: '0x13'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: TranslogCheckpointRefused
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TranslogCheckpointRefused
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              reason: behind_highwater
+            exp_annotations:
+              summary: "Transparency log: the checkpoint job refused to sign (behind_highwater)"
+              description: "The translog_checkpoint job refused to sign: behind_highwater. Do NOT re-sign and do NOT delete the high-water file. rewritten / behind_highwater after a database restore: follow docs/TRANSPARENCY.md § After a database restore BEFORE the signing key is loaded again. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater). journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'."
+      - eval_time: 13m
+        alertname: TranslogCheckpointRefused
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              reason: behind_highwater
+            exp_annotations:
+              summary: "Transparency log: the checkpoint job refused to sign (behind_highwater)"
+              description: "The translog_checkpoint job refused to sign: behind_highwater. Do NOT re-sign and do NOT delete the high-water file. rewritten / behind_highwater after a database restore: follow docs/TRANSPARENCY.md § After a database restore BEFORE the signing key is loaded again. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater). journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'."
+
+  # The series at 0 from boot (pre-created): silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_checkpoint_refusals_total{reason="rewritten"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: TranslogCheckpointRefused
+        exp_alerts: []

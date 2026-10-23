@@ -17,6 +17,10 @@ var (
 		Name: "vaultaire_translog_append_failures_total",
 		Help: "Transparency-log appends that failed (refused entry, database error), by entry kind.",
 	}, []string{"kind"})
+	checkpointRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_translog_checkpoint_refusals_total",
+		Help: "Checkpoint passes that refused to sign (rewritten: the log does not extend a signed tree; behind_highwater: the database was restored behind the newest tree this box signed; highwater_unreadable: the high-water file cannot be read).",
+	}, []string{"reason"})
 	signingKeyLoaded = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vaultaire_translog_signing_key_loaded",
 		Help: "1 when this process has the checkpoint signing key (credential translog_signing_key, TRANSLOG_SIGNING_KEY_FILE or TRANSLOG_SIGNING_KEY); 0 = entries append, nothing is signed.",
@@ -26,6 +30,9 @@ var (
 func init() {
 	for _, k := range translog.Kinds() {
 		appendFailures.WithLabelValues(k)
+	}
+	for _, r := range RefusalReasons() {
+		checkpointRefusals.WithLabelValues(r)
 	}
 }
 
@@ -40,7 +47,7 @@ func SetSigningKeyLoaded(loaded bool) {
 
 // Collectors are the process-state series.
 func Collectors() []prometheus.Collector {
-	return []prometheus.Collector{appendFailures, signingKeyLoaded}
+	return []prometheus.Collector{appendFailures, checkpointRefusals, signingKeyLoaded}
 }
 
 const stateTTL = 15 * time.Second

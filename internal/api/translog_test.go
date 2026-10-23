@@ -84,3 +84,15 @@ func TestTranslogCheckpointJob_ResultInJobRuns(t *testing.T) {
 	require.True(t, ok)
 	assert.False(t, res.Signed, "no key, nothing signed")
 }
+
+// RP37-11: the high-water file is TRANSLOG_HIGHWATER_FILE when absolute,
+// else the default under /opt/vaultaire/data (a Warn for a relative one).
+func TestTranslogHighwaterFile(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	logger := zap.New(core)
+	env := func(v string) func(string) string { return func(string) string { return v } }
+	assert.Equal(t, "/opt/vaultaire/data/translog/highwater", translogHighwaterFile(logger, env("")))
+	assert.Equal(t, "/srv/hw", translogHighwaterFile(logger, env("/srv/hw")))
+	assert.Equal(t, "/opt/vaultaire/data/translog/highwater", translogHighwaterFile(logger, env("relative/hw")))
+	assert.Len(t, logs.FilterLevelExact(zapcore.WarnLevel).All(), 1)
+}

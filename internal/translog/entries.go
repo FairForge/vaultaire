@@ -1,6 +1,7 @@
 package translog
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,8 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // The entry kinds. Entries become PUBLIC (GET /translog/…, then
@@ -28,30 +27,45 @@ const (
 	KindKeyCeremony = "key_ceremony"
 
 	// entryVersion is the body's "v": a change of any kind's fields is a
-	// new version.
+	// new version — except key_ceremony's v1 schema of #884 (a free-text
+	// statement), which was replaced before any ceremony entry existed
+	// (RP37-10: 0 on prod at the change), so v1 is the schema below.
 	entryVersion = 1
-	// maxStatement bounds a ceremony's statement text (bytes).
-	maxStatement = 2000
 )
 
-// The ceremonies a key_ceremony entry can record.
+// The actions a key_ceremony entry can record (docs/TRANSPARENCY.md
+// § Ceremony, docs/ENCRYPTION.md). A closed list: a ceremony that fits none
+// of them is a code change, never free text.
 const (
-	CeremonyMasterKeyInstall    = "master_key_install"
-	CeremonyMasterKeyRewrap     = "master_key_rewrap"
-	CeremonyEscrowShareRotation = "escrow_share_rotation"
-	CeremonyRecoveryRealm       = "recovery_realm"
-	CeremonyTranslogKeyInstall  = "translog_key_install"
+	ActionKeyGenerated  = "key_generated"  // a key was generated (on the box, offline)
+	ActionKeyInstalled  = "key_installed"  // sealed as the service's credential (TPM)
+	ActionKeyRewrapped  = "key_rewrapped"  // tenant keys re-wrapped under it (master re-key)
+	ActionKeyRotated    = "key_rotated"    // it replaced the previous key of its role
+	ActionKeyRetired    = "key_retired"    // destroyed: its credential and its shares
+	ActionEscrowSplit   = "escrow_split"   // split into trustee shares (shares, threshold)
+	ActionEscrowTested  = "escrow_tested"  // threshold shares recombined to the same fingerprint
+	ActionRealmEnrolled = "realm_enrolled" // a recovery realm enrolled with it (F-19)
+	ActionLogRestored   = "log_restored"   // the database was restored behind a signed checkpoint
 )
 
-var ceremonies = map[string]bool{
-	CeremonyMasterKeyInstall: true, CeremonyMasterKeyRewrap: true, CeremonyEscrowShareRotation: true,
-	CeremonyRecoveryRealm: true, CeremonyTranslogKeyInstall: true,
-}
+// The keys a key_ceremony entry can name, by role.
+const (
+	KeyMasterKey          = "master_key"           // ENCRYPTION_MASTER_KEY (F-14)
+	KeyTranslogSigningKey = "translog_signing_key" // this log's checkpoint key
+	KeyRecoveryRealmKey   = "recovery_realm_key"   // a recovery realm's key (F-19)
+)
 
-// Ceremonies lists the ceremony names, for a tool's usage text.
-func Ceremonies() []string {
-	return []string{CeremonyMasterKeyInstall, CeremonyMasterKeyRewrap, CeremonyEscrowShareRotation, CeremonyRecoveryRealm, CeremonyTranslogKeyInstall}
-}
+var (
+	ceremonyActions = []string{ActionKeyGenerated, ActionKeyInstalled, ActionKeyRewrapped, ActionKeyRotated, ActionKeyRetired,
+		ActionEscrowSplit, ActionEscrowTested, ActionRealmEnrolled, ActionLogRestored}
+	keyRoles = []string{KeyMasterKey, KeyTranslogSigningKey, KeyRecoveryRealmKey}
+)
+
+// CeremonyActions lists the actions, for a tool's usage text.
+func CeremonyActions() []string { return append([]string(nil), ceremonyActions...) }
+
+// KeyRoles lists the key roles.
+func KeyRoles() []string { return append([]string(nil), keyRoles...) }
 
 // Entry is one log entry of a known kind.
 type Entry interface {
@@ -104,13 +118,29 @@ func (b ServerBuild) validate() error {
 	return nil
 }
 
-// KeyCeremony is a key ceremony. It names the key by fingerprint — never the
-// key, a share or a participant.
+// KeyCeremony is a key ceremony. Every field is enumerated, a number or a
+// fixed shape (RP37-10): the log is public and permanent (the tables refuse
+// DELETE), so there is no free text in which a name, an address or a tenant
+// could be written. It names the key by role and fingerprint — never the
+// key, a share or a participant. What a person would say goes in the
+// referenced document, which we can correct; the entry cannot be.
 type KeyCeremony struct {
-	Ceremony       string `json:"ceremony"`        // one of Ceremonies()
+	Action         string `json:"action"`          // one of CeremonyActions()
+	KeyRole        string `json:"key_role"`        // one of KeyRoles()
 	KeyFingerprint string `json:"key_fingerprint"` // "sha256:" + 64 hex
 	Participants   int    `json:"participants"`    // how many people took part (1–20)
-	Statement      string `json:"statement"`       // what was done, plain text (≤ 2000 bytes)
+	Shares         int    `json:"shares"`          // trustee shares written (0 = none, else 2–20)
+	Threshold      int    `json:"threshold"`       // shares that recombine the key (0 with no shares)
+	// log_restored only (0 / false otherwise): the size of the newest tree
+	// the key had signed (the high-water file), the size the restored
+	// database holds, and whether the log continues under a new origin.
+	SignedSize   int64 `json:"signed_size"`
+	RestoredSize int64 `json:"restored_size"`
+	NewOrigin    bool  `json:"new_origin"`
+	// Reference is "" or a page of ours that says more: a pull request, a
+	// commit, or a docs/ file at a commit of github.com/FairForge/vaultaire
+	// (reReference) — never a URL with free words in it.
+	Reference string `json:"reference"`
 }
 
 // Kind implements Entry.
@@ -119,9 +149,17 @@ func (KeyCeremony) Kind() string { return KindKeyCeremony }
 // DedupKey: every ceremony is its own entry.
 func (KeyCeremony) DedupKey() string { return "" }
 
+// reReference: the only URLs a ceremony may point at. Fixed-length hex
+// (a full 40-hex commit) so no short id fits; a docs path is upper-case
+// file names only.
+var reReference = regexp.MustCompile(`^https://github\.com/FairForge/vaultaire/(pull/[1-9][0-9]{0,5}|commit/[0-9a-f]{40}|blob/[0-9a-f]{40}/docs/[A-Z][A-Z0-9_]{0,40}\.md)$`)
+
 func (c KeyCeremony) validate() error {
-	if !ceremonies[c.Ceremony] {
-		return fmt.Errorf("ceremony: one of %s", strings.Join(Ceremonies(), ", "))
+	if !contains(ceremonyActions, c.Action) {
+		return fmt.Errorf("action: one of %s", strings.Join(ceremonyActions, ", "))
+	}
+	if !contains(keyRoles, c.KeyRole) {
+		return fmt.Errorf("key_role: one of %s", strings.Join(keyRoles, ", "))
 	}
 	if !reFinger.MatchString(c.KeyFingerprint) {
 		return errors.New("key_fingerprint: sha256: followed by 64 lowercase hex")
@@ -129,47 +167,85 @@ func (c KeyCeremony) validate() error {
 	if c.Participants < 1 || c.Participants > 20 {
 		return errors.New("participants: 1–20")
 	}
-	return checkStatement(c.Statement)
+	switch {
+	case c.Shares == 0 && c.Threshold == 0:
+		if c.Action == ActionEscrowSplit || c.Action == ActionEscrowTested {
+			return fmt.Errorf("shares: %s names its shares (2–20) and threshold", c.Action)
+		}
+	case c.Shares < 2 || c.Shares > 20:
+		return errors.New("shares: 0, or 2–20")
+	case c.Threshold < 1 || c.Threshold > c.Shares:
+		return errors.New("threshold: 1–shares")
+	}
+	if c.Action == ActionLogRestored {
+		if c.KeyRole != KeyTranslogSigningKey {
+			return errors.New("key_role: log_restored is the translog_signing_key's")
+		}
+		if c.SignedSize < 1 || c.RestoredSize < 0 || c.RestoredSize >= c.SignedSize {
+			return errors.New("signed_size, restored_size: the database restored behind the newest signed tree (0 ≤ restored < signed)")
+		}
+	} else if c.SignedSize != 0 || c.RestoredSize != 0 || c.NewOrigin {
+		return errors.New("signed_size, restored_size, new_origin: log_restored only")
+	}
+	if c.Reference != "" && !reReference.MatchString(c.Reference) {
+		return errors.New("reference: empty, or https://github.com/FairForge/vaultaire/ pull/<n>, commit/<40 hex> or blob/<40 hex>/docs/<NAME>.md")
+	}
+	return nil
 }
 
-// What a statement must not contain: the shapes that name a person, a tenant
-// or an object. A false positive (a clock time written 12:30:00) is refused
-// too; say it another way.
-var identifyingText = []struct {
-	re   *regexp.Regexp
-	what string
-}{
-	{regexp.MustCompile(`@`), "an e-mail address"},
-	{regexp.MustCompile(`\b\d{1,3}(\.\d{1,3}){3}\b`), "an IPv4 address"},
-	{regexp.MustCompile(`(?i)([0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}`), "an IPv6 address"},
-	{regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`), "a UUID (tenant ids are UUIDs)"},
-	{regexp.MustCompile(`(?i)\btenants?[-_:/=#][0-9a-z]`), "a tenant id"},
-	{regexp.MustCompile(`(^|[\s"'(])t-[0-9A-Za-z_.-]+/`), "an object path (t-<tenant>/…)"},
-}
-
-func checkStatement(s string) error {
-	if strings.TrimSpace(s) == "" {
-		return errors.New("statement: empty")
-	}
-	if len(s) > maxStatement {
-		return fmt.Errorf("statement: longer than %d bytes", maxStatement)
-	}
-	if !utf8.ValidString(s) {
-		return errors.New("statement: not UTF-8")
-	}
-	for _, r := range s {
-		if r != '\n' && !unicode.IsPrint(r) {
-			return errors.New("statement: a control character")
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
 		}
 	}
-	return checkText("statement", s)
+	return false
 }
 
-func checkText(field, s string) error {
-	for _, it := range identifyingText {
-		if it.re.MatchString(s) {
-			return fmt.Errorf("%s: looks like %s — the log is public", field, it.what)
-		}
+// RetryableCeremony is c appended under a retry key (RP37-14, the ceremony
+// route's Idempotency-Key): its DedupKey makes a second append of the same
+// key return the first entry's index, in Append's own transaction — a
+// client retrying after a commit it never saw appends nothing. The key is
+// hashed with the actor by the caller; it lives in translog_entries.dedup_key,
+// never in the public body (the body is c's, byte for byte).
+func RetryableCeremony(c KeyCeremony, retryKey string) Entry {
+	return retryableCeremony{KeyCeremony: c, key: retryKey}
+}
+
+type retryableCeremony struct {
+	KeyCeremony
+	key string
+}
+
+func (r retryableCeremony) DedupKey() string {
+	if r.key == "" {
+		return ""
+	}
+	return KindKeyCeremony + ":" + r.key
+}
+
+// ParseKeyCeremony reads a ceremony from JSON strictly: a field outside the
+// allow-list (the removed "statement" included) is refused, then the entry
+// is validated.
+func ParseKeyCeremony(raw []byte) (KeyCeremony, error) {
+	var c KeyCeremony
+	if err := strictUnmarshal(raw, &c); err != nil {
+		return KeyCeremony{}, fmt.Errorf("translog: key_ceremony: %w", err)
+	}
+	if err := c.validate(); err != nil {
+		return KeyCeremony{}, fmt.Errorf("translog: key_ceremony entry refused: %w", err)
+	}
+	return c, nil
+}
+
+func strictUnmarshal(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if dec.More() {
+		return errors.New("trailing data")
 	}
 	return nil
 }
@@ -183,7 +259,8 @@ func AllowedFields(kind string) []string {
 	case KindServerBuild:
 		return []string{"git_sha", "binary_sha256", "build_time", "go_version"}
 	case KindKeyCeremony:
-		return []string{"ceremony", "key_fingerprint", "participants", "statement"}
+		return []string{"action", "key_role", "key_fingerprint", "participants", "shares", "threshold",
+			"signed_size", "restored_size", "new_origin", "reference"}
 	}
 	return nil
 }
@@ -244,11 +321,11 @@ func Decode(body []byte) (Decoded, error) {
 	switch raw.Kind {
 	case KindServerBuild:
 		var b ServerBuild
-		err = json.Unmarshal(raw.Entry, &b)
+		err = strictUnmarshal(raw.Entry, &b)
 		d.Entry = b
 	case KindKeyCeremony:
 		var c KeyCeremony
-		err = json.Unmarshal(raw.Entry, &c)
+		err = strictUnmarshal(raw.Entry, &c)
 		d.Entry = c
 	default:
 		return Decoded{}, fmt.Errorf("translog: decode: unknown kind %q", raw.Kind)

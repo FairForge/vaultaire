@@ -348,7 +348,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// entries append and nothing is signed.
 	translogSigner := translogSigningKeyOrFatal(logger, os.Getenv, os.ReadFile)
 	if s.db != nil {
-		s.translog = logstore.New(s.db, translogSigner)
+		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
 	}
 

@@ -7,6 +7,8 @@
 #   vaultaire_translog_checkpoint_timestamp_seconds   when it was signed, 0 = never                  (translog_checkpoints)
 #   vaultaire_translog_signing_key_loaded             1 = this process has the signing key (credential translog_signing_key)
 #   vaultaire_translog_append_failures_total{kind}    appends that failed (server_build, key_ceremony)
+#   vaultaire_translog_checkpoint_refusals_total{reason}  checkpoint passes that refused to sign (RP37-11):
+#       rewritten / behind_highwater / highwater_unreadable — every reason a series at 0 from boot
 #
 # The translog_checkpoint job signs a checkpoint every 10 min when the tree
 # grew; without the key it signs nothing and nothing here fires (the key is
@@ -18,7 +20,7 @@
 #   journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'
 #   — "does not extend checkpoint N" means the stored log no longer extends
 #   the last signed tree: STOP, do not re-sign; that is the event the log
-#   exists to expose (docs/TRANSPARENCY.md § Incidents).
+#   exists to expose (docs/TRANSPARENCY.md § After a database restore).
 groups:
   - name: vaultaire-translog
     rules:
@@ -36,6 +38,22 @@ groups:
         annotations:
           summary: "Transparency log: no checkpoint signed for {{ $value | humanizeDuration }} while entries wait"
           description: "The signing key is loaded and the log has grown past its newest checkpoint, which is more than an hour old. The translog_checkpoint job (every 10 min) is failing or refusing to sign: GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'translog checkpoint'. A 'does not extend' error is a rewritten history — never re-sign over it (docs/TRANSPARENCY.md)."
+
+      # The job refused to sign: the stored log does not extend a tree the key
+      # already signed (rewritten), the database holds fewer entries than the
+      # newest tree this box signed (behind_highwater — a restore), or the
+      # high-water file cannot be read. This is the one event the log exists
+      # to expose, so it pages (RP37-11: before, it surfaced only as the
+      # stale warning an hour later). Every pass re-proves, so it stays
+      # firing until the procedure in docs/TRANSPARENCY.md is done.
+      - alert: TranslogCheckpointRefused
+        expr: sum by (reason) (increase(vaultaire_translog_checkpoint_refusals_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Transparency log: the checkpoint job refused to sign ({{ $labels.reason }})"
+          description: "The translog_checkpoint job refused to sign: {{ $labels.reason }}. Do NOT re-sign and do NOT delete the high-water file. rewritten / behind_highwater after a database restore: follow docs/TRANSPARENCY.md § After a database restore BEFORE the signing key is loaded again. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater). journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'."
 
       # An append failed: a server_build at boot (never blocks the boot) or a
       # ceremony entry. The producer logged an Error line with the reason.
