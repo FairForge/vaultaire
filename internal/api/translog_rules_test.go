@@ -20,9 +20,9 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 		rules[r.Alert] = r.Expr
 		severity[r.Alert] = r.Labels["severity"]
 	}
-	require.Len(t, rules, 5)
+	require.Len(t, rules, 6)
 	assert.Equal(t, map[string]string{"TranslogCheckpointStale": "warning", "TranslogAppendFailing": "warning",
-		"TranslogCheckpointRefused": "page", "TranslogFrozen": "page", "TranslogWitnessStale": "warning"}, severity,
+		"TranslogCheckpointRefused": "page", "TranslogFrozen": "page", "TranslogWitnessStale": "warning", "TranslogAnchorStale": "warning"}, severity,
 		"a refusal to sign pages (RP37-11); so does a frozen log (RP42-1); a witness that stops cosigning warns (K4c-2)")
 	exported := map[string]bool{
 		"vaultaire_translog_size": true, "vaultaire_translog_checkpoint_size": true,
@@ -31,6 +31,9 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 		"vaultaire_translog_append_refusals_total": true,
 		"vaultaire_translog_witnesses_configured":  true, "vaultaire_translog_cosigned_size": true,
 		"vaultaire_translog_cosignature_timestamp_seconds": true, "vaultaire_translog_witness_cosign_total": true,
+		"vaultaire_translog_anchors_configured": true, "vaultaire_translog_anchored_size": true,
+		"vaultaire_translog_anchor_timestamp_seconds": true, "vaultaire_translog_anchor_total": true,
+		"vaultaire_translog_anchor_pending": true,
 	}
 	names := regexp.MustCompile(`vaultaire_[a-z_]+`)
 	for alert, expr := range rules {
@@ -48,9 +51,13 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 	assert.Contains(t, ws, "> 7200", "two hours")
 	assert.Contains(t, ws, "max(vaultaire_translog_witnesses_configured) > 0", "no witness, no alert")
 	assert.Contains(t, ws, "max(vaultaire_translog_checkpoint_size) > max(vaultaire_translog_cosigned_size)", "an idle log is not stale")
+	as := rules["TranslogAnchorStale"]
+	assert.Contains(t, as, "> 7200", "two hours")
+	assert.Contains(t, as, "max by (kind) (vaultaire_translog_anchors_configured) > 0", "no anchors configured, no alert")
+	assert.Contains(t, as, "max by (kind) (vaultaire_translog_anchored_size) < on () group_left max(vaultaire_translog_checkpoint_size)", "an idle log is not stale")
 	raw, err := os.ReadFile("../../deploy/monitoring/tests/vaultaire-translog_test.yml")
 	require.NoError(t, err)
-	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing", "TranslogCheckpointRefused", "TranslogFrozen", "TranslogWitnessStale"} {
+	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing", "TranslogCheckpointRefused", "TranslogFrozen", "TranslogWitnessStale", "TranslogAnchorStale"} {
 		assert.Contains(t, string(raw), s)
 	}
 }

@@ -142,6 +142,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(logstore.Collectors()...)
 		if s.db != nil {
 			reg.MustRegister(logstore.NewStateCollector(s.db, s.log()))
+			reg.MustRegister(logstore.NewAnchorStateCollector(s.db, s.log()))
 		}
 		if s.db != nil {
 			reg.MustRegister(newEntitlementsExpiringCollector(s.db, s.log()))

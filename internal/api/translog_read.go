@@ -222,7 +222,7 @@ func (s *Server) registerTranslogReadRoutes() {
 	}
 	// HEAD too (RP41-6): the same headers, no body — on a public origin's
 	// other hosts it is the S3 API's like GET, as the catch-all was.
-	for _, p := range []string{"/translog/checkpoint", "/translog/tile/*"} {
+	for _, p := range []string{"/translog/checkpoint", "/translog/tile/*", "/translog/anchor/*"} {
 		s.router.Get(p, serve)
 		s.router.Head(p, serve)
 	}

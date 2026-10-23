@@ -149,6 +149,9 @@ func (s *Server) registerJobs() {
 	if s.webhookRetry != nil {
 		s.jobs.Register(s.webhookRetry.spec())
 	}
+	if s.translogAnchor != nil {
+		s.jobs.Register(s.translogAnchor.spec())
+	}
 	if s.translogCheckpoint != nil {
 		s.jobs.Register(s.translogCheckpoint.spec())
 	}

@@ -30,7 +30,8 @@ func TrustHostRouter(h hosts.Hosts, trust, fallback http.Handler) http.Handler {
 }
 
 // newTrustRouter is what a trust host serves: GET and HEAD of
-// /translog/checkpoint and /translog/tile/… (behind translog_public, a
+// /translog/checkpoint, /translog/tile/… and /translog/anchor/<size>.ots
+// (K4c-3a) (behind translog_public, a
 // signed or presigned S3 request 404), /.well-known/security.txt, and a 404
 // for everything else — any path, any method, signed or not (D-P33-6: a 404,
 // not a 301 to the canonical origin; no trust page exists yet). Its own
@@ -51,7 +52,7 @@ func (s *Server) newTrustRouter() http.Handler {
 			}
 			h.ServeHTTP(w, r)
 		}
-		for _, p := range []string{"/translog/checkpoint", "/translog/tile/*"} {
+		for _, p := range []string{"/translog/checkpoint", "/translog/tile/*", "/translog/anchor/*"} {
 			r.Get(p, serve)
 			r.Head(p, serve)
 		}
@@ -68,5 +69,5 @@ func trustNotFound(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write([]byte("404 not found: this host serves the transparency log only (/translog/checkpoint, /translog/tile/…)\n"))
+	_, _ = w.Write([]byte("404 not found: this host serves the transparency log only (/translog/checkpoint, /translog/tile/…, /translog/anchor/…)\n"))
 }
