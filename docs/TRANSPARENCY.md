@@ -85,6 +85,22 @@ Exempt, with the reason in the map: the site statistics, the unread count, the b
 
 The switch of the record is itself an act that widens our access (contract rule 7), so it is not left to `audit_logs`. Every write of a `translog_*` flag row — set or clear, global or per tenant, from the admin API or the dashboard; both go through `flags.Service`, whose write guard is `internal/api/translog_flags.go` — appends a **`log_policy`** entry BEFORE the row is written. If the append fails (a frozen log, the database), the change is refused and nothing is written: the API answers 503 `{"error":"log_frozen"}` or `{"error":"flag_change_not_logged"}`, the dashboard a 503 page. A per-tenant OFF row of `translog_admin_reads` or `translog_customer_view` while the flag is on globally is refused before anything is appended (409 `flag_not_exemptible`); a tenant row naming no tenant is 404 `tenant_not_found` (its commitment needs the tenant's salt). A tenant's row carries a nonce and commitment under the tenant's salt, so the tenant finds the change in its own view (`kind: log_policy`, with `flag`, `action`, `enabled`); the global row's carries neither. The entry names no tenant, no operator and no reason: the operator and the old value stay in `audit_logs` (`flag.set` / `flag.unset`).
 
+### Before the global flip
+
+`translog_admin_reads` ON globally is the owner's flip. Run this list first (Stage 1a Prompt 34a, Part 0b):
+
+1. **The gate's two holes are closed:** RP44-1 (one parser, a subject that is no tenant is a 404) and RP44-2 (ON wins, the switch is a `log_policy` entry), deployed in `83dcfbd5` (#922). Check `/version` is that build or later.
+2. **The signing key is installed** (§ The signing key, the ceremony): `vaultaire_translog_signing_key_loaded 1` and a `translog checkpoint signed` line. Without it the entries exist but nothing is signed: no reader can hold a checkpoint the log must extend, and the tenant view's `checkpoint_size` stays null.
+3. **The witness cron runs** off the box (§ The witness), and `~/.translog-witness/cosigned` moves forward within its interval. That is what keeps a restore byte-exact (§ After a database restore).
+4. **`trust.stored.cloud` resolves** (proxied), the origin certificate carries the SAN, and `TLS_CERT_PROBE_TARGETS` names it (RP41-2), so the public can read what is logged. With `translog_public` still OFF the entries are recorded but not yet published.
+5. **What a freeze does to operators** (RP43-12, RP44-3). With the flag ON globally and the log frozen (§ After a database restore), or the database refusing the append:
+   - no admin read of customer metadata is served: tenant pages, the audit trail, the job list (`/api/v1/admin/jobs`, `/admin/system`), the flag list, the money routes (`POST …/payments`, `/entitlement`, `/refunds` answer the record, so they are reads too), resolve-null and the chunk dry runs. There is no break-glass;
+   - no `translog_*` flag can be changed;
+   - kill-switches still flip: `PUT /api/v1/admin/flags/{key}` of any other flag answers only the row it wrote, so it is not gated;
+   - read the checkpoint job with `psql … job_runs`, and the counters on the slot's own port (`curl 127.0.0.1:$(cat /opt/vaultaire/ACTIVE_PORT)/metrics`).
+
+Then: `PUT /api/v1/admin/flags/translog_admin_reads {"enabled": true}` with no `tenant_id`. That write is itself the log's next entry: `log_policy`, `scope: global`.
+
 ### What the log does not see
 
 The log records what goes through the application. **A `feature_flags` row written by SQL on the box** — a `translog_admin_reads` row set OFF, the global row deleted — leaves no `log_policy` entry: only the API and the dashboard write through the guard. Under ON-wins a per-tenant OFF row written that way exempts no one, but a global row deleted or set OFF by SQL turns the record off silently. (An account erasure deletes the erased tenant's rows with the tenant; nothing of a live tenant is touched.) **Root on the box reading Postgres directly** (`psql`, a dump, a copy of the data directory) leaves no entry — and neither does anything else done with the box's own privileges: a binary that never logs, a debugger attached to a slot. Until the attested data plane exists (contract rule 10: measured image, no SSH, published measurements), nothing in this log covers that, and we do not claim it does. The `server_build` entries say which binaries ran; they do not prove that nothing else did.
