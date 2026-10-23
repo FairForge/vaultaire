@@ -11,6 +11,9 @@
 //	GEYSER_ACCESS_KEY=… GEYSER_SECRET_KEY=… GEYSER_BUCKET=… \
 //	  geyser-put-bench -sizes 256MiB,1GiB -shapes off,default,256MiB:16:4GiB
 //
+// -endpoint picks the Vail site (default LA1); -multipart-min sets
+// GEYSER_MULTIPART_MIN for every shape but off.
+//
 // A shape is `off` (the streamed PUT), `default`, or
 // `<part max>:<concurrency>[:<budget>]`. One
 // JSON line per object on stdout.
@@ -59,6 +62,7 @@ func main() {
 	endpoint := flag.String("endpoint", "", "Vail endpoint (default: the driver's LA1)")
 	noGet := flag.Bool("no-get", false, "skip the read-back")
 	keep := flag.Bool("keep", false, "leave the multipart objects in place (canaries)")
+	multipartMin := flag.String("multipart-min", "", "GEYSER_MULTIPART_MIN for every shape but `off` (default: the driver's)")
 	raw := flag.Bool("raw", false, "time Vail's multipart calls one by one (-raw-part, -raw-parts, -raw-conc) instead")
 	rawPart := flag.String("raw-part", "16MiB", "-raw: part size")
 	rawParts := flag.String("raw-parts", "4,16", "-raw: part counts")
@@ -86,6 +90,9 @@ func main() {
 		shape = strings.TrimSpace(shape)
 		if err := applyShape(shape); err != nil {
 			log.Fatal(err)
+		}
+		if shape != "off" && *multipartMin != "" {
+			_ = os.Setenv("GEYSER_MULTIPART_MIN", *multipartMin)
 		}
 		var opts []drivers.GeyserOption
 		if *endpoint != "" {
