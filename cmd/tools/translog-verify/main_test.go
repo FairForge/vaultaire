@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,8 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/ots"
+	"github.com/FairForge/vaultaire/internal/translog/ots/otstest"
 )
 
 func logOf(t *testing.T, n int, rewrite int) *translog.Memory {
@@ -192,4 +196,82 @@ func TestVerify_MinCosignatures(t *testing.T) {
 	require.NoError(t, err)
 	_, err = verify(bare, 1, plain)
 	assert.ErrorContains(t, err, "not a cosignature/v1 key")
+}
+
+// anchoredSource serves a cosigned checkpoint and an .ots proof of it.
+type anchoredSource struct {
+	cosignedSource
+	proof func(logNote []byte) []byte // nil = no anchor
+}
+
+func (s anchoredSource) AnchorOTS(ctx context.Context, size int64) ([]byte, error) {
+	msg, _, _, err := s.MemorySource.CheckpointNote(ctx) // the note as the log signed it
+	if err != nil {
+		return nil, err
+	}
+	if s.proof == nil {
+		return nil, translog.ErrNoAnchor
+	}
+	return s.proof(msg), nil
+}
+
+// K4c-3a: translog-verify -anchors fetches the checkpoint's .ots proof,
+// checks it is of SHA-256 of the note as the log signed it (cosignature
+// lines left out), keeps it beside -state and says each attestation's state
+// — verifying it against Bitcoin is `ots verify`'s job, and it says so.
+func TestVerify_Anchors_PrintsStateAndChecksTheDigest(t *testing.T) {
+	// Arrange: a log of 9, cosigned, anchored at one calendar.
+	ctx := context.Background()
+	skey, vkey, err := translog.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	ls, err := translog.NewSigner(skey)
+	require.NoError(t, err)
+	w, _ := cosignerAt(t, "witness.test/a", time.Now())
+	cal := otstest.New(t)
+	serve := func(proof func([]byte) []byte) string {
+		src := anchoredSource{cosignedSource{&translog.MemorySource{Log: logOf(t, 9, -1), Signer: ls},
+			func(cp []byte) string { return lineOf(t, cp, w) }}, proof}
+		mux := http.NewServeMux()
+		mux.Handle("/translog/", http.StripPrefix("/translog/", translog.NewHandler(src)))
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		return srv.URL + "/translog"
+	}
+	stamp := func(b []byte) []byte {
+		p, err := ots.NewClient("test").Submit(ctx, cal.URL, sha256.Sum256(b))
+		require.NoError(t, err)
+		return p
+	}
+	dir := t.TempDir()
+
+	// Act
+	var out bytes.Buffer
+	err = run(&out, options{url: serve(stamp), vkey: vkey, state: filepath.Join(dir, "checkpoint"), entry: -1, anchors: true})
+
+	// Assert
+	require.NoError(t, err, out.String())
+	src := &translog.MemorySource{Log: logOf(t, 9, -1), Signer: ls}
+	logNote, _, _, err := src.CheckpointNote(ctx)
+	require.NoError(t, err)
+	want := sha256.Sum256(logNote)
+	assert.Contains(t, out.String(), "anchor ots: pending at "+cal.URL)
+	assert.Contains(t, out.String(), "ots verify -d "+hex.EncodeToString(want[:]))
+	assert.Contains(t, out.String(), "not verified here")
+	saved, err := os.ReadFile(filepath.Join(dir, "checkpoint-9.ots"))
+	require.NoError(t, err, "the proof is kept beside the state")
+	d, _, err := ots.Describe(saved)
+	require.NoError(t, err)
+	assert.Equal(t, want[:], d)
+
+	// A proof of another note (here: with the cosignature line) fails the run.
+	var bad bytes.Buffer
+	err = run(&bad, options{url: serve(func(b []byte) []byte { return stamp(append(b, lineOf(t, b, w)...)) }), vkey: vkey,
+		state: filepath.Join(t.TempDir(), "checkpoint"), entry: -1, anchors: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "anchor")
+
+	// No anchor yet: said, not a failure.
+	var none bytes.Buffer
+	require.NoError(t, run(&none, options{url: serve(nil), vkey: vkey, state: filepath.Join(t.TempDir(), "checkpoint"), entry: -1, anchors: true}))
+	assert.Contains(t, none.String(), "anchors: none served for checkpoint 9")
 }
