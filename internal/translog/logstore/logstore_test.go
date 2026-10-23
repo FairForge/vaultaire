@@ -419,7 +419,7 @@ func TestTranslogStateCollector(t *testing.T) {
 	c := NewStateCollector(db, nil)
 	c.ttl = 0
 	n := promtest.CollectAndCount(c)
-	assert.Equal(t, 3, n, "size, checkpoint size, checkpoint time")
+	assert.Equal(t, 5, n, "size, checkpoint size, checkpoint time, cosigned size, cosignature time")
 	_ = time.Second
 }
 
@@ -429,10 +429,10 @@ func TestTranslogStateCollector(t *testing.T) {
 // under the lock).
 func TestTranslog_OnlyTheStoreWritesTheLogTables(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
-	// The log's three tables. translog_subjects (104, K4c-1) is tenant data
+	// The log's tables (and its cosignatures, 105). translog_subjects (104, K4c-1) is tenant data
 	// — the admin-read salts — written by internal/translog/adminread and
 	// erased by internal/account; it is not the log.
-	write := regexp.MustCompile(`(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+translog_(entries|hashes|checkpoints)\b`)
+	write := regexp.MustCompile(`(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+translog_(entries|hashes|checkpoints|cosignatures)\b`)
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

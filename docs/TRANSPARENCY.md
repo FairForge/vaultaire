@@ -21,7 +21,7 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 | `admin_read` | `scope` (closed list, below), `actor_role` (`admin` — a role, never the person), `nonce` (16 random bytes, hex) and `commitment` (HMAC-SHA256 under the read tenant's salt, hex) for a read of ONE tenant; both empty for a read across tenants | every admin route that answers customer metadata — a GET, or a POST/PUT/DELETE whose answer carries some — BEFORE it is served (K4c-1, § Admin reads), behind `translog_admin_reads` |
 | `log_policy` | `flag` (closed list: `translog_public`, `translog_admin_reads`, `translog_customer_view`), `action` (`set`, `clear`), `enabled` (the row's value; `false` for a clear), `scope` (`global`, `tenant`), `nonce` and `commitment` (HMAC-SHA256 under the tenant's salt with the label `stored.cloud/translog/log_policy`) for a tenant's row, both empty for the global row | every write of a `translog_*` flag row, from the admin API (`PUT`/`DELETE /api/v1/admin/flags/{key}`) or the dashboard (`/admin/flags/{key}/set`, `/clear`), BEFORE the row is written; an append that fails refuses the change (Stage 1a Prompt 34a, RP44-2; § The switch) |
 
-Not yet (K4c-2/3): client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring, the Rekor mirror, and a co-signature by an independent third party. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log).
+Not yet (K4c-3): client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring and the Rekor mirror. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log). K4c-2 (Stage 1a Prompt 34b) made the witness speak the public protocol — [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature) cosignatures, [c2sp.org/tlog-witness](https://c2sp.org/tlog-witness) `add-checkpoint` — and the log collect and serve them (§ The witness). **A cosignature by an independent third party is still not there**: it waits for the owner's applications (§ Third-party witnesses).
 
 On prod since 2026-10-22 16:07 UTC (`83ef6c9`): entry 0 is that build's `server_build`, its `binary_sha256` equal to `sha256sum /opt/vaultaire/bin/vaultaire-8001`.
 
@@ -118,30 +118,66 @@ go run ./cmd/tools/translog-verify -url https://trust.stored.cloud/translog -vke
 go run ./cmd/tools/translog-verify -url https://trust.stored.cloud/translog -vkey @translog.vkey -entry 0  # + inclusion of entry 0, printed
 ```
 
-It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you hold a checkpoint the log must extend; `translog-witness` (§ The witness) also co-signs and keeps a byte copy.
+It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you hold a checkpoint the log must extend; `translog-witness` (§ The witness) also cosigns and keeps a byte copy.
+
+**Require witnesses** (K4c-2): `-witness <vkey>` (repeatable; a witness's cosignature/v1 verifier key or `@file`) and `-min N` (default 1 with any `-witness`). The checkpoint is accepted only with N fresh cosignatures from those keys. A line that claims one of them and does not verify — forged, or copied from another checkpoint — fails the run outright; a cosignature older than `-max-age` (default 24 h; the log refreshes an idle checkpoint's every 6 h) or dated more than 5 min ahead does not count.
+
+```sh
+go run ./cmd/tools/translog-verify -url https://trust.stored.cloud/translog -vkey @translog.vkey -witness @witness.vkey -min 1
+```
 
 ## The witness
 
-K4b (Stage 1a Prompt 32; plan 43.6: "an independent party co-signing each checkpoint and keeping its own record"). `cmd/tools/translog-witness` (library `internal/translog/witness`, never linked into `cmd/vaultaire`) runs on **another machine**, against the public read side, and trusts nothing of ours but the pinned verifier key of the log. One pass:
-
-1. fetch the newest checkpoint and verify its signature;
-2. prove it extends the checkpoint the witness accepted last (`<dir>/checkpoint`). A fork at the same size, a rewritten prefix or a shrunk log is a non-zero exit, and nothing moves: the tiles of a refused tree are never kept;
-3. **mirror** byte for byte, under `<dir>/cache/` in the tlog-tiles layout itself, every full entry bundle and full level-0 hash tile it does not hold yet, plus the partial entry bundle at the checkpoint's size (replaced as it widens). Every entry's leaf hash is proven against the checkpoint before it is kept, and every tile is authenticated by `tlog.TileHashReader`. Full tiles are immutable, so they are never fetched again;
-4. **co-sign:** the log's note, opened with the log's key, signed again with the witness's own key (`note.Sign` keeps the verified signature). The note goes to `<dir>/cosigned` with both signature lines, and each new note is appended to `<dir>/cosigned.history` (append-only, base64, one per line).
-
-The accepted checkpoint moves forward only after every step passed. The witness refuses the log's own key as its `-key`.
+K4b (Stage 1a Prompt 32; plan 43.6: "an independent party co-signing each checkpoint and keeping its own record") and K4c-2 (Stage 1a Prompt 34b: "at least one external witness co-signing every checkpoint"). `cmd/tools/translog-witness` (library `internal/translog/witness`, never linked into `cmd/vaultaire`) runs on **another machine** and trusts nothing of ours but the pinned verifier key of the log. It cosigns with its **own** key in the [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature) form: cosignature/v1, ML-DSA-44 ("ML-DSA-44 SHOULD be used for new deployments"), timestamped — "a statement that the specified tree hash is consistent with all other historical views of the log observed by the cosigner … and that, as of the specified time, this is the largest consistent tree the cosigner has observed". The signing and verifying code is `transparency-dev/formats/note`'s, none of it ours.
 
 ```sh
-translog-keygen -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey   # the witness's OWN key, kept on that machine
-translog-witness -vkey @translog.vkey -key @$HOME/.translog-witness/witness.key           # one pass (-once, the default): for cron
-# */10 * * * *  translog-witness -vkey @… -key @… >> ~/.translog-witness/log 2>&1
+translog-keygen -cosignature -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey   # the witness's OWN key, kept on that machine
 ```
+
+It has two ways in, sharing **one state** (`<dir>/checkpoint`, the log's note it accepted and cosigned last) under **one lock** (`<dir>/lock`, flock — two passes at once used to write the same history line twice, RP42-5):
+
+1. **The pull pass** (`translog-witness -once`, the default; for cron), against the public read side:
+   1. fetch the newest checkpoint and verify its signature;
+   2. prove it extends the checkpoint accepted last. A fork at the same size, a rewritten prefix or a shrunk log is a non-zero exit, and nothing moves: the tiles of a refused tree are never kept;
+   3. **mirror** byte for byte, under `<dir>/cache/` in the tlog-tiles layout itself, every full entry bundle and full level-0 hash tile it does not hold yet, plus the partial entry bundle at the checkpoint's size (replaced as it widens). Every entry's leaf hash is proven against the checkpoint before it is kept, and every tile is authenticated by `tlog.TileHashReader`. Full tiles are immutable, so they are never fetched again;
+   4. **cosign** — unless that very checkpoint is cosigned already (a timestamped cosignature would add a history line every run).
+2. **`translog-witness serve`** ([c2sp.org/tlog-witness](https://c2sp.org/tlog-witness)): the log pushes each new checkpoint. `POST /add-checkpoint` with `old <size>`, the consistency proof from that size and the checkpoint note. The witness verifies the log's signature against its pinned key, checks that the old size is the size it holds and proves consistency from it, persists, and answers its cosignature line. The spec's codes: **404** an origin it does not witness; **403** no valid signature by the log's key ("a signature line's key name and ID match a trusted key but the signature itself fails to verify" included); **400** a malformed body, or an old size above the checkpoint's; **409** an old size that is not the one it holds — "the response body MUST consist of the tree size of the latest cosigned checkpoint in decimal, followed by a newline … `Content-Type` of `text/x.tlog.size`"; **422** a proof that does not verify, a non-empty proof from 0, or another root at the size it holds (logged to stderr: "it might be proof of log misbehavior"). `GET /<sha256(origin) hex>/checkpoint` is the monitor view (the note it cosigned last). It does **not** mirror: run the pull pass from cron beside it to keep the cache translog-restore reads.
+
+Either way the note goes to `<dir>/cosigned` with both signature lines, and each new note is appended to `<dir>/cosigned.history` (append-only, base64, one per line). The accepted checkpoint moves forward only after every step passed. The witness refuses the log's own key and any key that is not a cosignature/v1 one.
+
+```sh
+translog-witness -vkey @translog.vkey -key @$HOME/.translog-witness/witness.key           # one pull pass: for cron
+# */10 * * * *  translog-witness -vkey @… -key @… >> ~/.translog-witness/log 2>&1
+translog-witness serve -listen 127.0.0.1:7380 -vkey @translog.vkey -key @$HOME/.translog-witness/witness.key   # behind TLS (a reverse proxy, a bastion)
+```
+
+### The log collects
+
+After the `translog_checkpoint` job signs (never after a refusal: a refused log is never put in front of a witness), it submits the newest checkpoint to every witness of **`TRANSLOG_WITNESSES`** — witnesses separated by `;` or newlines, each `<name> <url> <vkey>`: our name for it (the metrics label), its submission prefix (https; http only to a loopback host, a lab) and its cosignature/v1 verifier key (0x04 Ed25519 — the public networks' witnesses — or 0x06 ML-DSA-44). At most 8. The protocol has no authentication beyond the checkpoint's signature, so it is plain env, no credential. Unset = one Info line and no collect step; a list that does not validate = one Error line and no witness.
+
+- A witness is asked when it has not cosigned the newest checkpoint, or its newest cosignature of it is older than 6 h (an idle log's cosignatures stay fresh for a reader's `-max-age`). `old` = the largest size the log holds a cosignature of by that key (0 = none), with the consistency proof from it.
+- **A 409** gets one more request, with the proof from the size the witness names (its own pull pass moved it, or an answer was lost). A witness naming a size **larger** than the log's newest checkpoint is a conflict and a Warn line: a restored database (§ After a database restore) or a fork.
+- **A 200** is verified against that witness's pinned key (the answer concatenated to the note and opened with that key alone; lines by other keys ignored, a line claiming the key that does not verify = `bad_answer`, a cosignature dated more than 5 min ahead = `bad_answer`). Each verified line is kept in **`translog_cosignatures`** (migration 105: `checkpoint_size, witness, key_id, line, cosigned_at, received_at`; append-only, infrastructure, never erased or exported).
+- **The read side serves `GET /translog/checkpoint` with the newest line of each witness appended** ([c2sp.org/signed-note](https://c2sp.org/signed-note): more signature lines). A reader with only the log's key still opens it (the lines are unknown signatures, not bad ones).
+- **A witness that is down never fails the signing.** Its outcome is in the run's `job_runs.result` (`witnesses: {name: {outcome, size, old, detail}}`) and its note, a Warn line, and `vaultaire_translog_witness_cosign_total{witness,outcome}` (`ok`, `conflict`, `refused`, `bad_answer`, `unreachable`); it is asked again next run. Past 2 h without a fresh cosignature while the log grows, **TranslogWitnessStale** warns.
+
+Prod: `TRANSLOG_WITNESSES` stays unset until the signing-key ceremony (no key, nothing signed), then names our witness on the Mac (`serve` behind a stable URL, or only the cron pull pass) and, once accepted, the third-party ones.
 
 What it is for:
 - with its cache, entries a database restore lost can be put back **byte for byte** (§ After a database restore, `translog-restore -from <dir>`);
-- its accepted checkpoint is a tree the restored log must extend, and it survives the loss of the box and its high-water file (RP38-5).
+- its accepted checkpoint is a tree the restored log must extend, and it survives the loss of the box and its high-water file (RP38-5);
+- every cosignature served is a statement a reader can check offline (`translog-verify -witness … -min N`): a split view needs the witnesses to sign it too.
 
-**What it is not yet:** this is our own second record, under our own key, on another box (the owner's Mac from a cron, once the signing-key ceremony has run). A co-signature by an **independent third party**, in the [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature) timestamped form, comes with a real external witness (K4c), as do OpenTimestamps and the Rekor mirror.
+**What our witness is not:** it is our own second record, under our own key, on our own machine. It makes a restore byte-exact and a fork visible to us; it does not make the log independently witnessed. That is the third parties' role.
+
+### Third-party witnesses (owner)
+
+Researched 2026-10-23 (primary sources named; nothing built depends on their answer). Both networks below are **push**: the log POSTs `add-checkpoint` to each witness, exactly the collect step above; no witness fetches our tiles (a mirror would).
+
+1. **The Witness Network** ([witness-network.org](https://witness-network.org/participate/), lists in `github.com/transparency-dev/witness-network/lists/{testing,staging}/`; production "not available yet"). Apply by e-mail to `participate@lists.witness-network.org` with: the origin `stored.cloud/translog/v1` ("unique and never changing"), the log's verifier key (type 0x01 Ed25519, named for the origin — ours is), the rate as `qpd` (one checkpoint per 10 min = 144/day; a 409 costs a second request and the 6 h refresh adds 4, so ask for **qpd 300**), the list (**staging**), a contact, and what the log is for, with the checkpoint and tile URLs. The list entry is `vkey … / origin … / qpd … / contact …`. Participating witnesses (e.g. Geomys's Navigli) pick the log up from the list; we then add each one's prefix and 0x04 key to `TRANSLOG_WITNESSES` from its about page. **Never** change the origin or the key afterwards (witnesses "must not remove or update an already configured log": a new key is a new origin, F-33) and never exceed the `qpd`.
+2. **Glasklar's witness** (Sigsum; `witness.glasklar.is`, tlog-witness + tlog-cosignature + https-bastion v1). E-mail `witness-registry@glasklarteknik.se` with the verifier key (named for the origin), **proof we control the name** (the vkey served on a `stored.cloud` page), how often we submit, which **bastion** host it can receive requests through (it is reached only through a C2SP https-bastion relay — ask them which), and a contact. "Expect a response within three working days."
+
+What we publish first, for both: the verifier key on a `stored.cloud` page and outside our infrastructure (§ The signing key, step 1), the stable trust URL (`https://trust.stored.cloud/translog/`, RP41-2), and a contact address.
 
 ## The signing key
 
@@ -252,13 +288,15 @@ sudo -u postgres psql -At -d vaultaire -c "SELECT COALESCE(MAX(idx)+1,0) FROM tr
 
    With the file in place the log is frozen from the first boot, exactly as in case 2, and the slots may start. Then follow case 2 with that file: re-append from the witness's cache. The size and root are the newest tree the witness proved, which may be older than the last one the box signed. A checkpoint signed after the witness's last pass is lost with the box. That window is the cron's interval: readers who fetched it hold a tree the restored log may not reach, so say so in the incident's write-up. With no witness, this case is case 2's fallback (RP38-5).
 
+**Cosignatures after a restore.** `translog_cosignatures` comes back with the dump, so the log's record of each witness is the dump's. While the database is behind the high-water nothing is submitted (the run refuses). After the re-append and the next signature, a witness that saw later checkpoints answers 409 with a size the log now holds, and the job's one retry from it succeeds. A witness naming a size beyond the newest checkpoint stays a `conflict` until the log signs past it. With the new-origin fallback the witnesses are told the new origin and key like a new log.
+
 **What closed RP41-5.** `translog-restore` still does not check that no slot runs, and no longer needs to: a running slot cannot append while the log is frozen, and a slot that loaded the key refuses to sign until the re-append. Stopping the slots was the only protection before the gate; it is not a step any more.
 
 `docs/DEPLOY.md` § Backups points here.
 
 ## Metrics and alerts
 
-`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`, `vaultaire_translog_checkpoint_refusals_total{reason}` (every reason at 0 from boot), `vaultaire_translog_append_refusals_total{reason}` (`behind_highwater`, `highwater_unreadable`, at 0 from boot; a frozen log's refusals are NOT in `append_failures_total`). Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointRefused** (page: any refusal in 30 min, per reason), **TranslogFrozen** (page: any append refused in 30 min, per reason — RP42-1), **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**; the job is in `PeriodicJobStale`.
+`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds`, `vaultaire_translog_cosigned_size`, `vaultaire_translog_cosignature_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_witnesses_configured`, `vaultaire_translog_witness_cosign_total{witness,outcome}` (every outcome per configured witness at 0 from boot), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`, `vaultaire_translog_checkpoint_refusals_total{reason}` (every reason at 0 from boot), `vaultaire_translog_append_refusals_total{reason}` (`behind_highwater`, `highwater_unreadable`, at 0 from boot; a frozen log's refusals are NOT in `append_failures_total`). Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointRefused** (page: any refusal in 30 min, per reason), **TranslogFrozen** (page: any append refused in 30 min, per reason — RP42-1), **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**, **TranslogWitnessStale** (warn: witnesses configured, the newest checkpoint is larger than the largest cosigned one, and the newest cosignature is > 2 h old, for 10 min — an idle log and no witness configured are silent); the job is in `PeriodicJobStale`.
 
 ## Verifier key
 

@@ -393,6 +393,22 @@ type CheckpointResult struct {
 	Refused string `json:"refused,omitempty"`
 	// Note: "first run" when there was no high-water file yet.
 	Note string `json:"note,omitempty"`
+	// Witnesses is what each witness of TRANSLOG_WITNESSES answered this
+	// run (K4c-2), by the operator's name; absent when none was due.
+	Witnesses map[string]WitnessOutcome `json:"witnesses,omitempty"`
+}
+
+// WitnessOutcome is one witness's part of a checkpoint run.
+type WitnessOutcome struct {
+	// Outcome is one of CosignOutcomes().
+	Outcome string `json:"outcome"`
+	// Size is the checkpoint submitted.
+	Size int64 `json:"size"`
+	// Old is the size the witness was asked to extend (after a 409, the
+	// size it named).
+	Old int64 `json:"old"`
+	// Detail says why, for anything but ok.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Why a checkpoint pass refused to sign (vaultaire_translog_checkpoint_refusals_total{reason}).
@@ -630,13 +646,14 @@ func checkExtends(old translog.Checkpoint, size int64, root translog.Hash, prove
 }
 
 // CheckpointNote is the newest signed checkpoint as the read side serves
-// it (translog.Source).
+// it (translog.Source): the log's note with every collected cosignature
+// line appended (K4c-2, LatestCheckpointNote).
 func (s *Store) CheckpointNote(ctx context.Context) ([]byte, int64, bool, error) {
-	c, ok, err := s.LatestCheckpoint(ctx)
+	c, msg, ok, err := s.LatestCheckpointNote(ctx)
 	if err != nil || !ok {
 		return nil, 0, false, err
 	}
-	return []byte(c.Note), c.Size, true, nil
+	return msg, c.Size, true, nil
 }
 
 // ByDedupKey is the entry a dedup key names: its index and body; found =

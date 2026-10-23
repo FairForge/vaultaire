@@ -154,3 +154,60 @@ tests:
       - eval_time: 40m
         alertname: TranslogAppendFailing
         exp_alerts: []
+
+  # K4c-2: a witness configured, the log signed 12, the witness cosigned 10
+  # at t=0 and nothing since: silent before 2 h, firing 10 min after.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_witnesses_configured'
+        values: '1x200'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '12x200'
+      - series: 'vaultaire_translog_cosigned_size'
+        values: '10x200'
+      - series: 'vaultaire_translog_cosignature_timestamp_seconds'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 110m
+        alertname: TranslogWitnessStale
+        exp_alerts: []
+      - eval_time: 135m
+        alertname: TranslogWitnessStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Transparency log: no fresh witness cosignature for 2h 15m 0s while the log grows"
+              description: "The translog_checkpoint job signs, but no witness of TRANSLOG_WITNESSES has cosigned the newer checkpoints for over 2 h. The job's result names each witness's outcome (unreachable / refused / conflict / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select result from job_runs where job='translog_checkpoint'\"; vaultaire_translog_witness_cosign_total{outcome}. A conflict naming a LARGER size than the log's newest checkpoint is a restored database or a fork (docs/TRANSPARENCY.md § After a database restore)."
+
+  # An idle log: the newest checkpoint is the one cosigned, however old.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_witnesses_configured'
+        values: '1x300'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '10x300'
+      - series: 'vaultaire_translog_cosigned_size'
+        values: '10x300'
+      - series: 'vaultaire_translog_cosignature_timestamp_seconds'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 280m
+        alertname: TranslogWitnessStale
+        exp_alerts: []
+
+  # Prod until the owner's ceremony: no witness configured — silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_witnesses_configured'
+        values: '0x300'
+      - series: 'vaultaire_translog_checkpoint_size'
+        values: '12x300'
+      - series: 'vaultaire_translog_cosigned_size'
+        values: '0x300'
+      - series: 'vaultaire_translog_cosignature_timestamp_seconds'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 280m
+        alertname: TranslogWitnessStale
+        exp_alerts: []

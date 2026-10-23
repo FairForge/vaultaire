@@ -5,7 +5,7 @@
 // the newest checkpoint signed by another test's key, or its own run
 // "unchanged" because another process signed the same size first — a
 // merge-queue ejection for nothing. A test that SIGNS opens its own log
-// here: a throwaway database on the same server holding only migration 103,
+// here: a throwaway database on the same server holding only migrations 103 and 105 (the log and its cosignatures),
 // dropped at the end. A test that only appends keeps the shared one and
 // asserts only on its own entries. Imported by tests only (never linked
 // into cmd/vaultaire).
@@ -27,7 +27,7 @@ import (
 )
 
 // PrivateLog opens a fresh database holding only the transparency log's
-// tables (migration 103) and drops it when t ends. It skips the test when
+// tables (migrations 103 and 105) and drops it when t ends. It skips the test when
 // the test server is unreachable, like every DB-backed test.
 func PrivateLog(t testing.TB) *sql.DB {
 	t.Helper()
@@ -62,13 +62,15 @@ func PrivateLog(t testing.TB) *sql.DB {
 		_ = admin.Close()
 	})
 	_, self, _, _ := runtime.Caller(0)
-	mig := filepath.Join(filepath.Dir(self), "..", "..", "..", "database", "migrations", "103_translog.sql")
-	sqlText, err := os.ReadFile(mig) // #nosec G304 -- the repository's own migration
-	if err != nil {
-		t.Fatalf("translog test log: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, string(sqlText)); err != nil {
-		t.Fatalf("translog test log: migration 103: %v", err)
+	for _, m := range []string{"103_translog.sql", "105_translog_cosignatures.sql"} {
+		mig := filepath.Join(filepath.Dir(self), "..", "..", "..", "database", "migrations", m)
+		sqlText, err := os.ReadFile(mig) // #nosec G304 -- the repository's own migration
+		if err != nil {
+			t.Fatalf("translog test log: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, string(sqlText)); err != nil {
+			t.Fatalf("translog test log: migration %s: %v", m, err)
+		}
 	}
 	return db
 }

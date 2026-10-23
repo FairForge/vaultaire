@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,7 @@ func TestTranslogWitness_OnePass_KeysFromFiles(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	tmp := t.TempDir()
-	wskey, wvkey, err := note.GenerateKey(rand.Reader, "witness.test/ci")
+	wskey, wvkey, err := translog.GenerateCosignerKey("witness.test/ci")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "log.vkey"), []byte(vkey+"\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "w.key"), []byte(wskey+"\n"), 0o600))
@@ -51,19 +52,27 @@ func TestTranslogWitness_OnePass_KeysFromFiles(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "size 5")
-	assert.Contains(t, out.String(), "co-signed by witness.test/ci")
+	assert.Contains(t, out.String(), "cosigned by witness.test/ci")
 	cos, err := os.ReadFile(filepath.Join(dir, witness.CosignFile))
 	require.NoError(t, err)
 	lv, err := translog.NewVerifier(vkey)
 	require.NoError(t, err)
-	wv, err := note.NewVerifier(wvkey)
+	wv, err := translog.NewCosignatureVerifier(wvkey)
 	require.NoError(t, err)
 	n, err := note.Open(cos, note.VerifierList(lv, wv))
 	require.NoError(t, err)
 	assert.Len(t, n.Sigs, 2)
+	_, lines, err := translog.OpenCosigned(cos, lv, wv)
+	require.NoError(t, err)
+	require.Len(t, lines, 1, "a c2sp.org/tlog-cosignature line, timestamped")
+	assert.WithinDuration(t, time.Now(), lines[0].Time, time.Minute)
 
-	// The log's own key as -key is refused; a missing -key too.
-	assert.ErrorIs(t, run(context.Background(), &out, options{url: srv.URL + "/translog", vkey: vkey, key: skey, dir: dir, once: true}), witness.ErrSameKey)
+	// The log's own key as -key is refused, and so is a plain note key (no
+	// cosignature/v1, K4c-2); a missing -key too.
+	assert.ErrorContains(t, run(context.Background(), &out, options{url: srv.URL + "/translog", vkey: vkey, key: skey, dir: dir, once: true}), "ML-DSA-44")
+	plain, _, err := note.GenerateKey(rand.Reader, "witness.test/plain")
+	require.NoError(t, err)
+	assert.ErrorContains(t, run(context.Background(), &out, options{url: srv.URL + "/translog", vkey: vkey, key: plain, dir: dir, once: true}), "cosignature/v1")
 	assert.ErrorContains(t, run(context.Background(), &out, options{url: srv.URL + "/translog", vkey: vkey, dir: dir, once: true}), "-key is required")
 }
 

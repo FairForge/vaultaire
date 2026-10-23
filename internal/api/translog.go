@@ -81,7 +81,10 @@ type translogCheckpointer struct {
 	logger *zap.Logger
 	// build is this process's boot entry while it waits for the log
 	// (RP42-1): each run tries it first, then checkpoints.
-	build   *bootBuild
+	build *bootBuild
+	// cosign submits each new checkpoint to the witnesses (K4c-2,
+	// translog_witnesses.go); nil = TRANSLOG_WITNESSES unset.
+	cosign  *cosignCollector
 	JobName string
 }
 
@@ -100,10 +103,20 @@ func (c *translogCheckpointer) spec() jobSpec {
 		Run: func(ctx context.Context) (jobReport, error) {
 			c.build.try(ctx, c.store, c.logger, true)
 			res, err := c.store.Checkpoint(ctx)
+			if res.Signed {
+				c.logger.Info("translog checkpoint signed", zap.Int64("size", res.Size), zap.String("root", res.Root))
+			}
+			// Only a pass that refused nothing submits: a refused log is
+			// never put in front of a witness.
+			if err == nil {
+				res.Witnesses = c.cosign.collect(ctx)
+			}
 			rep := jobReport{Result: res, Note: res.Reason}
+			if n := witnessNote(res.Witnesses); n != "" {
+				rep.Note = strings.TrimPrefix(rep.Note+"; "+n, "; ")
+			}
 			if res.Signed {
 				rep.Rows = 1
-				c.logger.Info("translog checkpoint signed", zap.Int64("size", res.Size), zap.String("root", res.Root))
 			}
 			if err != nil {
 				c.logger.Error("translog checkpoint: nothing signed", zap.Error(err), zap.String("refused", res.Refused),

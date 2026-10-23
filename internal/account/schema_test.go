@@ -89,12 +89,12 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 	}
 }
 
-// translogTables are the transparency log's tables (migration 103, K4):
-// public infrastructure. They carry no tenant or user column, so the
+// translogTables are the transparency log's tables (migration 103, K4; its
+// collected cosignatures, 105, K4c-2): public infrastructure. They carry no tenant or user column, so the
 // erasure and the export never walk them, and no erase rule may name them —
 // an entry is append-only and public, and its kinds name no tenant
 // (internal/translog TestTranslog_EntriesNeverNameATenant).
-var translogTables = []string{"translog_entries", "translog_hashes", "translog_checkpoints"}
+var translogTables = []string{"translog_entries", "translog_hashes", "translog_checkpoints", "translog_cosignatures"}
 
 func TestTranslogTablesAreInfrastructure(t *testing.T) {
 	db, err := sql.Open("postgres", testutil.DSN())
@@ -107,7 +107,7 @@ func TestTranslogTablesAreInfrastructure(t *testing.T) {
 	for _, table := range translogTables {
 		var exists bool
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists))
-		require.True(t, exists, "%s is missing — migration 103", table)
+		require.True(t, exists, "%s is missing — migrations 103, 105", table)
 		var personal int
 		require.NoError(t, db.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM information_schema.columns

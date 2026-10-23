@@ -11,10 +11,14 @@
 // before the first signed checkpoint — goes to stdout, and the key ID to
 // stderr.
 //
-// A WITNESS's key (K4b, cmd/tools/translog-witness) is the same kind of key
-// under the witness's own name — never the log's:
+// A WITNESS's key (cmd/tools/translog-witness) is a cosignature/v1 key
+// (K4c-2, c2sp.org/tlog-cosignature): ML-DSA-44, timestamped, under the
+// witness's own name — never the log's:
 //
-//	translog-keygen -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey
+//	translog-keygen -cosignature -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey
+//
+// (A plain note key under another name, -name without -cosignature, is
+// still made — for nothing that cosigns: translog-witness refuses it.)
 package main
 
 import (
@@ -32,27 +36,36 @@ import (
 func main() {
 	out := flag.String("out", "", "where to write the signer key (created 0600; must not exist)")
 	name := flag.String("name", translog.Origin, "the key's name: the log's origin, or a witness's own name (translog-witness -key)")
+	cosig := flag.Bool("cosignature", false, "make a witness's ML-DSA-44 cosignature/v1 key (c2sp.org/tlog-cosignature) named -name")
 	flag.Parse()
-	if err := run(*out, *name); err != nil {
+	if err := run(*out, *name, *cosig); err != nil {
 		fmt.Fprintln(os.Stderr, "translog-keygen:", err)
 		os.Exit(1)
 	}
 }
 
-func run(out, name string) error {
+func run(out, name string, cosig bool) error {
 	if out == "" || out == "-" {
 		return errors.New("-out <file> is required: the signer key is never printed")
+	}
+	if cosig && name == translog.Origin {
+		return errors.New("-cosignature makes a witness's key: give it the witness's own name (-name witness.<host>), never the log's origin")
 	}
 	var (
 		skey, vkey string
 		s          note.Signer
 		err        error
 	)
-	if name == translog.Origin {
+	switch {
+	case cosig:
+		if skey, vkey, err = translog.GenerateCosignerKey(name); err == nil {
+			s, err = translog.NewCosigner(skey, nil)
+		}
+	case name == translog.Origin:
 		if skey, vkey, err = translog.GenerateKey(rand.Reader); err == nil {
 			s, err = translog.NewSigner(skey)
 		}
-	} else {
+	default:
 		// A witness key: any note key name but the log's origin.
 		if skey, vkey, err = note.GenerateKey(rand.Reader, name); err == nil {
 			s, err = note.NewSigner(skey)
@@ -73,8 +86,13 @@ func run(out, name string) error {
 		return fmt.Errorf("close %s: %w", out, err)
 	}
 	fmt.Println(vkey)
+	if cosig {
+		fmt.Fprintf(os.Stderr, "witness cosignature/v1 key (ML-DSA-44) %s, key ID %08x; signer key in %s (0600) — keep it on the witness's machine only; the verifier key on stdout goes in the log's TRANSLOG_WITNESSES and readers' translog-verify -witness\n",
+			name, s.KeyHash(), out)
+		return nil
+	}
 	if name != translog.Origin {
-		fmt.Fprintf(os.Stderr, "witness key %s, key ID %08x; signer key in %s (0600) — keep it on the witness's machine only\n",
+		fmt.Fprintf(os.Stderr, "note key %s, key ID %08x; signer key in %s (0600) — NOT a witness key (translog-witness wants -cosignature)\n",
 			name, s.KeyHash(), out)
 		return nil
 	}
