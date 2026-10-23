@@ -135,6 +135,13 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagTranslogPublic, false)
 	fl.Register(flagTranslogAdminReads, false)   // K4c-1: per subject tenant first; the owner flips it globally
 	fl.Register(flagTranslogCustomerView, false) // K4c-1: GET /api/v1/manage/account/transparency, per tenant first
+	// RP44-2 (Stage 1a Prompt 34a): a tenant row can only turn the record of
+	// admin reads — and the tenant's view of it — ON; translog_public is
+	// read globally only. Every write of these rows is a log_policy entry
+	// (the server's write guard, translog_flags.go).
+	fl.OnWins(flagTranslogAdminReads)
+	fl.OnWins(flagTranslogCustomerView)
+	fl.GlobalOnly(flagTranslogPublic)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

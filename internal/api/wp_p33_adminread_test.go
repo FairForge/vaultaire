@@ -28,38 +28,54 @@ import (
 // the transparency log — before the data is read, fail closed — and the
 // tenant can find its own entries; the public cannot link them.
 
-// TestAdminReadRoutes_AllClassified walks the whole router: every GET route
-// of the API's admin groups and of the dashboard's /admin pages has a
-// classification (a new admin page cannot ship unclassified), and every
-// classification names a route that exists.
+// TestAdminReadRoutes_AllClassified walks the whole router: every route of
+// every method of the API's admin groups and of the dashboard's /admin
+// pages has a classification (Stage 1a Prompt 34a, RP43-6: a route of
+// another method than GET is a logged read — through the gate — or a
+// mutation with its reason, so a POST that answers rows cannot ship
+// unclassified), and every classification names a route that exists.
 func TestAdminReadRoutes_AllClassified(t *testing.T) {
 	srv := NewServer(&config.Config{Server: config.ServerConfig{Port: 0}}, zap.NewNop(),
 		engine.NewEngine(nil, zap.NewNop(), &engine.Config{DefaultBackend: "local"}), nil, nil)
-	dash := dashboard.AdminReadClassification()
+	dash, dashWrites := dashboard.AdminReadClassification(), dashboard.AdminWriteClassification()
 	seen := map[string]bool{}
 	require.NoError(t, chi.Walk(srv.router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		if method != http.MethodGet {
-			return nil
-		}
 		route = strings.ReplaceAll(route, "/*/", "/")
+		key := route
+		if method != http.MethodGet {
+			key = method + " " + route
+		}
 		switch {
 		case strings.HasPrefix(route, "/api/v1/admin/"), strings.HasPrefix(route, "/api/compliance/"):
-			_, ok := apiAdminReads[route]
-			assert.True(t, ok, "GET %s is not classified in apiAdminReads", route)
-			_, wrapped := adminReadWrapped.Load(route)
-			assert.True(t, wrapped, "GET %s is not registered through adminRead", route)
+			_, read := apiAdminReads[key]
+			_, write := apiAdminWrites[key]
+			assert.True(t, read != write, "%s %s: classified in exactly one of apiAdminReads (log/exempt) and apiAdminWrites (mutation)", method, route)
+			if read {
+				_, wrapped := adminReadWrapped.Load(key)
+				assert.True(t, wrapped, "%s %s is not registered through adminRead", method, route)
+			}
+			if write {
+				assert.True(t, strings.HasPrefix(apiAdminWrites[key], "mutation: "), "%s: a mutation states its reason", key)
+			}
 		case route == "/admin" || strings.HasPrefix(route, "/admin/"):
-			_, ok := dash[route]
-			assert.True(t, ok, "GET %s is not classified in the dashboard's adminReadRoutes", route)
-			assert.True(t, dashboard.AdminReadWrapped(route), "GET %s is not registered through adminGet", route)
+			if method == http.MethodGet {
+				_, ok := dash[route]
+				assert.True(t, ok, "GET %s is not classified in the dashboard's adminReadRoutes", route)
+				assert.True(t, dashboard.AdminReadWrapped(route), "GET %s is not registered through adminGet", route)
+			} else {
+				assert.True(t, strings.HasPrefix(dashWrites[key], "mutation: "), "%s is not classified in the dashboard's adminWriteRoutes", key)
+			}
 		default:
 			return nil
 		}
-		seen[route] = true
+		seen[key] = true
 		return nil
 	}))
 	for p := range apiAdminReads {
-		assert.True(t, seen[p], "apiAdminReads names %s, which is no GET route", p)
+		assert.True(t, seen[p], "apiAdminReads names %s, which is no route", p)
+	}
+	for p := range apiAdminWrites {
+		assert.True(t, seen[p], "apiAdminWrites names %s, which is no route", p)
 	}
 	for p := range dash {
 		if p == "/admin/flags" || p == "/admin/backends" {
@@ -67,7 +83,13 @@ func TestAdminReadRoutes_AllClassified(t *testing.T) {
 		}
 		assert.True(t, seen[p], "adminReadRoutes names %s, which is no GET route", p)
 	}
-	assert.Greater(t, len(seen), 25, "the walk saw the admin routes")
+	for p := range dashWrites {
+		if strings.Contains(p, "/admin/flags/") || strings.Contains(p, "/admin/backends/") {
+			continue // mounted only with a flags service / an engine — checked in the dashboard package
+		}
+		assert.True(t, seen[p], "adminWriteRoutes names %s, which is no route", p)
+	}
+	assert.Greater(t, len(seen), 75, "the walk saw the admin routes of every method")
 }
 
 // readFixture is the admin money routes' fixture with a log, the recorder
@@ -238,5 +260,11 @@ func TestAdminReadRoutes_APIExemptAreTheAggregates(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{"/api/v1/admin/tenants/{tenant_id}/payments", "/api/v1/admin/audit", "/api/v1/admin/jobs",
-		"/api/v1/admin/flags"}, logged, "every other admin GET is an aggregate, infrastructure or scaffolding")
+		"/api/v1/admin/flags",
+		// RP43-6 (Stage 1a Prompt 34a): the routes of another method that answer customer data.
+		"POST /api/v1/admin/routing-truth/resolve-null", "POST /api/v1/admin/chunk-orphans", "POST /api/v1/admin/chunk-move",
+		"POST /api/v1/admin/tenants/{tenant_id}/payments", "POST /api/v1/admin/tenants/{tenant_id}/entitlement",
+		"POST /api/v1/admin/tenants/{tenant_id}/refunds", "POST /api/v1/admin/payments/stripe/stop-renewals",
+		"POST /api/v1/admin/payments/stripe/resume-renewals",
+	}, logged, "every other admin route is an aggregate, infrastructure, scaffolding or a mutation")
 }

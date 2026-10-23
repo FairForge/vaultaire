@@ -28,11 +28,15 @@ import (
 
 func (s *Server) registerAdminPaymentRoutes(r chi.Router) {
 	r.Get("/tenants/{tenant_id}/payments", s.requireAdmin(s.adminRead("/api/v1/admin/tenants/{tenant_id}/payments", s.handleAdminTenantPayments)))
-	r.Post("/tenants/{tenant_id}/payments", s.requireAdmin(s.handleAdminManualPayment))
-	r.Post("/tenants/{tenant_id}/entitlement", s.requireAdmin(s.handleAdminAdjustEntitlement))
-	r.Post("/tenants/{tenant_id}/refunds", s.requireAdmin(s.handleAdminRefund))
-	r.Post("/payments/stripe/stop-renewals", s.requireAdmin(s.handleBulkStopRenewals))
-	r.Post("/payments/stripe/resume-renewals", s.requireAdmin(s.handleBulkResumeRenewals))
+	// The money POSTs answer the tenant's record (the entitlement, the date
+	// it now holds), so each is the tenant's tenant_payments read as well
+	// (RP43-6: a no-op adjustment must not read past the GET's entry); the
+	// bulk dry runs list tenants.
+	r.Post("/tenants/{tenant_id}/payments", s.requireAdmin(s.adminRead("POST /api/v1/admin/tenants/{tenant_id}/payments", s.handleAdminManualPayment)))
+	r.Post("/tenants/{tenant_id}/entitlement", s.requireAdmin(s.adminRead("POST /api/v1/admin/tenants/{tenant_id}/entitlement", s.handleAdminAdjustEntitlement)))
+	r.Post("/tenants/{tenant_id}/refunds", s.requireAdmin(s.adminRead("POST /api/v1/admin/tenants/{tenant_id}/refunds", s.handleAdminRefund)))
+	r.Post("/payments/stripe/stop-renewals", s.requireAdmin(s.adminRead("POST /api/v1/admin/payments/stripe/stop-renewals", s.handleBulkStopRenewals)))
+	r.Post("/payments/stripe/resume-renewals", s.requireAdmin(s.adminRead("POST /api/v1/admin/payments/stripe/resume-renewals", s.handleBulkResumeRenewals)))
 }
 
 // entitlementJSON is the record as the admin API and the dashboard show it.

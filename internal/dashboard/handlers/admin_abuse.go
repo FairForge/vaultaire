@@ -141,6 +141,12 @@ func HandleAdminAbuse(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 }
 
 // HandleAdminAbuseDetail renders a single abuse report with action buttons.
+// AbuseReportID is the {id} of the abuse report page — the handler's and the
+// admin-read classifier's one parser (RP44-1).
+func AbuseReportID(r *http.Request) (int64, error) {
+	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+}
+
 func HandleAdminAbuseDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -149,8 +155,7 @@ func HandleAdminAbuseDetail(tmpl *template.Template, db *sql.DB, logger *zap.Log
 			return
 		}
 
-		idStr := chi.URLParam(r, "id")
-		id, err := strconv.ParseInt(idStr, 10, 64)
+		id, err := AbuseReportID(r)
 		if err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return

@@ -175,7 +175,13 @@ func TestChunkPutBudget_BuffersAreReturnedOnEveryExit(t *testing.T) {
 	f.fixed.failPut.Store(true)
 	assert.NotEqual(t, http.StatusOK, f.do(t, "PUT", "/test-bucket/fail.bin", randomBody(t, 6<<20), nil).Code)
 	f.fixed.failPut.Store(false)
-	assert.Zero(t, budget.inUse(), "after an abort")
+	// A sibling chunk PUT already at the backend when the first failed runs
+	// to its own end detached (RP14-1) and gives its lease back when it
+	// returns — it may still be returning as the handler answers (CI on
+	// #922, Stage 1a Prompt 34a: 1,550,006 bytes at the sample). Given back,
+	// within the bound.
+	assert.Eventually(t, func() bool { return budget.inUse() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"after an abort (still held: %d)", budget.inUse())
 
 	// A client cut while chunk PUTs are in flight: the PUTs that outlive the
 	// request keep their blob's share until they end (RP14-1), then it is

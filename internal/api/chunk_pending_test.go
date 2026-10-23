@@ -126,6 +126,30 @@ func randomBody(t *testing.T, n int) []byte {
 	return b
 }
 
+// chunkyBody is a random body of n bytes that the chunker cuts into at least
+// three chunks (RP43-1, Stage 1a Prompt 34a): a random body is content-
+// defined — 6 MiB holds no Rabin boundary past the 1 MiB minimum with
+// probability e^-5 ≈ 0.7 % (2 MiB average) — and a test that waits for "two
+// chunk PUTs in flight" then waited 10 s for a second chunk that did not
+// exist: the 1-in-200 "timed out waiting for chunk PUTs in flight" under
+// -count. Drawn again until it has the chunks; every draw is new bytes, so
+// a run never dedups onto a previous run's chunks.
+func chunkyBody(t *testing.T, n int) []byte {
+	t.Helper()
+	c, err := crypto.DefaultChunker()
+	require.NoError(t, err)
+	for i := 0; i < 50; i++ {
+		b := randomBody(t, n)
+		chunks, err := c.ChunkBytes(b)
+		require.NoError(t, err)
+		if len(chunks) >= 3 {
+			return b
+		}
+	}
+	t.Fatalf("no random body of %d bytes cut into three chunks in 50 draws", n)
+	return nil
+}
+
 // waitFor polls cond for up to 10 s.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
@@ -154,7 +178,7 @@ func (f *pendingFixture) chunkBlobs(t *testing.T) []string {
 func TestChunkStore_NoConnectionHeldAcrossTheBackendPut(t *testing.T) {
 	// Arrange: a chunked PUT whose chunk stores all wait on the backend.
 	f := setupPendingFixture(t)
-	body := randomBody(t, 8<<20)
+	body := chunkyBody(t, 8<<20)
 	done := make(chan int, 1)
 	go func() {
 		w := f.do(t, "PUT", "/test-bucket/slow.bin", body, nil)

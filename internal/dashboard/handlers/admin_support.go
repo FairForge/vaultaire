@@ -61,7 +61,7 @@ func HandleAdminSupport(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 		withCSRF(r.Context(), data)
 		data["Results"] = []supportResult{}
 
-		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		q := supportQuery(r)
 		data["Query"] = q
 		data["Searched"] = q != ""
 
@@ -76,6 +76,28 @@ func HandleAdminSupport(tmpl *template.Template, db *sql.DB, logger *zap.Logger)
 		}
 	}
 }
+
+// supportQuery is the support search's query, as the page reads it.
+func supportQuery(r *http.Request) string { return strings.TrimSpace(r.URL.Query().Get("q")) }
+
+// SupportSearchSubject is the tenant a support search reads when it finds
+// exactly one (an id, an e-mail, a key id, a Stripe customer — RP43-4): the
+// page's own query parse and search, so the classifier logs that tenant's
+// support case; "" when it finds none or several (the tenant list).
+func SupportSearchSubject(ctx context.Context, db *sql.DB, r *http.Request, logger *zap.Logger) string {
+	q := supportQuery(r)
+	if q == "" || db == nil {
+		return ""
+	}
+	if found := searchCustomers(ctx, db, q, logger); len(found) == 1 {
+		return found[0].ID
+	}
+	return ""
+}
+
+// AdminTenantID is the {id} of the admin tenant and support pages — the
+// handlers' and the admin-read classifier's one parser (RP44-1).
+func AdminTenantID(r *http.Request) string { return chi.URLParam(r, "id") }
 
 func searchCustomers(ctx context.Context, db *sql.DB, q string, logger *zap.Logger) []supportResult {
 	rows, err := db.QueryContext(ctx, `
@@ -126,7 +148,7 @@ func HandleCustomerDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 			return
 		}
 
-		tenantID := chi.URLParam(r, "id")
+		tenantID := AdminTenantID(r)
 		if tenantID == "" {
 			http.NotFound(w, r)
 			return

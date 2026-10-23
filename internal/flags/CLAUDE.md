@@ -10,6 +10,20 @@ restart. Backed by the `feature_flags` table (migration 059).
   global row — a sentinel, not NULL, because NULL can't be in a PK.
 - **Resolution precedence:** tenant row → global row → registered in-code
   default. Unregistered key with no row = disabled.
+- **`OnWins(key)`** (Stage 1a Prompt 34a, RP44-2; `translog_admin_reads`,
+  `translog_customer_view`): on for a tenant when its row OR the global state
+  (global row, else default) is on — a tenant row only turns it on. `Set` of a
+  tenant OFF row while it is on globally = `ErrNotExemptible` (API 409
+  `flag_not_exemptible`). **`GlobalOnly(key)`** (`translog_public`): `Set` of a
+  tenant row = `ErrGlobalOnly`.
+- **`SetWriteGuard(g)`**: `g(ctx, Change{Key, TenantID, Clear, Enabled})` runs
+  BEFORE every `Set`/`Unset` writes (after the two rules above); an error =
+  `ErrChangeRefused` wrapping it, nothing written. The API server installs it
+  (`api.Server.useFlags`, `translog_flags.go`): a `translog_*` row write is a
+  `log_policy` transparency-log entry first. Tests:
+  `TestWriteGuard_RunsBeforeTheRow_RefusalWritesNothing`,
+  `TestOnWins_TenantRowOnlyTurnsItOn` (global ON modelled by the default —
+  never a `'*'` row of a real flag on the shared database).
 - **Caching:** the whole table (tiny) is loaded into an in-memory snapshot,
   swapped under a mutex; background `Start(ctx)` loop refreshes every ~15s.
   `Set`/`Unset` write through and reload immediately, so an admin flip is

@@ -27,8 +27,9 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 )
 
-// cutUpload starts a chunked PUT of body on a cancellable context, waits
-// until at least two chunk PUTs are at the backend, cuts the client, and
+// cutUpload starts a chunked PUT of body (a chunkyBody: it has the chunks)
+// on a cancellable context, waits until at least two chunk PUTs are at the
+// backend, cuts the client, and
 // returns once the handler has answered (not 200) with the number of chunk
 // PUTs at the backend — sampled AFTER the answer, once it has held still for
 // 200 ms (RP42-4: sampled before cancel(), a worker already dispatched
@@ -72,7 +73,7 @@ func TestChunkClaim_ARetryOfACutUploadDedupsOntoTheDetachedPutsWithinSeconds(t *
 	// time this test out.
 	f := setupPendingFixture(t)
 	f.server.chunkPendingTakeover = 60 * time.Second
-	body := randomBody(t, 8<<20)
+	body := chunkyBody(t, 8<<20)
 	inFlight := f.cutUpload(t, "cut.bin", body)
 
 	// Act: the same body again at once; the backend answers the detached
@@ -172,7 +173,7 @@ func TestChunkClaim_AStoppingSlotWaitsForTheDetachedChunkPuts(t *testing.T) {
 	if f.server.healthChecker == nil {
 		f.server.healthChecker = NewBackendHealthChecker()
 	}
-	body := randomBody(t, 6<<20)
+	body := chunkyBody(t, 6<<20)
 	inFlight := f.cutUpload(t, "deploy.bin", body)
 	require.EqualValues(t, inFlight, f.server.chunkPuts().count(), "every detached PUT is accounted")
 	rows, err := f.db.Query(`SELECT plaintext_hash FROM global_content_index WHERE dedup_scope = $1 AND backend_id = 'fixed' AND state = 'pending'`, crypto.GlobalDedupScope)

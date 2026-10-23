@@ -29,6 +29,10 @@ const (
 	// K4c-1): the scope read and an opaque commitment to the tenant read,
 	// never the tenant, the operator or what was seen.
 	KindAdminRead = "admin_read"
+	// KindLogPolicy: a write of a translog_* feature-flag row — the switch
+	// of what the log records and who may read it (Stage 1a Prompt 34a,
+	// RP44-2): appended BEFORE the row is written, never naming the tenant.
+	KindLogPolicy = "log_policy"
 
 	// entryVersion is the body's "v": a change of any kind's fields is a
 	// new version — except key_ceremony's v1 schema of #884 (a free-text
@@ -210,27 +214,30 @@ func contains(list []string, s string) bool {
 // reads; the inventory of the admin routes is in docs/reviews/WP-P33.md and
 // the classification maps beside the routes). A closed list: a new admin
 // page that reads customer metadata is a new scope here, never free text.
-// The five subject scopes (subjectScopes) read ONE identified tenant and
+// The six subject scopes (subjectScopes) read ONE identified tenant and
 // carry a commitment to it; every other scope reads across tenants, or a
 // record that names no tenant, and carries none.
 const (
-	ScopeTenantDetail   = "tenant_detail"   // one tenant's record: account, usage, keys, buckets, billing
-	ScopeTenantPayments = "tenant_payments" // one tenant's entitlement and payment ledger
-	ScopeTenantAudit    = "tenant_audit"    // one tenant's (or one user's) audit trail
-	ScopeSupportCase    = "support_case"    // one customer's support view and notes
-	ScopeAbuseCase      = "abuse_case"      // one abuse report and the tenant it names
-	ScopeAbuseReport    = "abuse_report"    // one abuse report that names no tenant (the reporter's e-mail, the URL)
-	ScopeTenantList     = "tenant_list"     // the tenant / customer list (e-mails, names)
-	ScopeAuditList      = "audit_list"      // the audit trail across tenants
-	ScopeAuditExport    = "audit_export"    // its CSV export
-	ScopeWaitlistList   = "waitlist_list"   // the waitlist (e-mails)
-	ScopeWaitlistExport = "waitlist_export" // its CSV export
-	ScopeAbuseList      = "abuse_list"      // the abuse reports across tenants
-	ScopeBillingList    = "billing_list"    // revenue, costs and margins across tenants with their identity
-	ScopeUsageList      = "usage_list"      // per-tenant usage figures (dedup) with their identity
-	ScopeFlagList       = "flag_list"       // the feature flags with the tenants they are set for
-	ScopeJobList        = "job_list"        // the background jobs' results, which name tenants
-	ScopeNoticeList     = "notice_list"     // the operator notifications, which name tenants
+	ScopeTenantDetail   = "tenant_detail"       // one tenant's record: account, usage, keys, buckets, billing
+	ScopeTenantPayments = "tenant_payments"     // one tenant's entitlement and payment ledger
+	ScopeTenantAudit    = "tenant_audit"        // one tenant's (or one user's) audit trail, viewed
+	ScopeTenantAuditCSV = "tenant_audit_export" // the same, exported as CSV (RP44-4: its own entry)
+	ScopeSupportCase    = "support_case"        // one customer's support view and notes
+	ScopeAbuseCase      = "abuse_case"          // one abuse report and the tenant it names
+	ScopeAbuseReport    = "abuse_report"        // one abuse report that names no tenant (the reporter's e-mail, the URL)
+	ScopeTenantList     = "tenant_list"         // the tenant / customer list (e-mails, names)
+	ScopeAuditList      = "audit_list"          // the audit trail across tenants
+	ScopeAuditExport    = "audit_export"        // its CSV export
+	ScopeWaitlistList   = "waitlist_list"       // the waitlist (e-mails)
+	ScopeWaitlistExport = "waitlist_export"     // its CSV export
+	ScopeAbuseList      = "abuse_list"          // the abuse reports across tenants
+	ScopeBillingList    = "billing_list"        // revenue, costs and margins across tenants with their identity
+	ScopeUsageList      = "usage_list"          // per-tenant usage figures (dedup) with their identity
+	ScopeFlagList       = "flag_list"           // the feature flags with the tenants they are set for
+	ScopeJobList        = "job_list"            // the background jobs' results, which name tenants
+	ScopeNoticeList     = "notice_list"         // the operator notifications, which name tenants
+	ScopeRoutingRows    = "routing_rows"        // routing-truth's NULL rows resolved: tenant, bucket, key (RP43-6)
+	ScopeChunkList      = "chunk_list"          // the chunk-orphan dry run's blob keys, under tenants' prefixes (RP43-6)
 )
 
 // ActorRoleAdmin is the only actor an admin_read names: a role, never the
@@ -238,10 +245,11 @@ const (
 const ActorRoleAdmin = "admin"
 
 var (
-	subjectScopes   = []string{ScopeTenantDetail, ScopeTenantPayments, ScopeTenantAudit, ScopeSupportCase, ScopeAbuseCase}
+	subjectScopes = []string{ScopeTenantDetail, ScopeTenantPayments, ScopeTenantAudit, ScopeTenantAuditCSV, ScopeSupportCase,
+		ScopeAbuseCase}
 	adminReadScopes = append(append([]string(nil), subjectScopes...), ScopeAbuseReport,
 		ScopeTenantList, ScopeAuditList, ScopeAuditExport, ScopeWaitlistList, ScopeWaitlistExport, ScopeAbuseList,
-		ScopeBillingList, ScopeUsageList, ScopeFlagList, ScopeJobList, ScopeNoticeList)
+		ScopeBillingList, ScopeUsageList, ScopeFlagList, ScopeJobList, ScopeNoticeList, ScopeRoutingRows, ScopeChunkList)
 )
 
 // AdminReadScopes lists the scopes.
@@ -321,6 +329,74 @@ func (c coalescedAdminRead) DedupKey() string {
 	return KindAdminRead + ":" + c.key
 }
 
+// The translog_* flags a log_policy entry can name (internal/api's flag
+// keys; a closed list — a new switch of the log is a code change here).
+const (
+	FlagTranslogPublic       = "translog_public"        // the read side on the trust host (global)
+	FlagTranslogAdminReads   = "translog_admin_reads"   // admin reads of customer metadata appended (K4c-1)
+	FlagTranslogCustomerView = "translog_customer_view" // a tenant's view of its own entries (K4c-1)
+)
+
+// What a log_policy entry records of the row's write, and of which row.
+const (
+	PolicyActionSet   = "set"   // the row was written: Enabled is its value
+	PolicyActionClear = "clear" // the row was removed (the tenant follows the global row, the global row its default)
+	PolicyScopeGlobal = "global"
+	PolicyScopeTenant = "tenant"
+)
+
+var (
+	policyFlags   = []string{FlagTranslogPublic, FlagTranslogAdminReads, FlagTranslogCustomerView}
+	policyActions = []string{PolicyActionSet, PolicyActionClear}
+	policyScopes  = []string{PolicyScopeGlobal, PolicyScopeTenant}
+)
+
+// PolicyFlags lists the flags a log_policy entry can name.
+func PolicyFlags() []string { return append([]string(nil), policyFlags...) }
+
+// LogPolicy is a write of a translog_* flag row (RP44-2; contract rule 7:
+// switching off the record of reads is itself an access-widening act).
+// Every field is a closed list or a fixed shape (RP37-10): no tenant id, no
+// operator, no free text. A tenant row's write carries, like admin_read, a
+// random 16-byte Nonce and Commitment = HMAC-SHA256(the tenant's salt,
+// LogPolicyLabel ‖ nonce), so the tenant finds it in its own view and the
+// public cannot link it; a global row's carries neither.
+type LogPolicy struct {
+	Flag       string `json:"flag"`       // one of PolicyFlags()
+	Action     string `json:"action"`     // set | clear
+	Enabled    bool   `json:"enabled"`    // the row's value written (false for a clear)
+	Scope      string `json:"scope"`      // global | tenant
+	Nonce      string `json:"nonce"`      // 32 lowercase hex for a tenant row; "" for the global row
+	Commitment string `json:"commitment"` // 64 lowercase hex for a tenant row; "" for the global row
+}
+
+// LogPolicyLabel is the log_policy commitment's domain label.
+const LogPolicyLabel = "stored.cloud/translog/log_policy"
+
+// Kind implements Entry.
+func (LogPolicy) Kind() string { return KindLogPolicy }
+
+// DedupKey: none — every write of a switch is its own entry.
+func (LogPolicy) DedupKey() string { return "" }
+
+func (p LogPolicy) validate() error {
+	switch {
+	case !contains(policyFlags, p.Flag):
+		return fmt.Errorf("flag: one of %s", strings.Join(policyFlags, ", "))
+	case !contains(policyActions, p.Action):
+		return errors.New("action: set or clear")
+	case p.Action == PolicyActionClear && p.Enabled:
+		return errors.New("enabled: a clear writes no value")
+	case !contains(policyScopes, p.Scope):
+		return errors.New("scope: global or tenant")
+	case p.Scope == PolicyScopeTenant && (!reNonce.MatchString(p.Nonce) || !reHMAC.MatchString(p.Commitment)):
+		return errors.New("nonce, commitment: a tenant row — 32 and 64 lowercase hex")
+	case p.Scope == PolicyScopeGlobal && (p.Nonce != "" || p.Commitment != ""):
+		return errors.New("nonce, commitment: the global row names no tenant — both empty")
+	}
+	return nil
+}
+
 // RetryableCeremony is c appended under a retry key (RP37-14, the ceremony
 // route's Idempotency-Key): its DedupKey makes a second append of the same
 // key return the first entry's index, in Append's own transaction — a
@@ -370,7 +446,9 @@ func strictUnmarshal(raw []byte, v any) error {
 }
 
 // Kinds lists every entry kind.
-func Kinds() []string { return []string{KindServerBuild, KindKeyCeremony, KindAdminRead} }
+func Kinds() []string {
+	return []string{KindServerBuild, KindKeyCeremony, KindAdminRead, KindLogPolicy}
+}
 
 // AllowedFields is a kind's allow-list: the JSON fields of its "entry".
 func AllowedFields(kind string) []string {
@@ -382,6 +460,8 @@ func AllowedFields(kind string) []string {
 			"signed_size", "restored_size", "new_origin", "reference"}
 	case KindAdminRead:
 		return []string{"scope", "actor_role", "nonce", "commitment"}
+	case KindLogPolicy:
+		return []string{"flag", "action", "enabled", "scope", "nonce", "commitment"}
 	}
 	return nil
 }
@@ -452,6 +532,10 @@ func Decode(body []byte) (Decoded, error) {
 		var a AdminRead
 		err = strictUnmarshal(raw.Entry, &a)
 		d.Entry = a
+	case KindLogPolicy:
+		var p LogPolicy
+		err = strictUnmarshal(raw.Entry, &p)
+		d.Entry = p
 	default:
 		return Decoded{}, fmt.Errorf("translog: decode: unknown kind %q", raw.Kind)
 	}

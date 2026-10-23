@@ -282,7 +282,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	//              and OAuth signup are all covered; login is unaffected.
 	//   chunking — default on; global kill-switch + per-tenant override for
 	//              the chunked/dedup PUT path (reads unaffected).
-	s.flags = flags.New(s.db, logger)
+	s.useFlags(flags.New(s.db, logger))
 	audit.SetLogger(logger)
 	registerFlags(s.flags)
 	if err := s.flags.Refresh(context.Background()); err != nil {
@@ -1170,11 +1170,11 @@ func (s *Server) registerComplianceRoutes() {
 		r.Post("/quota-reconcile", s.requireAdmin(s.handleQuotaReconcile))
 		// Chunk blobs written before WP-R8-7 → the one address. Dry run by
 		// default; ?backend= is required.
-		r.Post("/chunk-move", s.requireAdmin(s.handleChunkMove))
+		r.Post("/chunk-move", s.requireAdmin(s.adminRead("POST /api/v1/admin/chunk-move", s.handleChunkMove)))
 		// Chunk blobs no index row names (WP-R8-2 B.2): the dry run, the
 		// candidates per backend with their sizes. A real run is the job's
 		// (POST /jobs/chunk_orphans/run).
-		r.Post("/chunk-orphans", s.requireAdmin(s.handleChunkOrphans))
+		r.Post("/chunk-orphans", s.requireAdmin(s.adminRead("POST /api/v1/admin/chunk-orphans", s.handleChunkOrphans)))
 		// Tenant key rotation (WP-R8-1). Idempotency-Key replays the first
 		// answer: a retried request does not rotate twice.
 		_, im := s.jsonAPIMiddleware()
@@ -1182,7 +1182,7 @@ func (s *Server) registerComplianceRoutes() {
 		// Routing truth (WP-R7-5): the boot check, the rows on no registered
 		// backend, the last run; and the NULL-row resolution (dry run by default).
 		r.Get("/routing-truth", s.requireAdmin(s.adminRead("/api/v1/admin/routing-truth", s.handleAdminRoutingTruth)))
-		r.Post("/routing-truth/resolve-null", s.requireAdmin(s.handleAdminRoutingTruthResolveNull))
+		r.Post("/routing-truth/resolve-null", s.requireAdmin(s.adminRead("POST /api/v1/admin/routing-truth/resolve-null", s.handleAdminRoutingTruthResolveNull)))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
