@@ -4,7 +4,9 @@
 #   vaultaire_backend_health{backend}              1/0: 0 after two failed probes in a row, 1 again after one
 #                                                  success (WP-R6-3: one failure flipped it — Wasabi's edge
 #                                                  stalls ~2.5 % of flows a minute); every failure is still
-#                                                  counted in the probe failures counter
+#                                                  counted in the probe failures counter; NO sample (and no
+#                                                  _probe_latency_seconds) until the backend's first probe —
+#                                                  an unknown state is never a 1 (RP38-1)
 #   vaultaire_backend_probe_failures_total{backend}
 #   vaultaire_backend_circuit_open{backend}        engine breaker not closed
 #   vaultaire_primary_backend{backend}             1 for the write primary (STORAGE_MODE)

@@ -296,8 +296,11 @@ const stopCallTimeout = 15 * time.Second
 // lock, held across the provider call (bounded by stopCallTimeout, 15 s), the row
 // and the entitlement are read again — a row withdrawn or closed since the
 // batch was listed (a portal un-cancel, a refused-stop revert, another
-// pass), or one whose subscription the house renews by again, is skipped
-// with no provider call (SkippedWithdrawn); every writer that withdraws a
+// pass) is skipped with no provider call (SkippedWithdrawn); a pending row
+// whose subscription the house renews by again (the un-cancel's grant
+// applied, its withdraw lost — RP40-1) is withdrawn in the same
+// transaction (audited billing.renewal_stop_withdrawn, counted there too),
+// never skipped for ever; every writer that withdraws a
 // stop takes the same lock, so none can slip between the read and the
 // call. A PERMANENT refusal (ErrProviderRefused: a 401 after a key change)
 // of a customer's switch reverts it exactly as the request path does
@@ -324,9 +327,10 @@ func (r *Registry) StopPendingRenewals(ctx context.Context, tenantID string) (St
 // stopOne is one row of StopPendingRenewals.
 func (r *Registry) stopOne(ctx context.Context, s RenewalStop, run *StopRun) error {
 	var (
-		cerr    error
-		skipped bool
-		revert  string // the pending provider of a refused switch, "" none
+		cerr      error
+		skipped   bool
+		withdrawn bool   // a pending stop the house renews by again, withdrawn (RP40-1)
+		revert    string // the pending provider of a refused switch, "" none
 	)
 	status, last := RenewalStopStopped, ""
 	err := InTx(ctx, r.db, func(tx *sql.Tx) error {
@@ -342,9 +346,18 @@ func (r *Registry) stopOne(ctx context.Context, s RenewalStop, run *StopRun) err
 			return err
 		}
 		renewsAgain := err == nil && e.LapsedAt == nil && e.Provider == s.Provider && e.ProviderRef == s.Ref && e.Renewal == RenewalAuto
-		if !found || cur.Status != RenewalStopPending || renewsAgain {
+		if !found || cur.Status != RenewalStopPending {
 			skipped = true
 			return nil
+		}
+		if renewsAgain {
+			// The house renews by this subscription again (a portal
+			// un-cancel whose grant applied but whose withdraw was lost,
+			// RP40-1): the stop is no longer owed — withdraw it, the
+			// un-cancel's own write done late, instead of skipping it on
+			// every pass for ever.
+			skipped, withdrawn = true, true
+			return WithdrawRenewalStop(ctx, tx, s.TenantID, s.Provider, s.Ref)
 		}
 		p := r.Provider(s.Provider)
 		if rs, ok := p.(RefRenewalStopper); p != nil && ok {
@@ -371,6 +384,13 @@ func (r *Registry) stopOne(ctx context.Context, s RenewalStop, run *StopRun) err
 		return err
 	}
 	switch {
+	case withdrawn:
+		run.SkippedWithdrawn++
+		audit.Record(ctx, r.db, audit.Entry{Actor: "renewal-stops", TenantID: s.TenantID, EventType: "billing", Action: "billing.renewal_stop_withdrawn",
+			Resource: "tenant:" + s.TenantID, Metadata: map[string]any{"tenant": s.TenantID, "actor": "renewal-stops", "provider": s.Provider, "provider_ref": s.Ref}})
+		r.logger.Info("payments: renewal stop withdrawn — the house renews by its subscription again; no provider call",
+			zap.String("tenant", s.TenantID), zap.String("provider", s.Provider), zap.String("ref", s.Ref))
+		return nil
 	case skipped:
 		run.SkippedWithdrawn++
 		r.logger.Info("payments: renewal stop no longer owed when read again — no provider call",

@@ -94,6 +94,7 @@ func TestBackendCollector_HealthCircuitAndWriteFailures(t *testing.T) {
 func TestBackendCollector_NilEngineStillExportsHealth(t *testing.T) {
 	hc := NewBackendHealthChecker()
 	hc.RegisterBackend("lyve")
+	hc.UpdateHealth("lyve", true, time.Millisecond, nil) // a sample only once probed (RP38-1)
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(newBackendCollector(hc, nil))
 

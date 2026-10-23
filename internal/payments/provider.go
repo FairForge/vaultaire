@@ -188,8 +188,9 @@ func (r *Registry) CancelUnpaidInvoice(ctx context.Context, tenantID, provider, 
 type StopRun struct {
 	Stopped, Failed, Unconfigured int
 	// SkippedWithdrawn: rows that were no longer owed when the job read them
-	// again under the tenant's lock (withdrawn, closed, or the house renews
-	// by the subscription again) — no provider call (RP37-5).
+	// again under the tenant's lock (withdrawn or closed meanwhile; or the
+	// house renews by the subscription again, when the job withdraws the
+	// row itself — RP40-1) — no provider call (RP37-5).
 	SkippedWithdrawn int `json:"skipped_withdrawn"`
 	// Reverted: switches put back after a permanent refusal (RP37-5).
 	Reverted int      `json:"reverted"`
