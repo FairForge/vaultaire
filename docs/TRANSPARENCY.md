@@ -137,14 +137,41 @@ sudo -u postgres psql -At -d vaultaire -c "SELECT COALESCE(MAX(idx)+1,0) FROM tr
 ```
 
 1. **M ≥ N and the job would pass** (the dump was taken after the newest signature): nothing happened to the log. Start the slots; the next pass proves it.
-2. **M < N** (entries the key signed are gone): the signed history is lost, and no tree this database can grow is the one the key signed at N. The log does **not** continue under the same origin with that key — any signature would be the equivocation. Instead:
-   - comment out the credential line (`systemctl edit vaultaire@` drop-in) so no slot loads the key; the job then appends and signs nothing (it would refuse anyway, and page);
-   - keep the high-water file and the old verifier key public: the last tree of `stored.cloud/translog/v1` is the file's (size N, root);
-   - start a **new log**, `stored.cloud/translog/v2` (a code change of `translog.Origin`, a new key by the ceremony above — the old key is never loaded again), on empty `translog_*` tables (the restored v1 rows exported to a file and kept, then the tables emptied by the operator with the triggers disabled — logged in `audit_logs`); its **first entry** is a `key_ceremony` `log_restored` with `key_role: translog_signing_key`, the OLD key's fingerprint, `signed_size: N`, `restored_size: M`, `new_origin: true` and a `reference` to the incident's pull request; then `key_retired` for the old key and `key_generated` / `key_installed` for the new one;
-   - publish the new verifier key as in the ceremony; readers re-pin.
+2. **M < N** (entries the key signed are gone): the tree the key signed at N exists again only if entries M…N−1 come back **byte for byte**. Any other tree this database grows is not the one the key signed, and a signature over it would be the equivocation. Keep the credential line commented out (`systemctl edit vaultaire@` drop-in) until the steps below are done.
 
-   The only way to keep the origin is to put the lost entries M…N−1 back **byte for byte** (from a witness's tile cache, a later dump) so the tree at N has the file's root — then the job passes by itself, and a `log_restored` entry with `new_origin: false` is appended. No tool does that re-append today (only `logstore` writes the tables).
-3. **The box is lost too** (no high-water file): the file is gone with it, and an absent file reads as "first run". Treat it as case 2 unless a witness (`translog-verify`'s saved checkpoint, K4b's external one) holds a checkpoint that the restored log provably extends.
+   **Keep the origin: re-append from the witness** (K4b). This works when a witness — `translog-witness`, run off the box — saw a checkpoint at N or later, so its cache holds every entry up to N−1:
+
+   ```sh
+   sudo vaultaire-switch status; sudo systemctl stop 'vaultaire@*'      # no slot appends while the log is repaired
+   # copy the witness's directory (its cache/ is what is read) to /root/translog-witness, and the tool:
+   #   GOOS=linux GOARCH=amd64 go build -o translog-restore ./cmd/tools/translog-restore
+   DATABASE_URL='postgres://…/vaultaire' /root/translog-restore \
+       -from /root/translog-witness -highwater /opt/vaultaire/data/translog/highwater
+   # database: M entries; high-water: stored.cloud/translog/v1 size N root …
+   # re-appended entries M…N-1: the root at N is … = the high-water's
+   ```
+
+   `translog-restore` (`logstore.ReAppend`) appends the cached bodies M…N−1 as they are, in ONE transaction under the log's lock, with their stored hashes. Kind and dedup key come from each body. It commits only when the root it recomputes at N is the file's root. It refuses, and writes nothing, when M ≥ N (that is case 1), when a bundle it needs is missing or narrower than N (it names the bundle), when a body does not decode, or when the root differs. It never signs.
+
+   Then:
+   1. restore the credential line and start the slots (`sudo vaultaire-switch restart`);
+   2. the next `translog_checkpoint` run proves the restored log extends both the database's newest checkpoint and the file's, then signs: `refused` empty, `vaultaire_translog_checkpoint_refusals_total` unchanged;
+   3. append the ceremony `log_restored` with `key_role: translog_signing_key`, the key's fingerprint, `signed_size: N`, `restored_size: M`, **`new_origin: false`** and a `reference` to the incident's pull request.
+
+   One thing the re-append cannot give back: a ceremony's `Idempotency-Key` dedup lives outside the body (RP37-14), so a re-appended ceremony entry has no dedup key. A retry of that very call after the restore would append it a second time. Within the idempotency window this is the operator's to avoid.
+
+   **The fallback: a new origin** (the cost is F-33, the owner's). Use it when no witness cache reaches N, or when `translog-restore` refuses because the root differs:
+   - comment out the credential line so no slot loads the key; the job then appends and signs nothing (it would refuse anyway, and page);
+   - keep the high-water file and the old verifier key public: the last tree of `stored.cloud/translog/v1` is the file's (size N, root);
+   - start a **new log**, `stored.cloud/translog/v2`. This is a code change of `translog.Origin` and a new key from the ceremony above; the old key is never loaded again. It starts on empty `translog_*` tables: export the restored v1 rows to a file and keep it, then the operator empties the tables with the triggers disabled, logged in `audit_logs`. Its **first entry** is a `key_ceremony` `log_restored` with `key_role: translog_signing_key`, the OLD key's fingerprint, `signed_size: N`, `restored_size: M`, `new_origin: true` and a `reference` to the incident's pull request. Then `key_retired` for the old key, and `key_generated` / `key_installed` for the new one;
+   - publish the new verifier key as in the ceremony; readers re-pin.
+3. **The box is lost too** (no high-water file): an absent file reads as "first run", so never start a slot with the key before this is settled. The witness holds the checkpoint the log must reach: its `cosigned` note (signed by the log's key, so take it only after checking it with the pinned verifier key). Its body is the high-water file:
+
+   ```sh
+   sed '/^$/,$d' ~/.translog-witness/cosigned > /opt/vaultaire/data/translog/highwater   # origin / N / root, nothing after
+   ```
+
+   Then follow case 2 with that file: re-append from the witness's cache. The size and root are the newest tree the witness proved, which may be older than the last one the box signed. A checkpoint signed after the witness's last pass is lost with the box. That window is the cron's interval: readers who fetched it hold a tree the restored log may not reach, so say so in the incident's write-up. With no witness, this case is case 2's fallback (RP38-5).
 
 `docs/DEPLOY.md` § Backups points here.
 

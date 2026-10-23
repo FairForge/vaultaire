@@ -6,8 +6,10 @@
 //
 // Append is ONE transaction under pg_advisory_xact_lock('translog'): the next
 // index is MAX(idx)+1, the entry and its stored hashes are written together,
-// so indexes have no gap and every committed entry has its hashes. The
-// tables refuse UPDATE/DELETE/TRUNCATE (migration 103's trigger).
+// so indexes have no gap and every committed entry has its hashes. ReAppend
+// (K4b) is the one other writer: lost entries put back byte for byte after a
+// restore, under the same lock, all or nothing. The tables refuse
+// UPDATE/DELETE/TRUNCATE (migration 103's trigger).
 package logstore
 
 import (
@@ -163,6 +165,91 @@ func (s *Store) Append(ctx context.Context, e translog.Entry) (idx int64, append
 		return 0, false, fmt.Errorf("translog append: commit %d: %w", n, err)
 	}
 	return n, true, nil
+}
+
+var (
+	// ErrReAppendSize: the bodies do not take the log from its size to the
+	// checkpoint's exactly (too many, too few, or the log is already there).
+	ErrReAppendSize = errors.New("translog re-append: the bodies do not end the log at the checkpoint's size")
+	// ErrReAppendRoot: the tree at the checkpoint's size is not the one it
+	// signed — the bodies are not the lost entries byte for byte.
+	ErrReAppendRoot = errors.New("translog re-append: the recomputed root is not the checkpoint's")
+)
+
+// ReAppend puts back entries a database restore lost (K4b, RP38-6;
+// docs/TRANSPARENCY.md § After a database restore): bodies are the RAW
+// bytes of entries size … expect.Size-1 — from a witness's byte cache — and
+// expect the checkpoint the key signed (the high-water file's). In ONE
+// transaction under the log's lock it appends each body exactly as Append
+// writes an entry (its stored hashes with it; kind and dedup key from the
+// body itself, translog.Decode — a body that does not decode is refused),
+// then recomputes the root at expect.Size: unless it is expect.Root, the
+// whole transaction rolls back. Never re-encoded (a new "at" would change
+// the leaf hash: byte-exact or nothing), never signed — the checkpoint job
+// then passes by itself. The operator tool is cmd/tools/translog-restore.
+func (s *Store) ReAppend(ctx context.Context, bodies [][]byte, expect translog.Checkpoint) error {
+	if s == nil || s.db == nil {
+		return errors.New("translog: no database")
+	}
+	if expect.Origin != "" && expect.Origin != translog.Origin {
+		return fmt.Errorf("translog re-append: a checkpoint of %q, not %q", expect.Origin, translog.Origin)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("translog re-append: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, lockLog); err != nil {
+		return fmt.Errorf("translog re-append: lock: %w", err)
+	}
+	var n, stored int64
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COALESCE(MAX(idx) + 1, 0) FROM translog_entries),
+	                                          (SELECT COALESCE(MAX(idx) + 1, 0) FROM translog_hashes)`).Scan(&n, &stored); err != nil {
+		return fmt.Errorf("translog re-append: size: %w", err)
+	}
+	if stored != translog.StoredHashCount(n) {
+		return fmt.Errorf("translog re-append: %d entries but %d stored hashes (want %d) — the tables are out of step", n, stored, translog.StoredHashCount(n))
+	}
+	if n >= expect.Size || n+int64(len(bodies)) != expect.Size {
+		return fmt.Errorf("%w: the log holds %d, %d bodies, the checkpoint is at %d", ErrReAppendSize, n, len(bodies), expect.Size)
+	}
+	hr := hashReader(ctx, tx)
+	for i, body := range bodies {
+		idx := n + int64(i)
+		d, err := translog.Decode(body)
+		if err != nil {
+			return fmt.Errorf("translog re-append: entry %d: %w", idx, err)
+		}
+		first, hashes, err := translog.StoredHashes(idx, body, hr)
+		if err != nil {
+			return fmt.Errorf("translog re-append: entry %d: %w", idx, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO translog_entries (idx, kind, body, dedup_key) VALUES ($1, $2, $3, NULLIF($4, ''))`,
+			idx, d.Kind, body, d.Entry.DedupKey()); err != nil {
+			return fmt.Errorf("translog re-append: entry %d: %w", idx, err)
+		}
+		idxs := make([]int64, len(hashes))
+		vals := make([][]byte, len(hashes))
+		for j := range hashes {
+			idxs[j] = first + int64(j)
+			vals[j] = hashes[j][:]
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO translog_hashes (idx, hash) SELECT * FROM unnest($1::bigint[], $2::bytea[])`,
+			pq.Array(idxs), pq.Array(vals)); err != nil {
+			return fmt.Errorf("translog re-append: hashes of %d: %w", idx, err)
+		}
+	}
+	root, err := translog.Root(expect.Size, hr)
+	if err != nil {
+		return fmt.Errorf("translog re-append: %w", err)
+	}
+	if root != expect.Root {
+		return fmt.Errorf("%w: %x at %d, the checkpoint signed %x", ErrReAppendRoot, root[:], expect.Size, expect.Root[:])
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("translog re-append: commit: %w", err)
+	}
+	return nil
 }
 
 // Size is the number of entries.
@@ -384,17 +471,25 @@ func (s *Store) readHighwater() (translog.Checkpoint, bool, error) {
 	if s.highwater == "" {
 		return translog.Checkpoint{}, false, nil
 	}
-	b, err := os.ReadFile(s.highwater) // #nosec G304 -- the operator's TRANSLOG_HIGHWATER_FILE
+	return ReadHighwater(s.highwater)
+}
+
+// ReadHighwater reads a high-water file by the checkpoint job's rules (the
+// operator tools read it the same way): ok = false when the file does not
+// exist; a file that is not a checkpoint body of this log (origin, size > 0,
+// a 32-byte root, nothing after it) is an error.
+func ReadHighwater(path string) (translog.Checkpoint, bool, error) {
+	b, err := os.ReadFile(path) // #nosec G304 -- the operator's TRANSLOG_HIGHWATER_FILE
 	if errors.Is(err, fs.ErrNotExist) {
 		return translog.Checkpoint{}, false, nil
 	}
 	if err != nil {
-		return translog.Checkpoint{}, false, fmt.Errorf("translog: read the high-water file %s: %w", s.highwater, err)
+		return translog.Checkpoint{}, false, fmt.Errorf("translog: read the high-water file %s: %w", path, err)
 	}
 	var cp log.Checkpoint
 	rest, err := cp.Unmarshal(b)
 	if err != nil || len(rest) != 0 || cp.Origin != translog.Origin || len(cp.Hash) != translog.HashSize || cp.Size == 0 || cp.Size > 1<<62 {
-		return translog.Checkpoint{}, false, fmt.Errorf("translog: the high-water file %s is not a checkpoint of %s", s.highwater, translog.Origin)
+		return translog.Checkpoint{}, false, fmt.Errorf("translog: the high-water file %s is not a checkpoint of %s", path, translog.Origin)
 	}
 	var root translog.Hash
 	copy(root[:], cp.Hash)

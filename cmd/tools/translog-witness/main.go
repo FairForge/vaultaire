@@ -42,7 +42,7 @@ type options struct {
 func main() {
 	home, _ := os.UserHomeDir()
 	var o options
-	flag.StringVar(&o.url, "url", "https://stored.cloud/translog", "where checkpoint and tile/… are served")
+	flag.StringVar(&o.url, "url", "https://trust.stored.cloud/translog", "where checkpoint and tile/… are served (the trust host)")
 	flag.StringVar(&o.vkey, "vkey", "", "the pinned verifier key of the LOG, or @file")
 	flag.StringVar(&o.dir, "dir", filepath.Join(home, ".translog-witness"), "the witness's state, cosigned notes and byte cache")
 	flag.StringVar(&o.key, "key", "", "the WITNESS's own signer key (translog-keygen -name …), or @file")

@@ -447,7 +447,11 @@ does not list yet goes on a later run).
   more. The checkpoint job refuses and pages (`TranslogCheckpointRefused`,
   the high-water file `/opt/vaultaire/data/translog/highwater` is not in the
   dump); **before the signing key is loaded again**, follow
-  `docs/TRANSPARENCY.md` § After a database restore. Never delete the
+  `docs/TRANSPARENCY.md` § After a database restore: with the slots stopped,
+  `translog-restore -from <the witness's directory> -highwater <file>` puts the
+  lost entries back byte for byte from the off-box witness's cache (K4b) and the
+  job passes again under the same origin; without a witness cache that reaches
+  the file's size, the fallback is a new origin (F-33). Never delete the
   high-water file to make the refusal go away.
 - **Restore:** `set -a; . /opt/vaultaire/configs/sync-backup.env; set +a;
   rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
