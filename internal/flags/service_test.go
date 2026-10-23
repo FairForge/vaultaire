@@ -3,6 +3,7 @@ package flags
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -189,4 +190,74 @@ func TestService_StartBackgroundRefresh(t *testing.T) {
 		return svc.Enabled(key, "tenant-a")
 	}, 2*time.Second, 10*time.Millisecond,
 		"background refresh must pick up rows written by other processes")
+}
+
+// Stage 1a Prompt 34a (RP44-2): the write guard runs BEFORE the row is
+// written, and a refusal writes nothing; an OnWins flag's tenant row can
+// only turn it on; a GlobalOnly flag takes no tenant row.
+func TestWriteGuard_RunsBeforeTheRow_RefusalWritesNothing(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	key, tenant := testKey(t, db), "tenant-p34a"
+	s := New(db, nil)
+	s.Register(key, false)
+	var sawRow []bool
+	refuse := false
+	s.SetWriteGuard(func(_ context.Context, c Change) error {
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM feature_flags WHERE flag_key = $1 AND tenant_id = $2 AND enabled = $3`,
+			c.Key, c.TenantID, c.Enabled).Scan(&n))
+		sawRow = append(sawRow, n > 0)
+		if refuse {
+			return errors.New("the log is frozen")
+		}
+		return nil
+	})
+
+	// Act + Assert: the guard sees no row; then the row is there.
+	require.NoError(t, s.Set(ctx, key, tenant, true, "test"))
+	assert.Equal(t, []bool{false}, sawRow)
+	assert.True(t, s.Enabled(key, tenant))
+
+	// A refusal: neither a set nor a clear is written.
+	refuse = true
+	err := s.Set(ctx, key, tenant, false, "test")
+	assert.ErrorIs(t, err, ErrChangeRefused)
+	assert.True(t, s.Enabled(key, tenant), "a refused set was written")
+	assert.ErrorIs(t, s.Unset(ctx, key, tenant), ErrChangeRefused)
+	require.NoError(t, s.Refresh(ctx))
+	assert.True(t, s.Enabled(key, tenant), "a refused clear was written")
+}
+
+func TestOnWins_TenantRowOnlyTurnsItOn(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	key, tenant := testKey(t, db), "tenant-p34a"
+	// Global ON by the default (no '*' row on the shared database).
+	on := New(db, nil)
+	on.Register(key, true)
+	on.OnWins(key)
+
+	// A tenant OFF row is refused; written behind the door, it changes nothing.
+	assert.ErrorIs(t, on.Set(ctx, key, tenant, false, "test"), ErrNotExemptible)
+	_, err := db.Exec(`INSERT INTO feature_flags (flag_key, tenant_id, enabled, updated_by) VALUES ($1, $2, false, 'sql')`, key, tenant)
+	require.NoError(t, err)
+	require.NoError(t, on.Refresh(ctx))
+	assert.True(t, on.Enabled(key, tenant), "ON wins")
+
+	// Global OFF: the tenant row turns it on for that tenant only.
+	off := New(db, nil)
+	off.Register(key, false)
+	off.OnWins(key)
+	require.NoError(t, off.Set(ctx, key, tenant, true, "test"))
+	assert.True(t, off.Enabled(key, tenant))
+	assert.False(t, off.Enabled(key, "another-"+tenant))
+	require.NoError(t, off.Set(ctx, key, tenant, false, "test"), "an OFF row is no exemption while the flag is off globally")
+	assert.False(t, off.Enabled(key, tenant))
+
+	// GlobalOnly: no tenant row.
+	g := New(db, nil)
+	g.Register(key, false)
+	g.GlobalOnly(key)
+	assert.ErrorIs(t, g.Set(ctx, key, tenant, true, "test"), ErrGlobalOnly)
 }

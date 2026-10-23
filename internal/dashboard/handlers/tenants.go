@@ -207,7 +207,7 @@ func HandleTenantDetail(tmpl *template.Template, db *sql.DB, logger *zap.Logger,
 			return
 		}
 
-		tenantID := chi.URLParam(r, "id")
+		tenantID := AdminTenantID(r)
 		if tenantID == "" {
 			http.NotFound(w, r)
 			return

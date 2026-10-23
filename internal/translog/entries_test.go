@@ -40,7 +40,8 @@ var forbiddenFieldTokens = map[string]bool{
 // can choose is checked for what would name one, and an encoded body
 // carries nothing else.
 func TestTranslog_EntriesNeverNameATenant(t *testing.T) {
-	samples := map[string]Entry{KindServerBuild: validBuild(), KindKeyCeremony: validCeremony(), KindAdminRead: validAdminRead()}
+	samples := map[string]Entry{KindServerBuild: validBuild(), KindKeyCeremony: validCeremony(), KindAdminRead: validAdminRead(),
+		KindLogPolicy: validLogPolicy()}
 	require.ElementsMatch(t, Kinds(), keys(samples), "every kind has a sample here")
 
 	for kind, e := range samples {

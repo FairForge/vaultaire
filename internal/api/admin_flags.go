@@ -18,7 +18,10 @@ import (
 //
 // updated_by comes from the JWT — never the request body. Only keys
 // registered in code are settable: a typo'd kill-switch must fail loudly,
-// not no-op.
+// not no-op. A translog_* row write is a log entry first (translog_flags.go):
+// 409 flag_not_exemptible (a per-tenant OFF under a global ON), 400
+// flag_global_only, 404 tenant_not_found, 503 log_frozen /
+// flag_change_not_logged — nothing written.
 
 func (s *Server) handleAdminFlagsList(w http.ResponseWriter, r *http.Request) {
 	_ = r
@@ -48,13 +51,17 @@ func (s *Server) handleAdminFlagSet(w http.ResponseWriter, r *http.Request) {
 
 	updatedBy, _ := r.Context().Value(emailKey).(string)
 	if err := s.flags.Set(r.Context(), key, req.TenantID, *req.Enabled, updatedBy); err != nil {
+		if flagWriteError(w, err) {
+			s.logger.Warn("admin flag set refused", zap.String("flag", key), zap.Error(err))
+			return
+		}
 		s.logger.Error("admin flag set failed",
 			zap.String("flag", key), zap.Error(err))
 		http.Error(w, "failed to set flag", http.StatusInternalServerError)
 		return
 	}
 
-	s.writeResolvedFlag(w, key)
+	s.writeResolvedFlag(w, key, req.TenantID)
 }
 
 func (s *Server) handleAdminFlagUnset(w http.ResponseWriter, r *http.Request) {
@@ -66,21 +73,37 @@ func (s *Server) handleAdminFlagUnset(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := r.URL.Query().Get("tenant_id")
 	if err := s.flags.Unset(r.Context(), key, tenantID); err != nil {
+		if flagWriteError(w, err) {
+			s.logger.Warn("admin flag unset refused", zap.String("flag", key), zap.Error(err))
+			return
+		}
 		s.logger.Error("admin flag unset failed",
 			zap.String("flag", key), zap.Error(err))
 		http.Error(w, "failed to unset flag", http.StatusInternalServerError)
 		return
 	}
 
-	s.writeResolvedFlag(w, key)
+	s.writeResolvedFlag(w, key, tenantID)
 }
 
-// writeResolvedFlag responds with the flag's post-change resolved state so
-// the caller sees exactly what is now live.
-func (s *Server) writeResolvedFlag(w http.ResponseWriter, key string) {
+// writeResolvedFlag responds with the flag's post-change state — its default,
+// global row and effective global state, and the ONE tenant row written
+// (none for the global row) — so the caller sees what is now live. Never the
+// other tenants' rows (Stage 1a Prompt 34a, RP43-6): those are the flag_list
+// read of GET /flags, and a write that answered them would read them past
+// the log; answering what it wrote keeps a flag write a mutation, so a
+// kill-switch can still be flipped while the log is frozen.
+func (s *Server) writeResolvedFlag(w http.ResponseWriter, key, tenantID string) {
 	var out *flags.Flag
 	for _, f := range s.flags.Resolved() {
 		if f.Key == key {
+			var mine []flags.Override
+			for _, o := range f.Overrides {
+				if tenantID != "" && o.TenantID == tenantID {
+					mine = append(mine, o)
+				}
+			}
+			f.Overrides = mine
 			out = &f
 			break
 		}

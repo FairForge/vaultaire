@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"sort"
@@ -8,6 +9,7 @@ import (
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
+	"github.com/FairForge/vaultaire/internal/translog/adminread"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 )
@@ -119,6 +121,10 @@ func HandleAdminFlagSet(svc *flags.Service, logger *zap.Logger) http.HandlerFunc
 		}
 
 		if err := svc.Set(r.Context(), key, r.FormValue("tenant_id"), enabled, sd.Email); err != nil {
+			if flagRefused(w, err) {
+				logger.Warn("dashboard flag set refused", zap.String("flag", key), zap.Error(err))
+				return
+			}
 			logger.Error("dashboard flag set failed",
 				zap.String("flag", key), zap.Error(err))
 			http.Error(w, "failed to set flag", http.StatusInternalServerError)
@@ -140,6 +146,10 @@ func HandleAdminFlagClear(svc *flags.Service, logger *zap.Logger) http.HandlerFu
 
 		key := chi.URLParam(r, "key")
 		if err := svc.Unset(r.Context(), key, r.FormValue("tenant_id")); err != nil {
+			if flagRefused(w, err) {
+				logger.Warn("dashboard flag clear refused", zap.String("flag", key), zap.Error(err))
+				return
+			}
 			logger.Error("dashboard flag clear failed",
 				zap.String("flag", key), zap.Error(err))
 			http.Error(w, "failed to clear flag", http.StatusInternalServerError)
@@ -147,4 +157,27 @@ func HandleAdminFlagClear(svc *flags.Service, logger *zap.Logger) http.HandlerFu
 		}
 		http.Redirect(w, r, "/admin/flags", http.StatusSeeOther)
 	}
+}
+
+// flagRefused answers a write the flag service refused (RP44-2) and reports
+// whether it did: 409 a per-tenant OFF under a global ON, 400 a tenant row
+// of a global-only flag, 404 a tenant row naming no tenant, 503 a translog_*
+// change whose log entry could not be appended — nothing was written.
+func flagRefused(w http.ResponseWriter, err error) bool {
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case errors.Is(err, flags.ErrNotExemptible):
+		http.Error(w, "Conflict: this flag is on globally and cannot be turned off for one tenant (flag_not_exemptible).", http.StatusConflict)
+	case errors.Is(err, flags.ErrGlobalOnly):
+		http.Error(w, "Bad Request: this flag has a global row only (flag_global_only).", http.StatusBadRequest)
+	case errors.Is(err, adminread.ErrNoSuchTenant):
+		http.Error(w, "Not Found: no tenant has that id (tenant_not_found).", http.StatusNotFound)
+	case errors.Is(err, flags.ErrChangeRefused):
+		http.Error(w, "Service Unavailable: this change could not be recorded in the transparency log, so it was not made (docs/TRANSPARENCY.md § Admin reads).",
+			http.StatusServiceUnavailable)
+	default:
+		w.Header().Del("Cache-Control")
+		return false
+	}
+	return true
 }

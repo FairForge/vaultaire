@@ -44,7 +44,7 @@ import (
 // flagTranslogPublic opens the read side on the trust host. Default OFF;
 // global only — the owner flips it once trust.stored.cloud resolves and the
 // signing key is loaded.
-const flagTranslogPublic = "translog_public"
+const flagTranslogPublic = translog.FlagTranslogPublic
 
 // serverBuildTimeout bounds the boot entry (hash the binary + one append).
 const serverBuildTimeout = time.Minute

@@ -3,7 +3,11 @@
 // flippable via the admin API / dashboard with no deploy or restart.
 //
 // Resolution precedence: tenant row → global row ('*') → registered in-code
-// default. Unregistered keys with no row are disabled. The whole table is
+// default. Unregistered keys with no row are disabled. A flag registered
+// OnWins (Stage 1a Prompt 34a, RP44-2: the transparency log's record of
+// admin reads) is on when the tenant row OR the global state is on: a
+// tenant row can only turn it on, and a per-tenant OFF row under a global
+// ON is refused (ErrNotExemptible). The whole table is
 // cached in memory and refreshed every ~15s (it is tiny), so the hot path
 // never touches the database; Set/Unset write through and reload the cache
 // immediately so an admin flip is visible on the next request.
@@ -13,6 +17,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -28,6 +33,29 @@ const GlobalTenant = "*"
 // ErrNoDatabase is returned by Set/Unset when the service runs without a
 // database (dev/CI): defaults still resolve, but there is nothing to write.
 var ErrNoDatabase = errors.New("flags: no database configured")
+
+// ErrNotExemptible: a per-tenant OFF row of an OnWins flag while the flag is
+// on globally — it would exempt one tenant from what everyone has (RP44-2).
+var ErrNotExemptible = errors.New("flags: this flag cannot be turned off for one tenant while it is on globally")
+
+// ErrGlobalOnly: a per-tenant row of a flag that is read only globally.
+var ErrGlobalOnly = errors.New("flags: this flag has a global row only")
+
+// ErrChangeRefused: the write guard refused the change; nothing was written
+// (the guard's own error is wrapped too).
+var ErrChangeRefused = errors.New("flags: the change was refused before it was written")
+
+// Change is one row write offered to the write guard before it happens.
+type Change struct {
+	Key      string
+	TenantID string // GlobalTenant for the global row
+	Clear    bool   // the row is removed (Unset)
+	Enabled  bool   // the value written; false for a clear
+}
+
+// WriteGuard runs before every Set and Unset writes the database; a non-nil
+// error refuses the write (ErrChangeRefused) and nothing is written.
+type WriteGuard func(ctx context.Context, c Change) error
 
 // Override is a per-tenant row in the resolved view of a flag.
 type Override struct {
@@ -65,9 +93,12 @@ type Service struct {
 	db     *sql.DB
 	logger *zap.Logger
 
-	mu       sync.RWMutex
-	defaults map[string]bool
-	cache    snapshot
+	mu         sync.RWMutex
+	defaults   map[string]bool
+	onWins     map[string]bool
+	globalOnly map[string]bool
+	guard      WriteGuard
+	cache      snapshot
 
 	refreshInterval time.Duration
 }
@@ -82,6 +113,8 @@ func New(db *sql.DB, logger *zap.Logger) *Service {
 		db:              db,
 		logger:          logger,
 		defaults:        make(map[string]bool),
+		onWins:          make(map[string]bool),
+		globalOnly:      make(map[string]bool),
 		cache:           snapshot{},
 		refreshInterval: 15 * time.Second,
 	}
@@ -95,23 +128,71 @@ func (s *Service) Register(key string, def bool) {
 	s.defaults[key] = def
 }
 
+// OnWins marks a registered flag ON-wins: on for a tenant when its row OR
+// the global state (row, else default) is on.
+func (s *Service) OnWins(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onWins[key] = true
+}
+
+// GlobalOnly marks a flag read only globally: Set refuses a tenant row.
+func (s *Service) GlobalOnly(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.globalOnly[key] = true
+}
+
+// SetWriteGuard installs g, run before every row write (nil = none).
+func (s *Service) SetWriteGuard(g WriteGuard) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.guard = g
+}
+
 // Enabled reports whether the flag is on for the given tenant.
 // tenantID may be empty for global-only flags (e.g. signups).
 func (s *Service) Enabled(key, tenantID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if rows, ok := s.cache[key]; ok {
-		if tenantID != "" && tenantID != GlobalTenant {
-			if row, ok := rows[tenantID]; ok {
-				return row.enabled
-			}
+	global := s.globalLocked(key)
+	if row, ok := s.cache[key][tenantID]; ok && tenantID != "" && tenantID != GlobalTenant {
+		if s.onWins[key] {
+			return row.enabled || global
 		}
-		if row, ok := rows[GlobalTenant]; ok {
-			return row.enabled
-		}
+		return row.enabled
+	}
+	return global
+}
+
+// globalLocked is the flag's global state: its global row, else its
+// default. s.mu held.
+func (s *Service) globalLocked(key string) bool {
+	if row, ok := s.cache[key][GlobalTenant]; ok {
+		return row.enabled
 	}
 	return s.defaults[key]
+}
+
+// check refuses a write the flag's rules forbid, then asks the guard.
+func (s *Service) check(ctx context.Context, c Change) error {
+	s.mu.RLock()
+	onWins, globalOnly, guard, global := s.onWins[c.Key], s.globalOnly[c.Key], s.guard, s.globalLocked(c.Key)
+	s.mu.RUnlock()
+	tenantRow := c.TenantID != GlobalTenant
+	switch {
+	case globalOnly && tenantRow && !c.Clear:
+		return ErrGlobalOnly
+	case onWins && tenantRow && !c.Clear && !c.Enabled && global:
+		return ErrNotExemptible
+	}
+	if guard != nil {
+		if err := guard(ctx, c); err != nil {
+			return fmt.Errorf("%w: %w", ErrChangeRefused, err)
+		}
+	}
+	return nil
 }
 
 // Refresh loads the entire feature_flags table and swaps the cache.
@@ -182,6 +263,9 @@ func (s *Service) Set(ctx context.Context, key, tenantID string, enabled bool, u
 	if tenantID == "" {
 		tenantID = GlobalTenant
 	}
+	if err := s.check(ctx, Change{Key: key, TenantID: tenantID, Enabled: enabled}); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO feature_flags (flag_key, tenant_id, enabled, updated_by, updated_at)
 		VALUES ($1, $2, $3, $4, now())
@@ -209,6 +293,9 @@ func (s *Service) Unset(ctx context.Context, key, tenantID string) error {
 	}
 	if tenantID == "" {
 		tenantID = GlobalTenant
+	}
+	if err := s.check(ctx, Change{Key: key, TenantID: tenantID, Clear: true}); err != nil {
+		return err
 	}
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM feature_flags WHERE flag_key = $1 AND tenant_id = $2`, key, tenantID)

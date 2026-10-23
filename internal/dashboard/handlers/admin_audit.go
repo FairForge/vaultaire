@@ -44,7 +44,8 @@ type auditRowView struct {
 	MetaSummary string
 }
 
-type auditFilters struct {
+// AuditFilters are the audit page's filters, as ParseAuditFilters reads them.
+type AuditFilters struct {
 	Tenant string
 	Actor  string
 	User   string
@@ -56,9 +57,13 @@ type auditFilters struct {
 
 const auditPageSize = 50
 
-func parseAuditFilters(r *http.Request) auditFilters {
+// ParseAuditFilters is the audit page's (and its export's) filter — the ONE
+// parser the handlers and the admin-read classifier
+// (internal/dashboard/admin_reads.go) both read (RP44-1): the tenant logged
+// is the tenant filtered on, whatever spaces the request carries.
+func ParseAuditFilters(r *http.Request) AuditFilters {
 	q := r.URL.Query()
-	return auditFilters{
+	return AuditFilters{
 		Tenant: strings.TrimSpace(q.Get("tenant")),
 		Actor:  strings.TrimSpace(q.Get("actor")),
 		User:   strings.TrimSpace(q.Get("user")),
@@ -69,13 +74,13 @@ func parseAuditFilters(r *http.Request) auditFilters {
 	}
 }
 
-func (f auditFilters) toAudit(limit int) audit.Filter {
+func (f AuditFilters) toAudit(limit int) audit.Filter {
 	return audit.Filter{TenantID: f.Tenant, Actor: f.Actor, UserID: f.User, IP: f.IP,
 		EventType: f.Type, Action: f.Action, Cursor: f.Cursor, Limit: limit}
 }
 
 // queryString renders the filters (without the cursor unless given) for links.
-func (f auditFilters) queryString(cursor string) string {
+func (f AuditFilters) queryString(cursor string) string {
 	params := url.Values{}
 	set := func(k, v string) {
 		if v != "" {
@@ -148,7 +153,7 @@ func HandleAdminAudit(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		data["Events"] = []auditRowView{}
 		data["HasMore"] = false
 
-		f := parseAuditFilters(r)
+		f := ParseAuditFilters(r)
 		data["Filters"] = f
 		data["ExportURL"] = "/admin/audit/export" + f.queryString("")
 
@@ -192,7 +197,7 @@ func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
-		f := parseAuditFilters(r)
+		f := ParseAuditFilters(r)
 		audit.Record(r.Context(), db, audit.Entry{UserID: sd.UserID, EventType: "admin", Action: "admin.audit_exported",
 			Metadata: map[string]any{"tenant": f.Tenant, "actor": f.Actor, "user": f.User, "ip": f.IP, "type": f.Type, "action": f.Action}})
 

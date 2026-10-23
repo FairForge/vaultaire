@@ -28,7 +28,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/FairForge/vaultaire/internal/translog/logstore"
@@ -49,6 +51,11 @@ func New(db *sql.DB, log *logstore.Store) *Store {
 
 // ErrNoSubject: a scope that reads one tenant was given none.
 var ErrNoSubject = errors.New("adminread: this scope reads one tenant, and none was named")
+
+// ErrNoSuchTenant: the subject a read (or a flag row) names is no tenant
+// (Stage 1a Prompt 34a, RP44-1): the gate answers 404 and the handler never
+// runs — never "nothing to record" while the handler reads.
+var ErrNoSuchTenant = errors.New("adminread: the subject named is no tenant")
 
 // Record appends the entry of one admin read BEFORE the data is read and
 // served (the caller refuses the read when it fails — fail closed): scope
@@ -88,10 +95,38 @@ func (s *Store) Record(ctx context.Context, actorID, scope, tenantID string) (id
 	return s.log.Append(ctx, translog.CoalescedAdminRead(e, key))
 }
 
+// RecordPolicy appends the log_policy entry of one write of a translog_*
+// flag row (RP44-2), BEFORE the row is written: the caller writes the row
+// only when it returns nil. tenantID "" = the global row; a tenant's row
+// carries a commitment under the tenant's salt (created when absent), so
+// the tenant finds it (Find). A frozen log is logstore.ErrLogFrozen.
+func (s *Store) RecordPolicy(ctx context.Context, flag, action string, enabled bool, tenantID string) (int64, error) {
+	if s == nil || s.log == nil {
+		return 0, errors.New("adminread: no log")
+	}
+	e := translog.LogPolicy{Flag: flag, Action: action, Enabled: enabled, Scope: translog.PolicyScopeGlobal}
+	if tenantID != "" {
+		salt, err := s.salt(ctx, tenantID, true)
+		if err != nil {
+			return 0, err
+		}
+		nonce := make([]byte, 16)
+		if _, err := io.ReadFull(s.rand, nonce); err != nil {
+			return 0, fmt.Errorf("adminread: nonce: %w", err)
+		}
+		e.Scope = translog.PolicyScopeTenant
+		e.Nonce, e.Commitment = hex.EncodeToString(nonce), hex.EncodeToString(commit(translog.LogPolicyLabel, salt, nonce))
+	}
+	idx, _, err := s.log.Append(ctx, e)
+	return idx, err
+}
+
 // Commitment is HMAC-SHA256(salt, translog.AdminReadLabel ‖ nonce).
-func Commitment(salt, nonce []byte) []byte {
+func Commitment(salt, nonce []byte) []byte { return commit(translog.AdminReadLabel, salt, nonce) }
+
+func commit(label string, salt, nonce []byte) []byte {
 	m := hmac.New(sha256.New, salt)
-	m.Write([]byte(translog.AdminReadLabel))
+	m.Write([]byte(label))
 	m.Write(nonce)
 	return m.Sum(nil)
 }
@@ -137,20 +172,27 @@ func (s *Store) salt(ctx context.Context, tenantID string, create bool) ([]byte,
 	return salt, nil
 }
 
-// Found is one of a tenant's admin-read entries.
+// Found is one of a tenant's entries: an admin read of it (kind admin_read,
+// its scope) or a write of its translog_* flag row (kind log_policy, its
+// flag, action and value).
 type Found struct {
-	Index int64     `json:"index"`
-	Scope string    `json:"scope"`
-	At    time.Time `json:"at"`
+	Index   int64     `json:"index"`
+	Kind    string    `json:"kind"`
+	Scope   string    `json:"scope,omitempty"`
+	Flag    string    `json:"flag,omitempty"`
+	Action  string    `json:"action,omitempty"`
+	Enabled *bool     `json:"enabled,omitempty"`
+	At      time.Time `json:"at"`
 	// CheckpointSize is the size of the first signed checkpoint whose tree
 	// includes the entry (index < size); nil = not signed yet.
 	CheckpointSize *int64 `json:"checkpoint_size"`
 }
 
-// Find returns the tenant's own admin-read entries, oldest first: every
-// admin_read entry of a subject scope whose commitment is the HMAC of its
-// nonce under the tenant's salt. A tenant never read has no salt and no
-// entries. Linear in the admin_read entries (they are few).
+// Find returns the tenant's own entries, oldest first: every admin_read
+// entry of a subject scope, and every log_policy entry of a tenant row,
+// whose commitment is the HMAC of its nonce under the tenant's salt. A
+// tenant never read (and whose switch was never written) has no salt and
+// no entries. Linear in those entries (they are few — RP43-3).
 func (s *Store) Find(ctx context.Context, tenantID string) ([]Found, error) {
 	salt, err := s.salt(ctx, tenantID, false)
 	if err != nil || salt == nil {
@@ -160,7 +202,8 @@ func (s *Store) Find(ctx context.Context, tenantID string) ([]Found, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT idx, body FROM translog_entries WHERE kind = $1 ORDER BY idx`, translog.KindAdminRead)
+	rows, err := s.db.QueryContext(ctx, `SELECT idx, body FROM translog_entries WHERE kind IN ($1, $2) ORDER BY idx`,
+		translog.KindAdminRead, translog.KindLogPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("adminread: entries: %w", err)
 	}
@@ -176,16 +219,30 @@ func (s *Store) Find(ctx context.Context, tenantID string) ([]Found, error) {
 		if err != nil {
 			return nil, fmt.Errorf("adminread: entry %d: %w", idx, err)
 		}
-		a, ok := d.Entry.(translog.AdminRead)
-		if !ok || !translog.ScopeHasSubject(a.Scope) {
+		var f Found
+		var label, nonceHex, commitHex string
+		switch e := d.Entry.(type) {
+		case translog.AdminRead:
+			if !translog.ScopeHasSubject(e.Scope) {
+				continue
+			}
+			f = Found{Index: idx, Kind: translog.KindAdminRead, Scope: e.Scope, At: d.At}
+			label, nonceHex, commitHex = translog.AdminReadLabel, e.Nonce, e.Commitment
+		case translog.LogPolicy:
+			if e.Scope != translog.PolicyScopeTenant {
+				continue
+			}
+			enabled := e.Enabled
+			f = Found{Index: idx, Kind: translog.KindLogPolicy, Flag: e.Flag, Action: e.Action, Enabled: &enabled, At: d.At}
+			label, nonceHex, commitHex = translog.LogPolicyLabel, e.Nonce, e.Commitment
+		default:
 			continue
 		}
-		nonce, err1 := hex.DecodeString(a.Nonce)
-		want, err2 := hex.DecodeString(a.Commitment)
-		if err1 != nil || err2 != nil || !hmac.Equal(Commitment(salt, nonce), want) {
+		nonce, err1 := hex.DecodeString(nonceHex)
+		want, err2 := hex.DecodeString(commitHex)
+		if err1 != nil || err2 != nil || !hmac.Equal(commit(label, salt, nonce), want) {
 			continue
 		}
-		f := Found{Index: idx, Scope: a.Scope, At: d.At}
 		if i := sort.Search(len(sizes), func(i int) bool { return sizes[i] > idx }); i < len(sizes) {
 			n := sizes[i]
 			f.CheckpointSize = &n
@@ -215,10 +272,12 @@ func (s *Store) checkpointSizes(ctx context.Context) ([]int64, error) {
 	return out, rows.Err()
 }
 
-// TenantExists reports whether tenantID is a tenant (a read of a tenant that
-// does not exist reads no one, and records nothing).
+// TenantExists reports whether tenantID is a tenant, exactly as written (no
+// trimming, no case folding: the handlers match exactly). A string Postgres
+// cannot hold as text (a NUL byte, invalid UTF-8) is no tenant, never a
+// database error.
 func TenantExists(ctx context.Context, db *sql.DB, tenantID string) (bool, error) {
-	if db == nil || tenantID == "" {
+	if db == nil || !textual(tenantID) {
 		return false, nil
 	}
 	var ok bool
@@ -231,8 +290,11 @@ func TenantExists(ctx context.Context, db *sql.DB, tenantID string) (bool, error
 // TenantOfUser is the tenant of a user (tenants.email = users.email, the
 // registration's pairing); "" when the user has none.
 func TenantOfUser(ctx context.Context, db *sql.DB, userID string) (string, error) {
-	if db == nil || userID == "" {
+	if db == nil {
 		return "", errors.New("adminread: no database")
+	}
+	if !textual(userID) {
+		return "", nil
 	}
 	var t string
 	err := db.QueryRowContext(ctx, `SELECT t.id FROM users u JOIN tenants t ON t.email = u.email WHERE u.id::text = $1 LIMIT 1`, userID).Scan(&t)
@@ -243,4 +305,9 @@ func TenantOfUser(ctx context.Context, db *sql.DB, userID string) (string, error
 		return "", fmt.Errorf("adminread: tenant of user %s: %w", userID, err)
 	}
 	return t, nil
+}
+
+// textual: a non-empty string Postgres can hold as text.
+func textual(s string) bool {
+	return s != "" && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
