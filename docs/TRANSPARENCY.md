@@ -49,6 +49,29 @@ go run ./cmd/tools/translog-verify -url https://stored.cloud/translog -vkey @tra
 
 It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you are the witness until K4b's external one exists.
 
+## The witness
+
+K4b (Stage 1a Prompt 32; plan 43.6: "an independent party co-signing each checkpoint and keeping its own record"). `cmd/tools/translog-witness` (library `internal/translog/witness`, never linked into `cmd/vaultaire`) runs on **another machine**, against the public read side, and trusts nothing of ours but the pinned verifier key of the log. One pass:
+
+1. fetch the newest checkpoint and verify its signature;
+2. prove it extends the checkpoint the witness accepted last (`<dir>/checkpoint`). A fork at the same size, a rewritten prefix or a shrunk log is a non-zero exit, and nothing moves: the tiles of a refused tree are never kept;
+3. **mirror** byte for byte, under `<dir>/cache/` in the tlog-tiles layout itself, every full entry bundle and full level-0 hash tile it does not hold yet, plus the partial entry bundle at the checkpoint's size (replaced as it widens). Every entry's leaf hash is proven against the checkpoint before it is kept, and every tile is authenticated by `tlog.TileHashReader`. Full tiles are immutable, so they are never fetched again;
+4. **co-sign:** the log's note, opened with the log's key, signed again with the witness's own key (`note.Sign` keeps the verified signature). The note goes to `<dir>/cosigned` with both signature lines, and each new note is appended to `<dir>/cosigned.history` (append-only, base64, one per line).
+
+The accepted checkpoint moves forward only after every step passed. The witness refuses the log's own key as its `-key`.
+
+```sh
+translog-keygen -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey   # the witness's OWN key, kept on that machine
+translog-witness -vkey @translog.vkey -key @$HOME/.translog-witness/witness.key           # one pass (-once, the default): for cron
+# */10 * * * *  translog-witness -vkey @… -key @… >> ~/.translog-witness/log 2>&1
+```
+
+What it is for:
+- with its cache, entries a database restore lost can be put back **byte for byte** (§ After a database restore, `translog-restore -from <dir>`);
+- its accepted checkpoint is a tree the restored log must extend, and it survives the loss of the box and its high-water file (RP38-5).
+
+**What it is not yet:** this is our own second record, under our own key, on another box (the owner's Mac from a cron, once the signing-key ceremony has run). A co-signature by an **independent third party**, in the [c2sp.org/tlog-cosignature](https://c2sp.org/tlog-cosignature) timestamped form, comes with a real external witness (K4c), as do OpenTimestamps and the Rekor mirror.
+
 ## The signing key
 
 Loaded like the master key (`docs/ENCRYPTION.md`): the systemd credential `translog_signing_key` (`$CREDENTIALS_DIRECTORY/translog_signing_key`), then `TRANSLOG_SIGNING_KEY_FILE=<path>`, then `TRANSLOG_SIGNING_KEY`. A source set but unreadable or malformed — or a key named for another origin — **refuses the boot**. One Info line `translog signing key: credential|file|env` with the key ID (public: it is in every signature), never the key; a Warn names lower sources also set. **No key:** entries still append, no checkpoint is signed, `vaultaire_translog_signing_key_loaded 0` (prod until the owner's ceremony).

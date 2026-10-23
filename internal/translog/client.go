@@ -25,6 +25,19 @@ type Client struct {
 	BaseURL  string
 	HTTP     *http.Client
 	Verifier note.Verifier
+	// Tiles, when set, is a store of FULL Merkle tiles (immutable): a full
+	// tile is read from it before the network, and every full tile tlog
+	// authenticated against a checkpoint is handed to it (the witness's
+	// mirror, K4b). nil = every tile from the network.
+	Tiles TileCache
+}
+
+// TileCache keeps full Merkle tiles by their tile path. A tile it returns
+// is authenticated again like a fetched one, so a corrupted copy is an
+// error, never a wrong hash.
+type TileCache interface {
+	Tile(path string) (data []byte, ok bool)
+	SaveTile(path string, data []byte)
 }
 
 const maxFetch = 32 << 20 // a full entry bundle is at most 256 × 64 KiB
@@ -80,7 +93,14 @@ func (r *tileReader) Height() int { return TileHeight }
 func (r *tileReader) ReadTiles(tiles []tlog.Tile) ([][]byte, error) {
 	out := make([][]byte, len(tiles))
 	for i, t := range tiles {
-		b, err := r.c.get(r.ctx, TilePath(t.L, t.N, t.W))
+		path := TilePath(t.L, t.N, t.W)
+		if t.W == TileWidth && r.c.Tiles != nil {
+			if b, ok := r.c.Tiles.Tile(path); ok {
+				out[i] = b
+				continue
+			}
+		}
+		b, err := r.c.get(r.ctx, path)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +109,18 @@ func (r *tileReader) ReadTiles(tiles []tlog.Tile) ([][]byte, error) {
 	return out, nil
 }
 
-func (r *tileReader) SaveTiles([]tlog.Tile, [][]byte) {}
+// SaveTiles is tlog's signal that tiles were authenticated against the
+// checkpoint: the full ones go to the cache.
+func (r *tileReader) SaveTiles(tiles []tlog.Tile, data [][]byte) {
+	if r.c.Tiles == nil {
+		return
+	}
+	for i, t := range tiles {
+		if t.W == TileWidth {
+			r.c.Tiles.SaveTile(TilePath(t.L, t.N, t.W), data[i])
+		}
+	}
+}
 
 // hashes reads hashes authenticated against cp.
 func (c *Client) hashes(ctx context.Context, cp Checkpoint) HashReader {
@@ -124,6 +155,42 @@ func (c *Client) VerifyInclusion(ctx context.Context, cp Checkpoint, idx int64) 
 		return nil, err
 	}
 	return body, nil
+}
+
+// EntryBundle fetches entry bundle n as cp's tree holds it — full, or the
+// partial one at cp.Size — and proves every entry's leaf hash against cp's
+// root: raw is the bundle exactly as served, bodies its entries (the
+// witness's mirror keeps raw byte for byte, K4b).
+func (c *Client) EntryBundle(ctx context.Context, cp Checkpoint, n int64) (raw []byte, bodies [][]byte, err error) {
+	width := TileWidthAt(EntriesLevel, n, cp.Size)
+	if n < 0 || width == 0 {
+		return nil, nil, fmt.Errorf("entry bundle %d is not in a tree of %d", n, cp.Size)
+	}
+	raw, err = c.get(ctx, TilePath(EntriesLevel, n, width))
+	if err != nil {
+		return nil, nil, err
+	}
+	bodies, err = ParseEntryBundle(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(bodies) != width {
+		return nil, nil, fmt.Errorf("entry bundle %d has %d entries, the tree of %d holds %d", n, len(bodies), cp.Size, width)
+	}
+	idx := make([]int64, width)
+	for i := range idx {
+		idx[i] = tlog.StoredHashIndex(0, n*TileWidth+int64(i))
+	}
+	leaves, err := c.hashes(ctx, cp).ReadHashes(idx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("leaf hashes of entry bundle %d: %w", n, err)
+	}
+	for i, b := range bodies {
+		if LeafHash(b) != leaves[i] {
+			return nil, nil, fmt.Errorf("entry %d of bundle %d is not the entry the checkpoint of %d commits to", n*TileWidth+int64(i), n, cp.Size)
+		}
+	}
+	return raw, bodies, nil
 }
 
 // VerifyConsistency proves cp extends old (saved earlier): nil means no
