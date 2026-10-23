@@ -290,3 +290,41 @@ Tests changed:
 - **F-33**, now narrower: a new origin is needed only when no witness cache reaches N. The freeze keeps the re-append possible otherwise.
 - RB-3: `BLOMP_ALLOW_UNSEALED` off before customers.
 - **`translog_admin_reads` global ON**, after reading `docs/TRANSPARENCY.md` § Admin reads (no break-glass, RP43-12); `translog_customer_view` when the customer copy is wanted.
+
+## Post-merge review (2026-10-23)
+
+Reviewed on `e3b48288` (main; prod `/version` `c699eb332a78`, built 11:06:55Z, slot 8000). The four product diffs (#916–#919) were read against the code paths they touch, and two throwaway tests were run on a private database (`vaultaire_test_rp43`, migrated through 104; neither test is committed). CI, Security, CodeQL and Deploy are green on main. **Verdict: the freeze, the trust host and the un-cancel evidence hold. K4c-1's entry, commitment and fail-closed order hold, but the gate has two holes. No P0, P1 or P2. Two P3s, both proven. Each lets an operator read one tenant's records with no entry, even once `translog_admin_reads` is ON globally.** The flag is ON for tenant zero only, so no customer's read has gone unlogged. Both must be closed before the owner's global flip.
+
+### Findings (RP44-n)
+
+| # | Sev | What | Proof | Where |
+|---|---|---|---|---|
+| RP44-1 | **P3** proven | **The classifier and the handler parse the subject differently, and a subject that does not resolve records nothing.** `auditScope` (dashboard) reads `q.Get("tenant")` raw. `HandleAdminAudit` and its export read `strings.TrimSpace(q.Get("tenant"))`. So `?tenant=%20<id>` reaches `RecordAdminRead` as `" <id>"`. `TenantExists` is false, and the recorder returns nil with no entry: "a subject scope naming no tenant that exists records nothing" is a fail-open default. The handler then trims, matches exactly and serves the tenant's audit trail. The same happens for the CSV export. `?user=%20<uuid>` falls to the list scope in the same way: under a per-tenant ON that is unlogged too, and under a global ON it is logged as a list, not against the tenant. The global flag does not help, because the recorder's early return comes after the flag check | A probe on the production dashboard router (`RegisterRoutes` with a DB), using a recorder that is `RecordAdminRead`'s logic. `/admin/audit?tenant=<id>` → 200, the tenant's row shown, **1** entry. `?tenant=%20<id>` → 200, the row shown, **0** entries (the recorder saw `"tenant_audit\| <id>"`). `/admin/audit/export?tenant=%20<id>` → 200 CSV with the row, **0** entries | `internal/dashboard/admin_reads.go` `auditScope`; `internal/api/admin_reads.go` `RecordAdminRead` (`!exists → return nil`) |
+| RP44-2 | **P3** proven | **The gate's own switch is not in the log.** `flags.Enabled` reads the per-tenant row first. Under a global ON, a per-tenant OFF row for `translog_admin_reads` is therefore a silent exemption for that one tenant: `PUT /api/v1/admin/flags/translog_admin_reads {tenant_id, enabled:false}`, read, then `DELETE`. Only `audit_logs` sees the two flag writes, and that is the table the log exists not to depend on. A global OFF is just as silent. Contract rule 7 says every access-widening act goes in the log, and switching off the record of reads is one | A probe on the API fixture (`setupReadFixture`, per-tenant ON): set the tenant's row OFF, `Refresh`, GET `/api/v1/admin/tenants/{id}/payments` → **200** with the ledger, then set it ON. `translog_entries` before 0, after **0**; the tenant's own view is empty | `internal/flags/service.go` `Enabled`; `internal/api/flags*.go`; `internal/dashboard/handlers` flag set/clear |
+| RP44-3 | P4 | With `translog_admin_reads` ON globally and the log frozen, `GET /api/v1/admin/jobs` and `/admin/system` are refused (`job_list`). The restore runbook checks the `translog_checkpoint` run's result after the re-append, and the operator's way to see it is gone exactly then. `POST …/jobs/translog_checkpoint/run` still works. The runbook should name `psql … job_runs` for that step, or `job_list` could be classified so it reads only rows that name no tenant | reading `docs/TRANSPARENCY.md` § After a database restore step 1 | docs |
+| RP44-4 | note | The audit CSV export of one tenant is the same scope as the view (`tenant_audit`, D-P33-13), so an export within the hour of a view appends nothing. The probe's first row shows it: view 1 entry, export 0. The public cannot tell a bulk export from a page view. A subject scope of its own (`tenant_audit_export`) would make the export visible | the RP44-1 probe, first two lines | `internal/dashboard/admin_reads.go` |
+| RP44-5 | note | A re-appended `admin_read` loses its coalescing key, because `ReAppend` takes the dedup key from the body and the HMAC'd key is not in it. A re-read in the same hour after a restore appends one more entry. This is harmless and is the same class as RP41-1 | reading `logstore.ReAppend` | translog |
+
+### What holds (checked)
+
+- **The freeze (#916).** The gate sits inside `Append`'s transaction, after `lockLog` and the size read. The dedup lookup comes first, so a read already logged in that hour is served while the log is frozen (it is in the log). `ReAppend` is ungated. `Frozen()` is advisory only and is re-checked under the lock. The boot entry is hashed once, and an invalid entry is never kept. The refusal counters are pre-created. On prod: `vaultaire_translog_append_refusals_total{behind_highwater,highwater_unreadable}` 0, `append_failures_total{admin_read,key_ceremony,server_build}` 0, and still no high-water file (no key).
+- **The trust host (#917).** `TrustHostRouter` wraps the CDN router, so it is reached first. `IsTrustHost` normalizes the host. The 404s are `no-store`. A signed request on the trust host is 404, never the S3 API. A dev origin is unchanged.
+- **The un-cancel evidence (#918).** The evidence is read from the event (`previous_attributes`) while the state is read from the fetched subscription. Out-of-order delivery cannot forge it: the switch's own stop sends `previous_attributes.cancel_at_period_end = false`, never true. An `invoice.*` grant never counts. The live-state fallback writes no withdrawals.
+- **K4c-1 (#919).** `requireAdmin` wraps `adminRead`, so a non-admin cannot append. Every admin GET on both routers goes through the gate, and the walk test enforces it. `{id}` on `/admin/tenants/{id}` and `/admin/support/{id}` is the tenant id the handlers read (`loadTenantDetail`). The commitment is unlinkable without the salt. The salt is erased and excluded from the export. The body allow-list is strict.
+
+### Prod (13:05 UTC)
+
+- `/version` `c699eb332a78`, active slot 8000;
+- **0** error lines in 3 h. The 10 warn lines are the expected `BLOMP_ALLOW_UNSEALED` (RB-3) and HEAD cache misses;
+- `translog_entries` 24: 23 `server_build` + 1 `admin_read` (idx 23);
+- 0 checkpoints, 1 `translog_subjects` row;
+- the `translog_checkpoint` job ok: `no signing key`, `first run: no high-water file yet`;
+- both `translog_*` flags ON for tenant zero only, set by `storedge@teamviera.com`;
+- one `admin.read` audit row (`translog_index` 23);
+- all 16 rule files on the box match `deploy/monitoring/` hash for hash (`vaultaire-translog.yml` `ab29f19a…`).
+
+### Process
+
+- #920 (this note's docs PR) merged at 11:52 UTC.
+- Still open and unreviewed, not touched: K5 #894–#897 (#895 UNSTABLE) and K2b #906/#907.
+- RP44-1 and RP44-2 → **Prompt 34 Part 0** (before the global flip). The owner's item "`translog_admin_reads` global ON" now waits for them.
