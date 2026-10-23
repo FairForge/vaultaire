@@ -363,6 +363,34 @@ deleted and the backends swept. The `account.erased` audit row counts them as
   - Another slot's process memory: unwrapped keys are cached there for at most
     an hour and are not reachable through the API (no row routes to them).
 
+## Client-side keys (Private mode, the SDK key core)
+
+Everything above is **Standard** mode: keys we hold. **Private** mode is the other hierarchy (keystone K2, `sdk/go/e2ee`, plan 10.0, F-12): every key below is made on the customer's device, and the server stores only what is wrapped under keys it does not have. It is one Go package compiled unchanged to WebAssembly (`sdk/wasm`, `sdk/js/e2ee`); no surface makes a key, a wrap or a derivation of its own. Nothing here runs on the server for customer data. It is built and tested (K2b, 2026-10-22, `docs/reviews/WP-P31.md`) and used by no surface yet.
+
+```
+password ─ Argon2id (memory, iterations, lanes, salt: in the wrap's header) ─▶ KEK
+                                                                               │
+                                                     0x04 password wrap ───────┤
+recovery key (32 B, shown once as 24 BIP-39 words) ── box "master-wrap/recovery"┼─▶ MASTER KEY (32 B, random, on the device)
+  ◀── box "recovery-key" under the master key (shown again when signed in)     │
+  ◀── box "recovery-wrap/vault" under the VAULT KEY ◀── the K5 realms, PIN      │
+                                                                               ├─ box "identity/enc" ─▶ X-Wing private key   (public key on the server)
+                                                                               ├─ box "identity/sig" ─▶ Ed25519 seed         (public key on the server)
+                                                                               └─ box "space-key"‖id ─▶ SPACE KEY (the owner)
+a member's X-Wing key ── 0x05 share: HPKE X-Wing seal + the sender's Ed25519 signature ─▶ SPACE KEY (a member)
+SPACE KEY ─ box "object-key"‖space‖object ─▶ OBJECT KEY ─ box "manifest"‖space‖object‖version ─▶ MANIFEST v1
+MANIFEST v1: the ordered chunks (keyed id, SHA-256, chunk key, sizes), the total, the previous manifest's hash
+chunk key = HKDF(space key, SHA-256(chunk)) ─▶ 0x02 chunk (dedups within the space, never across)
+```
+
+- **Password change** re-wraps the master key under a new KEK; **recovery** opens the master key with the recovery key (the 24 words, or the vault key the realms release under the PIN) and sets a new password. Neither touches a space, an object or a chunk.
+- **Argon2id parameters** travel in the wrap. `Sensitive` (256 MiB, t=3, p=1) is the default; `Interactive` (64 MiB, t=3, p=1) is the floor, and a wrap under it is refused before any derivation, so the server cannot hand a device weaker parameters.
+- **What the server holds and learns:** the wraps (it opens none), both public keys of each identity, which fingerprints shared which space and when, every ciphertext, and of each chunk its keyed id and its length.
+  - The length is len + 41 in every space, and the chunker is public. So a file of two or more chunks that is public elsewhere can be **confirmed** in a Private space by its lengths alone. The fix is the owner's decision **F-35** (measured in WP-P31).
+  - It never sees a password, a key, a plaintext chunk hash, a name or a path.
+- **No claim beyond that:** no "zero-knowledge" (that waits for an external audit, contract line 8), and no "keys are wiped" (WebAssembly never zeroes memory).
+- **Still to build:** SRP/OPAQUE login (10.0.5), the browser upload path (10.0.2), the chunker in WASM, the paranoid flag (random chunk keys), key transparency for fingerprints (K4b). A post-quantum signature waits for **F-34**; the envelope's `0x02` is held for it.
+
 ## Where to look
 
 | What | Where |
