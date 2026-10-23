@@ -37,7 +37,7 @@
         </tbody>
     </table>
     <p class="text-muted" style="margin-top: 1rem;">{{.Where.Note}}</p>
-    {{if .Published}}<pre><code>{{.VerifyCommand}}</code></pre>{{end}}
+    {{if .Published}}<p><code style="overflow-wrap: anywhere;">{{.VerifyCommand}}</code></p>{{end}}
     {{else if not .Unavailable}}
     <p class="text-muted">No operator read of your account's records has been recorded.</p>
     {{end}}
