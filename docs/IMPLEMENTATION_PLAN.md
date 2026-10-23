@@ -3102,7 +3102,8 @@ Sources: [FHE in 2026](https://wavect.io/blog/fully-homomorphic-encryption-pract
   - the customer's dashboard view, Settings → Access to your account (behind `translog_customer_view`).
 
   What is left of "at least one external witness" is the owner's: the ceremony, then our witness on the Mac, then the third-party applications (the Witness Network, Glasklar).
-  **K4c-3 (not built):** OpenTimestamps, the Rekor mirror, client build hashes, the fTPM quote in `server_build`.
+  **K4c-3a built (2026-10-23, `docs/reviews/WP-P35.md`, migration 106):** every signed checkpoint anchored in OpenTimestamps — the `translog_anchor` job submits SHA-256 of the note as the log signed it to each calendar of `TRANSLOG_ANCHORS` (≥ 2 calendars, never the aggregator pools) and completes pending proofs into new `translog_anchors` rows; `GET /translog/anchor/<size>.ots` on the trust host behind `translog_public`; `translog-verify -anchors`; verification against Bitcoin is `ots verify`'s, never ours (D-P35-1: the format is `nbd-wtf/opentimestamps`'s). The Rekor mirror is NOT built (D-P35-2, `docs/reviews/K4c-3-REKOR-PROBE.md`): Rekor v2 verifies Ed25519ph over a digest and the log's key signs checkpoints only — a dedicated anchor key is an owner ceremony.
+  **K4c-3 still open:** client build hashes (K4c-3b), the Rekor mirror (after the anchor-key ceremony), the fTPM quote in `server_build` (waits for hardware).
 - **Test:** a client with a build hash not in the log refuses to start → a ceremony's entry is co-signed by the external witness within the hour → an admin read of a tenant's rows appears on trust.stored.cloud with actor, opaque subject id and reason → a rewritten history fails the consistency proof against the witness's last checkpoint.
 
 
