@@ -16,10 +16,11 @@ const enc = new TextEncoder();
 const out = { version: e2ee.version };
 // Native → WASM.
 out.boxOpened = x(e2ee.open(h(inp.key), h(inp.box), enc.encode(inp.ad)));
-out.chunkHash = x(e2ee.chunkHash(h(inp.chunk)));
+out.chunkHash = x(e2ee.deviceOnlyChunkHash(h(inp.chunk)));
+out.chunkId = x(e2ee.chunkId(h(inp.spaceKey), h(out.chunkHash)));
 out.chunkKey = x(e2ee.chunkKey(h(inp.spaceKey), h(out.chunkHash)));
 out.chunkSealed = x(e2ee.sealChunk(h(out.chunkKey), h(inp.chunk)));
-out.chunkOpened = x(e2ee.openChunk(h(out.chunkKey), h(inp.nativeChunk)));
+out.chunkOpened = x(e2ee.openChunk(h(out.chunkKey), h(inp.nativeChunk), h(out.chunkHash)));
 out.sealedOpened = x(e2ee.openSealed(h(inp.priv), h(inp.sealed), enc.encode(inp.info), enc.encode(inp.ad)));
 // WASM → native.
 out.box = x(e2ee.seal(h(inp.key), enc.encode('from wasm'), enc.encode(inp.ad)));

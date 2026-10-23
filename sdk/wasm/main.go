@@ -72,9 +72,15 @@ func main() {
 		"open": fn(func(a []js.Value) (map[string]any, error) {
 			return value(e2ee.Open(bytesArg(a, 0), bytesArg(a, 1), bytesArg(a, 2)))
 		}),
-		"chunkHash": fn(func(a []js.Value) (map[string]any, error) {
+		// The plain SHA-256 of a chunk: it derives the chunk key and is
+		// checked on open, and it never leaves the device — the server is
+		// given chunkId (keyed under the space), never this (RP37-15b).
+		"deviceOnlyChunkHash": fn(func(a []js.Value) (map[string]any, error) {
 			h := sha256.Sum256(bytesArg(a, 0))
 			return value(h[:], nil)
+		}),
+		"chunkId": fn(func(a []js.Value) (map[string]any, error) {
+			return value(e2ee.ChunkID(bytesArg(a, 0), bytesArg(a, 1)))
 		}),
 		"chunkKey": fn(func(a []js.Value) (map[string]any, error) {
 			return value(e2ee.ChunkKey(bytesArg(a, 0), bytesArg(a, 1)))
@@ -83,7 +89,7 @@ func main() {
 			return value(e2ee.SealChunk(bytesArg(a, 0), bytesArg(a, 1)))
 		}),
 		"openChunk": fn(func(a []js.Value) (map[string]any, error) {
-			return value(e2ee.OpenChunk(bytesArg(a, 0), bytesArg(a, 1)))
+			return value(e2ee.OpenChunk(bytesArg(a, 0), bytesArg(a, 1), bytesArg(a, 2)))
 		}),
 		"generateKeyPair": fn(func([]js.Value) (map[string]any, error) {
 			priv, pub, err := e2ee.GenerateKeyPair()

@@ -8,7 +8,9 @@
 //   const sealed = e2ee.seal(key, bytes, purpose);
 //
 // Constructions (see sdk/go/e2ee): seal/open — XChaCha20-Poly1305 box;
-// chunkKey/sealChunk/openChunk — convergent chunks within a space;
+// chunkKey/sealChunk/openChunk(key, sealed, hash) — convergent chunks within
+// a space, opened only against their hash; chunkId — the keyed id the server
+// sees (deviceOnlyChunkHash never leaves the device);
 // generateKeyPair/sealTo/openSealed — HPKE with the post-quantum hybrid
 // X-Wing KEM (ML-KEM-768 + X25519). Every value is a Uint8Array.
 
@@ -31,7 +33,8 @@ export async function load(wasm) {
     randomKey: call('randomKey'),
     seal: call('seal'),
     open: call('open'),
-    chunkHash: call('chunkHash'),
+    deviceOnlyChunkHash: call('deviceOnlyChunkHash'), // never sent: the server sees chunkId
+    chunkId: call('chunkId'),
     chunkKey: call('chunkKey'),
     sealChunk: call('sealChunk'),
     openChunk: call('openChunk'),

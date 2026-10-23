@@ -1,7 +1,8 @@
 // Package e2ee is the client-side key core's cryptography (keystone K2,
-// plan Phase 10.0.1, decision F-12): the three constructions every Private
-// surface uses, compiled unchanged for native Go (CLI, SDK, server tests) and
-// for the browser (sdk/wasm → sdk/js/e2ee). Nothing here runs on the server
+// plan Phase 10.0.1, decision F-12): the constructions every Private
+// surface uses and the key hierarchy built from them (K2b), compiled
+// unchanged for native Go (CLI, SDK, server tests) and for the browser
+// (sdk/wasm → sdk/js/e2ee). Nothing here runs on the server
 // for customer data: Private mode means these keys exist only on the device.
 //
 // Nothing is hand-written. The cipher is XChaCha20-Poly1305
@@ -19,10 +20,23 @@
 //	              keys, metadata, manifests (AD = the caller's purpose)
 //	0x02 chunk   XChaCha20-Poly1305, convergent:   02 ‖ nonce(24) ‖ ciphertext ‖ tag(16)
 //	              key = ChunkKey(space key, SHA-256(chunk)); nonce derived
-//	              from the key AND the sealed bytes (R8-01)
+//	              from the key AND the sealed bytes (R8-01); named to the
+//	              server only by ChunkID (keyed), opened only against the
+//	              manifest's hash
 //	0x03 sealed  HPKE base mode, X-Wing:          03 ‖ enc(1120) ‖ ciphertext ‖ tag(16)
 //	              sharing a key to a member's public key (F-12 change 2);
 //	              HPKE info = label ‖ 03 ‖ the caller's info
+//	0x04 password wrap  header (Argon2id parameters, salt) ‖ 0x01 box under
+//	              the KEK (account.go)
+//	0x05 share   a 0x03 sealed space key + the sender's signature over it
+//	              (share.go)
+//
+// Above them, the hierarchy's wraps are 0x01 boxes whose AD names the role
+// (and the space, the object, the version): master key ← password KEK and
+// recovery key; recovery key ← master key and vault key; identity ← master
+// key; space key ← master key (owner) or a 0x05 share (member); object key ←
+// space key; manifest ← object key; chunk ← its convergent chunk key, named
+// in the manifest.
 //
 // A change to any of these bytes is a new format byte, never a silent change:
 // convergent chunks are a dedup contract (TestChunk_… pins one).
@@ -34,6 +48,7 @@ import (
 	"crypto/hpke"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
@@ -57,6 +72,7 @@ const (
 	label         = "stored.cloud/e2ee/v1/"
 	labelChunkKey = label + "chunk-key"
 	labelNonce    = label + "chunk-nonce"
+	labelChunkID  = label + "chunk-id"
 	labelSealed   = label + "sealed/"
 )
 
@@ -70,6 +86,9 @@ var (
 	ErrChunkTooLarge = errors.New("e2ee: chunk larger than 16 MiB")
 	// ErrFormat: not this package's envelope, or another format byte.
 	ErrFormat = errors.New("e2ee: unknown or malformed envelope")
+	// ErrChunkMismatch: a chunk that opens under its key but is not the
+	// chunk the key and the manifest name.
+	ErrChunkMismatch = errors.New("e2ee: chunk is not the one its manifest names")
 )
 
 // RandomKey is a fresh 256-bit key (a master, space, object or paranoid
@@ -141,7 +160,9 @@ func Open(key, msg, ad []byte) ([]byte, error) { return open(FormatBox, key, msg
 
 // ChunkKey is a chunk's convergent key in a space (F-12 change 1):
 // HKDF-SHA256(space key, info = label ‖ SHA-256 of the chunk). The same
-// chunk in the same space has the same key; two spaces never share one.
+// chunk in the same space has the same key; two spaces never share one —
+// so their bytes and ids never converge. Their LENGTHS do (len + 41, and the
+// chunker is public): F-35.
 func ChunkKey(spaceKey, chunkHash []byte) ([]byte, error) {
 	if len(spaceKey) != KeySize {
 		return nil, ErrKeySize
@@ -175,9 +196,46 @@ func SealChunk(chunkKey, plaintext []byte) ([]byte, error) {
 	return seal(FormatChunk, chunkKey, nonce, plaintext, nil)
 }
 
-// OpenChunk opens a chunk. The caller compares its SHA-256 with the
-// manifest's entry.
-func OpenChunk(chunkKey, msg []byte) ([]byte, error) { return open(FormatChunk, chunkKey, msg, nil) }
+// OpenChunk opens a chunk and checks that its plaintext is the chunk the
+// key was derived for: SHA-256(plaintext) must equal expectedHash (the
+// manifest's entry). A space member who sealed other bytes under another
+// chunk's key — to poison the dedup of everyone in the space who later
+// writes that chunk — is refused with ErrChunkMismatch, never served.
+func OpenChunk(chunkKey, msg, expectedHash []byte) ([]byte, error) {
+	if len(expectedHash) != sha256.Size {
+		return nil, errors.New("e2ee: a chunk hash is SHA-256 (32 bytes)")
+	}
+	pt, err := open(FormatChunk, chunkKey, msg, nil)
+	if err != nil {
+		return nil, err
+	}
+	if h := sha256.Sum256(pt); subtle.ConstantTimeCompare(h[:], expectedHash) != 1 {
+		return nil, ErrChunkMismatch
+	}
+	return pt, nil
+}
+
+// ChunkID is the only identifier of a chunk that leaves the device:
+// HMAC-SHA256(HKDF-SHA256(space key, info = label ‖ "chunk-id"), SHA-256 of
+// the chunk). It is stable within a space (the server dedups by it) and
+// keyed, so the server cannot test it against the hash of a file it knows,
+// and two spaces holding one file show it under two unrelated ids (RP37-15b).
+// SHA-256 of a chunk itself never leaves the device.
+func ChunkID(spaceKey, chunkHash []byte) ([]byte, error) {
+	if len(spaceKey) != KeySize {
+		return nil, ErrKeySize
+	}
+	if len(chunkHash) != sha256.Size {
+		return nil, errors.New("e2ee: a chunk hash is SHA-256 (32 bytes)")
+	}
+	idKey, err := hkdf.Key(sha256.New, spaceKey, nil, labelChunkID, KeySize)
+	if err != nil {
+		return nil, fmt.Errorf("e2ee: chunk id: %w", err)
+	}
+	m := hmac.New(sha256.New, idKey)
+	m.Write(chunkHash)
+	return m.Sum(nil), nil
+}
 
 // The sealed box's suite.
 var (
