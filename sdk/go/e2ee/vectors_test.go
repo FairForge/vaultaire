@@ -55,10 +55,55 @@ type sealedVector struct {
 	Msg       hexb `json:"msg"`
 }
 
+// argon2Vector: Argon2id(password, salt) under fixed parameters (RFC 9106;
+// recomputed with libsodium and OpenSSL by testdata/vectors_check.py).
+type argon2Vector struct {
+	Password    hexb   `json:"password"`
+	Salt        hexb   `json:"salt"`
+	MemoryKiB   uint32 `json:"memory_kib"`
+	Iterations  uint32 `json:"iterations"`
+	Parallelism uint8  `json:"parallelism"`
+	KEK         hexb   `json:"kek"`
+}
+
+// passwordWrapVector: a 0x04 password wrap with a fixed salt and nonce.
+type passwordWrapVector struct {
+	Password    hexb   `json:"password"`
+	MasterKey   hexb   `json:"master_key"`
+	MemoryKiB   uint32 `json:"memory_kib"`
+	Iterations  uint32 `json:"iterations"`
+	Parallelism uint8  `json:"parallelism"`
+	Salt        hexb   `json:"salt"`
+	Nonce       hexb   `json:"nonce"`
+	Wrapped     hexb   `json:"wrapped"`
+}
+
+// keyWrapVector: one key wrapped under another in a 0x01 box with a fixed
+// nonce, under the AD label of its role.
+type keyWrapVector struct {
+	WrappingKey hexb   `json:"wrapping_key"`
+	Key         hexb   `json:"key"`
+	Nonce       hexb   `json:"nonce"`
+	AD          string `json:"ad"`
+	Wrapped     hexb   `json:"wrapped"`
+}
+
+// bip39Vector: BIP-39's published vectors (trezor/python-mnemonic
+// vectors.json, MIT), the 256-bit entries: entropy → the 24 words.
+type bip39Vector struct {
+	Entropy  hexb   `json:"entropy"`
+	Mnemonic string `json:"mnemonic"`
+}
+
 type vectors struct {
-	Comment string        `json:"comment"`
-	Box     *boxVector    `json:"box,omitempty"`
-	Sealed  *sealedVector `json:"sealed,omitempty"`
+	Comment      string                    `json:"comment"`
+	Box          *boxVector                `json:"box,omitempty"`
+	Sealed       *sealedVector             `json:"sealed,omitempty"`
+	Argon2id     []argon2Vector            `json:"argon2id,omitempty"`
+	PasswordWrap *passwordWrapVector       `json:"password_wrap,omitempty"`
+	KeyWraps     map[string]*keyWrapVector `json:"key_wraps,omitempty"`
+	BIP39Source  string                    `json:"bip39_source,omitempty"`
+	BIP39        []bip39Vector             `json:"bip39,omitempty"`
 }
 
 func loadVectors(t *testing.T) vectors {

@@ -14,5 +14,91 @@
     "ad": "73746f7265642e636c6f75642f653265652f76312f676f6c64656e2f7365616c65642d6164",
     "plaintext": "61207365616c656420626f782070696e6e6564206f6e20323032362d31302d3232",
     "msg": "03f753c7b6035caaf8ba57464f72a9d4268921e463c64f60afa4affcea8ec57feb8820c14381219c822a992f7320d5a0a7722efbffd07467fe2329824052a59578cc996c0803283fc83b958d096d37fde1e5a5b95924e6bd150d6f208d0b6232a8ef5ac0f3ad135cddd17b3a96eb5bb054a24c14a2a1c09114497275012995482319f30378dba7f0124072762d54e45a6f52f6d98cf3e5862ae6fa7f7287415b37318a88705aad1dfca46c866ad37d53cc3fcdf9abd9ba8f2167641af16ee79c6315e5cc5b74195945d262d213c8b1c205582d93821e012c237713bb277644b81e7f1f3334f4b788a1dff3ed51d1185089d118271ea94c356e464bf5bb78e74035133b451b97b6546060cd58d14e59bc7287610bc89504a11ebf4afb4754bea496becd74868d3d5df666c0b60f9ea651a97eed0decdbb40d01e98d2d8ad67f8fd403b6eb2ee513874e0c6182cb3986e72f120f3aacfc5b90b30b0713f6bfe634ddcf30afae04da37f4647f59624d8f5cefba1a5c35433eb87f219745e868d85f492d8ee026d6fc7604cba66b0abc2023cdf074f5fa75d86207a60f729abf5507a4b5824e69d9c3cebb11f90d4d6320612b0dbe6d384b562c73d2ca23c0926bd9d0424b336f03a4fbe702d604abc6a7752c8056343b50218214065c01303f3eb4d4e63e2dfd9dc297ee379976e87ea3d6041fb707ea85bf391218ac90f53608a8d796520f015cb7318ca5dccdf49ae4354afec66ef8da481126460837c0618e6973916aceb0ea66344362a00d07fbb7c7227dabbfba58d49f0c30e0c6da0a94f29b1495941dbd14aeb4709db5c0971fa5f76f84ba922b04b5fbf26b8d9eabeff25d899dd6287def9788298176393b5e9d195f2e9b43a7d5329c5be5997e0330af006105fb14df6d76fc38283d3aa91a2c0899296fd22e186ffbfb3c0439eec7d90adf8cfa7cbdc2e168b572b85a8050357bf373bf25b2adcc45460fbce41c0dbc128863c5d1946846d1b14f8c54a48dbbd85beb5b21f8081a8e23fe72c94000b4042906c4ff77b4d00a12850269d8dae7cd180d7f2574d44d27a435657b2204ad510ab1f82062b240c02e768db1a87829e5197d28ad65a5a299915001207d9b392f06e3d9fd9e4a9b16450e4b0d608bb851ddf44137e33637832c482e60e8fc7bc6d989ca5a09879eed8f2aee4dd2de9c3aba692dd595b685bc75343a1f9dd4d5b46cb6efffa1f8b732b91c648eeb986db273b2c71917b4881c6ab37d222d6088986d744bf02eb13d370eea98ce66d58e114b58454f65f6563f42df7b951aa85bdbf3bd9c4cc96d04dc0d39022f0f3315f5c248a0e2ced2803aa09e36d24722209217f88cf04ba90387e8709fab91ae42ead14ead6e9eece1bca255832888e427ae6b4856896a8519ce36ba39902daaec9537ae698e235c3dc4cd5a59ee960f60ab15a1d87be63caf2c2512b2d81702f72dd0e3a785c3d94844ad3c88b21544cab4ed6fd552813b95626ec4e8e7ecfdf94ccd733c5511cf9f60f734da22e5f1f7cb953b46ffe5dd086e5b8ba33c3315728f4860b6c0d6e423da256ee99b6b2e8816aebd5dfd4d275cc59e655d268fc7c3f6d2df72418a6793bb420598e10adecdc63105229fe4968625388ea94239aab96a76"
-  }
+  },
+  "argon2id": [
+    {
+      "password": "636f727265637420686f727365206261747465727920737461706c65",
+      "salt": "24dd036c109d96b300ed3d1f07b9b812",
+      "memory_kib": 65536,
+      "iterations": 3,
+      "parallelism": 1,
+      "kek": "3602d230c5025b023e9baaebcccc1e2c5504f13fce302850fd13fe3fdf2d307b"
+    },
+    {
+      "password": "636f727265637420686f727365206261747465727920737461706c65",
+      "salt": "24dd036c109d96b300ed3d1f07b9b812",
+      "memory_kib": 65536,
+      "iterations": 4,
+      "parallelism": 2,
+      "kek": "1d32aa52386faa418c68751d49de8b7c4c25dab1f8029f4fa2fa5363e2d6536d"
+    }
+  ],
+  "password_wrap": {
+    "password": "547230756234646f722633206973206e6f7420612070617373706872617365",
+    "master_key": "8822184450b53361b017b72701f1e9d48ccba3ea0870747d9fdc0ff6c76f8822",
+    "memory_kib": 65536,
+    "iterations": 3,
+    "parallelism": 1,
+    "salt": "ab1eb01f8bf7f32a1cd50dc824e16a53",
+    "nonce": "45963bdf4f0d846a136617c46228a42fdec7ca59dec52567",
+    "wrapped": "0401000100000000000301ab1eb01f8bf7f32a1cd50dc824e16a530145963bdf4f0d846a136617c46228a42fdec7ca59dec52567085401d20a1bf8d11237a54bec5acf9b6499fe0bc96ba862ceeb04a47a3117e553111904b5bd589c77bda54317dfd7e2"
+  },
+  "key_wraps": {
+    "master_under_recovery": {
+      "wrapping_key": "46bfdb6104bee1869f90be41906e6e905d9f64d4c2d6adf0231f9d62feb83e18",
+      "key": "8822184450b53361b017b72701f1e9d48ccba3ea0870747d9fdc0ff6c76f8822",
+      "nonce": "772132c01bc8e9d17bac88beead16f4997474a9825cf2885",
+      "ad": "stored.cloud/e2ee/v1/master-wrap/recovery",
+      "wrapped": "01772132c01bc8e9d17bac88beead16f4997474a9825cf2885a4ccb573d104820f4ccaf804fec535d05851136edfaae9c2aed7f346519318c95d517359852de6d639ea4480a6d8e83d"
+    },
+    "recovery_under_master": {
+      "wrapping_key": "8822184450b53361b017b72701f1e9d48ccba3ea0870747d9fdc0ff6c76f8822",
+      "key": "46bfdb6104bee1869f90be41906e6e905d9f64d4c2d6adf0231f9d62feb83e18",
+      "nonce": "6a1ddadc0110e14b16d5c3affef19ca7d03c589c305335ed",
+      "ad": "stored.cloud/e2ee/v1/recovery-key",
+      "wrapped": "016a1ddadc0110e14b16d5c3affef19ca7d03c589c305335ed95bb2ded035917e557778b73d7d7eebadf1c6296dc2a7826d5a4430debdf81ed19d8d3c06289a1ce14c641393c752886"
+    },
+    "recovery_under_vault": {
+      "wrapping_key": "2fd2b13ed9cd2e7530267839cc9bccebd22e15076295bf7e0548aa2aeb5a56f8",
+      "key": "46bfdb6104bee1869f90be41906e6e905d9f64d4c2d6adf0231f9d62feb83e18",
+      "nonce": "5e4245cb0083afa6e64acfb9e7220bfe90519a89fc163009",
+      "ad": "stored.cloud/e2ee/v1/recovery-wrap/vault",
+      "wrapped": "015e4245cb0083afa6e64acfb9e7220bfe90519a89fc1630093535dea5654a206c98c6fd027106e4461501286a76c7e7260c532211b5be21399e9872d18e442a6160e2bfef5c65fa07"
+    }
+  },
+  "bip39_source": "https://github.com/trezor/python-mnemonic/blob/master/vectors.json (MIT), the 256-bit english entries, fetched 2026-10-22",
+  "bip39": [
+    {
+      "entropy": "0000000000000000000000000000000000000000000000000000000000000000",
+      "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+    },
+    {
+      "entropy": "7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f",
+      "mnemonic": "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title"
+    },
+    {
+      "entropy": "8080808080808080808080808080808080808080808080808080808080808080",
+      "mnemonic": "letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic bless"
+    },
+    {
+      "entropy": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "mnemonic": "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote"
+    },
+    {
+      "entropy": "68a79eaca2324873eacc50cb9c6eca8cc68ea5d936f98787c60c7ebc74e6ce7c",
+      "mnemonic": "hamster diagram private dutch cause delay private meat slide toddler razor book happy fancy gospel tennis maple dilemma loan word shrug inflict delay length"
+    },
+    {
+      "entropy": "9f6a2878b2520799a44ef18bc7df394e7061a224d2c33cd015b157d746869863",
+      "mnemonic": "panda eyebrow bullet gorilla call smoke muffin taste mesh discover soft ostrich alcohol speed nation flash devote level hobby quick inner drive ghost inside"
+    },
+    {
+      "entropy": "066dca1a2bb7e8a1db2832148ce9933eea0f3ac9548d793112d9a95c9407efad",
+      "mnemonic": "all hour make first leader extend hole alien behind guard gospel lava path output census museum junior mass reopen famous sing advance salt reform"
+    },
+    {
+      "entropy": "f585c11aec520db57dd353c69554b21a89b20fb0650966fa0a9d6f74fd989d8f",
+      "mnemonic": "void come effort suffer camp survey warrior heavy shoot primary clutch crush open amazing screen patrol group space point ten exist slush involve unfold"
+    }
+  ]
 }

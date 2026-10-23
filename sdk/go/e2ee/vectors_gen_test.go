@@ -5,6 +5,7 @@ package e2ee
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"testing"
@@ -48,6 +49,62 @@ func TestGenerateVectors(t *testing.T) {
 		require.NoError(t, err)
 		s.Msg = msg
 		v.Sealed = s
+	}
+
+	if v.Argon2id == nil {
+		for _, c := range []argon2Vector{
+			{MemoryKiB: 64 << 10, Iterations: 3, Parallelism: 1},
+			{MemoryKiB: 64 << 10, Iterations: 4, Parallelism: 2},
+		} {
+			c.Password = []byte("correct horse battery staple")
+			c.Salt = fill("argon2-salt")[:saltSize]
+			c.KEK = deriveKEK(c.Password, c.Salt, KDFParams{c.MemoryKiB, c.Iterations, c.Parallelism})
+			v.Argon2id = append(v.Argon2id, c)
+		}
+	}
+	if v.PasswordWrap == nil {
+		w := &passwordWrapVector{Password: []byte("Tr0ub4dor&3 is not a passphrase"), MasterKey: fill("master-key"),
+			MemoryKiB: Interactive.MemoryKiB, Iterations: Interactive.Iterations, Parallelism: Interactive.Parallelism,
+			Salt: fill("password-wrap-salt")[:saltSize], Nonce: fill("password-wrap-nonce")[:24]}
+		wrapped, err := wrapMasterKeyWithPassword(w.MasterKey, w.Password, Interactive, w.Salt, w.Nonce)
+		require.NoError(t, err)
+		w.Wrapped = wrapped
+		v.PasswordWrap = w
+	}
+	if v.KeyWraps == nil {
+		v.KeyWraps = map[string]*keyWrapVector{}
+	}
+	for name, kw := range map[string]struct{ wrapping, key, ad string }{
+		"master_under_recovery": {"recovery-key", "master-key", labelMasterWrapRecovery},
+		"recovery_under_master": {"master-key", "recovery-key", labelRecoveryKey},
+		"recovery_under_vault":  {"vault-key", "recovery-key", labelRecoveryWrapVault},
+	} {
+		if v.KeyWraps[name] != nil {
+			continue
+		}
+		w := &keyWrapVector{WrappingKey: fill(kw.wrapping), Key: fill(kw.key), Nonce: fill(name + "-nonce")[:24], AD: kw.ad}
+		wrapped, err := seal(FormatBox, w.WrappingKey, w.Nonce, w.Key, []byte(w.AD))
+		require.NoError(t, err)
+		w.Wrapped = wrapped
+		v.KeyWraps[name] = w
+	}
+	if v.BIP39 == nil {
+		// trezor/python-mnemonic vectors.json @ master, fetched 2026-10-22
+		// (MIT): its 256-bit "english" entries, copied verbatim.
+		raw, err := os.ReadFile(os.Getenv("E2EE_TREZOR_VECTORS"))
+		require.NoError(t, err, "E2EE_TREZOR_VECTORS = a copy of trezor/python-mnemonic vectors.json")
+		var tv struct {
+			English [][]string `json:"english"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &tv))
+		for _, e := range tv.English {
+			if len(e[0]) == 64 {
+				ent, err := hex.DecodeString(e[0])
+				require.NoError(t, err)
+				v.BIP39 = append(v.BIP39, bip39Vector{Entropy: ent, Mnemonic: e[1]})
+			}
+		}
+		v.BIP39Source = "https://github.com/trezor/python-mnemonic/blob/master/vectors.json (MIT), the 256-bit english entries, fetched 2026-10-22"
 	}
 
 	var buf bytes.Buffer
