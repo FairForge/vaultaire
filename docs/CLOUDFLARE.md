@@ -24,7 +24,8 @@ stored.cloud is the canonical domain (F-17). The zone (`85615649…`, same accou
 | `stored.cloud`, `www` | `38.147.105.54` | **proxied** | the web + dashboard; `www` 301s to the apex in Go (`VAULTAIRE_ALIAS_HOSTS`) |
 | **`s3.stored.cloud`** | same IP | **DNS-only** (recommended, F-17b) | as `s3.stored.ge`: no 100 MB body limit, no edge hop, TLS ends at our origin (an SSE-C key is never plaintext inside the edge) |
 | `cdn.stored.cloud` | same IP | proxied | public-read objects until the non-brand content domain exists (`CDN_PUBLIC_HOST`) |
-| `app.`, `docs.`, `trust.`, `status.` | — | — | part 2 of WP-DOMAIN-1 |
+| `trust.stored.cloud` | same IP | proxied | the transparency log's read side (K4b, `TRUST_PUBLIC_HOST`): `/translog/checkpoint` + `/translog/tile/*` answer only on this host (behind `translog_public`). HAProxy's default backend already sends it to the app; the origin certificate needs the `trust.stored.cloud` SAN (SSL is strict — it covers `s3.`, the apex and `www.` today, 2026-10-22) |
+| `app.`, `docs.`, `status.` | — | — | part 2 of WP-DOMAIN-1 |
 
 Re-create on this zone the three rules the stored.ge zone carries (below): the sign-in rate limit, **"S3 API is never cached"**, and the HEAD cache rule; the zone settings (origin HTTP/1.1, TLS 1.2 minimum, Smart Tiered Cache) the same. DNSSEC: the DS record at Porkbun (pending since 2026-09-20). The origin certificate needs the `s3.stored.cloud` and `cdn.stored.cloud` SANs (certbot) and `TLS_CERT_PROBE_TARGETS` gains them. stored.ge is served forever: its zone stays as it is, the web 301s in Go, the S3 API answers there with no redirect.
 
