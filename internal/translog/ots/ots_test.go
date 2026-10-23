@@ -3,8 +3,10 @@ package ots_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,4 +114,32 @@ func TestOTS_LibraryPanicIsABadAnswer(t *testing.T) {
 	// Assert
 	assert.ErrorIs(t, err, ots.ErrBadAnswer)
 	assert.Zero(t, cal.Gets.Load())
+}
+
+// testdata/checkpoint3-pending.ots is what the lab served for its checkpoint
+// 3 (Stage 1a Prompt 35): the real answers of three public calendars,
+// combined. The upstream client (`ots info`, v0.7.2) read it as the same
+// digest and the same three pending attestations.
+func TestOTS_RealCalendarsProof(t *testing.T) {
+	// Arrange
+	raw, err := os.ReadFile("testdata/checkpoint3-pending.ots")
+	require.NoError(t, err)
+
+	// Act
+	d, atts, err := ots.Describe(raw)
+	require.NoError(t, err)
+	again, err := ots.Combine(raw, raw)
+	require.NoError(t, err)
+	done, err := ots.Complete(raw)
+	require.NoError(t, err)
+
+	// Assert
+	assert.Equal(t, "19668629f6804000310c6443fbceb7e9c9ce36df12888c9d9cf30097d6b44df5", hex.EncodeToString(d))
+	assert.ElementsMatch(t, []ots.Attestation{
+		{Calendar: "https://alice.btc.calendar.opentimestamps.org"},
+		{Calendar: "https://bob.btc.calendar.opentimestamps.org"},
+		{Calendar: "https://finney.calendar.eternitywall.com"},
+	}, atts)
+	assert.Equal(t, raw, again, "combining a proof with itself is the proof")
+	assert.False(t, done)
 }
