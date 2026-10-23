@@ -93,3 +93,23 @@ func TestOTS_CalendarFailuresAreClassified(t *testing.T) {
 	_, err := ots.NewClient("test").Submit(ctx, "http://127.0.0.1:1", digest)
 	assert.ErrorIs(t, err, ots.ErrUnreachable, "connection refused")
 }
+
+// The library panics on an operation it does not implement; a calendar
+// answering one is a bad answer, never a crash of the job.
+func TestOTS_LibraryPanicIsABadAnswer(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	cal := otstest.New(t)
+	cal.Reverse = true
+	cal.Confirm()
+	c := ots.NewClient("test")
+	p, err := c.Submit(ctx, cal.URL, sha256.Sum256([]byte("x")))
+	require.NoError(t, err, "parsing does not apply the operations")
+
+	// Act
+	_, _, err = c.Upgrade(ctx, cal.URL, p)
+
+	// Assert
+	assert.ErrorIs(t, err, ots.ErrBadAnswer)
+	assert.Zero(t, cal.Gets.Load())
+}

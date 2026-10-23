@@ -239,6 +239,13 @@ func TestTrustHost_ServesOTSProofOnlyWhenPublic(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.translog.AddAnchor(ctx, logstore.Anchor{Size: cp.Size, Kind: logstore.AnchorKindOTS, Service: cal.URL,
 		State: logstore.AnchorPending, Proof: proof, Digest: digest[:]}))
+	// A row whose digest is not the note's is never served.
+	cal2 := otstest.New(t)
+	other := sha256.Sum256([]byte("another note"))
+	wrong, err := ots.NewClient("test").Submit(ctx, cal2.URL, other)
+	require.NoError(t, err)
+	require.NoError(t, s.translog.AddAnchor(ctx, logstore.Anchor{Size: cp.Size, Kind: logstore.AnchorKindOTS, Service: cal2.URL,
+		State: logstore.AnchorPending, Proof: wrong, Digest: other[:]}))
 	h := TrustHostRouter(s.hosts, s.newTrustRouter(), s.router)
 	get := func(host, path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()

@@ -35,6 +35,9 @@ type Calendar struct {
 	// PendingURL, when set, is the URL its pending attestations name
 	// instead of its own.
 	PendingURL string
+	// Reverse puts the "reverse" operation (0xf2) on the pending path — one
+	// the library does not implement (computing the commitment panics).
+	Reverse bool
 }
 
 // New starts one; it stops when t ends.
@@ -74,6 +77,9 @@ func (c *Calendar) serve(w http.ResponseWriter, r *http.Request) {
 		nonce := make([]byte, 16)
 		_, _ = rand.Read(nonce)
 		seq := opentimestamps.Sequence{op(0xf0, nonce), op(0x08, nil), {Attestation: &opentimestamps.Attestation{CalendarServerURL: url}}}
+		if c.Reverse {
+			seq = append(opentimestamps.Sequence{{Operation: &opentimestamps.Operation{Name: "reverse", Tag: 0xf2}}}, seq...)
+		}
 		write(w, d, seq)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/timestamp/"):
 		c.Gets.Add(1)
