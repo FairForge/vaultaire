@@ -107,6 +107,9 @@ func (s *Server) startServerBuildEntry() {
 // the trust host a signed S3 request is 404, never the S3 API. On a
 // development origin (localhost, an IP) the read side keeps K4's rule on its
 // one origin: a signed request is the S3 API's, an unsigned one the log's.
+// Since RP42-2 the top-level TrustHostRouter answers a trust host before
+// this router is reached (trust_host.go); the trust-host branches here stay
+// as the defence behind it.
 func (s *Server) registerTranslogReadRoutes() {
 	if s.translog == nil {
 		return
@@ -131,8 +134,12 @@ func (s *Server) registerTranslogReadRoutes() {
 		}
 		h.ServeHTTP(w, r)
 	}
-	s.router.Get("/translog/checkpoint", serve)
-	s.router.Get("/translog/tile/*", serve)
+	// HEAD too (RP41-6): the same headers, no body — on a public origin's
+	// other hosts it is the S3 API's like GET, as the catch-all was.
+	for _, p := range []string{"/translog/checkpoint", "/translog/tile/*"} {
+		s.router.Get(p, serve)
+		s.router.Head(p, serve)
+	}
 }
 
 // s3Handler is the S3 API's catch-all (a test hook replaces it).
