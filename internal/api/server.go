@@ -750,6 +750,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.setupRoutes()
 
+	// Trust host router (RP42-2): on a public canonical origin the trust
+	// hosts (internal/hosts.IsTrustHost) serve the transparency log only
+	// (trust_host.go); then the CDN hosts; everything else → normal router.
 	// CDN host-based router: the CDN hosts (internal/hosts.IsCDNHost —
 	// CDN_PUBLIC_HOST, cdn.<canonical>, cdn.<alias>, cdn.stored.ge forever)
 	// → CDN handler, everything else → normal router.
@@ -775,7 +778,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// belong in the handlers via context, not on the whole server.
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           CDNHostRouter(s.hosts, cdnRouter, s.router),
+		Handler:           TrustHostRouter(s.hosts, s.newTrustRouter(), CDNHostRouter(s.hosts, cdnRouter, s.router)),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MB

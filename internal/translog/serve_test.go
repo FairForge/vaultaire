@@ -90,6 +90,9 @@ func TestTranslogHandler_CheckpointTilesAndCacheHeaders(t *testing.T) {
 	for _, p := range []string{"tile/0/001", "tile/0/001.p/45", "tile/0/002.p/1", "tile/1/000.p/2", "tile/entries/001.p/45", "tile/0/x000/001", "nope", "tile/0/1"} {
 		resp, _ := get(t, srv.URL+"/translog/"+p)
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode, p)
+		// RP42-2: a tile beyond the checkpoint exists later — its 404 must
+		// not be cached by the edge in front of the trust host.
+		assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"), p)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/translog/checkpoint", nil)
@@ -106,6 +109,7 @@ func TestTranslogHandler_NoCheckpointIs404(t *testing.T) {
 	for _, p := range []string{"checkpoint", "tile/0/000.p/3", "tile/entries/000.p/3"} {
 		resp, _ := get(t, srv.URL+"/translog/"+p)
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode, p)
+		assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"), "no checkpoint yet: a 404 that must not outlive the first signature (%s)", p)
 	}
 }
 

@@ -54,7 +54,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if p != "checkpoint" {
 		var err error
 		if level, n, width, err = ParseTilePath(p); err != nil {
-			http.NotFound(w, r)
+			notFound(w, r)
 			return
 		}
 	}
@@ -65,7 +65,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		http.NotFound(w, r)
+		notFound(w, r)
 		return
 	}
 	if p == "checkpoint" {
@@ -73,7 +73,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if width > TileWidthAt(level, n, size) {
-		http.NotFound(w, r)
+		notFound(w, r)
 		return
 	}
 	var data []byte
@@ -103,6 +103,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cache = cacheImmutable
 	}
 	write(w, "application/octet-stream", cache, data)
+}
+
+// notFound is the read side's 404, never cached: a tile beyond the newest
+// checkpoint, or the checkpoint before the first signature, exists later
+// (RP42-2: Cloudflare fronts the trust host).
+func notFound(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", cacheNone)
+	http.NotFound(w, r)
 }
 
 type readErr string
