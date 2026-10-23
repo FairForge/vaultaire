@@ -1,6 +1,7 @@
 package translog
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -56,6 +57,9 @@ func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errNotFound(fmt.Sprintf("GET %s: %s", path, resp.Status))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET %s: %s", path, resp.Status)
 	}
@@ -210,4 +214,40 @@ func (c *Client) VerifyConsistency(ctx context.Context, old, cp Checkpoint) erro
 		return err
 	}
 	return VerifyConsistency(p, old.Size, cp.Size, old.Root, cp.Root)
+}
+
+// Anchor fetches the OpenTimestamps proof of the checkpoint of size
+// (anchor/<size>.ots, K4c-3a); ok = false when none is served (404).
+func (c *Client) Anchor(ctx context.Context, size int64) (proof []byte, ok bool, err error) {
+	b, err := c.get(ctx, fmt.Sprintf("anchor/%d.ots", size))
+	var nf errNotFound
+	if errors.As(err, &nf) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
+// errNotFound is a 404 from the read side.
+type errNotFound string
+
+func (e errNotFound) Error() string { return string(e) }
+
+// LogNote is msg — a checkpoint as the read side serves it, cosignature
+// lines appended — as the log signed it: the text and v's signature lines
+// only. Its SHA-256 is what the log anchors (K4c-3a).
+func LogNote(msg []byte, v note.Verifier) ([]byte, error) {
+	n, err := note.Open(msg, note.VerifierList(v))
+	if err != nil {
+		return nil, fmt.Errorf("translog: open the checkpoint note: %w", err)
+	}
+	var b bytes.Buffer
+	b.WriteString(n.Text)
+	b.WriteString("\n")
+	for _, s := range n.Sigs {
+		b.WriteString("— " + s.Name + " " + s.Base64 + "\n")
+	}
+	return b.Bytes(), nil
 }

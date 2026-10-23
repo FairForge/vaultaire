@@ -18,10 +18,19 @@
 // dated in the future) does not count.
 //
 //	translog-verify -vkey @translog.vkey -witness @witness.vkey -min 1
+//
+// With -anchors (K4c-3a) it fetches the checkpoint's OpenTimestamps proof
+// (anchor/<size>.ots), checks the proof is of SHA-256 of the note exactly as
+// the log signed it (cosignature lines left out), keeps it beside -state as
+// checkpoint-<size>.ots and prints each attestation's state. It does not
+// verify the proof against Bitcoin: that is `ots verify`'s job, and the
+// command to run is printed. Rekor anchors are not built (D-P35-2).
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,7 +40,10 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/mod/sumdb/note"
+
 	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/ots"
 )
 
 type options struct {
@@ -41,6 +53,7 @@ type options struct {
 	min              int
 	maxAge           time.Duration
 	now              func() time.Time
+	anchors          bool
 }
 
 // keyList is a repeatable -witness flag.
@@ -60,6 +73,7 @@ func main() {
 	flag.Var(&ws, "witness", "a witness's cosignature/v1 verifier key, or @file (repeatable)")
 	flag.IntVar(&o.min, "min", -1, "how many of the -witness keys must have cosigned (default: 1 with any -witness, else 0)")
 	flag.DurationVar(&o.maxAge, "max-age", 24*time.Hour, "a cosignature older than this does not count (0 = no limit)")
+	flag.BoolVar(&o.anchors, "anchors", false, "also fetch the checkpoint's OpenTimestamps proof, check its digest, keep it beside -state and print its state (verify it with `ots verify`)")
 	flag.Parse()
 	o.witnesses = ws
 	if err := run(os.Stdout, o); err != nil {
@@ -109,6 +123,12 @@ func run(out io.Writer, o options) error {
 			_, _ = fmt.Fprintf(out, "cosignature: %s at %s — OK\n", f.KeyID(), f.Time.UTC().Format(time.RFC3339))
 		}
 		_, _ = fmt.Fprintf(out, "cosignatures: %d of the %d required\n", len(fresh), policy.Min)
+	}
+
+	if o.anchors {
+		if err := anchors(ctx, out, c, cp, msg, v, filepath.Dir(o.state)); err != nil {
+			return err
+		}
 	}
 
 	prev, err := os.ReadFile(o.state)
@@ -174,4 +194,47 @@ func witnessPolicy(o options) (translog.WitnessPolicy, error) {
 		return p, fmt.Errorf("-min %d: only %d -witness key(s) given", p.Min, len(p.Witnesses))
 	}
 	return p, nil
+}
+
+// anchors prints the state of the checkpoint's anchors (K4c-3a) and keeps
+// the .ots proof in dir. A proof of another digest fails the run; no proof
+// served yet does not (the translog_anchor job runs every 10 minutes).
+func anchors(ctx context.Context, out io.Writer, c *translog.Client, cp translog.Checkpoint, msg []byte, v note.Verifier, dir string) error {
+	proof, ok, err := c.Anchor(ctx, cp.Size)
+	if err != nil {
+		return fmt.Errorf("anchor of checkpoint %d: %w", cp.Size, err)
+	}
+	if !ok {
+		_, _ = fmt.Fprintf(out, "anchors: none served for checkpoint %d yet (the log anchors each signed checkpoint within about 10 minutes)\n", cp.Size)
+		return nil
+	}
+	logNote, err := translog.LogNote(msg, v)
+	if err != nil {
+		return err
+	}
+	want := sha256.Sum256(logNote)
+	digest, atts, err := ots.Describe(proof)
+	if err != nil {
+		return fmt.Errorf("anchor of checkpoint %d: %w", cp.Size, err)
+	}
+	if !bytes.Equal(digest, want[:]) {
+		return fmt.Errorf("anchor of checkpoint %d: the proof is of digest %x, not of this checkpoint's note (%x)", cp.Size, digest, want)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	file := filepath.Join(dir, fmt.Sprintf("checkpoint-%d.ots", cp.Size))
+	if err := os.WriteFile(file, proof, 0o600); err != nil {
+		return err
+	}
+	for _, a := range atts {
+		if a.BitcoinHeight > 0 {
+			_, _ = fmt.Fprintf(out, "anchor ots: Bitcoin block %d\n", a.BitcoinHeight)
+		} else {
+			_, _ = fmt.Fprintf(out, "anchor ots: pending at %s (`ots upgrade` completes it once the calendar's aggregate is in a Bitcoin block)\n", a.Calendar)
+		}
+	}
+	_, _ = fmt.Fprintf(out, "anchors: kept in %s; not verified here — that is the OpenTimestamps client's job:\n  ots verify -d %x %s   (needs a Bitcoin node: --bitcoin-node)\n", file, want, file)
+	_, _ = fmt.Fprintln(out, "anchor rekor: not built (D-P35-2: Rekor v2 takes only prehashed signatures; the log's key signs checkpoints only)")
+	return nil
 }
