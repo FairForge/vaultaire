@@ -8,13 +8,13 @@
 </div>
 
 <div class="card">
-    <div class="card-title">Every operator read, in the public log</div>
+    <div class="card-title">{{.Where.Title}}</div>
     {{if .Recording}}
     <p class="text-muted" style="margin-bottom: 1rem;">When one of our operators reads your account's records through our admin tools, it is written to our transparency log before the records are shown. So is every change to how such reads are recorded for your account.</p>
     {{else}}
     <div class="alert alert-warning" style="margin-bottom: 1rem;">Operator reads of your account's records are not being recorded in the log yet. Changes to that setting for your account are, and appear below.</div>
     {{end}}
-    <p class="text-muted" style="margin-bottom: 1rem;">The public log does not name your account. This page finds your entries by matching each one against a secret kept for your account.</p>
+    <p class="text-muted" style="margin-bottom: 1rem;">The log does not name your account. This page finds your entries by matching each one against a secret kept for your account.</p>
     <p class="text-muted" style="margin-bottom: 1rem;">It covers our admin tools. It cannot cover someone reading the database directly on the server, and we do not claim it does.</p>
     {{if .Unavailable}}<div class="alert alert-error">The transparency log cannot be read right now. Try again in a few minutes.</div>{{end}}
     {{if .AccessRows}}
@@ -23,7 +23,7 @@
             <tr>
                 <th>When (UTC)</th>
                 <th>What was read or changed</th>
-                <th>In the public log</th>
+                <th>{{.Where.Column}}</th>
             </tr>
         </thead>
         <tbody>
@@ -31,11 +31,13 @@
             <tr>
                 <td><time datetime="{{.At.Format "2006-01-02T15:04:05Z"}}">{{.At.Format "2006-01-02 15:04"}}</time></td>
                 <td>{{.What}}</td>
-                <td>{{if .Checkpoint}}entry {{.Index}}, at <a href="{{$.CheckpointURL}}" rel="noopener">checkpoint {{.Checkpoint}}</a>{{else}}entry {{.Index}}, not yet signed{{end}}</td>
+                <td>{{if .Checkpoint}}entry {{.Index}}, {{$.Where.Included}} {{if $.Published}}<a href="{{$.CheckpointURL}}" rel="noopener">checkpoint {{.Checkpoint}}</a>{{else}}checkpoint {{.Checkpoint}}{{end}}{{else}}entry {{.Index}}, {{$.Where.Unsigned}}{{end}}</td>
             </tr>
         {{end}}
         </tbody>
     </table>
+    <p class="text-muted" style="margin-top: 1rem;">{{.Where.Note}}</p>
+    {{if .Published}}<pre><code>{{.VerifyCommand}}</code></pre>{{end}}
     {{else if not .Unavailable}}
     <p class="text-muted">No operator read of your account's records has been recorded.</p>
     {{end}}

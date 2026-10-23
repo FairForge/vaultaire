@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,13 +35,15 @@ func TestAccessRoute_ThroughTheDashboardRouter(t *testing.T) {
 	entries := fixedAccessLog{{Index: 23, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantPayments,
 		At: time.Date(2026, 10, 23, 11, 24, 0, 0, time.UTC), CheckpointSize: &size}}
 	for _, c := range []struct {
-		name     string
-		flagsOn  *bool
-		wantCode int
+		name      string
+		flagsOn   *bool
+		published bool // translog_public ON globally (RP46-3)
+		wantCode  int
 	}{
-		{"no flags service", nil, http.StatusNotFound},
-		{"the flag off", ptr(false), http.StatusNotFound},
-		{"the flag on", ptr(true), http.StatusOK},
+		{"no flags service", nil, false, http.StatusNotFound},
+		{"the flag off", ptr(false), false, http.StatusNotFound},
+		{"the flag on, the log not published", ptr(true), false, http.StatusOK},
+		{"the flag on, the log published", ptr(true), true, http.StatusOK},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			// Arrange
@@ -52,6 +55,7 @@ func TestAccessRoute_ThroughTheDashboardRouter(t *testing.T) {
 				fl = flags.New(nil, logger)
 				fl.Register(translog.FlagTranslogCustomerView, *c.flagsOn)
 				fl.Register(translog.FlagTranslogAdminReads, true)
+				fl.Register(translog.FlagTranslogPublic, c.published)
 			}
 			r := chi.NewRouter()
 			RegisterRoutes(r, Deps{Auth: authSvc, Sessions: sessions, Logger: logger, Email: email.NewSender(logger),
@@ -80,7 +84,13 @@ func TestAccessRoute_ThroughTheDashboardRouter(t *testing.T) {
 			if c.wantCode == http.StatusOK {
 				assert.Contains(t, page.Body.String(), "Access to your account")
 				assert.Contains(t, page.Body.String(), "Your plan and payments")
-				assert.Contains(t, page.Body.String(), `<a href="https://trust.stored.cloud/translog/checkpoint" rel="noopener">checkpoint 24</a>`)
+				if c.published {
+					assert.Contains(t, page.Body.String(), `included from <a href="https://trust.stored.cloud/translog/checkpoint" rel="noopener">checkpoint 24</a>`)
+				} else {
+					assert.Contains(t, page.Body.String(), "entry 23, included from checkpoint 24")
+					assert.NotContains(t, page.Body.String(), "trust.stored.cloud", "no link while translog_public is off")
+					assert.NotContains(t, strings.ToLower(page.Body.String()), "public log")
+				}
 				assert.Contains(t, settings.Body.String(), `href="/dashboard/settings/access"`)
 			} else {
 				assert.NotContains(t, settings.Body.String(), `href="/dashboard/settings/access"`, "no link to a page that is off")

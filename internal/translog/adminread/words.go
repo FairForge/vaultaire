@@ -57,3 +57,40 @@ func Words(f Found) string {
 	}
 	return Unknown
 }
+
+// WhereWords say where the tenant's entries are (RP46-3, contract rule 8:
+// claim nothing we do not do). "The public log" only while the log is
+// published: translog_public ON globally and a trust URL configured.
+// Otherwise the entries are in our transparency log, not yet published, and
+// nothing links out.
+type WhereWords struct {
+	Title    string // the card's title
+	Column   string // the table's column heading
+	Included string // "entry N, <Included> checkpoint M" for a signed entry (RP46-4)
+	Unsigned string // "entry N, <Unsigned>" for an entry no checkpoint covers yet
+	Note     string // under the table
+	// Verify is the command that proves one entry, %s = the log's URL
+	// (published only).
+	Verify string
+}
+
+var whereWords = map[bool]WhereWords{
+	true: {
+		Title:    "Every operator read, in the public log",
+		Column:   "In the public log",
+		Included: "included from",
+		Unsigned: "not yet signed",
+		Note:     "Each link opens the newest signed checkpoint, which includes every entry from the checkpoint named onwards. To prove one entry yourself, with our published verifier key:",
+		Verify:   "translog-verify -url %s -vkey <the verifier key> -entry N",
+	},
+	false: {
+		Title:    "Every operator read, in our transparency log",
+		Column:   "In our transparency log (not published yet)",
+		Included: "included from",
+		Unsigned: "not yet signed",
+		Note:     "Our transparency log is not published yet, so there is no public checkpoint to link to or check against.",
+	},
+}
+
+// Where is the WhereWords for a log published or not.
+func Where(published bool) WhereWords { return whereWords[published] }

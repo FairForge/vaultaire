@@ -74,11 +74,14 @@ func TestPages_WriteScreenshotFixtures(t *testing.T) {
 		{Index: 26, Kind: translog.KindLogPolicy, Flag: translog.FlagTranslogAdminReads, Action: translog.PolicyActionSet, Enabled: &on, At: at(13), CheckpointSize: &cp},
 		{Index: 27, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantAudit, At: at(14)},
 	}}
-	w = httptest.NewRecorder()
-	HandleAccess(page("access.html"), func(string) bool { return true }, func(string) bool { return true }, access,
-		"https://trust.stored.cloud/translog/checkpoint", zap.NewNop()).ServeHTTP(w,
-		injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings/access", nil), id))
-	write("access", w)
+	// Unpublished (translog_public OFF — prod today, RP46-3), then published.
+	for name, published := range map[string]bool{"access": false, "access-published": true} {
+		w = httptest.NewRecorder()
+		HandleAccess(page("access.html"), func(string) bool { return true }, func(string) bool { return true }, access,
+			"https://trust.stored.cloud/translog/checkpoint", func() bool { return published }, zap.NewNop()).ServeHTTP(w,
+			injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/settings/access", nil), id))
+		write(name, w)
+	}
 
 	// Bucket settings, with the customer-key requirement on (WP-SSEC-1 B.5).
 	_, err := db.Exec(`UPDATE buckets SET ssec_required = TRUE WHERE tenant_id = $1 AND name = 'photos'`, id)
