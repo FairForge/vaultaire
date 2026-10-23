@@ -15,6 +15,9 @@
 #   vaultaire_translog_cosigned_size                  largest checkpoint any witness cosigned, 0 = none   (translog_cosignatures)
 #   vaultaire_translog_cosignature_timestamp_seconds  the newest cosignature's own timestamp, 0 = none    (translog_cosignatures)
 #   vaultaire_translog_witness_cosign_total{witness,outcome}  submissions: ok / conflict / refused / bad_answer / unreachable
+#   vaultaire_translog_anchored_size_by_service{kind,service}         largest checkpoint each CONFIGURED anchoring service has a row for   (translog_anchors ∩ TRANSLOG_ANCHORS)
+#   vaultaire_translog_anchor_timestamp_by_service_seconds{kind,service}  when its newest anchor arrived, 0 = never
+#   vaultaire_translog_anchor_oldest_pending_seconds{kind,service}        age of its oldest pending proof with no complete row, 0 = none
 #
 # The translog_checkpoint job signs a checkpoint every 10 min when the tree
 # grew; without the key it signs nothing and nothing here fires (the key is
@@ -98,20 +101,37 @@ groups:
           summary: "Transparency log: no fresh witness cosignature for {{ $value | humanizeDuration }} while the log grows"
           description: "The translog_checkpoint job signs, but no witness of TRANSLOG_WITNESSES has cosigned the newer checkpoints for over 2 h. The job's result names each witness's outcome (unreachable / refused / conflict / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select result from job_runs where job='translog_checkpoint'\"; vaultaire_translog_witness_cosign_total{outcome}. A conflict naming a LARGER size than the log's newest checkpoint is a restored database or a fork (docs/TRANSPARENCY.md § After a database restore)."
 
-      # K4c-3a: anchors configured (TRANSLOG_ANCHORS), the log signs, and no
-      # anchor of that kind arrived for over 2 h while newer checkpoints wait
-      # for one. An idle log (its newest checkpoint anchored) is silent.
-      - alert: TranslogAnchorStale
+      # K4c-3a + RP48-1 (Stage 1a Prompt 36): per SERVICE — one dead calendar
+      # of two is one point of trust left, so it warns by itself. The
+      # by-service series exist only for the services of TRANSLOG_ANCHORS
+      # (≤ 8; the state collector intersects translog_anchors with the
+      # configured list), so none configured = no series = silent, and a
+      # calendar that never answered is zeros = firing once the log signs.
+      # Replaces TranslogAnchorStale (D-P36-1), whose max by (kind) fired
+      # only when EVERY calendar stopped.
+      - alert: TranslogAnchorServiceStale
         expr: |
-          (time() - max by (kind) (vaultaire_translog_anchor_timestamp_seconds)) > 7200
-          and on (kind) max by (kind) (vaultaire_translog_anchors_configured) > 0
-          and on (kind) (max by (kind) (vaultaire_translog_anchored_size) < on () group_left max(vaultaire_translog_checkpoint_size))
+          (time() - max by (kind, service) (vaultaire_translog_anchor_timestamp_by_service_seconds)) > 7200
+          and on (kind, service) (max by (kind, service) (vaultaire_translog_anchored_size_by_service) < on () group_left max(vaultaire_translog_checkpoint_size))
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Transparency log: no {{ $labels.kind }} anchor for {{ $value | humanizeDuration }} while the log grows"
-          description: "The translog_anchor job has not anchored the newer signed checkpoints in {{ $labels.kind }} for over 2 h. Its result names each service's outcome (unreachable / refused / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select last_outcome, last_error, result from job_runs where job='translog_anchor'\"; vaultaire_translog_anchor_total{outcome}. Every calendar of TRANSLOG_ANCHORS down at once, or the job not running (PeriodicJobStale). docs/TRANSPARENCY.md § Anchors."
+          summary: "Transparency log: no {{ $labels.kind }} anchor from {{ $labels.service }} for {{ $value | humanizeDuration }} while the log grows"
+          description: "{{ $labels.service }} has not anchored the newer signed checkpoints for over 2 h while another calendar may still be fine — the log is anchored by fewer points of trust than configured. The job's result names the outcome (unreachable / refused / bad_answer — a bad_answer naming two URLs is a pool, not a calendar: fix TRANSLOG_ANCHORS): sudo -u postgres psql -At -d vaultaire -c \"select last_outcome, last_error, result from job_runs where job='translog_anchor'\"; vaultaire_translog_anchor_total{service,outcome}. docs/TRANSPARENCY.md § Anchors."
+
+      # RP48-2: a proof pending past the re-submission horizon (48 h; Bitcoin
+      # confirms in hours — the lab's completed within 3 h). The job has
+      # re-submitted it once by now, so this firing means the calendar lost
+      # the commitment AND the re-submission is not completing either.
+      - alert: TranslogAnchorNotCompleting
+        expr: max by (kind, service) (vaultaire_translog_anchor_oldest_pending_seconds) > 172800
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transparency log: {{ $labels.service }}'s oldest pending proof is {{ $value | humanizeDuration }} old"
+          description: "A proof submitted to {{ $labels.service }} has been pending past the 48 h horizon. The job re-submits such a proof once (state 'resubmitted', migration 107); this firing means neither the original nor the re-submission completes. Check the calendar, and the rows: sudo -u postgres psql -At -d vaultaire -c \"select checkpoint_size, service, state, received_at from translog_anchors order by received_at\". docs/TRANSPARENCY.md § Anchors."
 
       # An append failed: a server_build at boot (never blocks the boot) or a
       # ceremony entry. The producer logged an Error line with the reason.

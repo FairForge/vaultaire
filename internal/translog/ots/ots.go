@@ -76,10 +76,33 @@ func (c *Client) Submit(ctx context.Context, calendar string, digest [32]byte) (
 	if err != nil {
 		return nil, err
 	}
+	if err := namesOnly(file, calendar); err != nil {
+		return nil, err
+	}
 	if len(file) > MaxProof {
 		return nil, fmt.Errorf("%w: %d bytes", ErrBadAnswer, len(file))
 	}
 	return file, nil
+}
+
+// namesOnly refuses a proof any of whose pending attestations names a URL
+// other than the calendar asked (RP48-1): an aggregator pool answers with
+// attestations naming its calendars (alice, bob), which would never be asked
+// again (Upgrade asks only the configured calendar) — an anchor that can
+// never complete. A calendar answers for itself or not at all.
+func namesOnly(proof []byte, calendar string) error {
+	f, err := parse(proof)
+	if err != nil {
+		return err
+	}
+	want := strings.TrimSuffix(calendar, "/")
+	for _, seq := range f.Sequences {
+		if a := seq.GetAttestation(); a.CalendarServerURL != "" && strings.TrimSuffix(a.CalendarServerURL, "/") != want {
+			return fmt.Errorf("%w: a pending attestation names %s, asked %s (a pool? configure the calendar itself)",
+				ErrBadAnswer, a.CalendarServerURL, calendar)
+		}
+	}
+	return nil
 }
 
 // Upgrade asks calendar to complete every pending attestation of proof that
@@ -121,6 +144,9 @@ func (c *Client) Upgrade(ctx context.Context, calendar string, proof []byte) (ou
 		}
 		tail, err := fileOf(commitment, body)
 		if err != nil {
+			return nil, false, err
+		}
+		if err := namesOnly(tail, calendar); err != nil {
 			return nil, false, err
 		}
 		tf, err := parse(tail)

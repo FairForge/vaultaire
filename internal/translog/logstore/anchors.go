@@ -26,6 +26,12 @@ const (
 
 	AnchorPending  = "pending"
 	AnchorComplete = "complete"
+	// AnchorResubmitted (migration 107, RP48-2): the fresh pending proof of a
+	// re-submission — a pending row past the horizon whose calendar may have
+	// lost the commitment is re-submitted ONCE (the unique index admits one
+	// such row per checkpoint and calendar). Asked to complete like a pending
+	// row; also the outcome counted for the re-submission call.
+	AnchorResubmitted = "resubmitted"
 )
 
 // Anchor is one row of translog_anchors.
@@ -78,22 +84,81 @@ func (s *Store) Unanchored(ctx context.Context, kind, service string, limit int)
 	return out, nil
 }
 
-// PendingAnchors are the pending rows of (kind, service) with no complete
-// row beside them, received before olderThan, oldest first, at most limit.
-func (s *Store) PendingAnchors(ctx context.Context, kind, service string, olderThan time.Time, limit int) ([]Anchor, error) {
+// AnchorCursor is where the upgrade pass stopped: the key of the last row
+// asked (RP48-2, the vault_parity reconcile pattern). The zero value is the
+// start.
+type AnchorCursor struct {
+	ReceivedAt time.Time `json:"received_at"`
+	Size       int64     `json:"size"`
+	State      string    `json:"state"`
+}
+
+const pendingAnchorsQuery = `SELECT checkpoint_size, kind, service, state, proof, digest, received_at FROM translog_anchors p
+		WHERE p.kind = $1 AND p.service = $2 AND p.state IN ('pending', 'resubmitted') AND p.received_at < $3
+		  AND NOT EXISTS (SELECT 1 FROM translog_anchors c WHERE c.checkpoint_size = p.checkpoint_size AND c.kind = p.kind
+		                  AND c.service = p.service AND c.state = 'complete')`
+
+// PendingAnchorsFrom are the pending and resubmitted rows of (kind, service)
+// with no complete row beside them, received before olderThan — starting
+// after the cursor in (received_at, checkpoint_size, state) order and
+// wrapping to the start when fewer than limit remain, so every waiting row
+// is asked within a bounded number of runs whatever the others do (RP48-2:
+// sixteen rows a calendar lost used to starve every newer one for ever).
+// Each row is returned at most once; the second value is the next cursor.
+func (s *Store) PendingAnchorsFrom(ctx context.Context, kind, service string, olderThan time.Time, after AnchorCursor, limit int) ([]Anchor, AnchorCursor, error) {
+	out, err := s.anchors(ctx, pendingAnchorsQuery+`
+		  AND (p.received_at, p.checkpoint_size, p.state) > ($4, $5, $6)
+		ORDER BY p.received_at, p.checkpoint_size, p.state LIMIT $7`,
+		kind, service, olderThan, after.ReceivedAt, after.Size, after.State, limit)
+	if err != nil {
+		return nil, after, err
+	}
+	if len(out) < limit {
+		key := func(a Anchor) string {
+			return fmt.Sprintf("%d|%d|%s", a.ReceivedAt.UnixNano(), a.Size, a.State)
+		}
+		seen := map[string]bool{}
+		for _, a := range out {
+			seen[key(a)] = true
+		}
+		head, err := s.anchors(ctx, pendingAnchorsQuery+`
+		ORDER BY p.received_at, p.checkpoint_size, p.state LIMIT $4`, kind, service, olderThan, limit-len(out))
+		if err != nil {
+			return nil, after, err
+		}
+		for _, a := range head {
+			if !seen[key(a)] {
+				out = append(out, a)
+			}
+		}
+	}
+	next := after
+	if len(out) > 0 {
+		last := out[len(out)-1]
+		next = AnchorCursor{ReceivedAt: last.ReceivedAt, Size: last.Size, State: last.State}
+	}
+	return out, next, nil
+}
+
+// ResubmittableAnchors are the pending rows of (kind, service) received
+// before the horizon with no complete row and no re-submission beside them
+// (RP48-2): candidates for the one re-submission, oldest first.
+func (s *Store) ResubmittableAnchors(ctx context.Context, kind, service string, olderThan time.Time, limit int) ([]Anchor, error) {
 	return s.anchors(ctx, `SELECT checkpoint_size, kind, service, state, proof, digest, received_at FROM translog_anchors p
 		WHERE p.kind = $1 AND p.service = $2 AND p.state = 'pending' AND p.received_at < $3
 		  AND NOT EXISTS (SELECT 1 FROM translog_anchors c WHERE c.checkpoint_size = p.checkpoint_size AND c.kind = p.kind
-		                  AND c.service = p.service AND c.state = 'complete')
+		                  AND c.service = p.service AND c.state IN ('complete', 'resubmitted'))
 		ORDER BY p.received_at, p.checkpoint_size LIMIT $4`, kind, service, olderThan, limit)
 }
 
-// Anchors are the rows of one checkpoint and kind the read side serves: per
-// service the complete one, else the pending one.
+// Anchors are every row of one checkpoint and kind, in the order received —
+// the read side serves them all combined (RP48-3: a wrong complete answer
+// must not replace the same calendar's good pending path; `ots verify`
+// judges each path).
 func (s *Store) Anchors(ctx context.Context, size int64, kind string) ([]Anchor, error) {
-	return s.anchors(ctx, `SELECT DISTINCT ON (service) checkpoint_size, kind, service, state, proof, digest, received_at
+	return s.anchors(ctx, `SELECT checkpoint_size, kind, service, state, proof, digest, received_at
 		FROM translog_anchors WHERE checkpoint_size = $1 AND kind = $2
-		ORDER BY service, (state = 'complete') DESC, received_at DESC`, size, kind)
+		ORDER BY received_at, service, state`, size, kind)
 }
 
 // AllAnchors are every row of one checkpoint, in the order received.
@@ -123,7 +188,8 @@ func (s *Store) anchors(ctx context.Context, q string, args ...any) ([]Anchor, e
 }
 
 // AnchorOTS is the .ots file the read side serves for a checkpoint: every
-// calendar's proof (complete, else pending) of the note's digest, combined.
+// row's proof of the note's digest — pending, resubmitted and complete —
+// combined (RP48-3).
 // translog.ErrNoAnchor when there is none — or when a row's digest is not the
 // note's (never served).
 func (s *Store) AnchorOTS(ctx context.Context, size int64) ([]byte, error) {

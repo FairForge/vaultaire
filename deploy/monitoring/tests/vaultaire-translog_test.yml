@@ -212,66 +212,87 @@ tests:
         alertname: TranslogWitnessStale
         exp_alerts: []
 
-  # K4c-3a: ots anchors configured, the log signed 12, the last anchor (of 10)
-  # arrived at t=0 and nothing since: silent before 2 h, firing 10 min after.
+  # K4c-3a + RP48-1: two calendars configured; alice anchors on time (fresh
+  # timestamps, size 12 = the checkpoint), bob silent since t=0 with size 10:
+  # bob alone fires, 10 min past the 2 h.
   - interval: 1m
     input_series:
-      - series: 'vaultaire_translog_anchors_configured{kind="ots"}'
-        values: '2x200'
-      - series: 'vaultaire_translog_anchors_configured{kind="rekor"}'
-        values: '0x200'
       - series: 'vaultaire_translog_checkpoint_size'
         values: '12x200'
-      - series: 'vaultaire_translog_anchored_size{kind="ots"}'
+      - series: 'vaultaire_translog_anchored_size_by_service{kind="ots",service="https://alice.example"}'
+        values: '12x200'
+      - series: 'vaultaire_translog_anchor_timestamp_by_service_seconds{kind="ots",service="https://alice.example"}'
+        values: '0+60x200'
+      - series: 'vaultaire_translog_anchored_size_by_service{kind="ots",service="https://bob.example"}'
         values: '10x200'
-      - series: 'vaultaire_translog_anchored_size{kind="rekor"}'
-        values: '0x200'
-      - series: 'vaultaire_translog_anchor_timestamp_seconds{kind="ots"}'
-        values: '0x200'
-      - series: 'vaultaire_translog_anchor_timestamp_seconds{kind="rekor"}'
+      - series: 'vaultaire_translog_anchor_timestamp_by_service_seconds{kind="ots",service="https://bob.example"}'
         values: '0x200'
     alert_rule_test:
       - eval_time: 110m
-        alertname: TranslogAnchorStale
+        alertname: TranslogAnchorServiceStale
         exp_alerts: []
       - eval_time: 135m
-        alertname: TranslogAnchorStale
+        alertname: TranslogAnchorServiceStale
         exp_alerts:
           - exp_labels:
               severity: warning
               kind: ots
+              service: https://bob.example
             exp_annotations:
-              summary: "Transparency log: no ots anchor for 2h 15m 0s while the log grows"
-              description: "The translog_anchor job has not anchored the newer signed checkpoints in ots for over 2 h. Its result names each service's outcome (unreachable / refused / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select last_outcome, last_error, result from job_runs where job='translog_anchor'\"; vaultaire_translog_anchor_total{outcome}. Every calendar of TRANSLOG_ANCHORS down at once, or the job not running (PeriodicJobStale). docs/TRANSPARENCY.md § Anchors."
+              summary: "Transparency log: no ots anchor from https://bob.example for 2h 15m 0s while the log grows"
+              description: "https://bob.example has not anchored the newer signed checkpoints for over 2 h while another calendar may still be fine — the log is anchored by fewer points of trust than configured. The job's result names the outcome (unreachable / refused / bad_answer — a bad_answer naming two URLs is a pool, not a calendar: fix TRANSLOG_ANCHORS): sudo -u postgres psql -At -d vaultaire -c \"select last_outcome, last_error, result from job_runs where job='translog_anchor'\"; vaultaire_translog_anchor_total{service,outcome}. docs/TRANSPARENCY.md § Anchors."
 
-  # An idle log: the newest checkpoint is anchored, however long ago.
+  # Both calendars anchored the newest checkpoint, however long ago: silent.
   - interval: 1m
     input_series:
-      - series: 'vaultaire_translog_anchors_configured{kind="ots"}'
-        values: '2x300'
       - series: 'vaultaire_translog_checkpoint_size'
         values: '10x300'
-      - series: 'vaultaire_translog_anchored_size{kind="ots"}'
+      - series: 'vaultaire_translog_anchored_size_by_service{kind="ots",service="https://alice.example"}'
         values: '10x300'
-      - series: 'vaultaire_translog_anchor_timestamp_seconds{kind="ots"}'
+      - series: 'vaultaire_translog_anchor_timestamp_by_service_seconds{kind="ots",service="https://alice.example"}'
+        values: '0x300'
+      - series: 'vaultaire_translog_anchored_size_by_service{kind="ots",service="https://bob.example"}'
+        values: '10x300'
+      - series: 'vaultaire_translog_anchor_timestamp_by_service_seconds{kind="ots",service="https://bob.example"}'
         values: '0x300'
     alert_rule_test:
       - eval_time: 280m
-        alertname: TranslogAnchorStale
+        alertname: TranslogAnchorServiceStale
         exp_alerts: []
 
-  # Prod until the owner's ceremony: no anchors configured — silent.
+  # Prod until the owner's ceremony: no anchors configured — the by-service
+  # series exist per CONFIGURED service only, so there is nothing to fire on.
   - interval: 1m
     input_series:
-      - series: 'vaultaire_translog_anchors_configured{kind="ots"}'
-        values: '0x300'
       - series: 'vaultaire_translog_checkpoint_size'
         values: '12x300'
-      - series: 'vaultaire_translog_anchored_size{kind="ots"}'
-        values: '0x300'
-      - series: 'vaultaire_translog_anchor_timestamp_seconds{kind="ots"}'
-        values: '0x300'
     alert_rule_test:
       - eval_time: 280m
-        alertname: TranslogAnchorStale
+        alertname: TranslogAnchorServiceStale
         exp_alerts: []
+      - eval_time: 280m
+        alertname: TranslogAnchorNotCompleting
+        exp_alerts: []
+
+  # RP48-2: a proof pending past the 48 h horizon fires after 30 m; one
+  # younger than the horizon is silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_translog_anchor_oldest_pending_seconds{kind="ots",service="https://alice.example"}'
+        values: '172900x100'
+      - series: 'vaultaire_translog_anchor_oldest_pending_seconds{kind="ots",service="https://bob.example"}'
+        values: '100000x100'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: TranslogAnchorNotCompleting
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: TranslogAnchorNotCompleting
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: ots
+              service: https://alice.example
+            exp_annotations:
+              summary: "Transparency log: https://alice.example's oldest pending proof is 2d 0h 1m 40s old"
+              description: "A proof submitted to https://alice.example has been pending past the 48 h horizon. The job re-submits such a proof once (state 'resubmitted', migration 107); this firing means neither the original nor the re-submission completes. Check the calendar, and the rows: sudo -u postgres psql -At -d vaultaire -c \"select checkpoint_size, service, state, received_at from translog_anchors order by received_at\". docs/TRANSPARENCY.md § Anchors."
