@@ -158,6 +158,9 @@ type Server struct {
 	// without a database. translogCheckpoint is its job.
 	translog           *logstore.Store
 	translogCheckpoint *translogCheckpointer
+	// translogBuild is this process's server_build entry while it waits
+	// for the log (RP42-1, translog_read.go).
+	translogBuild *bootBuild
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
 	// signed request to it (translog_read.go); nil = handleS3Request.
 	s3Fallback http.HandlerFunc
@@ -350,6 +353,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	if s.db != nil {
 		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
+		s.translogBuild = &bootBuild{}
+		s.translogCheckpoint.build = s.translogBuild
 	}
 
 	s.allowUnsealedCleartext = allowUnsealedCleartextFromEnv(os.Getenv, logger)

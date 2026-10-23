@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -50,12 +51,81 @@ const serverBuildTimeout = time.Minute
 
 // recordServerBuild appends the server_build entry of the binary at exe.
 func recordServerBuild(ctx context.Context, store *logstore.Store, exe string) (int64, bool, error) {
+	e, err := serverBuildOf(exe)
+	if err != nil {
+		return 0, false, err
+	}
+	return store.Append(ctx, e)
+}
+
+// serverBuildOf is the server_build entry of the binary at exe (a failure
+// to hash it is counted: the entry is lost).
+func serverBuildOf(exe string) (translog.ServerBuild, error) {
 	sum, err := fileSHA256(exe)
 	if err != nil {
 		logstore.CountAppendFailure(translog.KindServerBuild)
-		return 0, false, fmt.Errorf("hash the executable: %w", err)
+		return translog.ServerBuild{}, fmt.Errorf("hash the executable: %w", err)
 	}
-	return store.Append(ctx, translog.ServerBuild{GitSHA: BuildSHA, BinarySHA256: sum, BuildTime: BuildDate, GoVersion: runtime.Version()})
+	return translog.ServerBuild{GitSHA: BuildSHA, BinarySHA256: sum, BuildTime: BuildDate, GoVersion: runtime.Version()}, nil
+}
+
+// bootBuild is this process's server_build entry until it is in the log
+// (RP42-1, D-P33-2). The binary is hashed ONCE, at boot — the entry is
+// always the running binary's, even after a deploy replaced the file — and
+// an append that fails (the log frozen behind the high-water while a restore
+// is repaired, the database down) keeps it here: every translog_checkpoint
+// run tries it again, BEFORE it checkpoints, until it lands. After a restore
+// → re-append → start, it lands after the re-appended entries and the same
+// run signs.
+type bootBuild struct {
+	mu      sync.Mutex
+	entry   *translog.ServerBuild
+	pending bool
+}
+
+// set keeps e as the entry to append.
+func (b *bootBuild) set(e translog.ServerBuild) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.entry, b.pending = &e, true
+}
+
+// Pending reports whether the entry is still waiting for the log.
+func (b *bootBuild) Pending() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.pending
+}
+
+// try appends the entry when it is still pending; retried says whether this
+// is the job's retry (for the log line).
+func (b *bootBuild) try(ctx context.Context, store *logstore.Store, logger *zap.Logger, retried bool) {
+	if b == nil || store == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.pending || b.entry == nil {
+		return
+	}
+	idx, appended, err := store.Append(ctx, *b.entry)
+	switch {
+	case errors.Is(err, logstore.ErrLogFrozen):
+		logger.Warn("translog: server build waits — the log is frozen; the translog_checkpoint job retries it",
+			zap.Error(err), zap.String("git_sha", b.entry.GitSHA), zap.Bool("retried", retried))
+	case err != nil:
+		logger.Error("translog: server build not appended; the translog_checkpoint job retries it",
+			zap.Error(err), zap.String("git_sha", b.entry.GitSHA), zap.Bool("retried", retried))
+	case appended:
+		b.pending = false
+		logger.Info("translog: server build appended", zap.Int64("index", idx), zap.String("git_sha", b.entry.GitSHA), zap.Bool("retried", retried))
+	default:
+		b.pending = false
+		logger.Info("translog: server build already in the log", zap.Int64("index", idx), zap.String("git_sha", b.entry.GitSHA))
+	}
 }
 
 func fileSHA256(path string) (string, error) {
@@ -71,8 +141,9 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// startServerBuildEntry runs recordServerBuild for this process in the
-// background (never blocks the boot).
+// startServerBuildEntry appends this process's server_build entry in the
+// background (never blocks the boot); a failed append stays pending in
+// s.translogBuild for the translog_checkpoint job (RP42-1).
 func (s *Server) startServerBuildEntry() {
 	if s.translog == nil {
 		return
@@ -87,16 +158,31 @@ func (s *Server) startServerBuildEntry() {
 			logger.Error("translog: server build not appended: no executable path", zap.Error(err))
 			return
 		}
-		idx, appended, err := recordServerBuild(ctx, s.translog, exe)
-		switch {
-		case err != nil:
-			logger.Error("translog: server build not appended", zap.Error(err), zap.String("git_sha", BuildSHA))
-		case appended:
-			logger.Info("translog: server build appended", zap.Int64("index", idx), zap.String("git_sha", BuildSHA))
-		default:
-			logger.Info("translog: server build already in the log", zap.Int64("index", idx), zap.String("git_sha", BuildSHA))
-		}
+		s.recordBootBuild(ctx, exe)
 	}()
+}
+
+// recordBootBuild hashes the binary at exe and tries its entry once; on a
+// failure the entry stays pending (bootBuild).
+func (s *Server) recordBootBuild(ctx context.Context, exe string) {
+	logger := s.log()
+	e, err := serverBuildOf(exe)
+	if err != nil {
+		logger.Error("translog: server build not appended", zap.Error(err), zap.String("git_sha", BuildSHA))
+		return
+	}
+	// An entry the log refuses (a BuildSHA that is not hex, say) is refused
+	// for ever: counted once, never kept for a retry.
+	if _, err := translog.Encode(e, time.Now()); err != nil {
+		logstore.CountAppendFailure(translog.KindServerBuild)
+		logger.Error("translog: server build not appended: the entry is invalid", zap.Error(err), zap.String("git_sha", BuildSHA))
+		return
+	}
+	if s.translogBuild == nil {
+		s.translogBuild = &bootBuild{}
+	}
+	s.translogBuild.set(e)
+	s.translogBuild.try(ctx, s.translog, logger, false)
 }
 
 // registerTranslogReadRoutes mounts the read side. With a public canonical
@@ -186,7 +272,7 @@ func ceremonyRetryKey(actor, key string) string {
 // handleTranslogCeremony is POST /api/v1/admin/translog/ceremony: appends a
 // key_ceremony entry. 201 {index}; 400 a refused entry; 401 a wrong or
 // reused code; 403 not an admin or no MFA enrolled; 503 the log or the MFA
-// state cannot be read.
+// state cannot be read, or {"error":"log_frozen"} (the code not consumed).
 func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) {
 	actor, _ := r.Context().Value(userIDKey).(string)
 	fail := func(status int, msg string, err error) {
@@ -239,6 +325,17 @@ func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
+	// A frozen log (RP42-1: the database restored behind the high-water)
+	// answers before the code is consumed (RP37-14's order): the admin's
+	// code is not burned, and nothing stores the 503 — a retry with the
+	// same Idempotency-Key and code works once the log is repaired.
+	if reason, err := s.translog.Frozen(r.Context()); err != nil {
+		fail(http.StatusServiceUnavailable, "the transparency log cannot be read", err)
+		return
+	} else if reason != "" {
+		fail(http.StatusServiceUnavailable, "log_frozen", fmt.Errorf("%w: %s", logstore.ErrLogFrozen, reason))
+		return
+	}
 	enabled, err := s.auth.IsMFAEnabled(r.Context(), actor)
 	if err != nil {
 		fail(http.StatusServiceUnavailable, "the MFA state cannot be read", err)
@@ -259,6 +356,11 @@ func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	idx, appended, err := s.translog.Append(r.Context(), translog.RetryableCeremony(entry, retryKey))
+	if errors.Is(err, logstore.ErrLogFrozen) {
+		// Frozen between the check and the append (a restore meanwhile).
+		fail(http.StatusServiceUnavailable, "log_frozen", err)
+		return
+	}
 	if err != nil {
 		s.log().Error("translog: ceremony entry not appended", zap.Error(err), zap.String("action", entry.Action))
 		fail(http.StatusServiceUnavailable, "the entry could not be appended; nothing was written", err)

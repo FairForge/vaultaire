@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/lib/pq"
@@ -101,12 +102,22 @@ func hashReader(ctx context.Context, q querier) translog.HashReader {
 	})
 }
 
+// ErrLogFrozen: the append was refused because the database is behind the
+// high-water file (restored behind the newest tree this box signed) or the
+// file cannot be read (RP42-1). Nothing was written. The log is frozen until
+// translog-restore re-appends the lost entries (ReAppend is never gated) —
+// docs/TRANSPARENCY.md § After a database restore. Customers are served
+// meanwhile; only the log waits.
+var ErrLogFrozen = errors.New("translog: the log is frozen")
+
 // Append appends e and returns its index. With a dedup key already in the
 // log it appends nothing and returns the first entry's index, appended =
-// false. Every failure counts in vaultaire_translog_append_failures_total.
+// false. While the log is frozen (ErrLogFrozen) it appends nothing, counted
+// in vaultaire_translog_append_refusals_total{reason}; every other failure
+// counts in vaultaire_translog_append_failures_total.
 func (s *Store) Append(ctx context.Context, e translog.Entry) (idx int64, appended bool, err error) {
 	defer func() {
-		if err != nil && e != nil {
+		if err != nil && e != nil && !errors.Is(err, ErrLogFrozen) {
 			appendFailures.WithLabelValues(e.Kind()).Inc()
 		}
 	}()
@@ -142,6 +153,14 @@ func (s *Store) Append(ctx context.Context, e translog.Entry) (idx int64, append
 	}
 	if stored != translog.StoredHashCount(n) {
 		return 0, false, fmt.Errorf("translog append: %d entries but %d stored hashes (want %d) — the tables are out of step", n, stored, translog.StoredHashCount(n))
+	}
+	// The gate (RP42-1): an entry at index n of a database behind the
+	// high-water would be a body the key never signed, and the re-append of
+	// the lost entries could never reach the signed root again. Read on
+	// every append, under the lock (appends are rare; no cache to go stale).
+	if reason, err := s.frozenAt(n); reason != "" {
+		appendRefusals.WithLabelValues(reason).Inc()
+		return 0, false, fmt.Errorf("%w (%s, entry kind %s): %w", ErrLogFrozen, reason, e.Kind(), err)
 	}
 	first, hashes, err := translog.StoredHashes(n, body, hashReader(ctx, tx))
 	if err != nil {
@@ -250,6 +269,35 @@ func (s *Store) ReAppend(ctx context.Context, bodies [][]byte, expect translog.C
 		return fmt.Errorf("translog re-append: commit: %w", err)
 	}
 	return nil
+}
+
+// frozenAt is the gate's verdict for a log of n entries: "" (append), or
+// the reason (RefusedBehindHighwater, RefusedHighwaterUnreadable) and why.
+// An absent file (or none configured) is the first run: append.
+func (s *Store) frozenAt(n int64) (string, error) {
+	hw, ok, err := s.readHighwater()
+	if err != nil {
+		return RefusedHighwaterUnreadable, err
+	}
+	if ok && n < hw.Size {
+		return RefusedBehindHighwater, fmt.Errorf(
+			"the database holds %d entries but this box signed a tree of %d (%s) — re-append the lost entries with translog-restore (docs/TRANSPARENCY.md § After a database restore)",
+			n, hw.Size, s.highwater)
+	}
+	return "", nil
+}
+
+// Frozen reports whether an append would be refused now: "" = no, else the
+// reason (the same verdict Append reaches under the lock). For a caller that
+// must answer before it spends something — the ceremony route checks it
+// before it consumes the TOTP code.
+func (s *Store) Frozen(ctx context.Context) (string, error) {
+	n, err := s.Size(ctx)
+	if err != nil {
+		return "", err
+	}
+	reason, _ := s.frozenAt(n)
+	return reason, nil
 }
 
 // Size is the number of entries.
@@ -488,12 +536,32 @@ func ReadHighwater(path string) (translog.Checkpoint, bool, error) {
 	}
 	var cp log.Checkpoint
 	rest, err := cp.Unmarshal(b)
+	if err == nil && len(rest) == 0 && cp.Origin != translog.Origin && cp.Origin != "" {
+		// RP42-6: another log's file (a v1 file under F-33's v2). Never
+		// "archived" by itself: refused until the operator moves it aside.
+		return translog.Checkpoint{}, false, fmt.Errorf(
+			"translog: the high-water file %s is a checkpoint of %q, not %q — if that log is archived, move the file to %s (docs/TRANSPARENCY.md § The fallback: a new origin)",
+			path, cp.Origin, translog.Origin, path+"."+originVersion(cp.Origin))
+	}
 	if err != nil || len(rest) != 0 || cp.Origin != translog.Origin || len(cp.Hash) != translog.HashSize || cp.Size == 0 || cp.Size > 1<<62 {
 		return translog.Checkpoint{}, false, fmt.Errorf("translog: the high-water file %s is not a checkpoint of %s", path, translog.Origin)
 	}
 	var root translog.Hash
 	copy(root[:], cp.Hash)
 	return translog.Checkpoint{Origin: cp.Origin, Size: int64(cp.Size), Root: root}, true, nil
+}
+
+// originVersion is an origin's last path element ("v1" of
+// stored.cloud/translog/v1), the suffix an archived high-water file takes.
+func originVersion(origin string) string {
+	v := origin
+	if i := strings.LastIndexByte(origin, '/'); i >= 0 {
+		v = origin[i+1:]
+	}
+	if v == "" || strings.ContainsAny(v, `/\ .`) {
+		return "old"
+	}
+	return v
 }
 
 // writeHighwater replaces the high-water file with cp's checkpoint body,

@@ -20,13 +20,14 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 		rules[r.Alert] = r.Expr
 		severity[r.Alert] = r.Labels["severity"]
 	}
-	require.Len(t, rules, 3)
+	require.Len(t, rules, 4)
 	assert.Equal(t, map[string]string{"TranslogCheckpointStale": "warning", "TranslogAppendFailing": "warning",
-		"TranslogCheckpointRefused": "page"}, severity, "a refusal to sign pages (RP37-11)")
+		"TranslogCheckpointRefused": "page", "TranslogFrozen": "page"}, severity, "a refusal to sign pages (RP37-11); so does a frozen log (RP42-1)")
 	exported := map[string]bool{
 		"vaultaire_translog_size": true, "vaultaire_translog_checkpoint_size": true,
 		"vaultaire_translog_checkpoint_timestamp_seconds": true, "vaultaire_translog_signing_key_loaded": true,
 		"vaultaire_translog_append_failures_total": true, "vaultaire_translog_checkpoint_refusals_total": true,
+		"vaultaire_translog_append_refusals_total": true,
 	}
 	names := regexp.MustCompile(`vaultaire_[a-z_]+`)
 	for alert, expr := range rules {
@@ -39,9 +40,10 @@ func TestTranslogRules_ParseAndNameExportedSeries(t *testing.T) {
 	assert.Contains(t, stale, "> 3600")
 	assert.Contains(t, stale, "max(vaultaire_translog_size) > max(vaultaire_translog_checkpoint_size)", "an idle log is not stale")
 
+	assert.NotContains(t, rules["TranslogAppendFailing"], "append_refusals", "a frozen log is not an append failure")
 	raw, err := os.ReadFile("../../deploy/monitoring/tests/vaultaire-translog_test.yml")
 	require.NoError(t, err)
-	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing", "TranslogCheckpointRefused"} {
+	for _, s := range []string{"vaultaire-translog.yml", "TranslogCheckpointStale", "TranslogAppendFailing", "TranslogCheckpointRefused", "TranslogFrozen"} {
 		assert.Contains(t, string(raw), s)
 	}
 }

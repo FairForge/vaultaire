@@ -77,8 +77,11 @@ func translogHighwaterFile(logger *zap.Logger, getenv func(string) string) strin
 // extends it (a log that does not is a failed run and an Error line, and
 // nothing is signed). Without a key the run is ok and signs nothing.
 type translogCheckpointer struct {
-	store   *logstore.Store
-	logger  *zap.Logger
+	store  *logstore.Store
+	logger *zap.Logger
+	// build is this process's boot entry while it waits for the log
+	// (RP42-1): each run tries it first, then checkpoints.
+	build   *bootBuild
 	JobName string
 }
 
@@ -95,6 +98,7 @@ func newTranslogCheckpointer(store *logstore.Store, logger *zap.Logger) *translo
 func (c *translogCheckpointer) spec() jobSpec {
 	return jobSpec{Name: c.JobName, Every: 10 * time.Minute, BootDelay: 90 * time.Second, MaxRunTime: 2 * time.Minute,
 		Run: func(ctx context.Context) (jobReport, error) {
+			c.build.try(ctx, c.store, c.logger, true)
 			res, err := c.store.Checkpoint(ctx)
 			rep := jobReport{Result: res, Note: res.Reason}
 			if res.Signed {

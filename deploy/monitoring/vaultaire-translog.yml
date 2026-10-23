@@ -9,6 +9,8 @@
 #   vaultaire_translog_append_failures_total{kind}    appends that failed (server_build, key_ceremony)
 #   vaultaire_translog_checkpoint_refusals_total{reason}  checkpoint passes that refused to sign (RP37-11):
 #       rewritten / behind_highwater / highwater_unreadable — every reason a series at 0 from boot
+#   vaultaire_translog_append_refusals_total{reason}  appends refused while the log is frozen (RP42-1):
+#       behind_highwater / highwater_unreadable — every reason a series at 0 from boot; NOT in append_failures_total
 #
 # The translog_checkpoint job signs a checkpoint every 10 min when the tree
 # grew; without the key it signs nothing and nothing here fires (the key is
@@ -55,6 +57,24 @@ groups:
           summary: "Transparency log: the checkpoint job refused to sign ({{ $labels.reason }})"
           description: "The translog_checkpoint job refused to sign: {{ $labels.reason }}. Do NOT re-sign and do NOT delete the high-water file. rewritten / behind_highwater after a database restore: follow docs/TRANSPARENCY.md § After a database restore BEFORE the signing key is loaded again. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater). journalctl -u 'vaultaire@*' | grep 'translog checkpoint: nothing signed'."
 
+      # An append was refused because the log is frozen (RP42-1, Stage 1a
+      # Prompt 33): the database is behind the newest tree this box signed (a
+      # restore) or the high-water file cannot be read. Nothing was written:
+      # a producer (the boot's server_build, a ceremony, an admin read) is
+      # waiting for translog-restore. The checkpoint job refuses on the same
+      # condition (TranslogCheckpointRefused); this one says producers are
+      # being turned away — an admin read refused, a ceremony answered 503.
+      # D-P33-1: its own alert, not folded into the refusal one, because it
+      # is counted where the producers are and outlives a stopped job.
+      - alert: TranslogFrozen
+        expr: sum by (reason) (increase(vaultaire_translog_append_refusals_total[30m])) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Transparency log: frozen — appends refused ({{ $labels.reason }})"
+          description: "Appends to the transparency log are refused: {{ $labels.reason }}. The customers are served; only the log waits (server_build retried by the translog_checkpoint job, ceremonies answer 503 log_frozen, admin reads are refused). behind_highwater: re-append the lost entries with translog-restore — docs/TRANSPARENCY.md § After a database restore. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater); never delete it to unfreeze."
+
       # An append failed: a server_build at boot (never blocks the boot) or a
       # ceremony entry. The producer logged an Error line with the reason.
       - alert: TranslogAppendFailing
@@ -64,4 +84,4 @@ groups:
           severity: warning
         annotations:
           summary: "Transparency log: {{ $value | humanize }} {{ $labels.kind }} append(s) failed in the last hour"
-          description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried at the next boot of the same binary; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
+          description: "An entry that should be in the public log is not. journalctl -u 'vaultaire@*' | grep 'translog'. A server_build is retried by every translog_checkpoint run until it lands; a ceremony entry must be appended again (POST /api/v1/admin/translog/ceremony)."
