@@ -10,6 +10,11 @@
 // The VERIFIER key — the public half, to publish outside our infrastructure
 // before the first signed checkpoint — goes to stdout, and the key ID to
 // stderr.
+//
+// A WITNESS's key (K4b, cmd/tools/translog-witness) is the same kind of key
+// under the witness's own name — never the log's:
+//
+//	translog-keygen -name witness.<host> -out ~/.translog-witness/witness.key > witness.vkey
 package main
 
 import (
@@ -19,29 +24,42 @@ import (
 	"fmt"
 	"os"
 
+	"golang.org/x/mod/sumdb/note"
+
 	"github.com/FairForge/vaultaire/internal/translog"
 )
 
 func main() {
 	out := flag.String("out", "", "where to write the signer key (created 0600; must not exist)")
+	name := flag.String("name", translog.Origin, "the key's name: the log's origin, or a witness's own name (translog-witness -key)")
 	flag.Parse()
-	if err := run(*out); err != nil {
+	if err := run(*out, *name); err != nil {
 		fmt.Fprintln(os.Stderr, "translog-keygen:", err)
 		os.Exit(1)
 	}
 }
 
-func run(out string) error {
+func run(out, name string) error {
 	if out == "" || out == "-" {
 		return errors.New("-out <file> is required: the signer key is never printed")
 	}
-	skey, vkey, err := translog.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
+	var (
+		skey, vkey string
+		s          note.Signer
+		err        error
+	)
+	if name == translog.Origin {
+		if skey, vkey, err = translog.GenerateKey(rand.Reader); err == nil {
+			s, err = translog.NewSigner(skey)
+		}
+	} else {
+		// A witness key: any note key name but the log's origin.
+		if skey, vkey, err = note.GenerateKey(rand.Reader, name); err == nil {
+			s, err = note.NewSigner(skey)
+		}
 	}
-	s, err := translog.NewSigner(skey)
 	if err != nil {
-		return err
+		return fmt.Errorf("generate a key named %q: %w", name, err)
 	}
 	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -55,6 +73,11 @@ func run(out string) error {
 		return fmt.Errorf("close %s: %w", out, err)
 	}
 	fmt.Println(vkey)
+	if name != translog.Origin {
+		fmt.Fprintf(os.Stderr, "witness key %s, key ID %08x; signer key in %s (0600) — keep it on the witness's machine only\n",
+			name, s.KeyHash(), out)
+		return nil
+	}
 	fmt.Fprintf(os.Stderr, "origin %s, key ID %08x; signer key in %s (0600) — seal it with systemd-creds, then shred it\n",
 		translog.Origin, s.KeyHash(), out)
 	return nil
