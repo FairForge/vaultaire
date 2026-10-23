@@ -132,6 +132,74 @@ func TestGenerateVectors(t *testing.T) {
 		v.Identities[name] = iv
 	}
 
+	spaceKey, spaceID, objectID := fill("space-key"), []byte("space-0001"), []byte("object-0001")
+	if v.ChunkID == nil {
+		c := &chunkIDVector{SpaceKey: spaceKey, Chunk: []byte("the chunk the id is computed for")}
+		sum := sha256.Sum256(c.Chunk)
+		c.ChunkHash = sum[:]
+		id, err := ChunkID(c.SpaceKey, c.ChunkHash)
+		require.NoError(t, err)
+		c.ChunkID = id
+		v.ChunkID = c
+	}
+	if v.BoundWraps == nil {
+		v.BoundWraps = map[string]*boundWrapVector{}
+	}
+	if v.BoundWraps["space_key_owner"] == nil {
+		w := &boundWrapVector{WrappingKey: fill("master-key"), Key: spaceKey, SpaceID: spaceID, Nonce: fill("space-wrap-nonce")[:24]}
+		w.AD = spaceKeyAD(spaceID)
+		wrapped, err := seal(FormatBox, w.WrappingKey, w.Nonce, w.Key, w.AD)
+		require.NoError(t, err)
+		w.Wrapped = wrapped
+		v.BoundWraps["space_key_owner"] = w
+	}
+	if v.BoundWraps["object_key"] == nil {
+		w := &boundWrapVector{WrappingKey: spaceKey, Key: fill("object-key"), SpaceID: spaceID, ObjectID: objectID, Nonce: fill("object-wrap-nonce")[:24]}
+		w.AD = objectKeyAD(spaceID, objectID)
+		wrapped, err := seal(FormatBox, w.WrappingKey, w.Nonce, w.Key, w.AD)
+		require.NoError(t, err)
+		w.Wrapped = wrapped
+		v.BoundWraps["object_key"] = w
+	}
+	if v.Object == nil {
+		o := &objectVector{SpaceKey: spaceKey, SpaceID: spaceID, ObjectID: objectID, ObjectKey: fill("object-key")}
+		prev := make([]byte, 32)
+		for ver, parts := range [][]string{
+			{"first chunk of version one", "second chunk, ", "third"},
+			{"first chunk of version one", "a new second chunk of version two"},
+		} {
+			mv := manifestVector{Version: uint64(ver + 1), Previous: prev, Nonce: fill("manifest-nonce-" + string(rune('1'+ver)))[:24]}
+			m := &Manifest{SpaceID: spaceID, ObjectID: objectID, Version: mv.Version, Previous: prev, Compressor: CompressorNone}
+			for _, p := range parts {
+				ref, sealedChunk, err := PrepareChunk(spaceKey, []byte(p))
+				require.NoError(t, err)
+				m.Chunks = append(m.Chunks, ref)
+				m.TotalSize += uint64(ref.Size)
+				mv.Chunks = append(mv.Chunks, []byte(p))
+				mv.Sealed = append(mv.Sealed, sealedChunk)
+			}
+			require.NoError(t, m.check())
+			sealedManifest, err := seal(FormatBox, o.ObjectKey, mv.Nonce, m.encode(), manifestAD(spaceID, objectID, m.Version))
+			require.NoError(t, err)
+			mv.Manifest = sealedManifest
+			mv.Hash = ManifestHash(sealedManifest)
+			prev = mv.Hash
+			o.Versions = append(o.Versions, mv)
+		}
+		v.Object = o
+	}
+	if v.Share == nil {
+		alice, bob := v.Identities["alice"], v.Identities["bob"]
+		sender, err := IdentityFromKeys(alice.EncPrivate, alice.SigPrivate)
+		require.NoError(t, err)
+		recipient, err := IdentityFromKeys(bob.EncPrivate, bob.SigPrivate)
+		require.NoError(t, err)
+		sh := &shareVector{Sender: "alice", Recipient: "bob", SpaceID: spaceID, SpaceKey: spaceKey}
+		sh.Share, err = NewShare(sender, recipient.Public(), spaceID, spaceKey)
+		require.NoError(t, err)
+		v.Share = sh
+	}
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")

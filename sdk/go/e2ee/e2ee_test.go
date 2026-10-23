@@ -99,9 +99,10 @@ func TestBox_RelabelledFormatDoesNotOpen(t *testing.T) {
 	k := key(t, 7)
 	pt := []byte("bytes sealed as one kind, presented as another")
 
+	ph := sha256.Sum256(pt)
 	chunk, err := SealChunk(k, pt)
 	require.NoError(t, err)
-	_, err = OpenChunk(k, chunk)
+	_, err = OpenChunk(k, chunk, ph[:])
 	require.NoError(t, err, "the original opens")
 	asBox := append([]byte{FormatBox}, chunk[1:]...)
 	_, err = Open(k, asBox, nil)
@@ -112,13 +113,15 @@ func TestBox_RelabelledFormatDoesNotOpen(t *testing.T) {
 	_, err = Open(k, box, nil)
 	require.NoError(t, err, "the original opens")
 	asChunk := append([]byte{FormatChunk}, box[1:]...)
-	_, err = OpenChunk(k, asChunk)
+	_, err = OpenChunk(k, asChunk, ph[:])
 	assert.ErrorIs(t, err, ErrOpen, "a box re-labelled 0x02 does not open as a chunk")
 }
 
-// TestChunk_ConvergentWithinASpace_NeverAcross is F-12's change 1: a space
-// deduplicates its own chunks; two spaces never converge.
-func TestChunk_ConvergentWithinASpace_NeverAcross(t *testing.T) {
+// TestChunk_ConvergentWithinASpace_BytesNeverAcross is F-12's change 1: a
+// space deduplicates its own chunks; across two spaces the keys and the
+// bytes never converge. Their lengths do (len + ChunkOverhead in every
+// space — F-35), and this test says so.
+func TestChunk_ConvergentWithinASpace_BytesNeverAcross(t *testing.T) {
 	spaceA, spaceB := key(t, 1), key(t, 2)
 	chunk := bytes.Repeat([]byte("vm image block "), 1000)
 	h := sha256.Sum256(chunk)
@@ -139,13 +142,14 @@ func TestChunk_ConvergentWithinASpace_NeverAcross(t *testing.T) {
 	cB, err := SealChunk(kB, chunk)
 	require.NoError(t, err)
 	assert.Equal(t, c1, c2, "the same chunk in the same space is stored once")
-	assert.NotEqual(t, c1, cB, "two spaces never converge")
+	assert.NotEqual(t, c1, cB, "two spaces' bytes never converge")
+	assert.Len(t, cB, len(c1), "their lengths do: len(chunk) + 41 in every space")
 	assert.Equal(t, FormatChunk, c1[0])
 
-	got, err := OpenChunk(kA, c1)
+	got, err := OpenChunk(kA, c1, h[:])
 	require.NoError(t, err)
 	assert.Equal(t, chunk, got)
-	_, err = OpenChunk(kB, c1)
+	_, err = OpenChunk(kB, c1, h[:])
 	assert.ErrorIs(t, err, ErrOpen)
 
 	// Format pin: these bytes are the v1 wire format; a change here is a

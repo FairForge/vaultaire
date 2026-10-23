@@ -97,6 +97,9 @@ func TestE2EE_WASMMatchesNative(t *testing.T) {
 	// Native → WASM.
 	assert.Equal(t, "from native", string(un(got["boxOpened"])))
 	assert.Equal(t, x(h[:]), got["chunkHash"])
+	cid, err := ChunkID(space, h[:])
+	require.NoError(t, err)
+	assert.Equal(t, x(cid), got["chunkId"])
 	assert.Equal(t, x(ck), got["chunkKey"])
 	assert.Equal(t, x(nativeChunk), got["chunkSealed"], "a convergent chunk is the same ciphertext in WASM and native Go")
 	assert.Equal(t, x(chunk), got["chunkOpened"])

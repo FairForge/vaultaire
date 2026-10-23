@@ -115,16 +115,69 @@ type identityVector struct {
 	WrappedSig        hexb   `json:"wrapped_sig"`
 }
 
+// chunkIDVector: ChunkID(space key, SHA-256(chunk)) for a fixed chunk.
+type chunkIDVector struct {
+	SpaceKey  hexb `json:"space_key"`
+	Chunk     hexb `json:"chunk"`
+	ChunkHash hexb `json:"chunk_hash"`
+	ChunkID   hexb `json:"chunk_id"`
+}
+
+// boundWrapVector: a key wrapped under its parent with a fixed nonce, the AD
+// naming its role and the ids it is bound to.
+type boundWrapVector struct {
+	WrappingKey hexb `json:"wrapping_key"`
+	Key         hexb `json:"key"`
+	SpaceID     hexb `json:"space_id"`
+	ObjectID    hexb `json:"object_id,omitempty"`
+	Nonce       hexb `json:"nonce"`
+	AD          hexb `json:"ad"`
+	Wrapped     hexb `json:"wrapped"`
+}
+
+// manifestVector: one version of an object — its chunks (plaintext and
+// sealed), its manifest sealed with a fixed nonce, the manifest's hash.
+type manifestVector struct {
+	Version  uint64 `json:"version"`
+	Previous hexb   `json:"previous"`
+	Chunks   []hexb `json:"chunks"`
+	Sealed   []hexb `json:"sealed_chunks"`
+	Nonce    hexb   `json:"nonce"`
+	Manifest hexb   `json:"manifest"`
+	Hash     hexb   `json:"hash"`
+}
+
+type objectVector struct {
+	SpaceKey  hexb             `json:"space_key"`
+	SpaceID   hexb             `json:"space_id"`
+	ObjectID  hexb             `json:"object_id"`
+	ObjectKey hexb             `json:"object_key"`
+	Versions  []manifestVector `json:"versions"`
+}
+
+// shareVector: a 0x05 share produced once (its HPKE layer is random).
+type shareVector struct {
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	SpaceID   hexb   `json:"space_id"`
+	SpaceKey  hexb   `json:"space_key"`
+	Share     hexb   `json:"share"`
+}
+
 type vectors struct {
-	Comment      string                     `json:"comment"`
-	Box          *boxVector                 `json:"box,omitempty"`
-	Sealed       *sealedVector              `json:"sealed,omitempty"`
-	Argon2id     []argon2Vector             `json:"argon2id,omitempty"`
-	PasswordWrap *passwordWrapVector        `json:"password_wrap,omitempty"`
-	KeyWraps     map[string]*keyWrapVector  `json:"key_wraps,omitempty"`
-	BIP39Source  string                     `json:"bip39_source,omitempty"`
-	BIP39        []bip39Vector              `json:"bip39,omitempty"`
-	Identities   map[string]*identityVector `json:"identities,omitempty"`
+	Comment      string                      `json:"comment"`
+	Box          *boxVector                  `json:"box,omitempty"`
+	Sealed       *sealedVector               `json:"sealed,omitempty"`
+	Argon2id     []argon2Vector              `json:"argon2id,omitempty"`
+	PasswordWrap *passwordWrapVector         `json:"password_wrap,omitempty"`
+	KeyWraps     map[string]*keyWrapVector   `json:"key_wraps,omitempty"`
+	BIP39Source  string                      `json:"bip39_source,omitempty"`
+	BIP39        []bip39Vector               `json:"bip39,omitempty"`
+	Identities   map[string]*identityVector  `json:"identities,omitempty"`
+	ChunkID      *chunkIDVector              `json:"chunk_id,omitempty"`
+	BoundWraps   map[string]*boundWrapVector `json:"bound_wraps,omitempty"`
+	Object       *objectVector               `json:"object,omitempty"`
+	Share        *shareVector                `json:"share,omitempty"`
 }
 
 func loadVectors(t *testing.T) vectors {
