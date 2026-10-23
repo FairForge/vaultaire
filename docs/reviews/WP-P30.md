@@ -182,3 +182,29 @@ All 12 mutations were caught; M4 and M12 were rewritten once to compile.
 - **Contract line 1** says Private = "keys exist only on the customer's devices", which SSE-C Private is not (D-P30-20). Keep the wording and add SSE-C, or reword it.
 - **`la2rot2`:** does #892's test bucket on LA2 stay?
 - `pay_btcpay` stays OFF until you flip it.
+
+## Post-merge review (2026-10-23, plan driver)
+
+Adversarial pass on #902, #904 and #899 (and the parallel-session fixes #886, #891/#892, #883, #888). **Every claim checked holds; no P0/P1/P2.** What was verified against the live system:
+
+- **The reproducible recipe is live:** prod `/version` on `296bff865ca4` reports `build: 2026-10-23T00:53:19Z` = `git show -s --format=%cd` of that commit exactly; the three new counter families (`vaultaire_btcpay_unconfirmable_total`, `vaultaire_translog_checkpoint_refusals_total{reason}` × 3, `vaultaire_payments_double_period_total{provider}` × 3) export 0 on the active slot; 0 `"level":"error"` lines in the 3 h after the deploys.
+- **Rules on the box = the repo**, file for file (`sha256sum` over `/etc/prometheus/rules/*.yml`; the one difference is `alertmanager.yml`, which is Alertmanager config, not a rules file).
+- **The locks hold the story together:** `btcpay.apply` takes `payments.Lock` before `LockedPending` (states.go:252), so `SetCredit`'s spent-floor read (`rawCreditBalance`) is serialized against every checkout spend (the guard holds the same lock) — the D-P30-1 floor cannot race a spend.
+- **`RenewalStopOf` returns the row whatever its status and `EndByStatusOf` does not filter on it** — so the common ordering (the stop job marks the row `stopped`/`gone`, THEN Stripe's `customer.subscription.deleted` arrives) still keeps the house. Checked deliberately; it is the path a cancel-now takes every time.
+- **`EndByStatusOf` and the implicit switch:** an `implicit_switch` row's subscription ends only after the BTCPay grant moved the entitlement to `btcpay` with a future date, so the gate's miss on reason falls through to `EndByStatus` = kept by date. No gap.
+
+### Findings (RP40-n)
+
+| # | Sev | What | Where |
+|---|---|---|---|
+| RP40-1 | P4 | `stopOne`'s `renewsAgain` skip never resolves the row: when the portal-uncancel grant that would withdraw the stop was never applied (a lost webhook), the pending row is skipped every 10 min for ever — `SkippedWithdrawn` counts it but `StopRun.Errors` does not name it, while `RenewalStopsPending`'s runbook says `result.errors` names each pending row. Resolvable by hand (cancelling at Stripe flips renewal to prepaid via the webhook, the next pass then calls and closes it), but the runbook pointer is wrong for exactly this row. Name skipped rows in the result, or withdraw the stop when the entitlement provably renews `auto` by the ref (the un-cancel's own withdraw, done late) | payments/switch.go |
+| RP40-2 | note | `voidOpenInvoices` voids `status=open` only. Stripe sets `auto_advance=false` on `draft` invoices at cancel too, so a draft never finalizes by itself — but an operator finalizing it by hand at Stripe makes it open and payable outside our void. Watch, no code | billing/provider.go |
+| RP40-3 | note | A permanently-refused `implicit_switch` stop never reverts (the revert gate is reason `switch` — correct: the money was already taken); it stays pending + `Failed` until the operator acts at Stripe. By design | payments/switch.go |
+| RP40-4 | note | A high-water write that fails after its checkpoint row committed leaves the file one checkpoint behind until the log next grows (the `unchanged` path proves both trees but never rewrites the file). The DB checkpoint row still refuses a restore in that window; self-heals at the next signature | translog/logstore |
+
+### Beside the review
+
+- **PR #895 (K5 core) failed CI** on `TestSiaWriteBudget_PacingIsNeverAStalledS3d` — its base predates #893's RP34-11 margin fix; a rebase onto main should clear it. The K5 stack (#894–#897) and the K2b tail (#905–#907) are the two in-flight worker stacks; their reviews follow their merges.
+- Prompt 29 (K5) and Prompt 31 (K2b) were NOT reviewed here — they are unmerged.
+
+**Verdict: Prompt 30 holds.** RP40-1 goes to the next prompt's Part 0 with RP38-1; the rest are notes.
