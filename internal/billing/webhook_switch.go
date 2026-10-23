@@ -17,6 +17,29 @@ import (
 // § 4.1): a subscription a switch took the house from never takes it back,
 // and the portal race withdraws a pending switch.
 
+// uncancelSignal is what the event itself says about the renewal (RP42-3):
+// live cancel_at_period_end = false cannot tell a portal un-cancel from a
+// switch's stop that never landed (a 5xx or no answer: nothing was sent, so
+// Stripe still says false).
+type uncancelSignal struct {
+	// wasCancelling: a customer.subscription.updated whose
+	// data.previous_attributes.cancel_at_period_end is true — Stripe saying
+	// the field changed from true in this event: the customer's hand.
+	wasCancelling bool
+	// invoice: the grant comes from an invoice.* event, which never counts
+	// as an un-cancel (it says nothing about the renewal setting).
+	invoice bool
+}
+
+// subscriptionSignal reads the un-cancel evidence of a subscription event.
+func subscriptionSignal(event stripe.Event) uncancelSignal {
+	if event.Data == nil {
+		return uncancelSignal{}
+	}
+	v, ok := event.Data.PreviousAttributes["cancel_at_period_end"].(bool)
+	return uncancelSignal{wasCancelling: ok && v}
+}
+
 // stripeGrant is what grantStripe did in the caller's transaction.
 type stripeGrant struct {
 	payments.Granted
@@ -31,6 +54,10 @@ type stripeGrant struct {
 	away     bool
 	stop     payments.RenewalStop
 	reassert bool
+	// kept: live state said the renewal is on, but nothing showed the
+	// customer re-enabled it while a switch was in progress — the grant kept
+	// renewal 'prepaid', the pending switch and its stop (RP42-3).
+	kept bool
 }
 
 // grantStripe is the webhook's grant of a Stripe house (GrantRecorded) in
@@ -48,8 +75,18 @@ type stripeGrant struct {
 //     (pending_provider cleared in the same transaction); uncancelled tells
 //     the caller to invalidate the tenant's open prepaid invoices after the
 //     commit (afterUncancel).
+//
+// The portal race needs EVIDENCE (RP42-3): live cancel_at_period_end = false
+// is an un-cancel only when the event's previous_attributes say the field
+// was true (sig.wasCancelling), or the switch's stop row is 'stopped'
+// (Stripe confirmed the stop, so a false now is the customer's hand). An
+// invoice.* grant never is. Without it, while a switch is in progress (its
+// stop row pending, or pending_provider set), the grant keeps renewal
+// 'prepaid', the pending switch and the row — the renewal_stops job
+// finishes the stop (kept); with no switch in progress the live state is
+// written as it is, with none of the un-cancel's withdrawals.
 func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Order, paidThrough time.Time, sub *stripe.Subscription,
-	renewal payments.Renewal) (stripeGrant, error) {
+	renewal payments.Renewal, sig uncancelSignal) (stripeGrant, error) {
 	var out stripeGrant
 	if err := payments.Lock(ctx, tx, tenantID); err != nil {
 		return out, err
@@ -58,19 +95,17 @@ func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Or
 	if err != nil {
 		return out, err
 	}
+	cur, gerr := payments.Get(ctx, tx, tenantID)
+	if gerr != nil && !errors.Is(gerr, payments.ErrNoEntitlement) {
+		return out, gerr
+	}
+	ours := gerr == nil && cur.Provider == payments.ProviderStripe && cur.ProviderRef == sub.ID
 	// A row for the subscription the entitlement STILL names is the stop a
 	// customer's switch owes (SwitchToPrepaid writes it with the switch,
 	// RP33-3) — the house was not taken from it yet: the event applies as
 	// before, and a portal un-cancel withdraws the switch and its stop
 	// below.
-	owed := false
-	if found {
-		cur, gerr := payments.Get(ctx, tx, tenantID)
-		if gerr != nil && !errors.Is(gerr, payments.ErrNoEntitlement) {
-			return out, gerr
-		}
-		owed = gerr == nil && cur.Provider == payments.ProviderStripe && cur.ProviderRef == sub.ID
-	}
+	owed := found && ours
 	if found && !owed {
 		out.away, out.stop = true, st
 		if !sub.CancelAtPeriodEnd && st.Status != payments.RenewalStopGone {
@@ -80,6 +115,11 @@ func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Or
 		}
 		return out, err
 	}
+	evidence := !sig.invoice && (sig.wasCancelling || (owed && st.Status == payments.RenewalStopStopped))
+	if renewal == payments.RenewalAuto && !evidence && ours && cur.LapsedAt == nil && cur.Renewal == payments.RenewalPrepaid &&
+		((owed && st.Status == payments.RenewalStopPending) || cur.PendingProvider != "") {
+		renewal, out.kept = payments.RenewalPrepaid, true
+	}
 	g, err := payments.GrantRecorded(ctx, tx, tenantID, o, paidThrough, payments.ProviderStripe, sub.ID, renewal)
 	out.Granted = g
 	if err != nil {
@@ -87,7 +127,7 @@ func grantStripe(ctx context.Context, tx *sql.Tx, tenantID string, o payments.Or
 	}
 	prev := g.Previous
 	if !g.Changed || prev == nil || prev.LapsedAt != nil || prev.Provider != payments.ProviderStripe || prev.ProviderRef != sub.ID ||
-		prev.Renewal != payments.RenewalPrepaid || renewal != payments.RenewalAuto {
+		prev.Renewal != payments.RenewalPrepaid || renewal != payments.RenewalAuto || !evidence {
 		return out, nil
 	}
 	if _, err := tx.ExecContext(ctx,

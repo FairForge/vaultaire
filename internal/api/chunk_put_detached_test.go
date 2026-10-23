@@ -29,14 +29,16 @@ import (
 
 // cutUpload starts a chunked PUT of body on a cancellable context, waits
 // until at least two chunk PUTs are at the backend, cuts the client, and
-// returns once the handler has answered (not 200).
+// returns once the handler has answered (not 200) with the number of chunk
+// PUTs at the backend — sampled AFTER the answer, once it has held still for
+// 200 ms (RP42-4: sampled before cancel(), a worker already dispatched
+// entered the gated driver afterwards — 2 sampled, 3 detached).
 func (f *pendingFixture) cutUpload(t *testing.T, key string, body []byte) int32 {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	first := make(chan int, 1)
 	go func() { first <- f.doCtx(ctx, t, "PUT", "/test-bucket/"+key, body, nil).Code }()
 	waitFor(t, "chunk PUTs in flight", func() bool { return f.gated.inFlight.Load() >= 2 })
-	inFlight := f.gated.inFlight.Load()
 	cancel()
 	select {
 	case code := <-first:
@@ -44,7 +46,24 @@ func (f *pendingFixture) cutUpload(t *testing.T, key string, body []byte) int32 
 	case <-time.After(10 * time.Second):
 		t.Fatal("the cut upload's handler did not answer")
 	}
-	return inFlight
+	return stableInFlight(t, &f.gated.inFlight)
+}
+
+// stableInFlight is n once it has not moved for 200 ms (5 s at most).
+func stableInFlight(t *testing.T, n interface{ Load() int32 }) int32 {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	v := n.Load()
+	for time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+		w := n.Load()
+		if w == v {
+			return v
+		}
+		v = w
+	}
+	t.Fatalf("the chunk PUTs in flight never settled (last %d)", v)
+	return v
 }
 
 func TestChunkClaim_ARetryOfACutUploadDedupsOntoTheDetachedPutsWithinSeconds(t *testing.T) {

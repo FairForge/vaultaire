@@ -109,7 +109,9 @@ func TestPortalUncancel_AfterDurableSwitch_WithdrawsTheStop(t *testing.T) {
 	// Act
 	uncancelled := *sub
 	uncancelled.CancelAtPeriodEnd = false
-	f.post(t, "uncancel", "customer.subscription.updated", f.stripeHas(&uncancelled))
+	// What Stripe sends for the portal's un-cancel: the field's old value in
+	// previous_attributes (RP42-3 — the evidence the webhook now requires).
+	f.postPrev(t, "uncancel", "customer.subscription.updated", f.stripeHas(&uncancelled), map[string]any{"cancel_at_period_end": true})
 
 	// Assert
 	e := f.entitlement(t)

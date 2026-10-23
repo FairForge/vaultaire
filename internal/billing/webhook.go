@@ -424,7 +424,7 @@ func (h *WebhookHandler) handleCheckoutCompleted(ctx context.Context, event stri
 	if err != nil {
 		return tenantID, fmt.Errorf("fetch subscription %s after checkout: %w", subscriptionID, err)
 	}
-	if handled, err := h.applyHouse(ctx, tenantID, sub); handled || err != nil {
+	if handled, err := h.applyHouse(ctx, tenantID, sub, uncancelSignal{}); handled || err != nil {
 		return tenantID, err
 	}
 
@@ -544,7 +544,7 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 		return tenantID, fmt.Errorf("fetch subscription %s for %s: %w", payload.ID, event.Type, err)
 	}
 
-	handled, err := h.applyHouse(ctx, tenantID, sub)
+	handled, err := h.applyHouse(ctx, tenantID, sub, subscriptionSignal(event))
 	if !handled && err == nil {
 		// Not a house (a legacy pack): the record holds houses only and the
 		// tenants subscription columns are dropped (WP-PAY-7) — nothing to write.
@@ -591,7 +591,7 @@ func (h *WebhookHandler) handleSubscriptionUpdated(ctx context.Context, event st
 // second pooled connection, as the handlers' other queries): the claim's
 // per-customer lock already serialises the customer's events, and the
 // entitlement lock (payments.Lock) the tenant's grants.
-func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *stripe.Subscription) (bool, error) {
+func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *stripe.Subscription, sig uncancelSignal) (bool, error) {
 	order, ok := h.stripe.HouseFromSubscription(sub)
 	if !ok || h.quotas == nil || h.stripe.db == nil {
 		return false, nil
@@ -606,7 +606,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		var res stripeGrant
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			var err error
-			res, err = grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal)
+			res, err = grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal, sig)
 			return err
 		}); errors.Is(err, payments.ErrInvalidOrder) {
 			h.houseInvalid(ctx, tenantID, sub, order, err)
@@ -621,6 +621,11 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		h.auditGrant(ctx, tenantID, res.Granted, sub.ID)
 		if res.uncancelled {
 			h.afterUncancel(ctx, tenantID, sub.ID)
+		}
+		if res.kept {
+			renewal = payments.RenewalPrepaid
+			h.logger.Warn("stripe webhook: Stripe says the renewal is on, but nothing shows the customer re-enabled it — the switch and its stop are kept (the renewal_stops job finishes the stop)",
+				zap.String("tenant", tenantID), zap.String("subscription", sub.ID))
 		}
 		h.logger.Info("house granted",
 			zap.String("tenant", tenantID), zap.String("subscription", sub.ID),

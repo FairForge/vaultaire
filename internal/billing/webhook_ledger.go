@@ -126,7 +126,7 @@ func (h *WebhookHandler) recordInvoicePaid(ctx context.Context, event stripe.Eve
 					}
 					grantSub = sub
 					grant = func(tx *sql.Tx) error {
-						r, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal)
+						r, err := grantStripe(ctx, tx, tenantID, order, paidThrough, sub, renewal, uncancelSignal{invoice: true})
 						if errors.Is(err, payments.ErrInvalidOrder) {
 							// Refused before any statement but the lock: the
 							// transaction is intact.
