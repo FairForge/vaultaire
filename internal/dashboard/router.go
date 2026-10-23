@@ -83,6 +83,24 @@ func (d Deps) hostSet() hosts.Hosts {
 	return hosts.Get()
 }
 
+// trustCheckpointURL is the public checkpoint on the trust host; "" when
+// the host set names no trust host.
+func (d Deps) trustCheckpointURL() string {
+	if t := d.hostSet().Trust; t != "" {
+		return t + "/translog/checkpoint"
+	}
+	return ""
+}
+
+// translogPublished reports whether the log's read side is served:
+// translog_public ON globally (a global-only flag). nil without flags.
+func (d Deps) translogPublished() func() bool {
+	if d.Flags == nil {
+		return nil
+	}
+	return func() bool { return d.Flags.Enabled(translog.FlagTranslogPublic, "") }
+}
+
 // flagOn is a flag of deps.Flags for a tenant; nil when there are no flags
 // (a page gated by it is then off).
 func (d Deps) flagOn(key string) func(tenantID string) bool {
@@ -298,7 +316,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/access.html",
 		))
 		dr.Get("/settings/access", handlers.HandleAccess(accessTmpl, deps.flagOn(translog.FlagTranslogCustomerView),
-			deps.flagOn(translog.FlagTranslogAdminReads), deps.AccessLog, deps.hostSet().Trust+"/translog/checkpoint", deps.Logger))
+			deps.flagOn(translog.FlagTranslogAdminReads), deps.AccessLog, deps.trustCheckpointURL(), deps.translogPublished(), deps.Logger))
 		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))

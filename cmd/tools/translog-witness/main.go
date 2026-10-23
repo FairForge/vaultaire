@@ -160,14 +160,18 @@ func serveMain(args []string) error {
 	fs.StringVar(&o.vkey, "vkey", "", "the pinned verifier key of the LOG, or @file")
 	fs.StringVar(&o.dir, "dir", filepath.Join(home, ".translog-witness"), "the witness's state and cosigned notes (shared with the pull pass)")
 	fs.StringVar(&o.key, "key", "", "the WITNESS's own cosignature/v1 signer key, or @file")
+	floor := fs.Duration("refresh-floor", witness.DefaultRefreshFloor, "a request for the checkpoint already cosigned is answered with that cosignature, signing and writing nothing, while it is younger than this; keep it below the log's 6 h refresh (RP46-1)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *floor <= 0 || *floor >= 6*time.Hour {
+		return fmt.Errorf("-refresh-floor %s: want more than 0 and less than the log's 6 h refresh", *floor)
 	}
 	v, s, err := keys(o)
 	if err != nil {
 		return err
 	}
-	srv := &witness.Server{Dir: o.dir, Log: v, Signer: s,
+	srv := &witness.Server{Dir: o.dir, Log: v, Signer: s, RefreshFloor: *floor,
 		Logf: func(format string, a ...any) {
 			fmt.Fprintln(os.Stderr, time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, a...))
 		}}

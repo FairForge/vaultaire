@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"html/template"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -41,8 +43,11 @@ type AccessRow struct {
 // translog_admin_reads for it (the page says so when reads are not being
 // recorded — never "every read is in the log" while they are not); log the
 // finder (nil = the log is not on this deployment); checkpointURL the public
-// checkpoint (the trust host's /translog/checkpoint).
-func HandleAccess(tmpl *template.Template, enabled, recording func(tenantID string) bool, log AccessLog, checkpointURL string, logger *zap.Logger) http.HandlerFunc {
+// checkpoint (the trust host's /translog/checkpoint); published whether the
+// log is served there (translog_public ON globally; nil = not published).
+// Unpublished, the page says the entries are in our transparency log, not
+// yet published, and links nowhere (RP46-3, contract rule 8).
+func HandleAccess(tmpl *template.Template, enabled, recording func(tenantID string) bool, log AccessLog, checkpointURL string, published func() bool, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -56,7 +61,13 @@ func HandleAccess(tmpl *template.Template, enabled, recording func(tenantID stri
 		}
 		data := sessionData(sd, "settings")
 		withCSRF(r.Context(), data)
-		data["CheckpointURL"] = checkpointURL
+		pub := published != nil && checkpointURL != "" && published()
+		data["Published"] = pub
+		data["Where"] = adminread.Where(pub)
+		if pub {
+			data["CheckpointURL"] = checkpointURL
+			data["VerifyCommand"] = fmt.Sprintf(adminread.Where(true).Verify, strings.TrimSuffix(checkpointURL, "/checkpoint"))
+		}
 		data["Recording"] = recording != nil && recording(sd.TenantID)
 		rows := []AccessRow{}
 		if log == nil {

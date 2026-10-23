@@ -90,7 +90,7 @@ func TestAccessPage_ListsOnlyTheTenantsOwnRows(t *testing.T) {
 	signedAt := res.Size
 	iA2, _, err := s.Record(ctx, "op-2", translog.ScopeTenantAuditCSV, a)
 	require.NoError(t, err)
-	h := HandleAccess(accessPage(t), only(a, b), only(a), s, "https://trust.example/translog/checkpoint", zap.NewNop())
+	h := HandleAccess(accessPage(t), only(a, b), only(a), s, "https://trust.example/translog/checkpoint", func() bool { return true }, zap.NewNop())
 
 	// Act
 	w := getAccess(t, h, a)
@@ -103,7 +103,7 @@ func TestAccessPage_ListsOnlyTheTenantsOwnRows(t *testing.T) {
 	assert.Contains(t, page, "Your account&#39;s audit trail, exported as a file")
 	assert.NotContains(t, page, "Your support view", "B's read is not A's")
 	assert.NotContains(t, page, fmt.Sprintf("entry %d,", iB))
-	assert.Contains(t, page, fmt.Sprintf(`entry %d, at <a href="https://trust.example/translog/checkpoint" rel="noopener">checkpoint %d</a>`, iA1, signedAt))
+	assert.Contains(t, page, fmt.Sprintf(`entry %d, included from <a href="https://trust.example/translog/checkpoint" rel="noopener">checkpoint %d</a>`, iA1, signedAt))
 	assert.Contains(t, page, fmt.Sprintf("entry %d, not yet signed", iA2))
 	assert.Less(t, strings.Index(page, fmt.Sprintf("entry %d,", iA2)), strings.Index(page, fmt.Sprintf("entry %d,", iA1)), "newest first")
 	assert.Contains(t, page, "before the records are shown", "recording is on for A")
@@ -123,7 +123,7 @@ func TestAccessPage_FlagOff_404(t *testing.T) {
 		"no flags":           nil,
 		"off for the tenant": only("someone-else"),
 	} {
-		h := HandleAccess(accessPage(t), enabled, nil, f, "https://trust.example/translog/checkpoint", zap.NewNop())
+		h := HandleAccess(accessPage(t), enabled, nil, f, "https://trust.example/translog/checkpoint", nil, zap.NewNop())
 
 		// Act
 		w := getAccess(t, h, "tenant-x")
@@ -136,7 +136,7 @@ func TestAccessPage_FlagOff_404(t *testing.T) {
 	assert.Zero(t, f.calls, "the log is not read for a tenant with the page off")
 	// No session: the login page.
 	w := httptest.NewRecorder()
-	HandleAccess(accessPage(t), only("t"), nil, f, "", zap.NewNop()).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dashboard/settings/access", nil))
+	HandleAccess(accessPage(t), only("t"), nil, f, "", nil, zap.NewNop()).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dashboard/settings/access", nil))
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 }
 
@@ -147,7 +147,7 @@ func TestAccessPage_EscapesHTML(t *testing.T) {
 	f := &countingFinder{found: []adminread.Found{
 		{Index: 7, Kind: translog.KindAdminRead, Scope: `<script>alert("scope")</script>`, CheckpointSize: &size},
 	}}
-	h := HandleAccess(accessPage(t), only("t"), only("t"), f, `https://trust.example/x"><script>alert(1)</script>`, zap.NewNop())
+	h := HandleAccess(accessPage(t), only("t"), only("t"), f, `https://trust.example/x"><script>alert(1)</script>`, func() bool { return true }, zap.NewNop())
 
 	// Act
 	w := getAccess(t, h, "t")
@@ -163,7 +163,7 @@ func TestAccessPage_EscapesHTML(t *testing.T) {
 
 func TestAccessPage_LogUnreadable_SaysSo(t *testing.T) {
 	f := &countingFinder{err: errors.New("database down")}
-	w := getAccess(t, HandleAccess(accessPage(t), only("t"), only("t"), f, "", zap.NewNop()), "t")
+	w := getAccess(t, HandleAccess(accessPage(t), only("t"), only("t"), f, "", nil, zap.NewNop()), "t")
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "cannot be read right now")
 	assert.NotContains(t, w.Body.String(), "has been recorded", "never 'no reads' when the log could not be read")
@@ -178,4 +178,57 @@ type countingFinder struct {
 func (f *countingFinder) Find(context.Context, string) ([]adminread.Found, error) {
 	f.calls++
 	return f.found, f.err
+}
+
+// RP46-3 (rule 8: claim nothing we do not do): while the log is not
+// published — translog_public OFF globally, or no trust URL — the page says
+// the entries are in our transparency log, not yet published, and links
+// nowhere. RP46-4: a signed entry is "included from checkpoint M".
+func TestAccessPage_Unpublished_NoPublicClaim(t *testing.T) {
+	// Arrange: one signed entry, one not.
+	size := int64(9)
+	f := &countingFinder{found: []adminread.Found{
+		{Index: 7, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantPayments, CheckpointSize: &size},
+		{Index: 11, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantAudit},
+	}}
+	for name, published := range map[string]func() bool{
+		"no predicate":        nil,
+		"translog_public off": func() bool { return false },
+	} {
+		h := HandleAccess(accessPage(t), only("t"), only("t"), f, "https://trust.example/translog/checkpoint", published, zap.NewNop())
+
+		// Act
+		w := getAccess(t, h, "t")
+
+		// Assert
+		require.Equal(t, http.StatusOK, w.Code, name)
+		page := w.Body.String()
+		assert.NotContains(t, strings.ToLower(page), "public log", name)
+		assert.NotContains(t, page, "trust.example", "%s: no link to a log that is not served", name)
+		assert.NotContains(t, page, "translog-verify", "%s: nothing to verify against yet", name)
+		assert.Contains(t, page, adminread.Where(false).Column, name)
+		assert.Contains(t, page, "entry 7, included from checkpoint 9", name)
+		assert.Contains(t, page, "entry 11, not yet signed", name)
+	}
+}
+
+func TestAccessPage_Published_LinksTheCheckpoint(t *testing.T) {
+	// Arrange
+	size := int64(9)
+	f := &countingFinder{found: []adminread.Found{
+		{Index: 7, Kind: translog.KindAdminRead, Scope: translog.ScopeTenantPayments, CheckpointSize: &size},
+	}}
+	h := HandleAccess(accessPage(t), only("t"), only("t"), f, "https://trust.example/translog/checkpoint", func() bool { return true }, zap.NewNop())
+
+	// Act
+	w := getAccess(t, h, "t")
+
+	// Assert: the link is the newest checkpoint — the only one served — so
+	// it says "included from" M, and how to prove one entry.
+	require.Equal(t, http.StatusOK, w.Code)
+	page := w.Body.String()
+	assert.Contains(t, page, adminread.Where(true).Column)
+	assert.Contains(t, page, `entry 7, included from <a href="https://trust.example/translog/checkpoint" rel="noopener">checkpoint 9</a>`)
+	assert.Contains(t, page, "translog-verify -url https://trust.example/translog")
+	assert.Contains(t, page, "-entry N")
 }

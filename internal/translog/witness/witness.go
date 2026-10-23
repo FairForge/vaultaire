@@ -42,7 +42,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
+	fnote "github.com/transparency-dev/formats/note"
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/FairForge/vaultaire/internal/translog"
@@ -160,7 +163,7 @@ func (w *Witness) Pass(ctx context.Context) (Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("witness: open the checkpoint note: %w", err)
 	}
-	cos, _, err := accept(w.Dir, msg, n, w.Signer, false)
+	cos, _, err := accept(w.Dir, msg, n, w.Signer, 0, time.Time{})
 	if err != nil {
 		return res, err
 	}
@@ -186,38 +189,86 @@ func readHeld(dir string, v note.Verifier) (translog.Checkpoint, bool, error) {
 }
 
 // accept cosigns n (the log's verified note; msg as it came) and records it,
-// under the directory's lock which the caller holds: the cosigned note
-// (the log's signature and the witness's line) to <dir>/cosigned and, when
-// it is new, one base64 line to <dir>/cosigned.history; then the state.
-// refresh = false keeps an existing cosignature of the same checkpoint
-// (signed = false); true always signs anew (an add-checkpoint request).
-func accept(dir string, msg []byte, n *note.Note, s note.Signer, refresh bool) (cos []byte, signed bool, err error) {
+// under the directory's lock which the caller holds.
+//
+// An existing cosignature of the same checkpoint (same text, a line by s)
+// is answered as it is — no signature, no write — when keepFor is 0 (the
+// pull pass: for ever) or it is younger than keepFor at now (serve's
+// refresh floor, RP46-1: a replayed checkpoint must not cost a signature,
+// a history line and two fsyncs per request).
+//
+// Otherwise the order is the state, then <dir>/cosigned, then — only for a
+// tree not cosigned before (history = trees, a refresh adds none) — one
+// base64 line in <dir>/cosigned.history (RP46-2). A crash between them can
+// leave only the state ahead of `cosigned`, which is safe: a request from
+// the old size gets a 409 naming the new one, and only the same root at it
+// is cosigned. The other order published (the monitor GET) a cosignature at
+// N while the state held M < N, and a different root at N consistent with
+// M was then cosigned too: the witness equivocated.
+func accept(dir string, msg []byte, n *note.Note, s note.Signer, keepFor time.Duration, now time.Time) (cos []byte, signed bool, err error) {
 	cosPath := filepath.Join(dir, CosignFile)
+	statePath := filepath.Join(dir, StateFile)
 	before, err := os.ReadFile(cosPath) // #nosec G304 -- the witness's own directory
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, false, fmt.Errorf("witness: read %s: %w", CosignFile, err)
 	}
-	if !refresh && before != nil && noteText(before) == n.Text && len(translog.CosignatureLines(before, s.Name(), s.KeyHash())) > 0 {
-		cos = before
-	} else {
-		cos, err = note.Sign(&note.Note{Text: n.Text, Sigs: n.Sigs}, s)
-		if err != nil {
-			return nil, false, fmt.Errorf("witness: co-sign: %w", err)
+	sameTree := before != nil && noteText(before) == n.Text
+	if sameTree && len(translog.CosignatureLines(sigBlock(before), s.Name(), s.KeyHash())) > 0 {
+		if at, ok := cosignedAt(before, s); keepFor == 0 || (ok && now.Sub(at) < keepFor) {
+			// The state can only be behind `cosigned` in a directory written
+			// by the old order; bring it up without touching the rest.
+			if held, err := os.ReadFile(statePath); err != nil || !bytes.Equal(held, msg) { // #nosec G304 -- the witness's own directory
+				if err := writeStep(statePath, StateFile, msg); err != nil {
+					return nil, false, err
+				}
+			}
+			return before, false, nil
 		}
-		signed = true
 	}
-	if !bytes.Equal(before, cos) {
+	cos, err = note.Sign(&note.Note{Text: n.Text, Sigs: n.Sigs}, s)
+	if err != nil {
+		return nil, false, fmt.Errorf("witness: co-sign: %w", err)
+	}
+	if err := writeStep(statePath, StateFile, msg); err != nil {
+		return nil, false, err
+	}
+	if err := writeStep(cosPath, CosignFile, cos); err != nil {
+		return nil, false, err
+	}
+	if !sameTree {
 		if err := appendLine(filepath.Join(dir, HistoryFile), base64.StdEncoding.EncodeToString(cos)); err != nil {
 			return nil, false, err
 		}
-		if err := writeAtomic(cosPath, cos); err != nil {
-			return nil, false, fmt.Errorf("witness: write %s: %w", CosignFile, err)
+	}
+	return cos, true, nil
+}
+
+// afterWrite is a test seam: called after each file accept writes, an error
+// stops accept there — a crash between two writes.
+var afterWrite func(file string) error
+
+// writeStep writes one of accept's files atomically, then the seam.
+func writeStep(path, file string, data []byte) error {
+	if err := writeAtomic(path, data); err != nil {
+		return fmt.Errorf("witness: write %s: %w", file, err)
+	}
+	if afterWrite != nil {
+		return afterWrite(file)
+	}
+	return nil
+}
+
+// cosignedAt is the timestamp of s's cosignature line on a cosigned note
+// the witness wrote itself; ok = false when it carries none.
+func cosignedAt(cosigned []byte, s note.Signer) (time.Time, bool) {
+	for _, l := range translog.CosignatureLines(sigBlock(cosigned), s.Name(), s.KeyHash()) {
+		b64 := strings.TrimSuffix(l[strings.LastIndexByte(l, ' ')+1:], "\n")
+		t, err := fnote.CoSigV1Timestamp(note.Signature{Name: s.Name(), Hash: s.KeyHash(), Base64: b64})
+		if err == nil {
+			return t, true
 		}
 	}
-	if err := writeAtomic(filepath.Join(dir, StateFile), msg); err != nil {
-		return nil, false, fmt.Errorf("witness: write %s: %w", StateFile, err)
-	}
-	return cos, signed, nil
+	return time.Time{}, false
 }
 
 // noteText is a note's text: everything before its signature block.

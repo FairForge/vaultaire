@@ -45,6 +45,9 @@ type cosignLab struct {
 	wURL     string
 	requests *atomic.Int64
 	srv      *httptest.Server
+	// skew moves the witness's clock (its cosignatures and its refresh
+	// floor, RP46-1) with a test that moves the job's.
+	skew *atomic.Int64
 }
 
 // newCosignLab is a private log with a signing key, the read side, and one
@@ -64,13 +67,15 @@ func newCosignLab(t *testing.T) *cosignLab {
 
 	wsk, wvk, err := translog.GenerateCosignerKey("witness.test/lab")
 	require.NoError(t, err)
-	ws, err := translog.NewCosigner(wsk, nil)
+	var skew atomic.Int64
+	clock := func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
+	ws, err := translog.NewCosigner(wsk, clock)
 	require.NoError(t, err)
 	wv, err := translog.NewCosignatureVerifier(wvk)
 	require.NoError(t, err)
 	wDir := t.TempDir()
 	var n atomic.Int64
-	h := (&witness.Server{Dir: wDir, Log: logV, Signer: ws}).Handler()
+	h := (&witness.Server{Dir: wDir, Log: logV, Signer: ws, Now: clock}).Handler()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n.Add(1)
 		h.ServeHTTP(w, r)
@@ -82,7 +87,7 @@ func newCosignLab(t *testing.T) *cosignLab {
 	job := newTranslogCheckpointer(store, zap.NewNop())
 	job.JobName = "translog_checkpoint_cosign_test"
 	job.cosign = newCosignCollector(store, ws2, zap.NewNop())
-	return &cosignLab{db: db, store: store, logV: logV, job: job, readURL: read.URL + "/translog/", wDir: wDir, wv: wv, wvkey: wvk, wURL: srv.URL, requests: &n, srv: srv}
+	return &cosignLab{db: db, store: store, logV: logV, job: job, readURL: read.URL + "/translog/", wDir: wDir, wv: wv, wvkey: wvk, wURL: srv.URL, requests: &n, srv: srv, skew: &skew}
 }
 
 func (l *cosignLab) append(t *testing.T, n int) {
@@ -367,8 +372,10 @@ func TestCheckpointJob_RefreshesAnIdleCosignature(t *testing.T) {
 	require.Equal(t, logstore.CosignOK, res.Witnesses["lab"].Outcome)
 	first := l.served(t)
 
-	// Act: seven hours later, nothing new.
+	// Act: seven hours later, nothing new (the witness's clock too: past
+	// its refresh floor it signs anew).
 	l.job.cosign.now = func() time.Time { return time.Now().Add(7 * time.Hour) }
+	l.skew.Store(int64(7 * time.Hour))
 	res, _ = l.run(t)
 
 	// Assert: asked again from its own size, a second row, one line served.

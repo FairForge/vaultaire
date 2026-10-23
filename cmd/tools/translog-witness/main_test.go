@@ -88,3 +88,16 @@ func TestProductBinaryDoesNotLinkTheWitness(t *testing.T) {
 		assert.NotEqual(t, "github.com/FairForge/vaultaire/internal/translog/witness", line, "cmd/vaultaire links the witness")
 	}
 }
+
+// RP46-1: -refresh-floor must stay inside (0, 6 h) — at or past the log's
+// refresh, the log's own refresh would be answered with the old timestamp.
+func TestTranslogWitnessServe_RefreshFloorBounds(t *testing.T) {
+	for _, bad := range []string{"0s", "6h", "-1m"} {
+		// Act
+		err := serveMain([]string{"-refresh-floor", bad})
+
+		// Assert
+		require.Error(t, err, bad)
+		assert.Contains(t, err.Error(), "-refresh-floor", bad)
+	}
+}

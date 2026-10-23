@@ -44,7 +44,20 @@ type Server struct {
 	// LockWait bounds the wait for the directory lock (default 10 s; a
 	// pull pass mirroring holds it): past it the answer is 503.
 	LockWait time.Duration
+	// RefreshFloor (default DefaultRefreshFloor): a request for the
+	// checkpoint the witness holds is answered with its existing
+	// cosignature, signing and writing nothing, while that cosignature is
+	// younger than this (RP46-1: the public checkpoint POSTed again must not
+	// cost a signature, a history line and two fsyncs per request). Past it
+	// the request is the log's refresh and is signed anew; keep it below the
+	// log's refresh (6 h, internal/api/translog_witnesses.go).
+	RefreshFloor time.Duration
+	// Now is the clock the floor is read against (nil = time.Now).
+	Now func() time.Time
 }
+
+// DefaultRefreshFloor is Server.RefreshFloor's default.
+const DefaultRefreshFloor = time.Hour
 
 const maxAddCheckpoint = 1 << 20 // a checkpoint with up to 100 signature lines, a proof of 63 hashes
 
@@ -167,7 +180,15 @@ func (s *Server) addCheckpoint(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cos, _, err := accept(s.Dir, msg, n, s.Signer, true)
+	floor := s.RefreshFloor
+	if floor <= 0 {
+		floor = DefaultRefreshFloor
+	}
+	now := time.Now
+	if s.Now != nil {
+		now = s.Now
+	}
+	cos, _, err := accept(s.Dir, msg, n, s.Signer, floor, now())
 	if err != nil {
 		plain(w, http.StatusInternalServerError, "the witness could not record the checkpoint\n")
 		return
