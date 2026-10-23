@@ -62,7 +62,17 @@ The webhook writes the house's floors AND the entitlement row in one transaction
 
 ## Environment Variables (wired in server.go)
 
-- `STRIPE_SECRET_KEY` — Stripe API key
+- `STRIPE_SECRET_KEY` — Stripe API key. **A restricted key (`rk_…`) needs
+  exactly what the code calls** (the stripe-go packages it imports): Customers
+  **Write**; Checkout Sessions **Write**; Subscriptions **Write** (update,
+  cancel); Prices **Read** (the hourly price assert); Invoices **Write** (the
+  dashboard's list, and the void of a cancelled-for-a-switch subscription's
+  open invoice — RP37-3); Charges **Read** and Refunds **Read**
+  (`charge.refunded`); Customer portal **Write** for the portal session and
+  **"Customer portal: read"** for the configuration the RP33-9 assert reads —
+  without it Stripe answers 403, which is a verdict, so checkout closes
+  (RP34-4 = RP37-7). Webhook endpoints are managed in the dashboard, not by
+  the key.
 - `STRIPE_WEBHOOK_SECRET` — webhook endpoint secret. **Required for the route
   to exist**: `server.go` mounts `/webhook/stripe` only when both are set, and
   `NewWebhookHandler("")` answers 503 to everything (Review R10-01 — an empty

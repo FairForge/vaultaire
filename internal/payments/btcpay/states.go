@@ -410,19 +410,32 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 	if err != nil {
 		return fmt.Errorf("invoice %s: confirmed amount: %w", inv.ID, err)
 	}
+	if paid > 0 && !hasPayments(pms) {
+		// RP37-6: a 1.x-shaped answer — money on the invoice, no payment
+		// listed — so nothing can be shown confirmed: no credit is invented
+		// (confirmed stays 0), and a person is told.
+		payments.CountUnconfirmable()
+		p.logger.Error("btcpay webhook: the invoice says it was paid but lists no payments — nothing can be confirmed, nothing credited; look at it in BTCPay",
+			zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.String("status", inv.Status),
+			zap.Int64("paid_cents", paid))
+	}
 	switch inv.Status {
 	case StatusSettled:
 		if row.Order == nil {
 			return fmt.Errorf("invoice %s: the ledger row records no house", inv.ID)
 		}
-		if paid < row.AmountCents {
+		settledBefore := row.Status == payments.StatusSettled || row.Status == payments.StatusRefunded
+		if !settledBefore && confirmed < row.AmountCents {
 			// The lab: marking an UNPAID invoice Settled by hand sends
 			// InvoiceSettled{manuallyMarked} with paidAmount 0. Nobody paid:
 			// no grant, no receipt — an operator who means it records a
-			// manual payment.
-			p.logger.Error("btcpay webhook: invoice Settled without its amount paid (marked by hand?) — not granted",
+			// manual payment. The gate reads the CONFIRMED amount (RP37-6):
+			// a mark over a payment still Processing grants nothing yet — the
+			// InvoicePaymentSettled BTCPay sends when it confirms comes back
+			// here with it confirmed.
+			p.logger.Error("btcpay webhook: invoice Settled without its amount paid and confirmed (marked by hand?) — not granted",
 				zap.String("invoice", inv.ID), zap.String("tenant", row.TenantID), zap.String("additional_status", inv.AdditionalStatus),
-				zap.Int64("paid_cents", paid), zap.Int64("amount_cents", row.AmountCents))
+				zap.Int64("paid_cents", paid), zap.Int64("confirmed_cents", confirmed), zap.Int64("amount_cents", row.AmountCents))
 			a.verdict = payments.WebhookSettledUnpaid
 			return nil
 		}
@@ -430,7 +443,7 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		// event of a settled invoice) changes nothing.
 		var start, end time.Time
 		var granted *payments.Granted
-		if row.Status != payments.StatusSettled && row.Status != payments.StatusRefunded {
+		if !settledBefore {
 			s, e, g, err := p.grantSettled(ctx, tx, a, row, inv.ID)
 			if err != nil {
 				return err
@@ -446,21 +459,38 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 			return err
 		}
 		a.settled, a.granted = &settled, granted
-		if !settled.Newly {
+		if settled.Newly {
+			if err := payments.RecordCrypto(ctx, tx, payments.ProviderBTCPay, inv.ID, cryptoDetail(pm)); err != nil {
+				return err
+			}
+			// Settled after all: what arrived is the payment, no longer a
+			// credit.
+			if _, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), 0, "", now); err != nil {
+				return err
+			}
+			if err := p.logKept(ctx, tx, row, partialCreditID(inv.ID)); err != nil {
+				return err
+			}
+		}
+		if row.Status == payments.StatusRefunded {
+			// D-P30-1: a refunded row is never credited again — the operator
+			// who refunded it decided what the invoice's money was owed; a
+			// later payment to it is theirs to look at, not ours to credit.
 			return nil
 		}
-		if err := payments.RecordCrypto(ctx, tx, payments.ProviderBTCPay, inv.ID, cryptoDetail(pm)); err != nil {
+		// What was paid over the amount AND confirmed is a credit (§ 3.4;
+		// RP37-1: never an unconfirmed payment, which can be double-spent
+		// back after the settle). Written on EVERY delivery of the settled
+		// invoice (RP37-2): SetCredit sets an absolute value under the
+		// invoice's id, so a replay re-asserts it and a payment that
+		// arrives or confirms after the settle raises it.
+		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, overpaidCreditID(inv.ID),
+			max(0, confirmed-row.AmountCents), "overpaid invoice "+inv.ID, now)
+		if err != nil {
 			return err
 		}
-		// Settled after all: what arrived is the payment, no longer a credit;
-		// anything over the amount is (§ 3.4).
-		if _, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), 0, "", now); err != nil {
-			return err
-		}
-		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, overpaidCreditID(inv.ID), paid-row.AmountCents,
-			"overpaid invoice "+inv.ID, now)
 		a.credit = d
-		return err
+		return p.logKept(ctx, tx, row, overpaidCreditID(inv.ID))
 
 	case StatusExpired:
 		if !row.Open() {
@@ -501,8 +531,11 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		// is an InvoicePaymentSettled that sets it again).
 		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), confirmed,
 			"partial payment of expired invoice "+inv.ID, now)
+		if err != nil {
+			return err
+		}
 		a.credit = d
-		return err
+		return p.logKept(ctx, tx, row, partialCreditID(inv.ID))
 
 	case StatusInvalid:
 		if row.Status == payments.StatusSettled || row.Status == payments.StatusRefunded {
@@ -525,8 +558,11 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		// row to the total, so a redelivery credits it once.
 		d, err := payments.SetCredit(ctx, tx, row.TenantID, payments.ProviderBTCPay, partialCreditID(inv.ID), confirmed,
 			"payment on invalid invoice "+inv.ID, now)
+		if err != nil {
+			return err
+		}
 		a.credit = d
-		return err
+		return p.logKept(ctx, tx, row, partialCreditID(inv.ID))
 
 	case StatusProcessing:
 		// Informational only: Processing is not monotonic (the lab: a double
@@ -536,6 +572,30 @@ func (p *Provider) apply(ctx context.Context, tx *sql.Tx, a *applied, row paymen
 		return err
 	}
 	// New (nothing paid, or a payment double-spent away): nothing.
+	return nil
+}
+
+// hasPayments reports whether any payment method lists a payment.
+func hasPayments(pms []PaymentMethod) bool {
+	for _, pm := range pms {
+		if len(pm.Payments) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// logKept says, as an Error line, that a recomputed credit kept a part a
+// checkout had already spent (payments.SetCredit, D-P30-1) — the ledger row
+// records it too.
+func (p *Provider) logKept(ctx context.Context, tx *sql.Tx, row payments.Opened, creditID string) error {
+	kept, recomputed, err := payments.CreditKept(ctx, tx, payments.ProviderBTCPay, creditID)
+	if err != nil || kept == 0 {
+		return err
+	}
+	p.logger.Error("btcpay webhook: a credit recomputed below what checkout already spent — the spent part is kept on the row; decide by hand whether it is owed",
+		zap.String("credit", creditID), zap.String("tenant", row.TenantID),
+		zap.Int64("recomputed_cents", recomputed), zap.Int64("spent_kept_cents", kept))
 	return nil
 }
 

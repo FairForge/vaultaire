@@ -657,7 +657,7 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		var ended payments.Ended
 		if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 			var err error
-			ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now())
+			ended, err = payments.EndByStatusOf(ctx, tx, tenantID, payments.ProviderStripe, sub.ID, time.Now())
 			return err
 		}); err != nil {
 			return true, fmt.Errorf("clear house for tenant %s: %w", tenantID, err)
@@ -711,11 +711,18 @@ func (h *WebhookHandler) houseInvalid(ctx context.Context, tenantID string, sub 
 }
 
 // keptByDate reports a terminal status that ended the renewal of a house
-// still paid into the future (payments.EndByStatus, RP26-1): nothing was
-// revoked, the house runs to the kept date + grace.
+// still paid into the future (payments.EndByStatus, RP26-1), or of the
+// subscription the customer's own switch stopped (EndByStatusOf, RP37-3):
+// nothing was revoked, the house runs to the kept date + grace.
 func (h *WebhookHandler) keptByDate(ctx context.Context, tenantID string, sub *stripe.Subscription, status string, ended payments.Ended) {
 	if ended.Stopped {
 		payments.AuditRenewal(ctx, h.stripe.db, tenantID, payments.RenewalPrepaid, webhookActor, payments.ProviderStripe, sub.ID)
+	}
+	if ended.Switched {
+		h.logger.Info("the subscription the customer's switch stopped has ended — the house kept, waiting for the prepaid invoice (paid_through + grace)",
+			zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", status),
+			zap.Time("paid_through", ended.PaidThrough))
+		return
 	}
 	h.logger.Warn("terminal status on a house paid into the future — renewal stopped, the house kept to paid_through + grace",
 		zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", status),
@@ -821,7 +828,7 @@ func (h *WebhookHandler) handleSubscriptionDeleted(ctx context.Context, event st
 	var ended payments.Ended
 	if err := payments.InTx(ctx, h.stripe.db, func(tx *sql.Tx) error {
 		var err error
-		ended, err = payments.EndByStatus(ctx, tx, tenantID, time.Now())
+		ended, err = payments.EndByStatusOf(ctx, tx, tenantID, payments.ProviderStripe, sub.ID, time.Now())
 		return err
 	}); err != nil {
 		return tenantID, fmt.Errorf("clear house quotas on delete for tenant %s: %w", tenantID, err)
