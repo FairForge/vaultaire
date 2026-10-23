@@ -25,6 +25,10 @@ const (
 	// KindKeyCeremony: a key ceremony (F-14 master-key install, re-wrap,
 	// escrow share rotation; F-19 recovery realm; this log's own key).
 	KindKeyCeremony = "key_ceremony"
+	// KindAdminRead: an operator read customer metadata (contract rule 7,
+	// K4c-1): the scope read and an opaque commitment to the tenant read,
+	// never the tenant, the operator or what was seen.
+	KindAdminRead = "admin_read"
 
 	// entryVersion is the body's "v": a change of any kind's fields is a
 	// new version — except key_ceremony's v1 schema of #884 (a free-text
@@ -202,6 +206,121 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// The scopes an admin_read entry can record (docs/TRANSPARENCY.md § Admin
+// reads; the inventory of the admin routes is in docs/reviews/WP-P33.md and
+// the classification maps beside the routes). A closed list: a new admin
+// page that reads customer metadata is a new scope here, never free text.
+// The five subject scopes (subjectScopes) read ONE identified tenant and
+// carry a commitment to it; every other scope reads across tenants, or a
+// record that names no tenant, and carries none.
+const (
+	ScopeTenantDetail   = "tenant_detail"   // one tenant's record: account, usage, keys, buckets, billing
+	ScopeTenantPayments = "tenant_payments" // one tenant's entitlement and payment ledger
+	ScopeTenantAudit    = "tenant_audit"    // one tenant's (or one user's) audit trail
+	ScopeSupportCase    = "support_case"    // one customer's support view and notes
+	ScopeAbuseCase      = "abuse_case"      // one abuse report and the tenant it names
+	ScopeAbuseReport    = "abuse_report"    // one abuse report that names no tenant (the reporter's e-mail, the URL)
+	ScopeTenantList     = "tenant_list"     // the tenant / customer list (e-mails, names)
+	ScopeAuditList      = "audit_list"      // the audit trail across tenants
+	ScopeAuditExport    = "audit_export"    // its CSV export
+	ScopeWaitlistList   = "waitlist_list"   // the waitlist (e-mails)
+	ScopeWaitlistExport = "waitlist_export" // its CSV export
+	ScopeAbuseList      = "abuse_list"      // the abuse reports across tenants
+	ScopeBillingList    = "billing_list"    // revenue, costs and margins across tenants with their identity
+	ScopeUsageList      = "usage_list"      // per-tenant usage figures (dedup) with their identity
+	ScopeFlagList       = "flag_list"       // the feature flags with the tenants they are set for
+	ScopeJobList        = "job_list"        // the background jobs' results, which name tenants
+	ScopeNoticeList     = "notice_list"     // the operator notifications, which name tenants
+)
+
+// ActorRoleAdmin is the only actor an admin_read names: a role, never the
+// person (the operator stays in audit_logs).
+const ActorRoleAdmin = "admin"
+
+var (
+	subjectScopes   = []string{ScopeTenantDetail, ScopeTenantPayments, ScopeTenantAudit, ScopeSupportCase, ScopeAbuseCase}
+	adminReadScopes = append(append([]string(nil), subjectScopes...), ScopeAbuseReport,
+		ScopeTenantList, ScopeAuditList, ScopeAuditExport, ScopeWaitlistList, ScopeWaitlistExport, ScopeAbuseList,
+		ScopeBillingList, ScopeUsageList, ScopeFlagList, ScopeJobList, ScopeNoticeList)
+)
+
+// AdminReadScopes lists the scopes.
+func AdminReadScopes() []string { return append([]string(nil), adminReadScopes...) }
+
+// ScopeHasSubject reports whether scope reads ONE identified tenant (its
+// entry carries a commitment) — false for a list, an export, or a record
+// that names no tenant.
+func ScopeHasSubject(scope string) bool { return contains(subjectScopes, scope) }
+
+// AdminRead is an operator's read of customer metadata. Every field is a
+// closed list or a fixed shape (RP37-10): no tenant id, no e-mail, no
+// object key, no IP, no operator. For a read of one tenant, Nonce is 16
+// random bytes and Commitment = HMAC-SHA256(salt of that tenant,
+// AdminReadLabel ‖ nonce) — the salt is translog_subjects', never public, so
+// two entries cannot be linked to one tenant by anyone but the server (for
+// that tenant), and by no one once the salt is erased with the account. The
+// field is "commitment", not "subject": the public log's field names may not
+// read as naming someone (TestTranslog_EntriesNeverNameATenant).
+type AdminRead struct {
+	Scope      string `json:"scope"`      // one of AdminReadScopes()
+	ActorRole  string `json:"actor_role"` // ActorRoleAdmin
+	Nonce      string `json:"nonce"`      // 32 lowercase hex; "" when the scope reads no one tenant
+	Commitment string `json:"commitment"` // 64 lowercase hex; "" when the scope reads no one tenant
+}
+
+// AdminReadLabel is the commitment's domain label (the HMAC's message is
+// the label's bytes then the nonce's 16 raw bytes).
+const AdminReadLabel = "stored.cloud/translog/admin_read"
+
+// Kind implements Entry.
+func (AdminRead) Kind() string { return KindAdminRead }
+
+// DedupKey: none of its own; the producer coalesces with CoalescedAdminRead.
+func (AdminRead) DedupKey() string { return "" }
+
+var (
+	reNonce = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	reHMAC  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+func (a AdminRead) validate() error {
+	if !contains(adminReadScopes, a.Scope) {
+		return fmt.Errorf("scope: one of %s", strings.Join(adminReadScopes, ", "))
+	}
+	if a.ActorRole != ActorRoleAdmin {
+		return errors.New("actor_role: admin")
+	}
+	if ScopeHasSubject(a.Scope) {
+		if !reNonce.MatchString(a.Nonce) || !reHMAC.MatchString(a.Commitment) {
+			return fmt.Errorf("nonce, commitment: %s reads one tenant — 32 and 64 lowercase hex", a.Scope)
+		}
+	} else if a.Nonce != "" || a.Commitment != "" {
+		return fmt.Errorf("nonce, commitment: %s reads across tenants — both empty", a.Scope)
+	}
+	return nil
+}
+
+// CoalescedAdminRead is a appended under a coalescing key (K4c-1: one entry
+// per operator, scope and tenant per hour — a page refresh appends
+// nothing). The key lives in translog_entries.dedup_key, never in the
+// public body; the caller derives it so that it names no one either (keyed
+// by the tenant's salt for a subject scope).
+func CoalescedAdminRead(a AdminRead, key string) Entry {
+	return coalescedAdminRead{AdminRead: a, key: key}
+}
+
+type coalescedAdminRead struct {
+	AdminRead
+	key string
+}
+
+func (c coalescedAdminRead) DedupKey() string {
+	if c.key == "" {
+		return ""
+	}
+	return KindAdminRead + ":" + c.key
+}
+
 // RetryableCeremony is c appended under a retry key (RP37-14, the ceremony
 // route's Idempotency-Key): its DedupKey makes a second append of the same
 // key return the first entry's index, in Append's own transaction — a
@@ -251,7 +370,7 @@ func strictUnmarshal(raw []byte, v any) error {
 }
 
 // Kinds lists every entry kind.
-func Kinds() []string { return []string{KindServerBuild, KindKeyCeremony} }
+func Kinds() []string { return []string{KindServerBuild, KindKeyCeremony, KindAdminRead} }
 
 // AllowedFields is a kind's allow-list: the JSON fields of its "entry".
 func AllowedFields(kind string) []string {
@@ -261,6 +380,8 @@ func AllowedFields(kind string) []string {
 	case KindKeyCeremony:
 		return []string{"action", "key_role", "key_fingerprint", "participants", "shares", "threshold",
 			"signed_size", "restored_size", "new_origin", "reference"}
+	case KindAdminRead:
+		return []string{"scope", "actor_role", "nonce", "commitment"}
 	}
 	return nil
 }
@@ -327,6 +448,10 @@ func Decode(body []byte) (Decoded, error) {
 		var c KeyCeremony
 		err = strictUnmarshal(raw.Entry, &c)
 		d.Entry = c
+	case KindAdminRead:
+		var a AdminRead
+		err = strictUnmarshal(raw.Entry, &a)
+		d.Entry = a
 	default:
 		return Decoded{}, fmt.Errorf("translog: decode: unknown kind %q", raw.Kind)
 	}

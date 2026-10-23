@@ -429,7 +429,10 @@ func TestTranslogStateCollector(t *testing.T) {
 // under the lock).
 func TestTranslog_OnlyTheStoreWritesTheLogTables(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
-	write := regexp.MustCompile(`(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+translog_`)
+	// The log's three tables. translog_subjects (104, K4c-1) is tenant data
+	// — the admin-read salts — written by internal/translog/adminread and
+	// erased by internal/account; it is not the log.
+	write := regexp.MustCompile(`(?is)\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(\s+TABLE)?)\s+translog_(entries|hashes|checkpoints)\b`)
 	var offenders []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

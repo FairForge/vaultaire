@@ -175,6 +175,11 @@ var Deleted = []Rule{
 	// sealed under them — a copy the sweep before this did not reach, a
 	// backend's own backup — is unreadable from this commit on.
 	{"tenant_key_versions", `DELETE FROM tenant_key_versions WHERE tenant_id = $1`, ByTenant},
+	// The salt of the transparency log's admin-read commitments (104, K4c-1):
+	// with it gone, no one — the server included — can link the tenant's
+	// past admin_read entries (public, permanent) or their coalescing keys
+	// to the tenant again. The entries stay: they name no one.
+	{"translog_subjects", `DELETE FROM translog_subjects WHERE tenant_id = $1`, ByTenant},
 	// Displaced whole-object blobs awaiting the collector (WP-R2-1): the
 	// bytes they name are in the tenant's prefix and went with the sweep.
 	{"retired_blobs", `DELETE FROM retired_blobs WHERE tenant_id = $1`, ByTenant},

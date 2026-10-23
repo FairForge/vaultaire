@@ -133,6 +133,8 @@ func registerFlags(fl *flags.Service) {
 	// K4: the transparency log's public read side (GET /translog/…).
 	// Default OFF, global: flipped when trust.stored.cloud is decided.
 	fl.Register(flagTranslogPublic, false)
+	fl.Register(flagTranslogAdminReads, false)   // K4c-1: per subject tenant first; the owner flips it globally
+	fl.Register(flagTranslogCustomerView, false) // K4c-1: GET /api/v1/manage/account/transparency, per tenant first
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

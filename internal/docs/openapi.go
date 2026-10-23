@@ -1135,6 +1135,19 @@ func generateManagementPaths() map[string]*PathItem {
 				}),
 				jsonBody("Why the account is being closed", ref("AccountDeletionRequest")))),
 		},
+		"/api/v1/manage/account/transparency": {
+			Get: mgmt(jsonOp("Management", "Admin reads of your account in the transparency log", "ManageAccountTransparency",
+				"Every time an operator read your account's records (the tenant page, its payments, its audit trail, a support or abuse case), "+
+					"the transparency log received an `admin_read` entry BEFORE the read was served. The entry names no one: "+
+					"a scope, the role `admin`, a random nonce and an HMAC commitment under a salt only your account has. This lists yours — "+
+					"its index in the log, the scope, when, and the size of the first signed checkpoint whose tree includes it (null = not signed yet; "+
+					"check it with `translog-verify -entry <index>`). Reads across many accounts (lists, exports) are in the log without a commitment and are not listed here. "+
+					"Not yet available on every account: **404** while it is off for yours.",
+				map[string]Response{
+					"200": jsonResp("Your admin-read entries, oldest first", ref("AccountTransparency")),
+					"404": errResp("`not_found` while this view is off for the account"),
+				})),
+		},
 		"/api/v1/manage/account/cancel-deletion": {
 			Post: mut(jsonOp("Management", "Cancel a scheduled account deletion", "ManageCancelDeletion",
 				"Clears the scheduled deletion and sets the user back to `active`. Fails (500 `cancel_failed`) when nothing is pending. No request body.",
@@ -2098,6 +2111,17 @@ func generateJSONSchemas() map[string]Schema {
 			"error":                   str("Why the export failed (failed only)"),
 			"request_id":              str(""),
 		}, "object", "id", "status", "file_size_bytes", "created_at", "request_id"),
+		"AccountTransparency": object("", map[string]*Schema{
+			"object": strEnum("", "list"),
+			"origin": str("The transparency log's origin (stored.cloud/translog/v1)"),
+			"data":   arrayOf(ref("AccountTransparencyEntry")),
+		}, "object", "origin", "data"),
+		"AccountTransparencyEntry": object("", map[string]*Schema{
+			"index":           integer("The entry's index in the log"),
+			"scope":           str("What was read: tenant_detail, tenant_payments, tenant_audit, support_case, abuse_case"),
+			"at":              dateTime("When the read was recorded (UTC, seconds)"),
+			"checkpoint_size": nullable(integer("Size of the first signed checkpoint that includes the entry; null until one is signed")),
+		}, "index", "scope", "at", "checkpoint_size"),
 		"AccountDeletionRequest": object("", map[string]*Schema{
 			"reason": str("Why the account is being closed (required, stored on the user row)"),
 		}, "reason"),

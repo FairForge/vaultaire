@@ -27,7 +27,7 @@ import (
 //	                                                     dry_run false = 202, the stripe_bulk_renewals job (409 while one runs)
 
 func (s *Server) registerAdminPaymentRoutes(r chi.Router) {
-	r.Get("/tenants/{tenant_id}/payments", s.requireAdmin(s.handleAdminTenantPayments))
+	r.Get("/tenants/{tenant_id}/payments", s.requireAdmin(s.adminRead("/api/v1/admin/tenants/{tenant_id}/payments", s.handleAdminTenantPayments)))
 	r.Post("/tenants/{tenant_id}/payments", s.requireAdmin(s.handleAdminManualPayment))
 	r.Post("/tenants/{tenant_id}/entitlement", s.requireAdmin(s.handleAdminAdjustEntitlement))
 	r.Post("/tenants/{tenant_id}/refunds", s.requireAdmin(s.handleAdminRefund))
