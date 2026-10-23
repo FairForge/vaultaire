@@ -11,6 +11,10 @@
 #       rewritten / behind_highwater / highwater_unreadable — every reason a series at 0 from boot
 #   vaultaire_translog_append_refusals_total{reason}  appends refused while the log is frozen (RP42-1):
 #       behind_highwater / highwater_unreadable — every reason a series at 0 from boot; NOT in append_failures_total
+#   vaultaire_translog_witnesses_configured           witnesses of TRANSLOG_WITNESSES (K4c-2; 0 = none, prod until the owner's ceremony)
+#   vaultaire_translog_cosigned_size                  largest checkpoint any witness cosigned, 0 = none   (translog_cosignatures)
+#   vaultaire_translog_cosignature_timestamp_seconds  the newest cosignature's own timestamp, 0 = none    (translog_cosignatures)
+#   vaultaire_translog_witness_cosign_total{witness,outcome}  submissions: ok / conflict / refused / bad_answer / unreachable
 #
 # The translog_checkpoint job signs a checkpoint every 10 min when the tree
 # grew; without the key it signs nothing and nothing here fires (the key is
@@ -74,6 +78,25 @@ groups:
         annotations:
           summary: "Transparency log: frozen — appends refused ({{ $labels.reason }})"
           description: "Appends to the transparency log are refused: {{ $labels.reason }}. The customers are served; only the log waits (server_build retried by the translog_checkpoint job, ceremonies answer 503 log_frozen, admin reads are refused). behind_highwater: re-append the lost entries with translog-restore — docs/TRANSPARENCY.md § After a database restore. highwater_unreadable: check TRANSLOG_HIGHWATER_FILE (default /opt/vaultaire/data/translog/highwater); never delete it to unfreeze."
+
+      # K4c-2 (Stage 1a Prompt 34b): witnesses are configured, the log has
+      # signed a tree no witness cosigned, and the newest cosignature of any
+      # witness is more than 2 h old — every witness down or refusing for two
+      # hours while the log grows. Signing never waits for a witness (the
+      # checkpoint is served without the line), so this warns. An idle log
+      # is not stale (its newest checkpoint is the cosigned one; the job
+      # refreshes those every 6 h); no witness configured, nothing fires.
+      - alert: TranslogWitnessStale
+        expr: |
+          (time() - max(vaultaire_translog_cosignature_timestamp_seconds)) > 7200
+          and on () max(vaultaire_translog_witnesses_configured) > 0
+          and on () max(vaultaire_translog_checkpoint_size) > max(vaultaire_translog_cosigned_size)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transparency log: no fresh witness cosignature for {{ $value | humanizeDuration }} while the log grows"
+          description: "The translog_checkpoint job signs, but no witness of TRANSLOG_WITNESSES has cosigned the newer checkpoints for over 2 h. The job's result names each witness's outcome (unreachable / refused / conflict / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select result from job_runs where job='translog_checkpoint'\"; vaultaire_translog_witness_cosign_total{outcome}. A conflict naming a LARGER size than the log's newest checkpoint is a restored database or a fork (docs/TRANSPARENCY.md § After a database restore)."
 
       # An append failed: a server_build at boot (never blocks the boot) or a
       # ceremony entry. The producer logged an Error line with the reason.

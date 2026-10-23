@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -113,6 +114,63 @@ func TestTranslogRestore_FromTheWitnessCache_TheJobPassesAgain(t *testing.T) {
 	// Run again: the database is at the high-water — refused, nothing written.
 	err = run(ctx, &out, options{from: wdir, highwater: hwFile}, restored)
 	assert.ErrorContains(t, err, "nothing to re-append")
+}
+
+// K4c-2: the witness cosigns in the c2sp.org/tlog-cosignature form now;
+// its cache is what the restore reads, and its cosigned note is still the
+// high-water of case 3 (the box lost): the text before the blank line.
+func TestRestore_FromCosignatureV1Cache(t *testing.T) {
+	// Arrange: a live log signed at 5 and 9, witnessed by a cosignature/v1 key.
+	ctx := context.Background()
+	signer, verifier := logKey(t)
+	tmp := t.TempDir()
+	liveDB := logstoretest.PrivateLog(t)
+	live := logstore.New(liveDB, signer).WithHighwater(filepath.Join(tmp, "highwater"))
+	srv := httptest.NewServer(http.StripPrefix("/translog/", translog.NewHandler(live)))
+	t.Cleanup(srv.Close)
+	wsk, wvk, err := translog.GenerateCosignerKey("witness.test/restore-v1")
+	require.NoError(t, err)
+	ws, err := translog.NewCosigner(wsk, nil)
+	require.NoError(t, err)
+	wv, err := translog.NewCosignatureVerifier(wvk)
+	require.NoError(t, err)
+	wdir := filepath.Join(tmp, "witness")
+	w := &witness.Witness{Dir: wdir, Client: &translog.Client{BaseURL: srv.URL + "/translog/", Verifier: verifier}, Signer: ws}
+	for i := 0; i < 9; i++ {
+		_, _, err := live.Append(ctx, translog.KeyCeremony{Action: translog.ActionKeyGenerated, KeyRole: translog.KeyTranslogSigningKey,
+			KeyFingerprint: "sha256:" + strings.Repeat("fedcba9876543210", 4)[:63] + string("0123456789"[i]), Participants: 1})
+		require.NoError(t, err)
+		if i == 4 || i == 8 {
+			_, err := live.Checkpoint(ctx)
+			require.NoError(t, err)
+			_, err = w.Pass(ctx)
+			require.NoError(t, err)
+		}
+	}
+	cosigned, err := os.ReadFile(filepath.Join(wdir, witness.CosignFile))
+	require.NoError(t, err)
+	cp, cos, err := translog.OpenCosigned(cosigned, verifier, wv)
+	require.NoError(t, err)
+	require.Len(t, cos, 1, "the witness's line is a cosignature/v1 one")
+	assert.Equal(t, int64(9), cp.Size)
+	// The box is lost: the high-water file is the cosigned note's body.
+	body, _, ok := strings.Cut(string(cosigned), "\n\n")
+	require.True(t, ok)
+	hwFile := filepath.Join(tmp, "highwater-from-witness")
+	require.NoError(t, os.WriteFile(hwFile, []byte(body+"\n"), 0o600))
+	restored := dumpOf(t, liveDB, 5)
+
+	// Act
+	err = run(ctx, &bytes.Buffer{}, options{from: wdir, highwater: hwFile}, restored)
+
+	// Assert: re-appended byte for byte; the job signs again.
+	require.NoError(t, err)
+	root, err := logstore.New(restored, nil).Root(ctx, 9)
+	require.NoError(t, err)
+	assert.Equal(t, cp.Root, root)
+	res, err := logstore.New(restored, signer).WithHighwater(hwFile).Checkpoint(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, res.Refused)
 }
 
 func TestTranslogRestore_MissingBundleIsNamed(t *testing.T) {

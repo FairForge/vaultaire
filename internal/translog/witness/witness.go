@@ -1,26 +1,34 @@
 // Package witness is the transparency log's external witness (keystone
-// K4b, plan Phase 43.6, docs/ARCHITECTURE_CONTRACT.md rule 7: "the log has
-// signed checkpoints and an external witness"; docs/TRANSPARENCY.md
-// § The witness). It runs on any machine against the public read side and
-// trusts nothing of ours but the pinned verifier key of the log.
+// K4b/K4c-2, plan Phase 43.6, docs/ARCHITECTURE_CONTRACT.md rule 7: "the log
+// has signed checkpoints and an external witness"; docs/TRANSPARENCY.md
+// § The witness). It runs on any machine and trusts nothing of ours but the
+// pinned verifier key of the log. It cosigns in the c2sp.org/tlog-cosignature
+// form (cosignature/v1: timestamped, ML-DSA-44, its own key —
+// translog.NewCosigner).
 //
-// One pass: fetch the newest checkpoint and verify its signature; prove it
-// extends the checkpoint the witness accepted last (a rewritten, forked or
-// shrunk history is refused); mirror, byte for byte, every full entry
-// bundle and full level-0 hash tile it does not hold yet and the partial
-// entry bundle at the checkpoint's size, each entry's leaf hash proven
-// against the checkpoint before it is kept; then co-sign the checkpoint
-// with the witness's OWN key — the note carries both signature lines — and
-// keep that note (<dir>/cosigned, and one line per new note in the
-// append-only <dir>/cosigned.history). The accepted checkpoint
-// (<dir>/checkpoint) moves forward only after every step passed.
+// Two ways in, one state: <dir>/checkpoint (the log's note it accepted and
+// cosigned last), under one lock (<dir>/lock, flock — RP42-5):
+//   - the pull pass (Pass; cron): fetch the newest checkpoint and verify its
+//     signature; prove it extends the accepted one (a rewritten, forked or
+//     shrunk history is refused); mirror, byte for byte, every full entry
+//     bundle and full level-0 hash tile it does not hold yet and the partial
+//     entry bundle at the checkpoint's size, each entry's leaf hash proven
+//     against the checkpoint before it is kept; then cosign — unless that
+//     very checkpoint is cosigned already;
+//   - serve (Server; c2sp.org/tlog-witness add-checkpoint): the log pushes
+//     each new checkpoint with a consistency proof from the size the
+//     witness holds; it cosigns without mirroring.
+//
+// Either keeps the note with both signature lines (<dir>/cosigned) and one
+// line per new note in the append-only <dir>/cosigned.history; the accepted
+// checkpoint moves only after every step passed.
 //
 // Why: with the witness's cache, entries lost to a database restore can be
 // put back byte for byte (cmd/tools/translog-restore, RP38-6), and a
 // checkpoint the restored log must extend survives the loss of the box and
-// its high-water file (RP38-5). This is our own second record under our own
-// key on another machine; the c2sp.org/tlog-cosignature timestamped form
-// comes with a real third-party witness (K4c).
+// its high-water file (RP38-5). Run by us it is our own second record on
+// another machine; a third party running the same protocol (K4c-2's owner
+// items) is the independent one.
 //
 // Operator code: imported by cmd/tools only, never linked into cmd/vaultaire.
 package witness
@@ -51,8 +59,9 @@ type Witness struct {
 // Files of a witness directory.
 const (
 	StateFile   = "checkpoint"       // the log's note the witness accepted last
-	CosignFile  = "cosigned"         // that note with the witness's signature added
+	CosignFile  = "cosigned"         // that note with the witness's cosignature added
 	HistoryFile = "cosigned.history" // every new cosigned note, base64, one per line
+	LockFile    = "lock"             // flock: one pass or request at a time (RP42-5)
 )
 
 // Result is what one pass did.
@@ -72,9 +81,13 @@ type Result struct {
 // it would say nothing.
 var ErrSameKey = errors.New("witness: the witness key is the log's key — make the witness its own key (translog-keygen -name)")
 
-// Pass runs one pass (see the package comment). On any error nothing it
-// accepted moves: the state file is untouched (the cache may hold more
-// verified bytes, never unverified ones).
+// Pass runs one pass (see the package comment) under the directory's lock
+// (RP42-5: a cron pass, a -once=false loop and `serve` never interleave). On
+// any error nothing it accepted moves: the state file is untouched (the
+// cache may hold more verified bytes, never unverified ones). A checkpoint
+// the witness already cosigned is not cosigned again: a cosignature is
+// timestamped (c2sp.org/tlog-cosignature), so re-signing an unchanged tree
+// would add a history line every run.
 func (w *Witness) Pass(ctx context.Context) (Result, error) {
 	res := Result{PrevSize: -1}
 	if w.Client == nil || w.Client.Verifier == nil || w.Signer == nil || w.Dir == "" {
@@ -84,6 +97,11 @@ func (w *Witness) Pass(ctx context.Context) (Result, error) {
 	if w.Signer.Name() == v.Name() && w.Signer.KeyHash() == v.KeyHash() {
 		return res, ErrSameKey
 	}
+	unlock, err := lockDir(ctx, w.Dir)
+	if err != nil {
+		return res, err
+	}
+	defer unlock()
 	cache := OpenCache(w.Dir)
 
 	cp, msg, err := w.Client.Checkpoint(ctx)
@@ -94,16 +112,11 @@ func (w *Witness) Pass(ctx context.Context) (Result, error) {
 
 	// Consistency with what was accepted before, with a READ-ONLY view of
 	// the cache: a forked tree's tiles are never kept.
-	prev, err := os.ReadFile(filepath.Join(w.Dir, StateFile))
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-	case err != nil:
-		return res, fmt.Errorf("witness: read the accepted checkpoint: %w", err)
-	default:
-		old, err := translog.OpenCheckpoint(prev, v)
-		if err != nil {
-			return res, fmt.Errorf("witness: the accepted checkpoint does not open with the log's key: %w", err)
-		}
+	old, ok, err := readHeld(w.Dir, v)
+	if err != nil {
+		return res, err
+	}
+	if ok {
 		res.PrevSize = old.Size
 		ro := *w.Client
 		ro.Tiles = readOnly{cache}
@@ -147,28 +160,73 @@ func (w *Witness) Pass(ctx context.Context) (Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("witness: open the checkpoint note: %w", err)
 	}
-	cos, err := note.Sign(n, w.Signer)
+	cos, _, err := accept(w.Dir, msg, n, w.Signer, false)
 	if err != nil {
-		return res, fmt.Errorf("witness: co-sign: %w", err)
+		return res, err
 	}
 	res.Cosigned = cos
-	cosPath := filepath.Join(w.Dir, CosignFile)
+	return res, nil
+}
+
+// readHeld is the checkpoint the witness accepted (and cosigned) last,
+// opened with the log's key; ok = false when there is none.
+func readHeld(dir string, v note.Verifier) (translog.Checkpoint, bool, error) {
+	prev, err := os.ReadFile(filepath.Join(dir, StateFile)) // #nosec G304 -- the witness's own directory
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return translog.Checkpoint{}, false, nil
+	case err != nil:
+		return translog.Checkpoint{}, false, fmt.Errorf("witness: read the accepted checkpoint: %w", err)
+	}
+	old, err := translog.OpenCheckpoint(prev, v)
+	if err != nil {
+		return translog.Checkpoint{}, false, fmt.Errorf("witness: the accepted checkpoint does not open with the log's key: %w", err)
+	}
+	return old, true, nil
+}
+
+// accept cosigns n (the log's verified note; msg as it came) and records it,
+// under the directory's lock which the caller holds: the cosigned note
+// (the log's signature and the witness's line) to <dir>/cosigned and, when
+// it is new, one base64 line to <dir>/cosigned.history; then the state.
+// refresh = false keeps an existing cosignature of the same checkpoint
+// (signed = false); true always signs anew (an add-checkpoint request).
+func accept(dir string, msg []byte, n *note.Note, s note.Signer, refresh bool) (cos []byte, signed bool, err error) {
+	cosPath := filepath.Join(dir, CosignFile)
 	before, err := os.ReadFile(cosPath) // #nosec G304 -- the witness's own directory
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return res, fmt.Errorf("witness: read %s: %w", CosignFile, err)
+		return nil, false, fmt.Errorf("witness: read %s: %w", CosignFile, err)
+	}
+	if !refresh && before != nil && noteText(before) == n.Text && len(translog.CosignatureLines(before, s.Name(), s.KeyHash())) > 0 {
+		cos = before
+	} else {
+		cos, err = note.Sign(&note.Note{Text: n.Text, Sigs: n.Sigs}, s)
+		if err != nil {
+			return nil, false, fmt.Errorf("witness: co-sign: %w", err)
+		}
+		signed = true
 	}
 	if !bytes.Equal(before, cos) {
-		if err := appendLine(filepath.Join(w.Dir, HistoryFile), base64.StdEncoding.EncodeToString(cos)); err != nil {
-			return res, err
+		if err := appendLine(filepath.Join(dir, HistoryFile), base64.StdEncoding.EncodeToString(cos)); err != nil {
+			return nil, false, err
 		}
 		if err := writeAtomic(cosPath, cos); err != nil {
-			return res, fmt.Errorf("witness: write %s: %w", CosignFile, err)
+			return nil, false, fmt.Errorf("witness: write %s: %w", CosignFile, err)
 		}
 	}
-	if err := writeAtomic(filepath.Join(w.Dir, StateFile), msg); err != nil {
-		return res, fmt.Errorf("witness: write %s: %w", StateFile, err)
+	if err := writeAtomic(filepath.Join(dir, StateFile), msg); err != nil {
+		return nil, false, fmt.Errorf("witness: write %s: %w", StateFile, err)
 	}
-	return res, nil
+	return cos, signed, nil
+}
+
+// noteText is a note's text: everything before its signature block.
+func noteText(msg []byte) string {
+	i := bytes.LastIndex(msg, []byte("\n\n"))
+	if i < 0 {
+		return ""
+	}
+	return string(msg[:i+1])
 }
 
 // readOnly is a cache view that keeps nothing.

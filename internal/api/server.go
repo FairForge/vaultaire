@@ -360,6 +360,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	if s.db != nil {
 		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
+		s.translogCheckpoint.cosign = newCosignCollector(s.translog, translogWitnessesFromEnv(logger, os.Getenv), logger)
 		s.translogBuild = &bootBuild{}
 		s.translogCheckpoint.build = s.translogBuild
 		s.adminReads = adminread.New(s.db, s.translog)
