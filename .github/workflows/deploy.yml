@@ -53,8 +53,19 @@ jobs:
           go-version-file: go.mod
 
       - name: Build
-        # Stamp the commit + time into /version, /health and /status (WP-R14-4).
-        run: GOOS=linux GOARCH=amd64 go build -ldflags "-X github.com/FairForge/vaultaire/internal/api.BuildSHA=${GITHUB_SHA::12} -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o vaultaire-linux ./cmd/vaultaire
+        # The one reproducible recipe (RP37-9, scripts/build-release.sh):
+        # go.mod's toolchain, CGO off, -trimpath, no VCS stamping, the commit
+        # and its COMMIT time stamped into /version, /health and /status
+        # (WP-R14-4). The binary's sha256 is what the server_build entry of
+        # the transparency log records, so anyone can rebuild it from the
+        # commit (docs/TRANSPARENCY.md § Recompute a server_build entry).
+        run: GOOS=linux GOARCH=amd64 scripts/build-release.sh vaultaire-linux
+
+      - name: Reproducible build
+        # Two more builds from fresh copies of the commit, own GOCACHE and
+        # GOPATH each, seconds apart: the deploy fails unless all three are
+        # the same bytes (RP37-9: two binaries for one sha on 2026-10-22).
+        run: GOOS=linux GOARCH=amd64 scripts/repro-check.sh vaultaire-linux
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

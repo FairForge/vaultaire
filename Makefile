@@ -115,15 +115,18 @@ og:
 	"$(CHROME)" --headless=new --disable-gpu --hide-scrollbars --no-sandbox --blink-settings=preferredColorScheme=1 --window-size=1200,630 --force-device-scale-factor=1 --virtual-time-budget=4000 --screenshot=internal/api/og.png file:///tmp/vaultaire-og/og.html >/dev/null 2>&1
 	@ls -la internal/api/og.png
 
-# Build identity stamped into /version, /health and /status (WP-R14-4).
-# deploy.yml stamps the same two variables from GITHUB_SHA.
-BUILD_SHA  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo dev)
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS    := -X github.com/FairForge/vaultaire/internal/api.BuildSHA=$(BUILD_SHA) \
-              -X github.com/FairForge/vaultaire/internal/api.BuildDate=$(BUILD_DATE)
+# Build identity stamped into /version, /health and /status (WP-R14-4): the
+# commit and its COMMIT time (UTC), never the wall clock. `make build` and
+# deploy.yml run the same reproducible recipe, scripts/build-release.sh
+# (RP37-9); `make repro-check` builds twice from fresh copies and compares.
+BUILD_SHA  ?= $(shell git rev-parse HEAD 2>/dev/null | cut -c1-12)
+BUILD_DATE ?= $(shell TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD 2>/dev/null)
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o bin/vaultaire ./cmd/vaultaire
+	BUILD_SHA=$(BUILD_SHA) BUILD_DATE=$(BUILD_DATE) scripts/build-release.sh bin/vaultaire
+
+repro-check:
+	GOOS=linux GOARCH=amd64 scripts/repro-check.sh
 
 version:
 	@echo "$(BUILD_SHA) $(BUILD_DATE)"
@@ -147,7 +150,7 @@ clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	go clean
 
-.PHONY: build version clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
+.PHONY: build repro-check version clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
 
 # The Private-mode key core for the browser (keystone K2): sdk/go/e2ee compiled
 # to WebAssembly, with the SAME toolchain's wasm_exec.js beside it (they must

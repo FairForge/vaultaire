@@ -29,8 +29,12 @@ import (
 //     never blocks the boot: a failure is an Error line and
 //     vaultaire_translog_append_failures_total{kind="server_build"}.
 //   - key_ceremony: POST /api/v1/admin/translog/ceremony — admin JWT AND a
-//     fresh TOTP code of the admin's own MFA in the body (consumed once),
-//     audited (admin.translog_ceremony), refusals included.
+//     fresh TOTP code of the admin's own MFA in the body (consumed once, and
+//     only after the entry validated — RP37-14), audited
+//     (admin.translog_ceremony), refusals included: a non-admin's 403 is
+//     audited by this route's own gate (requireAdmin writes no row). An
+//     Idempotency-Key makes a retry return the first answer and append
+//     nothing (the log's own dedup, in the append's transaction).
 //   - read side, dark behind translog_public (default OFF = 404):
 //     GET /translog/checkpoint, GET /translog/tile/… (translog.NewHandler).
 //     A SigV4-signed or presigned request on those paths is the S3 API's,
@@ -135,15 +139,32 @@ func signedS3Request(r *http.Request) bool {
 
 // registerTranslogAdminRoutes mounts the ceremony route on the admin group.
 func (s *Server) registerTranslogAdminRoutes(r chi.Router) {
-	r.Post("/translog/ceremony", s.requireAdmin(s.handleTranslogCeremony))
+	r.Post("/translog/ceremony", func(w http.ResponseWriter, r *http.Request) {
+		if !s.isAdminRequest(r) {
+			actor, _ := r.Context().Value(userIDKey).(string)
+			audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.translog_ceremony",
+				Error: errors.New("not an admin")})
+			http.Error(w, "admin access required", http.StatusForbidden)
+			return
+		}
+		s.handleTranslogCeremony(w, r)
+	})
 }
 
+// translogCeremonyRequest is a ceremony entry's fields (RP37-10: no free
+// text — an unknown field, "statement" included, is a 400) and the code.
 type translogCeremonyRequest struct {
-	Ceremony       string `json:"ceremony"`
-	KeyFingerprint string `json:"key_fingerprint"`
-	Participants   int    `json:"participants"`
-	Statement      string `json:"statement"`
-	MFACode        string `json:"mfa_code"`
+	translog.KeyCeremony
+	MFACode string `json:"mfa_code"`
+}
+
+// ceremonyRetryKey scopes an Idempotency-Key to the admin who sent it.
+func ceremonyRetryKey(actor, key string) string {
+	if key == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(actor + "\x00" + key))
+	return hex.EncodeToString(sum[:])
 }
 
 // handleTranslogCeremony is POST /api/v1/admin/translog/ceremony: appends a
@@ -170,6 +191,38 @@ func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) 
 		fail(http.StatusBadRequest, "invalid JSON body", err)
 		return
 	}
+	entry := req.KeyCeremony
+	// Validated BEFORE the code is consumed: a typo in the entry must not
+	// burn the admin's code (RP37-14).
+	if _, err := translog.Encode(entry, time.Now()); err != nil {
+		fail(http.StatusBadRequest, err.Error(), err)
+		return
+	}
+	idemKey := r.Header.Get(idempotencyKeyHeader)
+	if len(idemKey) > idempotencyKeyMaxLen {
+		fail(http.StatusBadRequest, "Idempotency-Key: 256 characters or fewer", nil)
+		return
+	}
+	retryKey := ceremonyRetryKey(actor, idemKey)
+	if retryKey != "" {
+		// A retry of an append that committed: the first answer, no code
+		// needed (the first request consumed it), nothing appended.
+		idx, body, found, err := s.translog.ByDedupKey(r.Context(), translog.KindKeyCeremony, translog.RetryableCeremony(entry, retryKey).DedupKey())
+		if err != nil {
+			fail(http.StatusServiceUnavailable, "the transparency log cannot be read", err)
+			return
+		}
+		if found {
+			d, err := translog.Decode(body)
+			if err != nil || d.Entry != translog.Entry(entry) {
+				fail(http.StatusConflict, "Idempotency-Key already used for another ceremony entry", err)
+				return
+			}
+			w.Header().Set(idempotencyReplayHeader, "true")
+			writeJSON(w, http.StatusCreated, map[string]any{"index": idx, "kind": translog.KindKeyCeremony})
+			return
+		}
+	}
 	enabled, err := s.auth.IsMFAEnabled(r.Context(), actor)
 	if err != nil {
 		fail(http.StatusServiceUnavailable, "the MFA state cannot be read", err)
@@ -189,19 +242,21 @@ func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) 
 		fail(http.StatusUnauthorized, "mfa_code: wrong, expired or already used", nil)
 		return
 	}
-	entry := translog.KeyCeremony{Ceremony: req.Ceremony, KeyFingerprint: req.KeyFingerprint, Participants: req.Participants, Statement: req.Statement}
-	if _, err := translog.Encode(entry, time.Now()); err != nil {
-		fail(http.StatusBadRequest, err.Error(), err)
-		return
-	}
-	idx, _, err := s.translog.Append(r.Context(), entry)
+	idx, appended, err := s.translog.Append(r.Context(), translog.RetryableCeremony(entry, retryKey))
 	if err != nil {
-		s.log().Error("translog: ceremony entry not appended", zap.Error(err), zap.String("ceremony", req.Ceremony))
+		s.log().Error("translog: ceremony entry not appended", zap.Error(err), zap.String("action", entry.Action))
 		fail(http.StatusServiceUnavailable, "the entry could not be appended; nothing was written", err)
 		return
 	}
+	if !appended {
+		// A concurrent retry of the same key appended it first.
+		w.Header().Set(idempotencyReplayHeader, "true")
+		writeJSON(w, http.StatusCreated, map[string]any{"index": idx, "kind": translog.KindKeyCeremony})
+		return
+	}
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, EventType: "admin", Action: "admin.translog_ceremony",
-		Metadata: map[string]any{"index": idx, "ceremony": req.Ceremony, "key_fingerprint": req.KeyFingerprint, "participants": req.Participants}})
-	s.log().Info("translog: ceremony entry appended", zap.Int64("index", idx), zap.String("ceremony", req.Ceremony))
+		Metadata: map[string]any{"index": idx, "action": entry.Action, "key_role": entry.KeyRole, "key_fingerprint": entry.KeyFingerprint,
+			"participants": entry.Participants}})
+	s.log().Info("translog: ceremony entry appended", zap.Int64("index", idx), zap.String("action", entry.Action))
 	writeJSON(w, http.StatusCreated, map[string]any{"index": idx, "kind": translog.KindKeyCeremony})
 }

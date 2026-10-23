@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -48,6 +50,27 @@ func translogSigningKeyOrFatal(logger *zap.Logger, getenv func(string) string, r
 	return sk.Signer
 }
 
+// defaultTranslogHighwater is where the checkpoint job keeps the newest
+// checkpoint this box signed, outside the database (RP37-11): on the NVMe,
+// read by both slots (one user, no PrivateTmp — like MULTIPART_STAGING_DIR).
+const defaultTranslogHighwater = "/opt/vaultaire/data/translog/highwater"
+
+// translogHighwaterFile is TRANSLOG_HIGHWATER_FILE (an absolute path), else
+// the default; a relative value is a Warn and the default is kept.
+func translogHighwaterFile(logger *zap.Logger, getenv func(string) string) string {
+	p := strings.TrimSpace(getenv("TRANSLOG_HIGHWATER_FILE"))
+	switch {
+	case p == "":
+		p = defaultTranslogHighwater
+	case !filepath.IsAbs(p):
+		logger.Warn("TRANSLOG_HIGHWATER_FILE is not an absolute path — the default is kept",
+			zap.String("value", p), zap.String("default", defaultTranslogHighwater))
+		p = defaultTranslogHighwater
+	}
+	logger.Info("translog high-water file", zap.String("path", p))
+	return p
+}
+
 // translogCheckpointer is the translog_checkpoint job: every 10 min, under
 // the job lock, a checkpoint of the whole log is signed when the tree grew
 // past the newest one — after proving from the stored hashes that the log
@@ -79,8 +102,8 @@ func (c *translogCheckpointer) spec() jobSpec {
 				c.logger.Info("translog checkpoint signed", zap.Int64("size", res.Size), zap.String("root", res.Root))
 			}
 			if err != nil {
-				c.logger.Error("translog checkpoint: nothing signed", zap.Error(err),
-					zap.Int64("size", res.Size), zap.Int64("checkpoint_size", res.CheckpointSize))
+				c.logger.Error("translog checkpoint: nothing signed", zap.Error(err), zap.String("refused", res.Refused),
+					zap.Int64("size", res.Size), zap.Int64("checkpoint_size", res.CheckpointSize), zap.Int64("highwater_size", res.HighwaterSize))
 			}
 			return rep, err
 		}}

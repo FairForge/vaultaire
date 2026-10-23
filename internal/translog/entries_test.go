@@ -17,8 +17,8 @@ func validBuild() ServerBuild {
 }
 
 func validCeremony() KeyCeremony {
-	return KeyCeremony{Ceremony: CeremonyMasterKeyInstall, KeyFingerprint: "sha256:" + strings.Repeat("0f", 32), Participants: 1,
-		Statement: "F-14 install: master key generated on the box, sealed with systemd-creds (TPM), 2-of-3 escrow shares written."}
+	return KeyCeremony{Action: ActionEscrowSplit, KeyRole: KeyMasterKey, KeyFingerprint: "sha256:" + strings.Repeat("0f", 32),
+		Participants: 1, Shares: 3, Threshold: 2, Reference: "https://github.com/FairForge/vaultaire/blob/" + strings.Repeat("ab", 20) + "/docs/ENCRYPTION.md"}
 }
 
 // forbiddenFieldTokens: a field whose name has one of these words between
@@ -85,15 +85,6 @@ func TestTranslog_EntriesNeverNameATenant(t *testing.T) {
 				_, err := Encode(cp.Interface().(Entry), time.Now())
 				assert.Error(t, err, "%s.%s accepted %q", kind, rv.Type().Field(i).Name, bad)
 			}
-			// Free text: also inside a sentence.
-			if rv.Type().Field(i).Name == "Statement" {
-				for _, bad := range identifying {
-					cp := validCeremony()
-					cp.Statement = "Installed for " + bad + " today."
-					_, err := Encode(cp, time.Now())
-					assert.Error(t, err, "Statement accepted %q inside a sentence", bad)
-				}
-			}
 		}
 	}
 }
@@ -108,9 +99,13 @@ func TestTranslog_EntryValidation(t *testing.T) {
 	assert.Error(t, err)
 
 	c := validCeremony()
-	c.Ceremony = "whatever"
+	c.Action = "whatever"
 	_, err = Encode(c, time.Now())
-	assert.Error(t, err, "ceremonies are an enum")
+	assert.Error(t, err, "actions are an enum")
+	c = validCeremony()
+	c.KeyRole = "another_key"
+	_, err = Encode(c, time.Now())
+	assert.Error(t, err, "key roles are an enum")
 	c = validCeremony()
 	c.KeyFingerprint = strings.Repeat("0f", 32)
 	_, err = Encode(c, time.Now())
@@ -119,14 +114,32 @@ func TestTranslog_EntryValidation(t *testing.T) {
 	c.Participants = 0
 	_, err = Encode(c, time.Now())
 	assert.Error(t, err)
-	c = validCeremony()
-	c.Statement = strings.Repeat("x", 2001)
-	_, err = Encode(c, time.Now())
-	assert.Error(t, err)
-	c = validCeremony()
-	c.Statement = "line\x00"
-	_, err = Encode(c, time.Now())
-	assert.Error(t, err)
+	for name, mutate := range map[string]func(*KeyCeremony){
+		"escrow_split without shares": func(c *KeyCeremony) { c.Shares, c.Threshold = 0, 0 },
+		"one share":                   func(c *KeyCeremony) { c.Shares, c.Threshold = 1, 1 },
+		"threshold over shares":       func(c *KeyCeremony) { c.Threshold = 4 },
+		"threshold 0 with shares":     func(c *KeyCeremony) { c.Threshold = 0 },
+		"sizes outside log_restored":  func(c *KeyCeremony) { c.SignedSize = 10 },
+		"new_origin outside":          func(c *KeyCeremony) { c.NewOrigin = true },
+		"another host":                func(c *KeyCeremony) { c.Reference = "https://example.com/x" },
+		"a short commit":              func(c *KeyCeremony) { c.Reference = "https://github.com/FairForge/vaultaire/commit/abcdef1" },
+		"a docs anchor":               func(c *KeyCeremony) { c.Reference += "#jane-doe" },
+		"log_restored of the master key": func(c *KeyCeremony) {
+			c.Action, c.Shares, c.Threshold, c.SignedSize, c.RestoredSize = ActionLogRestored, 0, 0, 10, 4
+		},
+		"log_restored not behind": func(c *KeyCeremony) {
+			c.Action, c.KeyRole, c.Shares, c.Threshold, c.SignedSize, c.RestoredSize = ActionLogRestored, KeyTranslogSigningKey, 0, 0, 10, 10
+		},
+	} {
+		c := validCeremony()
+		mutate(&c)
+		_, err := Encode(c, time.Now())
+		assert.Error(t, err, name)
+	}
+	restored := KeyCeremony{Action: ActionLogRestored, KeyRole: KeyTranslogSigningKey, KeyFingerprint: "sha256:" + strings.Repeat("0f", 32),
+		Participants: 1, SignedSize: 120, RestoredSize: 96, Reference: "https://github.com/FairForge/vaultaire/pull/912"}
+	_, err = Encode(restored, time.Now())
+	assert.NoError(t, err, "a log_restored entry")
 
 	assert.Equal(t, "server_build:a2d388f9f1aa:"+strings.Repeat("ab", 32), validBuild().DedupKey())
 	assert.Empty(t, validCeremony().DedupKey(), "every ceremony is its own entry")
@@ -139,4 +152,53 @@ func keys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestCeremonyEntry_RefusesFreeText (RP37-10): the review's three strings —
+// a name with an address, an obfuscated e-mail, a bare tenant id — cannot be
+// expressed in a key_ceremony entry: not in any field, not as the removed
+// "statement", not appended to a reference.
+func TestCeremonyEntry_RefusesFreeText(t *testing.T) {
+	freeText := []string{
+		"Installed by Isaac Viera with Jane Doe of 12 Main Street",
+		"Installed by isaacv17 at gmail dot com",
+		"4e1b43062db9d685",
+	}
+	base := validCeremony()
+	rv := reflect.ValueOf(base)
+	for _, s := range freeText {
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).Kind() != reflect.String {
+				continue
+			}
+			for _, v := range []string{s, rv.Field(i).String() + s, rv.Field(i).String() + "/" + s} {
+				cp := reflect.New(rv.Type()).Elem()
+				cp.Set(rv)
+				cp.Field(i).SetString(v)
+				_, err := Encode(cp.Interface().(Entry), time.Now())
+				assert.Error(t, err, "%s accepted %q", rv.Type().Field(i).Name, v)
+			}
+		}
+		raw, err := json.Marshal(base)
+		require.NoError(t, err)
+		withStatement := append(raw[:len(raw)-1:len(raw)-1], []byte(`,"statement":`+strconvQuote(s)+`}`)...)
+		_, err = ParseKeyCeremony(withStatement)
+		assert.Error(t, err, "statement %q", s)
+		body, err := Encode(base, time.Now())
+		require.NoError(t, err)
+		forged := strings.Replace(string(body), `"reference":`, `"statement":`+strconvQuote(s)+`,"reference":`, 1)
+		_, err = Decode([]byte(forged))
+		assert.Error(t, err, "a body carrying a statement does not decode")
+	}
+	_, err := ParseKeyCeremony(mustJSON(t, base))
+	assert.NoError(t, err, "the valid entry parses")
+}
+
+func strconvQuote(s string) string { b, _ := json.Marshal(s); return string(b) }
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
 }

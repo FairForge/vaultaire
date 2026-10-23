@@ -17,11 +17,24 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 | Kind | Fields | Written by |
 |---|---|---|
 | `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing |
-| `key_ceremony` | `ceremony` (`master_key_install`, `master_key_rewrap`, `escrow_share_rotation`, `recovery_realm`, `translog_key_install`), `key_fingerprint` (`sha256:<hex>` — never the key), `participants`, `statement` (≤ 2000 bytes; no e-mail, IP, UUID, tenant id or object path) | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, audited `admin.translog_ceremony`) |
+| `key_ceremony` | `action` (closed list: `key_generated`, `key_installed`, `key_rewrapped`, `key_rotated`, `key_retired`, `escrow_split`, `escrow_tested`, `realm_enrolled`, `log_restored`), `key_role` (`master_key`, `translog_signing_key`, `recovery_realm_key`), `key_fingerprint` (`sha256:<64 hex>` — never the key), `participants` (1–20), `shares` / `threshold` (the trustee shares written and how many recombine the key; 0/0 = none, else 2–20 and 1–shares), `signed_size` / `restored_size` / `new_origin` (`log_restored` only), `reference` (empty, or `https://github.com/FairForge/vaultaire/` + `pull/<n>`, `commit/<40 hex>` or `blob/<40 hex>/docs/<NAME>.md`). **No free text** (RP37-10): a person's name, an address, an e-mail, a tenant id cannot be written in any field — what a person would say goes in the referenced document, which we can correct; the entry cannot be (the tables refuse DELETE). An unknown field (the removed `statement` of #884 included — 0 ceremony entries existed when it went) is refused | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, consumed only after the entry validated; `Idempotency-Key` = a retry returns the first answer and appends nothing; audited `admin.translog_ceremony`, a non-admin's 403 included) |
 
 Not yet (K4b): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; the external witness, OpenTimestamps anchoring, the Rekor mirror and trust.stored.cloud.
 
 On prod since 2026-10-22 16:07 UTC (`83ef6c9`): entry 0 is that build's `server_build`, its `binary_sha256` equal to `sha256sum /opt/vaultaire/bin/vaultaire-8001`.
+
+### Recompute a `server_build` entry
+
+Since RP37-9 (Stage 1a Prompt 30) every deployed binary is built by ONE reproducible recipe, `scripts/build-release.sh`: go.mod's `toolchain` (go1.26.10), `CGO_ENABLED=0`, `-trimpath`, `-buildvcs=false`, `BuildSHA` = the commit's first 12 hex, `BuildDate` = the **commit** time in UTC (so `/version`'s `build` and the entry's `build_time` are when the commit was made). The deploy job fails unless two more builds from fresh copies of the commit, with their own `GOCACHE` and `GOPATH`, give the same bytes (`scripts/repro-check.sh`). Anyone can rebuild the binary an entry names:
+
+```sh
+git clone https://github.com/FairForge/vaultaire && cd vaultaire
+git checkout <the entry's git_sha>          # 12 hex is enough for git
+GOOS=linux GOARCH=amd64 scripts/build-release.sh /tmp/vaultaire-linux   # needs go ≥ 1.21 and git; fetches go1.26.10 itself
+sha256sum /tmp/vaultaire-linux             # (macOS: shasum -a 256) = the entry's binary_sha256
+```
+
+The entry's `build_time` and `go_version` must also read as the commit's time and `go1.26.10`. **Entries 0–7 (2026-10-22, builds before this recipe) cannot be recomputed**: their builds stamped the wall clock and kept the build paths (two binaries for one sha — `c2a7fa698eb2`, `d464454ea785`). They stay as they are: history, true about what ran, unverifiable about what it was built from.
 
 ## Reading the log
 
@@ -65,22 +78,54 @@ cat /root/translog.vkey                     # the VERIFIER key: public
 
    ```sh
    FP=$(tr -d '\n' < /root/translog.vkey | sha256sum | cut -c1-64)
-   curl -s -X POST https://stored.ge/api/v1/admin/translog/ceremony -H "Authorization: Bearer $ADMIN_JWT" \
-     -d '{"ceremony":"translog_key_install","key_fingerprint":"sha256:'"$FP"'","participants":1,
-          "statement":"Checkpoint signing key generated on the box and sealed with systemd-creds (TPM).","mfa_code":"<6 digits>"}'
+   for A in key_generated key_installed; do
+     curl -s -X POST https://stored.ge/api/v1/admin/translog/ceremony -H "Authorization: Bearer $ADMIN_JWT" \
+       -H "Idempotency-Key: translog-key-$A-$(date -u +%F)" \
+       -d '{"action":"'"$A"'","key_role":"translog_signing_key","key_fingerprint":"sha256:'"$FP"'","participants":1,
+            "reference":"https://github.com/FairForge/vaultaire/blob/<40-hex commit>/docs/TRANSPARENCY.md","mfa_code":"<6 digits>"}'
+   done   # one fresh code per call (each is consumed once)
    ```
 
-   The F-14 master-key install is the same call with `"ceremony":"master_key_install"` and the fingerprint of the master key (`sha256` of its 32 bytes, computed on the box — never the key). 201 `{"index": n}`.
+   The F-14 master-key install is the same calls with `"key_role":"master_key"` and the fingerprint of the master key (`sha256` of its 32 bytes, computed on the box — never the key), then `escrow_split` with `"shares":3,"threshold":2` and `escrow_tested` after the recombination test. 201 `{"index": n}`; a retry with the same `Idempotency-Key` answers the same index and appends nothing; a refused entry (400) does not consume the code.
 
-Losing the key loses nothing already signed: a new key is a new ceremony entry signed by the new key, and readers pin both. A leaked key is the same, plus a statement.
+Losing the key loses nothing already signed: a new key is a new ceremony entry signed by the new key, and readers pin both. A leaked key is the same, plus a `key_retired` entry for it and a `reference` to the incident's write-up.
 
 ## The checkpoint job
 
-`translog_checkpoint`, every 10 min (+90 s at boot, 2 min ceiling), under the job lock: when the log grew past the newest checkpoint it computes the root from the stored hashes, **proves the log extends the newest checkpoint** (a consistency proof verified by `transparency-dev/merkle`), and signs. A log that does not extend its last checkpoint is a failed run with the Error line `translog checkpoint: nothing signed … does not extend checkpoint N` — **never re-sign over it**: that is the event the log exists to expose; investigate the database (restore? manual SQL?) first. Result in `job_runs.result`: `{size, checkpoint_size, signed, root, reason}` (`reason`: `unchanged`, `empty`, `no signing key`, `already signed`).
+`translog_checkpoint`, every 10 min (+90 s at boot, 2 min ceiling), under the job lock: when the log grew past the newest checkpoint it computes the root from the stored hashes, **proves the log extends the newest checkpoint** (a consistency proof verified by `transparency-dev/merkle`), and signs. A log that does not extend its last checkpoint is a failed run with the Error line `translog checkpoint: nothing signed … does not extend checkpoint N` — **never re-sign over it**: that is the event the log exists to expose; investigate the database (restore? manual SQL?) first. Result in `job_runs.result`: `{size, checkpoint_size, highwater_size, signed, root, reason, refused, note}` (`reason`: `unchanged`, `empty`, `no signing key`, `already signed`; `refused`: below).
+
+**The high-water file (RP37-11).** A database restored from the 03:00 dump holds the checkpoints of the dump's moment; without more, the job would find the restored log consistent with its own newest checkpoint and sign a DIFFERENT tree at sizes the key already signed and published — the key equivocating. So the job keeps the newest checkpoint it signed **outside the database**: `TRANSLOG_HIGHWATER_FILE` (default `/opt/vaultaire/data/translog/highwater`, on the NVMe, read by both slots; an absolute path), the checkpoint's body (origin, size, base64 root) written atomically and 0600 after each signature (after its row, never before). Every pass proves the stored log extends **both** the newest checkpoint in the database and the file's, and refuses otherwise, counted in `vaultaire_translog_checkpoint_refusals_total{reason}`:
+
+- `behind_highwater` — the database holds fewer entries than the tree in the file (a restore);
+- `rewritten` — the stored log does not extend a tree the key signed (the database's or the file's: a restore whose log has since grown with different entries, or edited rows);
+- `highwater_unreadable` — the file exists but cannot be read or is not a checkpoint of this log. Never taken as "first run".
+
+An absent file is the first run (`note: first run …`): it is written after the next signature. Every pass re-proves, so a refusal repeats every 10 min until it is resolved; `TranslogCheckpointRefused` **pages** at the first one.
+
+## After a database restore
+
+Decided here (Stage 1a Prompt 30); the cost of the new origin is the owner's to confirm (F-33). **Before the signing key is loaded again** — that is, before any slot is started on the restored database with `LoadCredentialEncrypted=translog_signing_key` in the unit — compare the two:
+
+```sh
+sudo cat /opt/vaultaire/data/translog/highwater          # stored.cloud/translog/v1 / N / root
+sudo -u postgres psql -At -d vaultaire -c "SELECT COALESCE(MAX(idx)+1,0) FROM translog_entries"   # M
+```
+
+1. **M ≥ N and the job would pass** (the dump was taken after the newest signature): nothing happened to the log. Start the slots; the next pass proves it.
+2. **M < N** (entries the key signed are gone): the signed history is lost, and no tree this database can grow is the one the key signed at N. The log does **not** continue under the same origin with that key — any signature would be the equivocation. Instead:
+   - comment out the credential line (`systemctl edit vaultaire@` drop-in) so no slot loads the key; the job then appends and signs nothing (it would refuse anyway, and page);
+   - keep the high-water file and the old verifier key public: the last tree of `stored.cloud/translog/v1` is the file's (size N, root);
+   - start a **new log**, `stored.cloud/translog/v2` (a code change of `translog.Origin`, a new key by the ceremony above — the old key is never loaded again), on empty `translog_*` tables (the restored v1 rows exported to a file and kept, then the tables emptied by the operator with the triggers disabled — logged in `audit_logs`); its **first entry** is a `key_ceremony` `log_restored` with `key_role: translog_signing_key`, the OLD key's fingerprint, `signed_size: N`, `restored_size: M`, `new_origin: true` and a `reference` to the incident's pull request; then `key_retired` for the old key and `key_generated` / `key_installed` for the new one;
+   - publish the new verifier key as in the ceremony; readers re-pin.
+
+   The only way to keep the origin is to put the lost entries M…N−1 back **byte for byte** (from a witness's tile cache, a later dump) so the tree at N has the file's root — then the job passes by itself, and a `log_restored` entry with `new_origin: false` is appended. No tool does that re-append today (only `logstore` writes the tables).
+3. **The box is lost too** (no high-water file): the file is gone with it, and an absent file reads as "first run". Treat it as case 2 unless a witness (`translog-verify`'s saved checkpoint, K4b's external one) holds a checkpoint that the restored log provably extends.
+
+`docs/DEPLOY.md` § Backups points here.
 
 ## Metrics and alerts
 
-`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`. Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**; the job is in `PeriodicJobStale`.
+`vaultaire_translog_size`, `vaultaire_translog_checkpoint_size`, `vaultaire_translog_checkpoint_timestamp_seconds` (read from the tables on scrape), `vaultaire_translog_signing_key_loaded`, `vaultaire_translog_append_failures_total{kind}`, `vaultaire_translog_checkpoint_refusals_total{reason}` (every reason at 0 from boot). Rules `deploy/monitoring/vaultaire-translog.yml`: **TranslogCheckpointRefused** (page: any refusal in 30 min, per reason), **TranslogCheckpointStale** (key loaded, entries past the newest checkpoint, which is > 1 h old, for 15 min), **TranslogAppendFailing**; the job is in `PeriodicJobStale`.
 
 ## Verifier key
 

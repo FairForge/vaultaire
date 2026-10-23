@@ -15,9 +15,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/transparency-dev/formats/log"
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/FairForge/vaultaire/internal/translog"
@@ -27,14 +31,28 @@ const lockLog = `SELECT pg_advisory_xact_lock(hashtextextended('translog', 0))`
 
 // Store is the log on a database.
 type Store struct {
-	db     *sql.DB
-	signer note.Signer
-	now    func() time.Time
+	db        *sql.DB
+	signer    note.Signer
+	now       func() time.Time
+	highwater string
 }
 
 // New returns the store; signer nil = entries append, nothing is signed.
 func New(db *sql.DB, signer note.Signer) *Store {
 	return &Store{db: db, signer: signer, now: time.Now}
+}
+
+// WithHighwater keeps the newest checkpoint this box signed in the file at
+// path, OUTSIDE the database (RP37-11): a database restored from a dump
+// holds an older newest checkpoint, and without the file the job would sign
+// a different tree at a size the key already signed — the equivocation the
+// log exists to make impossible. Before every signature the stored log must
+// extend BOTH the newest checkpoint in the database and the file's; the
+// file is rewritten atomically (0600) after each signature. Both slots read
+// one file (TRANSLOG_HIGHWATER_FILE). "" = no file (tests of other things).
+func (s *Store) WithHighwater(path string) *Store {
+	s.highwater = path
+	return s
 }
 
 // Signing reports whether the store has a signing key.
@@ -231,16 +249,49 @@ func (s *Store) LatestCheckpoint(ctx context.Context) (Stored, bool, error) {
 type CheckpointResult struct {
 	Size           int64  `json:"size"`
 	CheckpointSize int64  `json:"checkpoint_size"`
+	HighwaterSize  int64  `json:"highwater_size,omitempty"`
 	Signed         bool   `json:"signed"`
 	Root           string `json:"root,omitempty"`
 	Reason         string `json:"reason,omitempty"`
+	// Refused names the refusal (RefusedRewritten, RefusedBehindHighwater,
+	// RefusedHighwaterUnreadable): the run failed and nothing was signed.
+	Refused string `json:"refused,omitempty"`
+	// Note: "first run" when there was no high-water file yet.
+	Note string `json:"note,omitempty"`
+}
+
+// Why a checkpoint pass refused to sign (vaultaire_translog_checkpoint_refusals_total{reason}).
+const (
+	// RefusedRewritten: the stored log does not extend a tree the key
+	// signed (the database's newest checkpoint or the high-water file's).
+	RefusedRewritten = "rewritten"
+	// RefusedBehindHighwater: the database holds fewer entries than the
+	// newest tree this box signed — it was restored behind it.
+	RefusedBehindHighwater = "behind_highwater"
+	// RefusedHighwaterUnreadable: the high-water file exists but cannot be
+	// read or parsed — never taken as "first run".
+	RefusedHighwaterUnreadable = "highwater_unreadable"
+)
+
+// RefusalReasons lists every refusal reason.
+func RefusalReasons() []string {
+	return []string{RefusedRewritten, RefusedBehindHighwater, RefusedHighwaterUnreadable}
+}
+
+// refuse records a refusal on res and the counter, and returns err.
+func refuse(res *CheckpointResult, reason string, err error) error {
+	res.Refused = reason
+	checkpointRefusals.WithLabelValues(reason).Inc()
+	return err
 }
 
 // Checkpoint signs a checkpoint of the whole log when it grew past the
 // newest one. Before signing it proves — from the stored hashes — that the
-// log extends the newest checkpoint; a log that does not is an error and
-// nothing is signed. Without a signing key it does the same check and
-// signs nothing ("no signing key").
+// log extends the newest checkpoint in the database AND the high-water
+// file's (WithHighwater); a log that does not, or a database holding fewer
+// entries than the file, is a refusal: an error, a count, nothing signed.
+// Without a signing key it does the same checks and signs nothing ("no
+// signing key").
 func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 	var res CheckpointResult
 	size, err := s.Size(ctx)
@@ -252,14 +303,25 @@ func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 	if err != nil {
 		return res, err
 	}
+	hw, hwOK, err := s.readHighwater()
+	if err != nil {
+		return res, refuse(&res, RefusedHighwaterUnreadable, err)
+	}
+	if s.highwater != "" && !hwOK {
+		res.Note = "first run: no high-water file yet, written after the next signature"
+	}
+	if hwOK {
+		res.HighwaterSize = hw.Size
+		if hw.Size > size {
+			return res, refuse(&res, RefusedBehindHighwater, fmt.Errorf(
+				"translog: the database holds %d entries but this box signed a tree of %d (%s) — restored behind the high-water: refusing to sign (docs/TRANSPARENCY.md § After a database restore)",
+				size, hw.Size, s.highwater))
+		}
+	}
 	if ok {
 		res.CheckpointSize = latest.Size
 		if latest.Size > size {
-			return res, fmt.Errorf("translog: the log has %d entries but a checkpoint was signed at %d", size, latest.Size)
-		}
-		if latest.Size == size {
-			res.Reason = "unchanged"
-			return res, nil
+			return res, refuse(&res, RefusedRewritten, fmt.Errorf("translog: the log has %d entries but a checkpoint was signed at %d", size, latest.Size))
 		}
 	}
 	if size == 0 {
@@ -271,12 +333,22 @@ func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 		return res, err
 	}
 	res.Root = fmt.Sprintf("%x", root[:])
+	prove := func(o, n int64) ([]translog.Hash, error) { return s.ConsistencyProof(ctx, o, n) }
 	if ok {
-		if err := checkExtends(translog.Checkpoint{Size: latest.Size, Root: latest.Root}, size, root, func(o, n int64) ([]translog.Hash, error) {
-			return s.ConsistencyProof(ctx, o, n)
-		}); err != nil {
-			return res, err
+		if err := checkExtends(translog.Checkpoint{Size: latest.Size, Root: latest.Root}, size, root, prove); err != nil {
+			return res, refuse(&res, RefusedRewritten, err)
 		}
+	}
+	if hwOK {
+		if err := checkExtends(hw, size, root, prove); err != nil {
+			return res, refuse(&res, RefusedRewritten, fmt.Errorf("%w (the high-water file %s)", err, s.highwater))
+		}
+	}
+	if ok && latest.Size == size {
+		// Both signed trees proven above (every pass re-proves them, so a
+		// restore is refused even before the log grows): nothing new to sign.
+		res.Reason = "unchanged"
+		return res, nil
 	}
 	if s.signer == nil {
 		res.Reason = "no signing key"
@@ -296,11 +368,90 @@ func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 		return res, nil
 	}
 	res.Signed, res.CheckpointSize = true, size
+	// After the row, never before: a file ahead of a checkpoint that was
+	// never stored would refuse every later run.
+	if err := s.writeHighwater(translog.Checkpoint{Origin: translog.Origin, Size: size, Root: root}); err != nil {
+		return res, err
+	}
+	res.HighwaterSize = size
 	return res, nil
+}
+
+// readHighwater reads the high-water file: ok = false when there is no file
+// (or none configured). Anything else that is not a checkpoint body of this
+// log is an error — never "first run".
+func (s *Store) readHighwater() (translog.Checkpoint, bool, error) {
+	if s.highwater == "" {
+		return translog.Checkpoint{}, false, nil
+	}
+	b, err := os.ReadFile(s.highwater) // #nosec G304 -- the operator's TRANSLOG_HIGHWATER_FILE
+	if errors.Is(err, fs.ErrNotExist) {
+		return translog.Checkpoint{}, false, nil
+	}
+	if err != nil {
+		return translog.Checkpoint{}, false, fmt.Errorf("translog: read the high-water file %s: %w", s.highwater, err)
+	}
+	var cp log.Checkpoint
+	rest, err := cp.Unmarshal(b)
+	if err != nil || len(rest) != 0 || cp.Origin != translog.Origin || len(cp.Hash) != translog.HashSize || cp.Size == 0 || cp.Size > 1<<62 {
+		return translog.Checkpoint{}, false, fmt.Errorf("translog: the high-water file %s is not a checkpoint of %s", s.highwater, translog.Origin)
+	}
+	var root translog.Hash
+	copy(root[:], cp.Hash)
+	return translog.Checkpoint{Origin: cp.Origin, Size: int64(cp.Size), Root: root}, true, nil
+}
+
+// writeHighwater replaces the high-water file with cp's checkpoint body,
+// atomically: a temporary file in the same directory, synced, renamed over
+// it, the directory synced.
+func (s *Store) writeHighwater(cp translog.Checkpoint) error {
+	if s.highwater == "" {
+		return nil
+	}
+	dir := filepath.Dir(s.highwater)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("translog: high-water directory %s: %w", dir, err)
+	}
+	f, err := os.CreateTemp(dir, ".highwater-*")
+	if err != nil {
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	body := log.Checkpoint{Origin: cp.Origin, Size: uint64(cp.Size), Hash: cp.Root[:]}.Marshal()
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	if err := os.Rename(tmp, s.highwater); err != nil {
+		return fmt.Errorf("translog: write the high-water file: %w", err)
+	}
+	if d, err := os.Open(dir); err == nil { // #nosec G304 -- the high-water file's own directory
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // checkExtends proves the tree (size, root) extends old.
 func checkExtends(old translog.Checkpoint, size int64, root translog.Hash, prove func(oldSize, newSize int64) ([]translog.Hash, error)) error {
+	if old.Size == size {
+		if old.Root != root {
+			return fmt.Errorf("translog: the stored log does not extend checkpoint %d — refusing to sign: a different root at the same size", old.Size)
+		}
+		return nil
+	}
 	p, err := prove(old.Size, size)
 	if err != nil {
 		return fmt.Errorf("translog: consistency proof %d→%d: %w", old.Size, size, err)
@@ -319,4 +470,17 @@ func (s *Store) CheckpointNote(ctx context.Context) ([]byte, int64, bool, error)
 		return nil, 0, false, err
 	}
 	return []byte(c.Note), c.Size, true, nil
+}
+
+// ByDedupKey is the entry a dedup key names: its index and body; found =
+// false when none.
+func (s *Store) ByDedupKey(ctx context.Context, kind, key string) (idx int64, body []byte, found bool, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT idx, body FROM translog_entries WHERE kind = $1 AND dedup_key = $2`, kind, key).Scan(&idx, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil, false, nil
+	}
+	if err != nil {
+		return 0, nil, false, fmt.Errorf("translog: by dedup key: %w", err)
+	}
+	return idx, body, true, nil
 }

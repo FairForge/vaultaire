@@ -211,7 +211,10 @@ server. `workflow_dispatch` is the manual lever (`gh workflow run deploy.yml
 branch and never cancelled mid-flight.
 
 ```
-build   GOOS=linux GOARCH=amd64 go build ./cmd/vaultaire  (go.mod toolchain, 1.26.9)  -> artifact
+build   GOOS=linux GOARCH=amd64 scripts/build-release.sh vaultaire-linux  -> artifact
+        (the one reproducible recipe: go.mod's toolchain go1.26.10, CGO off, -trimpath,
+         -buildvcs=false, BuildDate = the COMMIT time; then scripts/repro-check.sh builds
+         twice more from fresh copies and fails the deploy unless all three match — RP37-9)
 deploy  scp binary + internal/database/migrations/ to /tmp on the host, then over ssh:
         1. migrate   for f in $(ls /tmp/vaultaire-migrations/*.sql | sort); do
                         psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" </dev/null
@@ -439,6 +442,13 @@ does not list yet goes on a later run).
 - **Retention is by the date in the file name, never by modtime:** the Sync
   bridge reports every file as modified in January 1970; a `--min-age` sweep
   deleted fresh backups on 2026-10-07 (caught and fixed the same run).
+- **A restore puts the transparency log behind what its key signed** (RP37-11):
+  the dump holds `translog_*` as of 03:00, the key may have signed up to 24 h
+  more. The checkpoint job refuses and pages (`TranslogCheckpointRefused`,
+  the high-water file `/opt/vaultaire/data/translog/highwater` is not in the
+  dump); **before the signing key is loaded again**, follow
+  `docs/TRANSPARENCY.md` § After a database restore. Never delete the
+  high-water file to make the refusal go away.
 - **Restore:** `set -a; . /opt/vaultaire/configs/sync-backup.env; set +a;
   rclone lsf -R syncbk:_ops/backups` → `rclone copyto syncbk:_ops/backups/<y>/<m>/<file> .`
   → `zcat <dump> | psql` (plain SQL, psql ≥ 16.10 for the `\restrict` header).
@@ -523,7 +533,7 @@ app :8000/metrics  <- Prometheus (:9090, on the box, 10 s scrape)
 |----------|---------------|
 | Is the process up? | `curl -s https://stored.ge/health/live` (200 = serving); `sudo vaultaire-switch status` (both slots, what HAProxy routes to) |
 | Is it ready / which backends are healthy? | `curl -s https://stored.ge/health` — JSON with per-backend probe state and counts; `curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/health/backends` on the box for the detailed list (keep it off the public edge); `/health/ready` for the readiness verdict; `/status` is the HTML page |
-| What is running? | `curl -s https://stored.ge/version` — the commit and build time; the deploy job fails if it does not report the commit it just deployed |
+| What is running? | `curl -s https://stored.ge/version` — the commit and its build stamp, which is the COMMIT time in UTC since RP37-9 (the reproducible recipe), not when it was built; the deploy job fails if it does not report the commit it just deployed |
 | Logs | `journalctl -u 'vaultaire@*' -f` (both slots; `-u vaultaire@8001` for one) (Zap JSON; request ids in `X-Request-Id` / the S3 `RequestId`). Password-reset bodies are no longer logged (R14-01) |
 | Metrics right now | `curl -s localhost:8010/metrics \| grep vaultaire_backend_health` on the box (HAProxy routes `:8010` to the active slot); `localhost:9090` for Prometheus, `curl -s localhost:9090/api/v1/rules` for loaded rules |
 | Deploy did not run | `gh run list --workflow deploy.yml`; `gh workflow run deploy.yml --ref main` to re-trigger |

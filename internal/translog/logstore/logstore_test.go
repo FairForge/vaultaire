@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,9 +16,11 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/testutil"
 	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/logstore/logstoretest"
 	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/mod/sumdb/note"
 
 	_ "github.com/lib/pq"
 )
@@ -48,13 +49,13 @@ func uniqueBuild(t *testing.T) translog.ServerBuild {
 	return translog.ServerBuild{GitSHA: "dev", BinarySHA256: hex.EncodeToString(b), BuildTime: "unknown", GoVersion: "go1.26.0"}
 }
 
-func ceremony(t *testing.T, statement string) translog.KeyCeremony {
+func ceremony(t *testing.T) translog.KeyCeremony {
 	t.Helper()
 	b := make([]byte, 32)
 	_, err := rand.Read(b)
 	require.NoError(t, err)
-	return translog.KeyCeremony{Ceremony: translog.CeremonyTranslogKeyInstall, KeyFingerprint: "sha256:" + hex.EncodeToString(b),
-		Participants: 1, Statement: statement}
+	return translog.KeyCeremony{Action: translog.ActionKeyGenerated, KeyRole: translog.KeyTranslogSigningKey,
+		KeyFingerprint: "sha256:" + hex.EncodeToString(b), Participants: 1}
 }
 
 // recomputeRoot rebuilds the tree of the first size entries from their
@@ -91,11 +92,15 @@ func TestTranslog_ConcurrentAppends_Contiguous(t *testing.T) {
 	var wg sync.WaitGroup
 	idxs := make([]int64, n)
 	errs := make([]error, n)
+	entries := make([]translog.KeyCeremony, n)
+	for i := range entries {
+		entries[i] = ceremony(t)
+	}
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			idxs[i], _, errs[i] = s.Append(ctx, ceremony(t, fmt.Sprintf("concurrent append %d", i)))
+			idxs[i], _, errs[i] = s.Append(ctx, entries[i])
 		}(i)
 	}
 	wg.Wait()
@@ -125,7 +130,7 @@ func TestTranslog_ConcurrentAppends_Contiguous(t *testing.T) {
 	for i, x := range idxs {
 		var body []byte
 		require.NoError(t, db.QueryRow(`SELECT body FROM translog_entries WHERE idx = $1`, x).Scan(&body))
-		require.Contains(t, string(body), fmt.Sprintf("concurrent append %d", i))
+		require.Contains(t, string(body), entries[i].KeyFingerprint)
 		p, err := s.InclusionProof(ctx, x, size)
 		require.NoError(t, err)
 		require.NoError(t, translog.VerifyInclusion(p, x, size, translog.LeafHash(body), stored))
@@ -153,7 +158,9 @@ func TestTranslog_AppendRefusedEntryCountsAFailure(t *testing.T) {
 	db := openDB(t)
 	s := New(db, nil)
 	before := promtest.ToFloat64(appendFailures.WithLabelValues(translog.KindKeyCeremony))
-	_, _, err := s.Append(context.Background(), ceremony(t, "for alice@example.com"))
+	bad := ceremony(t)
+	bad.Reference = "https://example.com/alice"
+	_, _, err := s.Append(context.Background(), bad)
 	require.Error(t, err)
 	assert.Equal(t, before+1, promtest.ToFloat64(appendFailures.WithLabelValues(translog.KindKeyCeremony)))
 }
@@ -162,7 +169,7 @@ func TestTranslog_TablesAreAppendOnly(t *testing.T) {
 	db := openDB(t)
 	s := New(db, nil)
 	ctx := context.Background()
-	idx, _, err := s.Append(ctx, ceremony(t, "append-only check"))
+	idx, _, err := s.Append(ctx, ceremony(t))
 	require.NoError(t, err)
 	for _, q := range []string{
 		`UPDATE translog_entries SET body = 'x' WHERE idx = $1`,
@@ -177,53 +184,205 @@ func TestTranslog_TablesAreAppendOnly(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestTranslog_CheckpointSignsWhenTheTreeGrew(t *testing.T) {
-	db := openDB(t)
-	ctx := context.Background()
+func testSigner(t *testing.T) (note.Signer, note.Verifier) {
+	t.Helper()
 	skey, vkey, err := translog.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	signer, err := translog.NewSigner(skey)
 	require.NoError(t, err)
 	verifier, err := translog.NewVerifier(vkey)
 	require.NoError(t, err)
-	s := New(db, signer)
+	return signer, verifier
+}
 
-	_, _, err = s.Append(ctx, ceremony(t, "checkpoint test"))
-	require.NoError(t, err)
+// A test that signs runs on its own log (RP37-13): on the shared one another
+// package could sign the same size first, with another key.
+func TestTranslog_CheckpointSignsWhenTheTreeGrew(t *testing.T) {
+	db := logstoretest.PrivateLog(t)
+	ctx := context.Background()
+	signer, verifier := testSigner(t)
+	hw := filepath.Join(t.TempDir(), "translog", "highwater")
+	s := New(db, signer).WithHighwater(hw)
+
+	for i := 0; i < 3; i++ {
+		_, _, err := s.Append(ctx, ceremony(t))
+		require.NoError(t, err)
+	}
 	res, err := s.Checkpoint(ctx)
 	require.NoError(t, err)
-	// Another package's run may have signed this size first (shared DB):
-	// either way the newest checkpoint is at least our size and opens with
-	// a key — ours when we signed it.
-	size, err := s.Size(ctx)
+	require.True(t, res.Signed, "%+v", res)
+	assert.Equal(t, int64(3), res.Size)
+	assert.Contains(t, res.Note, "first run", "no high-water file yet")
+	latest, ok, err := s.LatestCheckpoint(ctx)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, size, res.Size)
-	if res.Signed {
-		latest, ok, err := s.LatestCheckpoint(ctx)
+	require.True(t, ok)
+	cp, err := translog.OpenCheckpoint([]byte(latest.Note), verifier)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), cp.Size)
+	assert.Equal(t, recomputeRoot(t, db, cp.Size), cp.Root)
+
+	// The high-water file holds that checkpoint, 0600.
+	st, err := os.Stat(hw)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm())
+	raw, err := os.ReadFile(hw)
+	require.NoError(t, err)
+	assert.Equal(t, strings.SplitN(latest.Note, "\n\n", 2)[0]+"\n", string(raw), "the checkpoint body as signed")
+
+	// Nothing appended since: the next run signs nothing; one more entry is signed.
+	res, err = New(db, signer).WithHighwater(hw).Checkpoint(ctx)
+	require.NoError(t, err)
+	assert.False(t, res.Signed)
+	assert.Equal(t, "unchanged", res.Reason)
+	_, _, err = s.Append(ctx, ceremony(t))
+	require.NoError(t, err)
+	res, err = s.Checkpoint(ctx)
+	require.NoError(t, err)
+	assert.True(t, res.Signed)
+	assert.Equal(t, int64(4), res.HighwaterSize)
+}
+
+// restoreOf is a database restored from a dump taken when the log held the
+// first m entries of src and src's checkpoints up to m: the same rows,
+// byte for byte (the dump), in a fresh log.
+func restoreOf(t *testing.T, src *sql.DB, m int64) *sql.DB {
+	t.Helper()
+	ctx := context.Background()
+	dst := logstoretest.PrivateLog(t)
+	copyRows := func(query, insert string, arg int64, cols int) {
+		rows, err := src.QueryContext(ctx, query, arg)
 		require.NoError(t, err)
-		require.True(t, ok)
-		cp, err := translog.OpenCheckpoint([]byte(latest.Note), verifier)
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			vals := make([]any, cols)
+			ptrs := make([]any, cols)
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			require.NoError(t, rows.Scan(ptrs...))
+			_, err := dst.ExecContext(ctx, insert, vals...)
+			require.NoError(t, err)
+		}
+		require.NoError(t, rows.Err())
+	}
+	copyRows(`SELECT idx, kind, body, dedup_key FROM translog_entries WHERE idx < $1 ORDER BY idx`,
+		`INSERT INTO translog_entries (idx, kind, body, dedup_key) VALUES ($1, $2, $3, $4)`, m, 4)
+	copyRows(`SELECT idx, hash FROM translog_hashes WHERE idx < $1`,
+		`INSERT INTO translog_hashes (idx, hash) VALUES ($1, $2)`, translog.StoredHashCount(m), 2)
+	copyRows(`SELECT size, root, note, signed_at FROM translog_checkpoints WHERE size <= $1`,
+		`INSERT INTO translog_checkpoints (size, root, note, signed_at) VALUES ($1, $2, $3, $4)`, m, 4)
+	return dst
+}
+
+// RP37-11: a database restored behind the newest tree the key signed makes
+// the job refuse — first because it holds fewer entries than the high-water
+// (behind_highwater), then, once new entries reach and pass that size,
+// because they are a different tree (rewritten). Never a second signature at
+// a size already signed. Without the file the restored database's own
+// checkpoint is consistent and the job would sign the fork.
+func TestCheckpoint_DatabaseRestoredBehindHighwater_RefusesToSign(t *testing.T) {
+	ctx := context.Background()
+	signer, _ := testSigner(t)
+	hw := filepath.Join(t.TempDir(), "highwater")
+	live := logstoretest.PrivateLog(t)
+	s := New(live, signer).WithHighwater(hw)
+	for i := 0; i < 2; i++ {
+		_, _, err := s.Append(ctx, ceremony(t))
 		require.NoError(t, err)
-		assert.Equal(t, res.Size, cp.Size)
-		assert.Equal(t, recomputeRoot(t, db, cp.Size), cp.Root)
+	}
+	res, err := s.Checkpoint(ctx) // the 03:00 dump is taken after this: size 2, signed
+	require.NoError(t, err)
+	require.True(t, res.Signed)
+	for i := 0; i < 3; i++ {
+		_, _, err := s.Append(ctx, ceremony(t))
+		require.NoError(t, err)
+	}
+	res, err = s.Checkpoint(ctx) // signed at 5 and published; then the disk dies
+	require.NoError(t, err)
+	require.True(t, res.Signed)
+	require.Equal(t, int64(5), res.HighwaterSize)
+
+	restored := restoreOf(t, live, 2)
+	r := New(restored, signer).WithHighwater(hw)
+	behind := promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedBehindHighwater))
+	rewritten := promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedRewritten))
+	signedRows := func() int {
+		var n int
+		require.NoError(t, restored.QueryRow(`SELECT COUNT(*) FROM translog_checkpoints WHERE size > 2`).Scan(&n))
+		return n
 	}
 
-	// Nothing appended since: the next run signs nothing.
-	s2 := New(db, signer)
-	_, err = s2.Checkpoint(ctx)
-	require.NoError(t, err)
-	res3, err := s2.Checkpoint(ctx)
-	require.NoError(t, err)
-	if size2, _ := s2.Size(ctx); size2 == res3.CheckpointSize {
-		assert.False(t, res3.Signed, "an unchanged tree is not signed again")
+	// Restored to 2 entries, then new (different) entries up to 4: behind.
+	for i := 0; i < 2; i++ {
+		_, _, err := r.Append(ctx, ceremony(t))
+		require.NoError(t, err)
 	}
+	res, err = r.Checkpoint(ctx)
+	require.Error(t, err)
+	assert.Equal(t, RefusedBehindHighwater, res.Refused)
+	assert.Equal(t, behind+1, promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedBehindHighwater)))
+	assert.Equal(t, 0, signedRows())
+
+	// Grown to 5 and past it with different entries: not the tree the key signed.
+	for _, want := range []int64{5, 6} {
+		_, _, err := r.Append(ctx, ceremony(t))
+		require.NoError(t, err)
+		res, err = r.Checkpoint(ctx)
+		require.Error(t, err, "size %d", want)
+		assert.Equal(t, RefusedRewritten, res.Refused)
+		assert.Contains(t, err.Error(), "does not extend checkpoint 5")
+	}
+	assert.Equal(t, rewritten+2, promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedRewritten)))
+	assert.Equal(t, 0, signedRows(), "the key never signed a second tree at a size it had signed")
+}
+
+// RP37-11: a high-water file that exists but cannot be read, or is not a
+// checkpoint of this log, refuses — never "first run".
+func TestCheckpoint_HighwaterUnreadable_Refuses(t *testing.T) {
+	ctx := context.Background()
+	signer, _ := testSigner(t)
+	db := logstoretest.PrivateLog(t)
+	s0 := New(db, signer)
+	_, _, err := s0.Append(ctx, ceremony(t))
+	require.NoError(t, err)
+	dir := t.TempDir()
+	cases := map[string]func(path string){
+		"garbage": func(p string) { require.NoError(t, os.WriteFile(p, []byte("not a checkpoint\n"), 0o600)) },
+		"another origin": func(p string) {
+			require.NoError(t, os.WriteFile(p, []byte("example.com/log\n1\n"+strings.Repeat("A", 43)+"=\n"), 0o600))
+		},
+		"empty":       func(p string) { require.NoError(t, os.WriteFile(p, nil, 0o600)) },
+		"a directory": func(p string) { require.NoError(t, os.Mkdir(p, 0o700)) },
+	}
+	if os.Geteuid() != 0 {
+		cases["unreadable"] = func(p string) { require.NoError(t, os.WriteFile(p, []byte("x"), 0o000)) }
+	}
+	for name, mk := range cases {
+		p := filepath.Join(dir, strings.ReplaceAll(name, " ", "_"))
+		mk(p)
+		before := promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedHighwaterUnreadable))
+		res, err := New(db, signer).WithHighwater(p).Checkpoint(ctx)
+		require.Error(t, err, name)
+		assert.Equal(t, RefusedHighwaterUnreadable, res.Refused, name)
+		assert.False(t, res.Signed, name)
+		assert.Equal(t, before+1, promtest.ToFloat64(checkpointRefusals.WithLabelValues(RefusedHighwaterUnreadable)), name)
+	}
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM translog_checkpoints`).Scan(&n))
+	assert.Equal(t, 0, n)
+}
+
+// Every refusal reason is a series from boot (at 0).
+func TestCheckpointRefusals_PreCreated(t *testing.T) {
+	assert.Equal(t, len(RefusalReasons()), promtest.CollectAndCount(checkpointRefusals), "one series per reason, from init")
+	assert.ElementsMatch(t, []string{"rewritten", "behind_highwater", "highwater_unreadable"}, RefusalReasons())
 }
 
 func TestTranslog_CheckpointWithoutAKeySignsNothing(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 	s := New(db, nil)
-	_, _, err := s.Append(ctx, ceremony(t, "no key"))
+	_, _, err := s.Append(ctx, ceremony(t))
 	require.NoError(t, err)
 	res, err := s.Checkpoint(ctx)
 	require.NoError(t, err)
