@@ -39,6 +39,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/payments/btcpay"
 	"github.com/FairForge/vaultaire/internal/sitestats"
+	"github.com/FairForge/vaultaire/internal/translog/adminread"
 	"github.com/FairForge/vaultaire/internal/translog/logstore"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -161,6 +162,12 @@ type Server struct {
 	// translogBuild is this process's server_build entry while it waits
 	// for the log (RP42-1, translog_read.go).
 	translogBuild *bootBuild
+	// adminReads writes and finds the log's admin_read entries (K4c-1,
+	// admin_reads.go); nil without a database.
+	adminReads *adminread.Store
+	// adminReadHook replaces RecordAdminRead in the API's admin routes (a
+	// test hook; nil = RecordAdminRead).
+	adminReadHook func(ctx context.Context, actorID, scope, tenantID string) error
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
 	// signed request to it (translog_read.go); nil = handleS3Request.
 	s3Fallback http.HandlerFunc
@@ -355,6 +362,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
 		s.translogBuild = &bootBuild{}
 		s.translogCheckpoint.build = s.translogBuild
+		s.adminReads = adminread.New(s.db, s.translog)
 	}
 
 	s.allowUnsealedCleartext = allowUnsealedCleartextFromEnv(os.Getenv, logger)
@@ -1005,18 +1013,21 @@ func (s *Server) setupRoutes() {
 		// whose driver is down by its probe or breaker as unavailable.
 		RegionAvailable: s.regionAvailableNow,
 		Payments:        s.payments,
-		Google:          s.googleOAuth,
-		GitHub:          s.githubOAuth,
-		StorageMode:     storageMode,
-		Email:           s.emailSender,
-		BaseURL:         s.baseURL,
-		Hosts:           s.hosts,
-		Engine:          s.engine,
-		HealthChecker:   &healthCheckerAdapter{s.healthChecker},
-		Flags:           s.flags,
-		Account:         s.accountSvc,
-		Exports:         dashboardExports(s.accountExports),
-		Egress:          s.egress,
+		// Admin pages that read customer metadata append their admin_read
+		// entry first (K4c-1, admin_reads.go).
+		AdminReads:    s,
+		Google:        s.googleOAuth,
+		GitHub:        s.githubOAuth,
+		StorageMode:   storageMode,
+		Email:         s.emailSender,
+		BaseURL:       s.baseURL,
+		Hosts:         s.hosts,
+		Engine:        s.engine,
+		HealthChecker: &healthCheckerAdapter{s.healthChecker},
+		Flags:         s.flags,
+		Account:       s.accountSvc,
+		Exports:       dashboardExports(s.accountExports),
+		Egress:        s.egress,
 		// JWT_SECRET is the one secret every deployment must set and it
 		// survives restarts: the CSRF key is derived from it under its own
 		// label, never the secret itself (WP-R12-5).
@@ -1104,39 +1115,39 @@ func (s *Server) registerComplianceRoutes() {
 		r.Use(s.requireAdminMiddleware)
 
 		r.Post("/sar", complianceHandler.HandleCreateSAR)
-		r.Get("/sar/{id}", complianceHandler.HandleGetSARStatus)
-		r.Get("/inventory", complianceHandler.HandleGetDataInventory)
-		r.Get("/activities", complianceHandler.HandleListProcessingActivities)
+		r.Get("/sar/{id}", s.adminRead("/api/compliance/sar/{id}", complianceHandler.HandleGetSARStatus))
+		r.Get("/inventory", s.adminRead("/api/compliance/inventory", complianceHandler.HandleGetDataInventory))
+		r.Get("/activities", s.adminRead("/api/compliance/activities", complianceHandler.HandleListProcessingActivities))
 
 		r.Post("/deletion", complianceHandler.HandleCreateDeletionRequest)
 
 		r.Post("/consent", complianceHandler.HandleGrantConsent)
 		r.Delete("/consent/{purpose}", complianceHandler.HandleWithdrawConsent)
-		r.Get("/consent", complianceHandler.HandleGetConsentStatus)
-		r.Get("/consent/{purpose}", complianceHandler.HandleCheckConsent)
-		r.Get("/consent/history", complianceHandler.HandleGetConsentHistory)
-		r.Get("/consent/purposes", complianceHandler.HandleListConsentPurposes)
+		r.Get("/consent", s.adminRead("/api/compliance/consent", complianceHandler.HandleGetConsentStatus))
+		r.Get("/consent/{purpose}", s.adminRead("/api/compliance/consent/{purpose}", complianceHandler.HandleCheckConsent))
+		r.Get("/consent/history", s.adminRead("/api/compliance/consent/history", complianceHandler.HandleGetConsentHistory))
+		r.Get("/consent/purposes", s.adminRead("/api/compliance/consent/purposes", complianceHandler.HandleListConsentPurposes))
 
 		r.Post("/breach", complianceHandler.HandleReportBreach)
-		r.Get("/breach/{id}", complianceHandler.HandleGetBreach)
-		r.Get("/breach", complianceHandler.HandleListBreaches)
+		r.Get("/breach/{id}", s.adminRead("/api/compliance/breach/{id}", complianceHandler.HandleGetBreach))
+		r.Get("/breach", s.adminRead("/api/compliance/breach", complianceHandler.HandleListBreaches))
 		r.Patch("/breach/{id}", complianceHandler.HandleUpdateBreach)
 		r.Post("/breach/{id}/notify", complianceHandler.HandleNotifyBreach)
-		r.Get("/breach/stats", complianceHandler.HandleGetBreachStats)
+		r.Get("/breach/stats", s.adminRead("/api/compliance/breach/stats", complianceHandler.HandleGetBreachStats))
 
 		r.Post("/ropa/activities", complianceHandler.HandleCreateActivity)
-		r.Get("/ropa/activities/{id}", complianceHandler.HandleGetActivity)
-		r.Get("/ropa/activities", complianceHandler.HandleListActivities)
+		r.Get("/ropa/activities/{id}", s.adminRead("/api/compliance/ropa/activities/{id}", complianceHandler.HandleGetActivity))
+		r.Get("/ropa/activities", s.adminRead("/api/compliance/ropa/activities", complianceHandler.HandleListActivities))
 		r.Patch("/ropa/activities/{id}", complianceHandler.HandleUpdateActivity)
 		r.Delete("/ropa/activities/{id}", complianceHandler.HandleDeleteActivity)
 		r.Post("/ropa/activities/{id}/review", complianceHandler.HandleReviewActivity)
-		r.Get("/ropa/report", complianceHandler.HandleGetROPAReport)
-		r.Get("/ropa/compliance/{id}", complianceHandler.HandleCheckCompliance)
-		r.Get("/ropa/stats", complianceHandler.HandleGetROPAStats)
+		r.Get("/ropa/report", s.adminRead("/api/compliance/ropa/report", complianceHandler.HandleGetROPAReport))
+		r.Get("/ropa/compliance/{id}", s.adminRead("/api/compliance/ropa/compliance/{id}", complianceHandler.HandleCheckCompliance))
+		r.Get("/ropa/stats", s.adminRead("/api/compliance/ropa/stats", complianceHandler.HandleGetROPAStats))
 
 		r.Post("/privacy/controls", complianceHandler.HandleEnablePrivacyControl)
 		r.Post("/privacy/minimize", complianceHandler.HandleMinimizeData)
-		r.Get("/privacy/purpose/{dataId}/{purpose}", complianceHandler.HandleCheckPurpose)
+		r.Get("/privacy/purpose/{dataId}/{purpose}", s.adminRead("/api/compliance/privacy/purpose/{dataId}/{purpose}", complianceHandler.HandleCheckPurpose))
 		r.Post("/privacy/pseudonymize", complianceHandler.HandlePseudonymize)
 	})
 
@@ -1144,13 +1155,13 @@ func (s *Server) registerComplianceRoutes() {
 		r.Use(s.requireJWT)
 
 		r.Post("/breach", s.requireAdmin(complianceHandler.HandleReportBreach))
-		r.Get("/breaches", s.requireAdmin(complianceHandler.HandleListBreaches))
+		r.Get("/breaches", s.requireAdmin(s.adminRead("/api/v1/admin/breaches", complianceHandler.HandleListBreaches)))
 		r.Patch("/breach/{id}", s.requireAdmin(complianceHandler.HandleUpdateBreach))
 
 		// Background jobs (WP-R13-3): the state of every job, and one run
 		// now. The four named triggers are the same call as /jobs/{job}/run
 		// — 202 once the run holds the job's lock, 409 while another does.
-		r.Get("/jobs", s.requireAdmin(s.handleAdminJobsList))
+		r.Get("/jobs", s.requireAdmin(s.adminRead("/api/v1/admin/jobs", s.handleAdminJobsList)))
 		r.Post("/jobs/{job}/run", s.requireAdmin(s.handleAdminJobRun))
 		r.Post("/dedup-gc", s.requireAdmin(s.adminJobTrigger(dedupGCJobName)))
 		r.Post("/smart-demotion", s.requireAdmin(s.adminJobTrigger(smartDemotionJobName)))
@@ -1170,17 +1181,17 @@ func (s *Server) registerComplianceRoutes() {
 		r.With(im.Middleware).Post("/tenants/{tenant_id}/encryption-key/rotate", s.requireAdmin(s.handleRotateTenantKey))
 		// Routing truth (WP-R7-5): the boot check, the rows on no registered
 		// backend, the last run; and the NULL-row resolution (dry run by default).
-		r.Get("/routing-truth", s.requireAdmin(s.handleAdminRoutingTruth))
+		r.Get("/routing-truth", s.requireAdmin(s.adminRead("/api/v1/admin/routing-truth", s.handleAdminRoutingTruth)))
 		r.Post("/routing-truth/resolve-null", s.requireAdmin(s.handleAdminRoutingTruthResolveNull))
 
 		// Feature flags (1.13): flip kill-switches / per-tenant enablement
 		// at runtime. updated_by comes from the JWT.
-		r.Get("/flags", s.requireAdmin(s.handleAdminFlagsList))
+		r.Get("/flags", s.requireAdmin(s.adminRead("/api/v1/admin/flags", s.handleAdminFlagsList)))
 		r.Put("/flags/{key}", s.requireAdmin(s.handleAdminFlagSet))
 		r.Delete("/flags/{key}", s.requireAdmin(s.handleAdminFlagUnset))
 
 		// Operator audit trail (Review R11-09, pre-launch checklist item 1).
-		r.Get("/audit", s.requireAdmin(s.handleAdminAuditList))
+		r.Get("/audit", s.requireAdmin(s.adminRead("/api/v1/admin/audit", s.handleAdminAuditList)))
 
 		// The money (WP-PAY-3): a tenant's entitlement + ledger, a manual
 		// payment, a paid_through / house adjustment, a refund — every

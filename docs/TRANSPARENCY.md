@@ -18,8 +18,9 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 |---|---|---|
 | `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing; an append refused (a frozen log, the database down) is kept and retried by every `translog_checkpoint` run until it lands (RP42-1) |
 | `key_ceremony` | `action` (closed list: `key_generated`, `key_installed`, `key_rewrapped`, `key_rotated`, `key_retired`, `escrow_split`, `escrow_tested`, `realm_enrolled`, `log_restored`), `key_role` (`master_key`, `translog_signing_key`, `recovery_realm_key`), `key_fingerprint` (`sha256:<64 hex>` — never the key), `participants` (1–20), `shares` / `threshold` (the trustee shares written and how many recombine the key; 0/0 = none, else 2–20 and 1–shares), `signed_size` / `restored_size` / `new_origin` (`log_restored` only), `reference` (empty, or `https://github.com/FairForge/vaultaire/` + `pull/<n>`, `commit/<40 hex>` or `blob/<40 hex>/docs/<NAME>.md`). **No free text** (RP37-10): a person's name, an address, an e-mail, a tenant id cannot be written in any field — what a person would say goes in the referenced document, which we can correct; the entry cannot be (the tables refuse DELETE). An unknown field (the removed `statement` of #884 included — 0 ceremony entries existed when it went) is refused | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, consumed only after the entry validated; `Idempotency-Key` = a retry returns the first answer and appends nothing; audited `admin.translog_ceremony`, a non-admin's 403 included) |
+| `admin_read` | `scope` (closed list, below), `actor_role` (`admin` — a role, never the person), `nonce` (16 random bytes, hex) and `commitment` (HMAC-SHA256 under the read tenant's salt, hex) for a read of ONE tenant; both empty for a read across tenants | every admin GET that reads customer metadata, BEFORE it is served (K4c-1, § Admin reads), behind `translog_admin_reads` |
 
-Not yet (K4c): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring, the Rekor mirror, and a co-signature by an independent third party. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log).
+Not yet (K4c-2/3): client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring, the Rekor mirror, and a co-signature by an independent third party. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log).
 
 On prod since 2026-10-22 16:07 UTC (`83ef6c9`): entry 0 is that build's `server_build`, its `binary_sha256` equal to `sha256sum /opt/vaultaire/bin/vaultaire-8001`.
 
@@ -35,6 +36,47 @@ sha256sum /tmp/vaultaire-linux             # (macOS: shasum -a 256) = the entry'
 ```
 
 The entry's `build_time` and `go_version` must also read as the commit's time and `go1.26.10`. **Entries 0–7 (2026-10-22, builds before this recipe) cannot be recomputed**: their builds stamped the wall clock and kept the build paths (two binaries for one sha — `c2a7fa698eb2`, `d464454ea785`). They stay as they are: history, true about what ran, unverifiable about what it was built from.
+
+## Admin reads
+
+K4c-1 (Stage 1a Prompt 33; contract rule 7: "an admin read of customer metadata" writes to the log; "customers read outcomes; auditors read the log"). Before K4c-1 an operator reading one tenant's records left a row in `audit_logs` — which we can rewrite — and nothing in the log.
+
+**What is logged.** Every admin GET route is classified beside where it is registered (`internal/api/admin_reads.go` `apiAdminReads`, `internal/dashboard/admin_reads.go` `adminReadRoutes`); a route with no classification panics at registration, and `TestAdminReadRoutes_AllClassified` walks the whole router (every admin GET is classified and registered through the gate). The inventory with every route's verdict is in `docs/reviews/WP-P33.md` § K4c-1.
+
+| Scope | Reads | Routes |
+|---|---|---|
+| `tenant_detail` | one tenant's record | dashboard `/admin/tenants/{id}` |
+| `tenant_payments` | one tenant's entitlement and ledger | `GET /api/v1/admin/tenants/{tenant_id}/payments` |
+| `tenant_audit` | one tenant's (or one user's, logged against the user's tenant) audit trail, viewed or exported | `/admin/audit?tenant=` / `?user=`, `/admin/audit/export` filtered, `GET /api/v1/admin/audit?tenant_id=` / `?user_id=` |
+| `support_case` | one customer's support view (buckets, keys, IPs of its errors, notes) | `/admin/support/{id}` |
+| `abuse_case` | one abuse report and the tenant it names | `/admin/abuse/{id}` |
+| `abuse_report` | one abuse report that names no tenant | `/admin/abuse/{id}` |
+| `tenant_list` | tenants or users with their e-mail / name | `/admin/`, `/admin/tenants`, `/admin/support` |
+| `audit_list`, `audit_export` | the audit trail across tenants | `/admin/audit`, `/admin/audit/export`, `GET /api/v1/admin/audit` |
+| `waitlist_list`, `waitlist_export` | the waitlist's e-mails | `/admin/waitlist`, `/admin/waitlist/export` |
+| `abuse_list` | the abuse reports | `/admin/abuse` |
+| `billing_list` | revenue, costs, margins per tenant by e-mail | `/admin/revenue`, `/admin/costs` |
+| `usage_list` | dedup per tenant by e-mail | `/admin/dedup` |
+| `flag_list` | the tenants a flag is set for | `/admin/flags`, `GET /api/v1/admin/flags` |
+| `job_list` | job results and notes, which name tenants, buckets, keys | `/admin/system`, `GET /api/v1/admin/jobs` |
+| `notice_list` | the operator notifications | `/admin/notifications` |
+
+Exempt, with the reason in the map: the site statistics, the unread count, the backends' health, routing-truth counts, the vendor plans, the breach register and ROPA, and the compliance scaffolding.
+
+**The commitment.** A read of one tenant carries a random 16-byte `nonce` and `commitment = HMAC-SHA256(salt_t, "stored.cloud/translog/admin_read" ‖ nonce)`. `salt_t` is the tenant's 32 random bytes in `translog_subjects` (migration 104), created at its first admin read, erased by `account.EraseRows`, excluded from the GDPR export, and never shown to anyone. So:
+- **the public** sees how many admin reads happened and of which scope, and cannot link two entries to one tenant (a fresh nonce each time; the commitment is an HMAC under a key it does not have);
+- **the tenant** finds its own entries: `GET /api/v1/manage/account/transparency` (behind `translog_customer_view`, default OFF, per tenant first) recomputes each entry's commitment under its salt and lists index, scope, time and the first signed checkpoint whose tree includes it;
+- **after an erasure** no one — we included — can link the past entries to the tenant: the salt is gone, the entries stay (they name no one), and their coalescing keys are keyed by the same salt.
+
+**Coalescing.** One entry per (operator, scope, tenant) per UTC hour: a page refresh appends nothing. The key is `admin_read:<HMAC(salt_t, operator ‖ scope ‖ hour)>` for a tenant read and `admin_read:<SHA-256(operator ‖ scope ‖ hour)>` for a list, in `translog_entries.dedup_key` — never in the body (the tiles serve bodies only).
+
+**Fail closed, append first.** The entry is appended BEFORE the handler reads anything, so an entry exists even if the response is lost. An append that fails — a frozen log (§ After a database restore), the database — refuses the read: the API answers 503 `{"error":"log_frozen"}` or `{"error":"admin_read_not_logged"}`, the dashboard a 503 page. There is no break-glass. The operator stays in `audit_logs` (`admin.read`, with the entry's `translog_index` — the reference the log itself does not reveal).
+
+**The flag.** `translog_admin_reads` (default OFF) is keyed on the SUBJECT tenant (per tenant first; a list reads the global row). OFF = no entry and no refusal, the behaviour before K4c-1. **ON globally** (the owner's flip) = every admin read of customer metadata is in the public log, and an operator cannot read a tenant's records while the log is frozen or the database refuses the append.
+
+### What the log does not see
+
+The log records what goes through the application. **Root on the box reading Postgres directly** (`psql`, a dump, a copy of the data directory) leaves no entry — and neither does anything else done with the box's own privileges: a binary that never logs, a debugger attached to a slot. Until the attested data plane exists (contract rule 10: measured image, no SSH, published measurements), nothing in this log covers that, and we do not claim it does. The `server_build` entries say which binaries ran; they do not prove that nothing else did.
 
 ## Reading the log
 

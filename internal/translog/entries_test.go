@@ -21,6 +21,10 @@ func validCeremony() KeyCeremony {
 		Participants: 1, Shares: 3, Threshold: 2, Reference: "https://github.com/FairForge/vaultaire/blob/" + strings.Repeat("ab", 20) + "/docs/ENCRYPTION.md"}
 }
 
+func validAdminRead() AdminRead {
+	return AdminRead{Scope: ScopeTenantDetail, ActorRole: ActorRoleAdmin, Nonce: strings.Repeat("0a", 16), Commitment: strings.Repeat("c3", 32)}
+}
+
 // forbiddenFieldTokens: a field whose name has one of these words between
 // underscores would be the start of a tenant, a person or an object in a
 // public log.
@@ -36,7 +40,7 @@ var forbiddenFieldTokens = map[string]bool{
 // can choose is checked for what would name one, and an encoded body
 // carries nothing else.
 func TestTranslog_EntriesNeverNameATenant(t *testing.T) {
-	samples := map[string]Entry{KindServerBuild: validBuild(), KindKeyCeremony: validCeremony()}
+	samples := map[string]Entry{KindServerBuild: validBuild(), KindKeyCeremony: validCeremony(), KindAdminRead: validAdminRead()}
 	require.ElementsMatch(t, Kinds(), keys(samples), "every kind has a sample here")
 
 	for kind, e := range samples {

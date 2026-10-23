@@ -149,7 +149,7 @@ func (s *Server) backendRegistered(name string) bool {
 
 // registerAdminBackendPlanRoutes mounts the plan record under /api/v1/admin.
 func (s *Server) registerAdminBackendPlanRoutes(r chi.Router) {
-	r.Get("/backends/{backend}/plan", s.requireAdmin(s.handleGetBackendPlan))
+	r.Get("/backends/{backend}/plan", s.requireAdmin(s.adminRead("/api/v1/admin/backends/{backend}/plan", s.handleGetBackendPlan)))
 	r.Put("/backends/{backend}/plan", s.requireAdmin(s.handlePutBackendPlan))
 }
 

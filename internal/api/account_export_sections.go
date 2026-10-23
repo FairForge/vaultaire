@@ -81,6 +81,7 @@ var exportExcludedTables = map[string]string{
 	"sts_tokens":             "temporary credentials (secret_key); expire within hours",
 	"tenant_encryption_keys": "key material (read by nothing since 084)",
 	"tenant_key_versions":    "key material (wrapped tenant keys, WP-R8-1)",
+	"translog_subjects":      "key material: the salt of the transparency log's admin-read commitments (104, K4c-1); the tenant reads its entries at GET /api/v1/manage/account/transparency, never the salt",
 	// storage bookkeeping
 	"retired_blobs": "addresses of displaced object blobs awaiting deletion (WP-R2-1): storage bookkeeping, not the customer's data; the objects themselves are in `objects`",
 	// scaffolding with no writer in the product (D-12)

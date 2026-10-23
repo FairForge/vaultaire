@@ -62,6 +62,9 @@ func (s *Server) registerManagementRoutes() {
 		r.Get("/account/export/{id}", s.handleMgmtGetExport)
 		r.Delete("/account", s.handleMgmtDeleteAccount)
 		r.Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
+		// The tenant's own admin-read entries in the transparency log (K4c-1),
+		// dark behind translog_customer_view.
+		r.Get("/account/transparency", s.handleMgmtAccountTransparency)
 	})
 }
 

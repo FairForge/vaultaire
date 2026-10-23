@@ -59,6 +59,10 @@ type Deps struct {
 	Account         *account.Service         // The one account-deletion state machine (WP-R10-3); nil = built per request from DB.
 	Exports         handlers.ExportService   // The one GDPR export service (WP-R10-3b); nil = the settings page says export is unavailable.
 	Egress          usage.EgressStatusReader // The API server's live egress counter (WP-R10-9); nil = the recorded month.
+	// AdminReads appends the transparency log's admin_read entry before an
+	// admin page that reads customer metadata is served (K4c-1,
+	// admin_reads.go); nil = no entry (tests, a box without a log).
+	AdminReads AdminReadRecorder
 	// CSRFKey keys the session-bound CSRF token (WP-R12-5): CSRFKeyFromSecret
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
 	// key for this process — forms opened before a restart then fail once.
@@ -432,9 +436,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Use(middleware.RequireAdminMFA(deps.Auth))
 		ar.Use(middleware.Flash)
 		ar.NotFound(handlers.HandleNotFound(deps.Logger))
-		ar.Get("/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
-		ar.Get("/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
-		ar.Get("/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger, deps.Egress))
+		adminGet(ar, deps, "/", handlers.HandleAdminOverview(adminTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/tenants", handlers.HandleTenantList(tenantListTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/tenants/{id}", handlers.HandleTenantDetail(tenantDetailTmpl, deps.DB, deps.Logger, deps.Egress))
 		ar.Post("/tenants/{id}/suspend", handlers.HandleSuspendTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/enable", handlers.HandleEnableTenant(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/quota", handlers.HandleUpdateQuota(deps.DB, deps.Logger))
@@ -445,32 +449,32 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/billing/payment", handlers.HandleAdminManualPayment(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/billing/entitlement", handlers.HandleAdminAdjustEntitlement(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/billing/refund", handlers.HandleAdminRefund(deps.DB, deps.Logger))
-		ar.Get("/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
-		ar.Get("/audit", handlers.HandleAdminAudit(auditTmpl, deps.DB, deps.Logger))
-		ar.Get("/audit/export", handlers.HandleAdminAuditExport(deps.DB, deps.Logger))
-		ar.Get("/waitlist", handlers.HandleAdminWaitlist(waitlistTmpl, deps.DB, deps.Logger))
-		ar.Get("/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
-		ar.Get("/stats", handlers.HandleAdminStats(statsTmpl, deps.DB, deps.Logger))
-		ar.Get("/revenue", handlers.HandleAdminRevenue(revenueTmpl, deps.DB, deps.Logger))
-		ar.Get("/costs", handlers.HandleAdminCosts(costsTmpl, deps.DB, deps.Logger))
-		ar.Get("/dedup", handlers.HandleAdminDedup(dedupTmpl, deps.DB, deps.Logger))
-		ar.Get("/notifications", handlers.HandleAdminNotifications(notificationsTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/audit", handlers.HandleAdminAudit(auditTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/audit/export", handlers.HandleAdminAuditExport(deps.DB, deps.Logger))
+		adminGet(ar, deps, "/waitlist", handlers.HandleAdminWaitlist(waitlistTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/waitlist/export", handlers.HandleAdminWaitlistExport(deps.DB, deps.Logger))
+		adminGet(ar, deps, "/stats", handlers.HandleAdminStats(statsTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/revenue", handlers.HandleAdminRevenue(revenueTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/costs", handlers.HandleAdminCosts(costsTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/dedup", handlers.HandleAdminDedup(dedupTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/notifications", handlers.HandleAdminNotifications(notificationsTmpl, deps.DB, deps.Logger))
 		ar.Post("/notifications/read-all", handlers.HandleMarkAllRead(deps.DB, deps.Logger))
 		ar.Post("/notifications/{id}/read", handlers.HandleMarkRead(deps.DB, deps.Logger))
-		ar.Get("/notifications/count", handlers.HandleNotifCount(deps.DB, deps.Logger))
-		ar.Get("/abuse", handlers.HandleAdminAbuse(adminAbuseTmpl, deps.DB, deps.Logger))
-		ar.Get("/abuse/{id}", handlers.HandleAdminAbuseDetail(abuseDetailTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/notifications/count", handlers.HandleNotifCount(deps.DB, deps.Logger))
+		adminGet(ar, deps, "/abuse", handlers.HandleAdminAbuse(adminAbuseTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/abuse/{id}", handlers.HandleAdminAbuseDetail(abuseDetailTmpl, deps.DB, deps.Logger))
 		ar.Post("/abuse/{id}/action", handlers.HandleAbuseAction(deps.DB, deps.Logger))
-		ar.Get("/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
-		ar.Get("/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger, deps.Egress))
+		adminGet(ar, deps, "/support", handlers.HandleAdminSupport(supportTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/support/{id}", handlers.HandleCustomerDetail(customerDetailTmpl, deps.DB, deps.Logger, deps.Egress))
 		ar.Post("/support/{id}/notes", handlers.HandleAddNote(deps.DB, deps.Logger))
 		if deps.Engine != nil {
-			ar.Get("/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
+			adminGet(ar, deps, "/backends", handlers.HandleAdminBackends(backendsTmpl, deps.Engine, deps.HealthChecker, deps.Logger))
 			ar.Post("/backends/{name}/primary", handlers.HandleSetPrimary(deps.Engine, deps.DB, deps.Logger))
 			ar.Post("/backends/{name}/check", handlers.HandleForceHealthCheck(deps.Engine, deps.Logger))
 		}
 		if deps.Flags != nil {
-			ar.Get("/flags", handlers.HandleAdminFlags(flagsTmpl, deps.Flags, deps.Logger))
+			adminGet(ar, deps, "/flags", handlers.HandleAdminFlags(flagsTmpl, deps.Flags, deps.Logger))
 			ar.Post("/flags/{key}/set", handlers.HandleAdminFlagSet(deps.Flags, deps.Logger))
 			ar.Post("/flags/{key}/clear", handlers.HandleAdminFlagClear(deps.Flags, deps.Logger))
 		}

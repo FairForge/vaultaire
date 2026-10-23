@@ -149,7 +149,7 @@ func TestReAppend_RefusesUndecodableBody(t *testing.T) {
 	require.NoError(t, err)
 	r := New(restoreOf(t, live.db, 5), nil)
 	bad := append([][]byte(nil), lost...)
-	bad[1] = []byte(`{"kind":"admin_read","v":1,"at":"2026-10-22T00:00:00Z","entry":{}}`)
+	bad[1] = []byte(`{"kind":"le_production","v":1,"at":"2026-10-22T00:00:00Z","entry":{}}`) // a kind this build does not know (admin_read is one since K4c-1)
 
 	err = r.ReAppend(ctx, bad, at9)
 

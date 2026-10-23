@@ -418,3 +418,17 @@ func TestEraseRows_StripsStripeCustomerID(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT metadata FROM payments WHERE provider_id = $1`, pid).Scan(&meta))
 	assert.JSONEq(t, `{"ids": {"invoice": "in_1", "subscription": "sub_1"}}`, string(meta))
 }
+
+// K4c-1: the admin-read salt goes with the account — after the erasure no
+// one can link the tenant's past admin_read entries to it.
+func TestEraseRows_RemovesTranslogSubjects(t *testing.T) {
+	f := setupEraseFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	f.exec(`INSERT INTO translog_subjects (tenant_id, salt) VALUES ($1, $2)`, f.tenantID, []byte(strings.Repeat("s", 32)))
+
+	res, err := f.svc.EraseRows(context.Background(), f.userID, f.tenantID, f.email, time.Now())
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), res.Rows["translog_subjects"])
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM translog_subjects WHERE tenant_id = $1`, f.tenantID))
+}
