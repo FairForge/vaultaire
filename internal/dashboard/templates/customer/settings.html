@@ -109,6 +109,14 @@
     {{end}}
 </div>
 
+{{if .AccessView}}
+<div class="card">
+    <div class="card-title">Access to your account</div>
+    <p class="text-muted" style="margin-bottom: 1rem;">Every read of your account's records by our operators, from our public transparency log.</p>
+    <a href="/dashboard/settings/access" class="btn">See who read what</a>
+</div>
+{{end}}
+
 <div class="card">
     <div class="card-title">Two-Factor Authentication</div>
     {{if .MFAError}}<div class="alert alert-error">{{.MFAError}}</div>{{end}}

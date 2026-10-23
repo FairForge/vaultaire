@@ -13,7 +13,7 @@ import (
 
 // HandleSettings renders the settings page with current profile, preferences,
 // and the list of active sessions (devices signed in as this user).
-func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, exports ExportService, logger *zap.Logger) http.HandlerFunc {
+func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, sessions dashauth.SessionStore, exports ExportService, accessView func(tenantID string) bool, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -37,6 +37,9 @@ func HandleSettings(tmpl *template.Template, authSvc *auth.AuthService, db *sql.
 
 		// Active sessions list.
 		data["SessionRows"] = loadSessionRows(r, sessions, sd.UserID, logger)
+
+		// "Access to your account" (translog_customer_view, Stage 1a Prompt 34b).
+		data["AccessView"] = accessView != nil && sd.TenantID != "" && accessView(sd.TenantID)
 
 		// Account deletion status.
 		populateDeletionStatus(r.Context(), db, sd.UserID, data)

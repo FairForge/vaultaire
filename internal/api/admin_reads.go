@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/FairForge/vaultaire/internal/translog/adminread"
 	"github.com/FairForge/vaultaire/internal/translog/logstore"
@@ -248,6 +249,15 @@ func (s *Server) RecordAdminRead(ctx context.Context, actorID, scope, tenantID s
 			Metadata: map[string]any{"scope": scope, "translog_index": idx}})
 	}
 	return nil
+}
+
+// accessLog is the dashboard's "Access to your account" finder: the same
+// adminread.Find as the API's view; nil (never a typed nil) without a log.
+func (s *Server) accessLog() handlers.AccessLog {
+	if s.adminReads == nil {
+		return nil
+	}
+	return s.adminReads
 }
 
 // handleMgmtAccountTransparency is GET /api/v1/manage/account/transparency:

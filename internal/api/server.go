@@ -1016,6 +1016,7 @@ func (s *Server) setupRoutes() {
 		// Admin pages that read customer metadata append their admin_read
 		// entry first (K4c-1, admin_reads.go).
 		AdminReads:    s,
+		AccessLog:     s.accessLog(),
 		Google:        s.googleOAuth,
 		GitHub:        s.githubOAuth,
 		StorageMode:   storageMode,

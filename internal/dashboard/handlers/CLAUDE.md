@@ -71,7 +71,8 @@ Queries: `tenant_quotas`, `bandwidth_usage_daily` (30 days). Chart bars are `Cha
 ## Settings Page (`settings.go`)
 
 Four handlers:
-- `HandleSettings(tmpl, authSvc, db, sessions, logger)` — GET renders profile, password, notification forms and the active-sessions list
+- `HandleSettings(tmpl, authSvc, db, sessions, exports, accessView, logger)` — GET renders profile, password, notification forms and the active-sessions list; `accessView(tenant)` (= `translog_customer_view`) shows the "Access to your account" card
+- `HandleAccess(tmpl, enabled, recording, log, checkpointURL, logger)` (`access.go`, Stage 1a Prompt 34b) — GET `/dashboard/settings/access`, "Access to your account": the tenant's own transparency-log entries from `AccessLog.Find` (the API's `adminread.Find`), newest first, each said by `adminread.Words` (ONE table, fixed sentences, `Unknown` for anything else — never the raw scope), "entry N, at checkpoint M" linked to the trust host's `/translog/checkpoint` or "not yet signed". `enabled` OFF (or nil) = 404 `no-store`, the log never read; `recording` (= `translog_admin_reads`) OFF = a warning instead of "every read is written first"; a log that cannot be read = an error line, never "none recorded". Tests: `TestAccessPage_ListsOnlyTheTenantsOwnRows` (two tenants, a signed checkpoint), `_FlagOff_404`, `_EscapesHTML`, `_LogUnreadable_SaysSo`; the screenshot fixture renders it (`make dash-shots` → `access-*.png`)
 - `HandleUpdateProfile(tmpl, authSvc, db, logger)` — POST updates company in DB + in-memory
 - `HandleChangePassword(tmpl, authSvc, db, sessions, logger)` — POST validates current password via `authSvc.ChangePassword()`, enforces min length + match + different-from-current, then revokes every other session
 - `HandleUpdateNotifications(tmpl, authSvc, db, logger)` — POST saves email notification preference via `authSvc.SetUserPreferences()`

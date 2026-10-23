@@ -23,6 +23,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -63,6 +64,10 @@ type Deps struct {
 	// admin page that reads customer metadata is served (K4c-1,
 	// admin_reads.go); nil = no entry (tests, a box without a log).
 	AdminReads AdminReadRecorder
+	// AccessLog finds a tenant's own transparency-log entries for "Access
+	// to your account" (Stage 1a Prompt 34b, the same adminread.Find as the
+	// API's view); nil = the page says the log is not available.
+	AccessLog handlers.AccessLog
 	// CSRFKey keys the session-bound CSRF token (WP-R12-5): CSRFKeyFromSecret
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
 	// key for this process — forms opened before a restart then fail once.
@@ -76,6 +81,15 @@ func (d Deps) hostSet() hosts.Hosts {
 		return d.Hosts
 	}
 	return hosts.Get()
+}
+
+// flagOn is a flag of deps.Flags for a tenant; nil when there are no flags
+// (a page gated by it is then off).
+func (d Deps) flagOn(key string) func(tenantID string) bool {
+	if d.Flags == nil {
+		return nil
+	}
+	return func(tenantID string) bool { return d.Flags.Enabled(key, tenantID) }
 }
 
 // CSRFKeyFromSecret derives the CSRF key from a persistent server secret
@@ -275,7 +289,16 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		template.Must(settingsTmpl.ParseFS(Templates,
 			"templates/customer/settings.html",
 		))
-		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Exports, deps.Logger))
+		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Exports, deps.flagOn(translog.FlagTranslogCustomerView), deps.Logger))
+
+		// "Access to your account" (Stage 1a Prompt 34b): the tenant's own
+		// transparency-log entries, behind translog_customer_view.
+		accessTmpl := template.Must(baseTmpl.Clone())
+		template.Must(accessTmpl.ParseFS(Templates,
+			"templates/customer/access.html",
+		))
+		dr.Get("/settings/access", handlers.HandleAccess(accessTmpl, deps.flagOn(translog.FlagTranslogCustomerView),
+			deps.flagOn(translog.FlagTranslogAdminReads), deps.AccessLog, deps.hostSet().Trust+"/translog/checkpoint", deps.Logger))
 		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
 		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
