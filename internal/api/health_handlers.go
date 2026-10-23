@@ -43,6 +43,10 @@ type BackendHealthState struct {
 	// LastSuccess is the last successful probe; zero = none yet, and then
 	// the first failure is enough (RP9-9).
 	LastSuccess time.Time
+	// Probed: UpdateHealth has run at least once. Until then Healthy is
+	// RegisterBackend's seed, not a measurement, and vaultaire_backend_health
+	// exports no sample for it (RP38-1).
+	Probed bool
 }
 
 // probeFailuresToUnhealthy is how many probes in a row must fail before a
@@ -92,6 +96,7 @@ func (b *BackendHealthChecker) UpdateHealth(id string, healthy bool, latency tim
 		b.backends[id] = state
 	}
 
+	state.Probed = true
 	state.Latency = latency
 	state.LastCheck = time.Now()
 	if healthy {

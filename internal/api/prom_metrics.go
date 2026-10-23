@@ -276,12 +276,17 @@ func (c *backendCollector) Collect(ch chan<- prometheus.Metric) {
 	sort.Strings(names)
 	for _, n := range names {
 		st := states[n]
+		ch <- prometheus.MustNewConstMetric(c.probeFailures, prometheus.CounterValue, float64(st.Failures), n)
+		if !st.Probed {
+			// Never probed: Healthy is RegisterBackend's seed — no sample,
+			// never a false 1 (RP38-1).
+			continue
+		}
 		healthy := 0.0
 		if st.Healthy {
 			healthy = 1
 		}
 		ch <- prometheus.MustNewConstMetric(c.health, prometheus.GaugeValue, healthy, n)
-		ch <- prometheus.MustNewConstMetric(c.probeFailures, prometheus.CounterValue, float64(st.Failures), n)
 		ch <- prometheus.MustNewConstMetric(c.probeLatency, prometheus.GaugeValue, st.Latency.Seconds(), n)
 	}
 
