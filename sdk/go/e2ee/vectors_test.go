@@ -95,15 +95,36 @@ type bip39Vector struct {
 	Mnemonic string `json:"mnemonic"`
 }
 
+// identityVector: an identity from fixed seeds — its public keys, its
+// fingerprint, one deterministic Ed25519 signature, and its two wraps under
+// a master key with fixed nonces.
+type identityVector struct {
+	EncPrivate        hexb   `json:"enc_private"`
+	SigPrivate        hexb   `json:"sig_private"`
+	EncPublic         hexb   `json:"enc_public"`
+	SigPublic         hexb   `json:"sig_public"`
+	Fingerprint       hexb   `json:"fingerprint"`
+	FingerprintString string `json:"fingerprint_string"`
+	SignContext       string `json:"sign_context"`
+	SignMessage       hexb   `json:"sign_message"`
+	Signature         hexb   `json:"signature"`
+	MasterKey         hexb   `json:"master_key"`
+	NonceEnc          hexb   `json:"nonce_enc"`
+	NonceSig          hexb   `json:"nonce_sig"`
+	WrappedEnc        hexb   `json:"wrapped_enc"`
+	WrappedSig        hexb   `json:"wrapped_sig"`
+}
+
 type vectors struct {
-	Comment      string                    `json:"comment"`
-	Box          *boxVector                `json:"box,omitempty"`
-	Sealed       *sealedVector             `json:"sealed,omitempty"`
-	Argon2id     []argon2Vector            `json:"argon2id,omitempty"`
-	PasswordWrap *passwordWrapVector       `json:"password_wrap,omitempty"`
-	KeyWraps     map[string]*keyWrapVector `json:"key_wraps,omitempty"`
-	BIP39Source  string                    `json:"bip39_source,omitempty"`
-	BIP39        []bip39Vector             `json:"bip39,omitempty"`
+	Comment      string                     `json:"comment"`
+	Box          *boxVector                 `json:"box,omitempty"`
+	Sealed       *sealedVector              `json:"sealed,omitempty"`
+	Argon2id     []argon2Vector             `json:"argon2id,omitempty"`
+	PasswordWrap *passwordWrapVector        `json:"password_wrap,omitempty"`
+	KeyWraps     map[string]*keyWrapVector  `json:"key_wraps,omitempty"`
+	BIP39Source  string                     `json:"bip39_source,omitempty"`
+	BIP39        []bip39Vector              `json:"bip39,omitempty"`
+	Identities   map[string]*identityVector `json:"identities,omitempty"`
 }
 
 func loadVectors(t *testing.T) vectors {
