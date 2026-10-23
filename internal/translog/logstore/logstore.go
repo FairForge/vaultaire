@@ -438,6 +438,11 @@ func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 	if err != nil {
 		return res, err
 	}
+	if ok {
+		// Recorded before any refusal (RP41-4): a behind_highwater result
+		// names the database's newest checkpoint too.
+		res.CheckpointSize = latest.Size
+	}
 	hw, hwOK, err := s.readHighwater()
 	if err != nil {
 		return res, refuse(&res, RefusedHighwaterUnreadable, err)
@@ -454,7 +459,6 @@ func (s *Store) Checkpoint(ctx context.Context) (CheckpointResult, error) {
 		}
 	}
 	if ok {
-		res.CheckpointSize = latest.Size
 		if latest.Size > size {
 			return res, refuse(&res, RefusedRewritten, fmt.Errorf("translog: the log has %d entries but a checkpoint was signed at %d", size, latest.Size))
 		}

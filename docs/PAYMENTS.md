@@ -757,6 +757,18 @@ The customer-id stripping the second paragraph promises is implemented in
    `Invalid` (audited); if the crypto invoice **already settled** both have
    paid → § 2.5's detector, refund by hand. Portal reactivation is turned off
    in the click-list to keep this to the one case the API cannot prevent.
+   **Evidence, not live state (RP42-3, Stage 1a Prompt 33):** live
+   `cancel_at_period_end=false` is an un-cancel only when the event's
+   `data.previous_attributes.cancel_at_period_end` is `true` ("the names of
+   the updated attributes and their values prior to the event", Stripe's
+   event object), or the switch's stop row is `stopped` (Stripe confirmed
+   the stop, so `false` now is the customer's hand). An `invoice.*` grant
+   never is. Without that evidence, while a switch is in progress (its stop
+   pending, or `pending_provider` set), the grant keeps `renewal='prepaid'`,
+   `pending_provider` and the pending row, and the `renewal_stops` job
+   finishes the stop: a stop that got a 5xx or no answer leaves Stripe at
+   `false` too, and an event redelivered from the same outage used to undo
+   the customer's switch.
 
 ### 4.2 Crypto → Stripe
 
@@ -840,7 +852,7 @@ does not pay anyone loses the **house** (quota) after grace, never a byte.
     - Only a permanent refusal (`ErrProviderRefused`: a Stripe 4xx other than 404/408/409/429) puts the switch back and deletes the stop.
     - A client that leaves, a Stripe 5xx or a crash leaves the switch standing with the stop owed to the `renewal_stops` job.
   - A `stopped` record never closes a `pending` row, so a bitcoin settle cannot mark Stripe stopped before Stripe answered.
-  - The Stripe webhook treats the stop row of the entitlement's own subscription as owed, so a portal un-cancel still withdraws the switch and its stop.
+  - The Stripe webhook treats the stop row of the entitlement's own subscription as owed, so a portal un-cancel still withdraws the switch and its stop — when the event carries the evidence (§ 4.1 step 5, RP42-3).
   - **RP33-7:** a switch from a past_due / unpaid / incomplete subscription cancels it now (RP31-4's path).
   - **RP33-2: only confirmed bitcoin is value.** The Invalid credit, the Expired partial credit and the paid-late mark use `btcpay.confirmedCents` = max(0, min(`paidAmount` − Σ unconfirmed value×rate, Σ Settled value×rate)). A seen-but-unconfirmed payment waits for its `InvoicePaymentSettled`.
   - **RP33-11 (lab):** BTCPay delivers `InvoicePaymentSettled` even for an invoice already Invalid, so a late confirmation is credited, never granted.

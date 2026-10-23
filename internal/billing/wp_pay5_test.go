@@ -67,7 +67,8 @@ func TestPortalUncancel_RestoresAuto_InvalidatesPendingInvoice(t *testing.T) {
 	// Act: the portal's un-cancel.
 	uncancelled := *sub
 	uncancelled.CancelAtPeriodEnd = false
-	f.post(t, "uncancel", "customer.subscription.updated", f.stripeHas(&uncancelled))
+	// Stripe names the field's old value (RP42-3: the evidence required).
+	f.postPrev(t, "uncancel", "customer.subscription.updated", f.stripeHas(&uncancelled), map[string]any{"cancel_at_period_end": true})
 
 	// Assert: Stripe renews again, the switch is withdrawn, the open bitcoin
 	// invoice is marked Invalid (reason portal_uncancel).
