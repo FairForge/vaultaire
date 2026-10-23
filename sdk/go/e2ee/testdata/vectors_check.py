@@ -11,6 +11,8 @@ before committing a new section; it is not part of CI (CI has no PyNaCl).
 The 0x03 sealed box and the share's HPKE layer cannot be recomputed here
 (no X-Wing in libsodium); their open side is pinned by the Go tests.
 """
+import base64
+import hashlib
 import json
 import pathlib
 import struct
@@ -41,6 +43,10 @@ def argon2id_sodium(password, salt, mem_kib, t):
     return bindings.crypto_pwhash_alg(32, password, salt, t, mem_kib * 1024, bindings.crypto_pwhash_ALG_ARGON2ID13)
 
 
+def lp(b):
+    return struct.pack(">H", len(b)) + b
+
+
 def main():
     v = json.loads(pathlib.Path(__file__).with_name("vectors.json").read_text())
     h = bytes.fromhex
@@ -64,6 +70,22 @@ def main():
     for name, kw in sorted(v["key_wraps"].items()):
         want = box(h(kw["wrapping_key"]), h(kw["nonce"]), h(kw["key"]), kw["ad"].encode())
         checks.append((f"key_wraps.{name}", want == h(kw["wrapped"])))
+
+    for name, iv in sorted(v["identities"].items()):
+        seed = h(iv["sig_private"])
+        assert seed[0] == 0x01
+        pk, sk = bindings.crypto_sign_seed_keypair(seed[1:])
+        checks.append((f"identities.{name}.sig_public", b"\x01" + pk == h(iv["sig_public"])))
+        fp = hashlib.sha256(LABEL + b"fingerprint" + lp(h(iv["enc_public"])) + lp(h(iv["sig_public"]))).digest()
+        checks.append((f"identities.{name}.fingerprint", fp == h(iv["fingerprint"])))
+        text = base64.b32encode(fp[:20]).decode().lower()
+        checks.append((f"identities.{name}.fingerprint_string", " ".join(text[i:i + 4] for i in range(0, 32, 4)) == iv["fingerprint_string"]))
+        msg = lp(LABEL + b"sig/" + iv["sign_context"].encode()) + h(iv["sign_message"])
+        sig = bindings.crypto_sign(msg, sk)[:64]
+        checks.append((f"identities.{name}.signature", b"\x01" + sig == h(iv["signature"])))
+        mk = h(iv["master_key"])
+        checks.append((f"identities.{name}.wrapped_enc", box(mk, h(iv["nonce_enc"]), h(iv["enc_private"]), LABEL + b"identity/enc") == h(iv["wrapped_enc"])))
+        checks.append((f"identities.{name}.wrapped_sig", box(mk, h(iv["nonce_sig"]), seed, LABEL + b"identity/sig") == h(iv["wrapped_sig"])))
 
     bad = [name for name, ok in checks if not ok]
     for name, ok in checks:

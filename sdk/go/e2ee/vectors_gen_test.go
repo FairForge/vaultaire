@@ -107,6 +107,31 @@ func TestGenerateVectors(t *testing.T) {
 		v.BIP39Source = "https://github.com/trezor/python-mnemonic/blob/master/vectors.json (MIT), the 256-bit english entries, fetched 2026-10-22"
 	}
 
+	if v.Identities == nil {
+		v.Identities = map[string]*identityVector{}
+	}
+	for _, name := range []string{"alice", "bob", "mallory"} {
+		if v.Identities[name] != nil {
+			continue
+		}
+		id, err := IdentityFromKeys(fill(name+"-x-wing-seed"), append([]byte{SigEd25519}, fill(name+"-ed25519-seed")...))
+		require.NoError(t, err)
+		fp, err := Fingerprint(id.Public())
+		require.NoError(t, err)
+		fps, err := FingerprintString(fp)
+		require.NoError(t, err)
+		iv := &identityVector{EncPrivate: id.EncPrivate, SigPrivate: id.SigPrivate, EncPublic: id.EncPublic, SigPublic: id.SigPublic,
+			Fingerprint: fp, FingerprintString: fps, SignContext: "golden", SignMessage: []byte("signed by " + name),
+			MasterKey: fill(name + "-master-key"), NonceEnc: fill(name + "-nonce-enc")[:24], NonceSig: fill(name + "-nonce-sig")[:24]}
+		iv.Signature, err = Sign(id.SigPrivate, iv.SignContext, iv.SignMessage)
+		require.NoError(t, err)
+		iv.WrappedEnc, err = seal(FormatBox, iv.MasterKey, iv.NonceEnc, id.EncPrivate, []byte(labelIdentityEnc))
+		require.NoError(t, err)
+		iv.WrappedSig, err = seal(FormatBox, iv.MasterKey, iv.NonceSig, id.SigPrivate, []byte(labelIdentitySig))
+		require.NoError(t, err)
+		v.Identities[name] = iv
+	}
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
