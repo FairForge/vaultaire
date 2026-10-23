@@ -204,3 +204,51 @@ func TestSetBucket_Refusals(t *testing.T) {
 	_, err = SetBucket(ctx, f.db, "someone-else", "b", Change{Visibility: ptr(VisibilityPublic)})
 	assert.ErrorIs(t, err, ErrNoBucket, "another tenant's bucket is not found")
 }
+
+// TestModesJSON_NoUnqualifiedCannotRead is RP37-4: a mode sentence may say
+// we cannot read (or decrypt) only together with "at rest" or a client-side
+// clause. SSE-C, the developer surface's Private, sends the key with every
+// request and we decrypt to serve the GET: "can't read at rest", never
+// "can't read" (the owner's rule of 2026-10-14; contract line 8).
+func TestModesJSON_NoUnqualifiedCannotRead(t *testing.T) {
+	// Arrange
+	f := All()
+	var texts []string
+	for _, m := range f.Modes {
+		for _, s := range []Sentence{m.ServerHolds, m.Customer, m.How} {
+			texts = append(texts, s.Text, s.WithoutMasterKey)
+		}
+	}
+	for _, s := range f.Surfaces {
+		texts = append(texts, s.Note)
+	}
+
+	// Act
+	var bad []string
+	for _, text := range texts {
+		bad = append(bad, UnqualifiedCannotRead(text)...)
+	}
+
+	// Assert
+	assert.Empty(t, bad, "a 'cannot read' with neither 'at rest' nor a client-side clause")
+	// The rule itself: what it refuses and what it lets through.
+	assert.NotEmpty(t, UnqualifiedCannotRead("We store your files encrypted and cannot read them."))
+	assert.NotEmpty(t, UnqualifiedCannotRead("Your files as ciphertext we can't decrypt."))
+	assert.Empty(t, UnqualifiedCannotRead("We cannot read them at rest."))
+	assert.Empty(t, UnqualifiedCannotRead("Encrypted on your device, so we cannot read them."))
+	require.Error(t, Validate(File{Modes: []Mode{
+		{ID: Private, Name: "P", ServerHolds: Sentence{Text: "x"}, Customer: Sentence{Text: "We cannot read them."}, How: Sentence{Text: "x"}},
+		{ID: Standard, Name: "S", ServerHolds: Sentence{Text: "x"}, Customer: Sentence{Text: "x"}, How: Sentence{Text: "x"}},
+		{ID: Public, Name: "U", ServerHolds: Sentence{Text: "x"}, Customer: Sentence{Text: "x"}, How: Sentence{Text: "x"}},
+	}}), "Validate refuses an unqualified 'cannot read'")
+}
+
+// TestModesJSON_DeletedBytesSentence is RP37-8: the privacy page's retention
+// sentence covers the bytes of deleted files — the collector's day on disk
+// providers, and never freed on tape.
+func TestModesJSON_DeletedBytesSentence(t *testing.T) {
+	text := strings.ToLower(All().DeletedBytes.Text)
+	require.NotEmpty(t, text)
+	assert.Contains(t, text, "up to a day")
+	assert.Contains(t, text, "tape")
+}

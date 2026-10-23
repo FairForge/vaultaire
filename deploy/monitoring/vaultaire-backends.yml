@@ -24,6 +24,12 @@ groups:
       - alert: BackendProbeFailing
         expr: vaultaire_backend_health{backend!~"lyve|permafrost|sync"} == 0
         for: 5m
+        # A slot switch boots a process whose backends read healthy until
+        # their first probe (RegisterBackend seeds Healthy): one scrape of 1
+        # resolved a page for an outage still running (Geyser LA1,
+        # 2026-10-22 19:13:39 UTC; refired 19:16:24 — RP37-17). Stay firing
+        # until the backend has been healthy for 5 minutes.
+        keep_firing_for: 5m
         labels:
           severity: critical
         annotations:
@@ -36,6 +42,12 @@ groups:
       - alert: PrimaryBackendProbeFailing
         expr: (vaultaire_backend_health == 0) and on(backend) (vaultaire_primary_backend == 1)
         for: 5m
+        # A slot switch boots a process whose backends read healthy until
+        # their first probe (RegisterBackend seeds Healthy): one scrape of 1
+        # resolved a page for an outage still running (Geyser LA1,
+        # 2026-10-22 19:13:39 UTC; refired 19:16:24 — RP37-17). Stay firing
+        # until the backend has been healthy for 5 minutes.
+        keep_firing_for: 5m
         labels:
           severity: critical
         annotations:

@@ -119,3 +119,17 @@ func TestBucketSettings_ModesCopy_ShowsTheModeAndItsSentence(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(body), "keys we hold")
 	assert.NotContains(t, body, `toggle-active">Private</span>`)
 }
+
+// RP37-8: the retention list says what happens to a deleted file's bytes —
+// from modes.json, behind modes_copy like the per-mode table.
+func TestPrivacyRetention_ModesCopy_SaysDeletedBytesOutliveTheDelete(t *testing.T) {
+	r, _, _ := setupTestRouter(t)
+	withModesCopy(t, true, false)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest("GET", "/legal/privacy", nil))
+	assert.Contains(t, w.Body.String(), "<strong>Deleted and replaced files</strong>, "+template.HTMLEscapeString(modes.All().DeletedBytes.Text))
+}
+
+func TestPrivacyRetention_FlagOff_NoDeletedBytesSentence(t *testing.T) {
+	assert.NotContains(t, privacyPage(t), "Deleted and replaced files")
+}

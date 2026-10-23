@@ -74,6 +74,10 @@ type File struct {
 	About    string             `json:"_about,omitempty"`
 	Modes    []Mode             `json:"modes"`
 	Surfaces map[string]Surface `json:"surfaces"`
+	// DeletedBytes is the privacy page's retention sentence for the bytes of
+	// a deleted or overwritten file (RP37-8): the retired_blobs grace on
+	// disk providers, dedup GC's for chunks, never freed on tape.
+	DeletedBytes Sentence `json:"deleted_bytes"`
 }
 
 // forbiddenWords no sentence may say (contract line 8).
@@ -111,8 +115,19 @@ func Validate(f File) error {
 						return fmt.Errorf("modes.json: %s.%s says %q", m.ID, field, w)
 					}
 				}
+				if bad := UnqualifiedCannotRead(text); len(bad) > 0 {
+					return fmt.Errorf("modes.json: %s.%s says we cannot read with neither \"at rest\" nor a client-side clause: %q", m.ID, field, bad[0])
+				}
 			}
 		}
+	}
+	for _, w := range forbiddenWords {
+		if strings.Contains(strings.ToLower(f.DeletedBytes.Text), w) {
+			return fmt.Errorf("modes.json: deleted_bytes says %q", w)
+		}
+	}
+	if bad := UnqualifiedCannotRead(f.DeletedBytes.Text); len(bad) > 0 {
+		return fmt.Errorf("modes.json: deleted_bytes says we cannot read with neither \"at rest\" nor a client-side clause: %q", bad[0])
 	}
 	for name, s := range f.Surfaces {
 		for _, id := range append([]string{s.Default}, s.Also...) {
@@ -181,3 +196,36 @@ func SetMasterKeyLoaded(v bool) { masterKeyLoaded.Store(v) }
 
 // MasterKeyLoaded reports it.
 func MasterKeyLoaded() bool { return masterKeyLoaded.Load() }
+
+// cannotReadPhrases are the claims RP37-4 qualifies, and the clauses that
+// make one true: SSE-C (the key reaches our server with every request, and
+// we decrypt to serve it) is "can't read at rest", never "can't read";
+// only a key kept on the customer's device is (contract line 8).
+var (
+	cannotReadPhrases = []string{"cannot read", "can't read", "can’t read", "cannot decrypt", "can't decrypt", "can’t decrypt"}
+	cannotReadQualify = []string{"at rest", "on your device", "client-side", "before they are uploaded"}
+)
+
+// UnqualifiedCannotRead returns the sentences of text that say we cannot
+// read (or decrypt) with neither "at rest" nor a client-side clause.
+func UnqualifiedCannotRead(text string) []string {
+	var bad []string
+	for _, sentence := range strings.Split(text, ". ") {
+		low := strings.ToLower(sentence)
+		claims := false
+		for _, p := range cannotReadPhrases {
+			claims = claims || strings.Contains(low, p)
+		}
+		if !claims {
+			continue
+		}
+		qualified := false
+		for _, q := range cannotReadQualify {
+			qualified = qualified || strings.Contains(low, q)
+		}
+		if !qualified {
+			bad = append(bad, sentence)
+		}
+	}
+	return bad
+}
