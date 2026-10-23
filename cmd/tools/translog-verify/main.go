@@ -5,7 +5,7 @@
 // until an external witness exists, K4b), and, with -entry, the inclusion
 // of one entry, printed.
 //
-//	translog-verify -url https://stored.cloud/translog -vkey 'stored.cloud/translog/v1+…' -entry 0
+//	translog-verify -url https://trust.stored.cloud/translog -vkey 'stored.cloud/translog/v1+…' -entry 0
 //
 // -vkey takes the key or @file. The saved checkpoint moves forward only
 // after every check passed; a failure exits 1 and leaves it as it was.
@@ -33,7 +33,7 @@ type options struct {
 func main() {
 	home, _ := os.UserHomeDir()
 	var o options
-	flag.StringVar(&o.url, "url", "https://stored.cloud/translog", "where checkpoint and tile/… are served")
+	flag.StringVar(&o.url, "url", "https://trust.stored.cloud/translog", "where checkpoint and tile/… are served (the trust host)")
 	flag.StringVar(&o.vkey, "vkey", "", "the pinned verifier key, or @file")
 	flag.StringVar(&o.state, "state", filepath.Join(home, ".translog-verify", "checkpoint"), "the checkpoint verified last time")
 	flag.Int64Var(&o.entry, "entry", -1, "also prove this entry is in the log and print it")

@@ -1,7 +1,8 @@
 // Package hosts is the ONE source of every host name the product prints or
 // matches (WP-DOMAIN-1, decision F-17): the canonical web origin, the S3
-// endpoint, the public-content origin, the OAuth/e-mail base and the web
-// aliases that 301 to the canonical origin. Nothing else in the repository
+// endpoint, the public-content origin, the trust origin (the transparency
+// log's read side), the OAuth/e-mail base and the web aliases that 301 to the
+// canonical origin. Nothing else in the repository
 // types a domain into code or copy; it asks this package. It is a leaf
 // package (zap only) because internal/api, internal/dashboard, internal/docs,
 // internal/email and internal/sitestats all read it.
@@ -45,6 +46,7 @@ type Hosts struct {
 	Canonical string   // web + dashboard origin (VAULTAIRE_PUBLIC_HOST)
 	S3        string   // S3 endpoint (VAULTAIRE_ENDPOINT)
 	CDN       string   // public-content origin (CDN_PUBLIC_HOST)
+	Trust     string   // the trust origin: the transparency log's read side (TRUST_PUBLIC_HOST)
 	BaseURL   string   // OAuth callbacks and e-mail links (VAULTAIRE_BASE_URL)
 	Aliases   []string // web names that 301 to Canonical (VAULTAIRE_ALIAS_HOSTS)
 }
@@ -52,15 +54,16 @@ type Hosts struct {
 // Defaults is the local development set: every origin http://localhost:port.
 func Defaults(port int) Hosts {
 	local := fmt.Sprintf("http://localhost:%d", port)
-	return Hosts{Canonical: local, S3: local, CDN: local, BaseURL: local}
+	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, BaseURL: local}
 }
 
-// FromEnv reads the five variables. A malformed value is logged at Warn and
+// FromEnv reads the six variables. A malformed value is logged at Warn and
 // the default kept (the repository's env convention); a malformed alias is
 // dropped on its own. Fallbacks, chosen so a deploy before the .env edit
 // behaves exactly as before: Canonical ← VAULTAIRE_BASE_URL ← localhost;
 // S3 and BaseURL ← Canonical; CDN ← https://cdn.<canonical host> when the
-// canonical host is a public name, else Canonical (served under /cdn/).
+// canonical host is a public name, else Canonical (served under /cdn/);
+// Trust ← https://trust.<canonical host> the same way (K4b), else Canonical.
 func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -79,6 +82,7 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		return o
 	}
 	public, base, endpoint, cdn := origin("VAULTAIRE_PUBLIC_HOST"), origin("VAULTAIRE_BASE_URL"), origin("VAULTAIRE_ENDPOINT"), origin("CDN_PUBLIC_HOST")
+	trust := origin("TRUST_PUBLIC_HOST")
 
 	switch {
 	case public != "":
@@ -98,6 +102,12 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		h.CDN = cdn
 	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
 		h.CDN = schemeOf(h.Canonical) + "://cdn." + ch
+	}
+	h.Trust = h.Canonical
+	if trust != "" {
+		h.Trust = trust
+	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
+		h.Trust = schemeOf(h.Canonical) + "://trust." + ch
 	}
 
 	for _, a := range strings.Split(getenv("VAULTAIRE_ALIAS_HOSTS"), ",") {
@@ -236,6 +246,33 @@ func (h Hosts) IsCDNHost(host string) bool {
 	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
 }
 
+// TrustHost is the trust origin's host name.
+func (h Hosts) TrustHost() string { return hostOf(h.Trust) }
+
+// TrustPublic reports whether the canonical origin is a public name: then the
+// transparency log's read side answers on a trust host ONLY (IsTrustHost —
+// RP35-1: on the web/S3 hosts /translog/… is the S3 API's again). On a
+// development origin it answers on that one origin, as before K4b.
+func (h Hosts) TrustPublic() bool { return isPublicName(hostOf(h.Canonical)) }
+
+// IsTrustHost reports whether host is a trust host: the TRUST_PUBLIC_HOST
+// host, trust.<canonical host>, trust.<an alias>, and trust.<brand or legacy
+// domain> (trust.stored.cloud and trust.stored.ge route whatever the env).
+func (h Hosts) IsTrustHost(host string) bool {
+	host = normHost(host)
+	if host == "" {
+		return false
+	}
+	if t := h.TrustHost(); t != "" && t != hostOf(h.Canonical) && t != hostOf(h.S3) && host == t {
+		return true
+	}
+	rest, ok := strings.CutPrefix(host, "trust.")
+	if !ok {
+		return false
+	}
+	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
+}
+
 func isLegacy(host string) bool {
 	for _, d := range LegacyDomains {
 		if host == d {
@@ -295,7 +332,7 @@ func (h Hosts) IsOwn(host string) bool {
 	}
 	own := append([]string{"localhost", BrandDomain}, LegacyDomains...)
 	own = append(own, h.Aliases...)
-	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.BaseURL} {
+	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.BaseURL} {
 		if hh := hostOf(o); hh != "" {
 			own = append(own, hh)
 		}

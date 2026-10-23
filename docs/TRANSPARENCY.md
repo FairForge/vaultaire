@@ -19,7 +19,7 @@ Each kind is a typed struct with an allow-list of fields; none names a tenant, a
 | `server_build` | `git_sha`, `binary_sha256` (SHA-256 of the running executable), `build_time`, `go_version` | every boot, once per distinct (git sha, binary) — a restart of the same binary appends nothing |
 | `key_ceremony` | `action` (closed list: `key_generated`, `key_installed`, `key_rewrapped`, `key_rotated`, `key_retired`, `escrow_split`, `escrow_tested`, `realm_enrolled`, `log_restored`), `key_role` (`master_key`, `translog_signing_key`, `recovery_realm_key`), `key_fingerprint` (`sha256:<64 hex>` — never the key), `participants` (1–20), `shares` / `threshold` (the trustee shares written and how many recombine the key; 0/0 = none, else 2–20 and 1–shares), `signed_size` / `restored_size` / `new_origin` (`log_restored` only), `reference` (empty, or `https://github.com/FairForge/vaultaire/` + `pull/<n>`, `commit/<40 hex>` or `blob/<40 hex>/docs/<NAME>.md`). **No free text** (RP37-10): a person's name, an address, an e-mail, a tenant id cannot be written in any field — what a person would say goes in the referenced document, which we can correct; the entry cannot be (the tables refuse DELETE). An unknown field (the removed `statement` of #884 included — 0 ceremony entries existed when it went) is refused | `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code of the admin's own MFA, consumed only after the entry validated; `Idempotency-Key` = a retry returns the first answer and appends nothing; audited `admin.translog_ceremony`, a non-admin's 403 included) |
 
-Not yet (K4b): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; the external witness, OpenTimestamps anchoring, the Rekor mirror and trust.stored.cloud.
+Not yet (K4c): admin reads of customer metadata, client build hashes, law-enforcement productions, `audit_logs` roots, the fTPM quote of a build; OpenTimestamps anchoring, the Rekor mirror, and a co-signature by an independent third party. K4b (Stage 1a Prompt 32) built our own off-box witness (§ The witness), the byte-exact restore (§ After a database restore) and the trust host (§ Reading the log).
 
 On prod since 2026-10-22 16:07 UTC (`83ef6c9`): entry 0 is that build's `server_build`, its `binary_sha256` equal to `sha256sum /opt/vaultaire/bin/vaultaire-8001`.
 
@@ -38,16 +38,18 @@ The entry's `build_time` and `go_version` must also read as the commit's time an
 
 ## Reading the log
 
-Behind the flag **`translog_public`** (default OFF, global; OFF = 404, owner decision to flip): `GET /translog/checkpoint` (the signed note, `Cache-Control: no-store`) and `GET /translog/tile/<L>/<N>[.p/<W>]`, `/translog/tile/entries/<N>[.p/<W>]` in the [c2sp.org/tlog-tiles](https://c2sp.org/tlog-tiles) layout (`internal/translog/serve.go`). Only what the newest signed checkpoint commits to is served: no checkpoint (no signing key) = 404 everywhere, even with the flag on. A full tile is `public, max-age=31536000, immutable`; a partial tile is `no-store`. A request on those paths that carries a SigV4 signature or a presigned query goes to the S3 API, so a customer bucket named `translog` still works through signed calls (an anonymous GET of a public bucket of that name is shadowed — RP35-1).
+On the **trust host** — `https://trust.stored.cloud/translog/` (`TRUST_PUBLIC_HOST`, default `trust.<canonical host>`; `trust.stored.ge` answers too) — behind the flag **`translog_public`** (default OFF, global; OFF = 404, owner decision to flip): `GET /translog/checkpoint` (the signed note, `Cache-Control: no-store`) and `GET /translog/tile/<L>/<N>[.p/<W>]`, `/translog/tile/entries/<N>[.p/<W>]` in the [c2sp.org/tlog-tiles](https://c2sp.org/tlog-tiles) layout (`internal/translog/serve.go`). Only what the newest signed checkpoint commits to is served: no checkpoint (no signing key) = 404 everywhere, even with the flag on. A full tile is `public, max-age=31536000, immutable`; a partial tile is `no-store`.
+
+**Only on the trust host (K4b, RP35-1).** With a public canonical origin, `/translog/…` on any other host — `stored.cloud`, `s3.stored.cloud`, `stored.ge` — is the S3 API's, signed or not, exactly as before K4: an anonymous GET of a public customer bucket named `translog` is no longer shadowed. On the trust host a signed or presigned S3 request is 404, never the S3 API. A development origin (localhost, an IP) keeps K4's rule on its one origin (a signed request is the S3 API's, an unsigned one the log's), so labs work unchanged.
 
 Verify from outside with `cmd/tools/translog-verify` (any machine; nothing of ours trusted but the pinned key):
 
 ```sh
-go run ./cmd/tools/translog-verify -url https://stored.cloud/translog -vkey @translog.vkey            # signature + consistency with the last run
-go run ./cmd/tools/translog-verify -url https://stored.cloud/translog -vkey @translog.vkey -entry 0   # + inclusion of entry 0, printed
+go run ./cmd/tools/translog-verify -url https://trust.stored.cloud/translog -vkey @translog.vkey      # signature + consistency with the last run
+go run ./cmd/tools/translog-verify -url https://trust.stored.cloud/translog -vkey @translog.vkey -entry 0  # + inclusion of entry 0, printed
 ```
 
-It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you are the witness until K4b's external one exists.
+It keeps the checkpoint it verified last in `~/.translog-verify/checkpoint` (`-state`) and moves it forward only after every check passed; a checkpoint that does not extend it — a rewritten or forked history — is a non-zero exit. Run it from a cron of your own and you hold a checkpoint the log must extend; `translog-witness` (§ The witness) also co-signs and keeps a byte copy.
 
 ## The witness
 

@@ -36,12 +36,13 @@ import (
 //     Idempotency-Key makes a retry return the first answer and append
 //     nothing (the log's own dedup, in the append's transaction).
 //   - read side, dark behind translog_public (default OFF = 404):
-//     GET /translog/checkpoint, GET /translog/tile/… (translog.NewHandler).
-//     A SigV4-signed or presigned request on those paths is the S3 API's,
-//     flag or not (a bucket named "translog" keeps working with a key).
+//     GET /translog/checkpoint, GET /translog/tile/… (translog.NewHandler),
+//     on the trust host only when the canonical origin is a public name
+//     (K4b, RP35-1; every other host: the S3 API's, signed or not).
 
-// flagTranslogPublic opens the read side. Default OFF; global only — the
-// owner flips it when trust.stored.cloud is decided (K4b).
+// flagTranslogPublic opens the read side on the trust host. Default OFF;
+// global only — the owner flips it once trust.stored.cloud resolves and the
+// signing key is loaded.
 const flagTranslogPublic = "translog_public"
 
 // serverBuildTimeout bounds the boot entry (hash the binary + one append).
@@ -98,14 +99,29 @@ func (s *Server) startServerBuildEntry() {
 	}()
 }
 
-// registerTranslogReadRoutes mounts the read side.
+// registerTranslogReadRoutes mounts the read side. With a public canonical
+// origin it answers on the trust host only (hosts.IsTrustHost: trust.<canonical>,
+// trust.stored.cloud, trust.stored.ge — K4b, RP35-1): on any other host the
+// two paths are the S3 API's exactly as before K4, signed or not, so an
+// anonymous GET of a public bucket named "translog" is never shadowed; on
+// the trust host a signed S3 request is 404, never the S3 API. On a
+// development origin (localhost, an IP) the read side keeps K4's rule on its
+// one origin: a signed request is the S3 API's, an unsigned one the log's.
 func (s *Server) registerTranslogReadRoutes() {
 	if s.translog == nil {
 		return
 	}
 	h := http.StripPrefix("/translog/", translog.NewHandler(s.translog))
 	serve := func(w http.ResponseWriter, r *http.Request) {
-		if signedS3Request(r) {
+		hs := s.hostSet()
+		switch {
+		case hs.TrustPublic() && !hs.IsTrustHost(r.Host):
+			s.s3Handler()(w, r)
+			return
+		case hs.TrustPublic() && signedS3Request(r):
+			http.NotFound(w, r)
+			return
+		case !hs.TrustPublic() && signedS3Request(r):
 			s.s3Handler()(w, r)
 			return
 		}
