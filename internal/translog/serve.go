@@ -2,6 +2,7 @@ package translog
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,20 @@ type Source interface {
 	Entries(ctx context.Context, from, n int64) ([][]byte, error)
 }
 
+// AnchorSource is a Source that also serves its checkpoints' anchors
+// (K4c-3a, docs/TRANSPARENCY.md § Anchors): "anchor/<size>.ots".
+type AnchorSource interface {
+	// AnchorOTS is the OpenTimestamps proof of the checkpoint of size;
+	// ErrNoAnchor when there is none.
+	AnchorOTS(ctx context.Context, size int64) ([]byte, error)
+}
+
+// ErrNoAnchor: the checkpoint has no anchor (or was never signed).
+var ErrNoAnchor = errors.New("translog: no anchor of that checkpoint")
+
+// OTSContentType is the .ots file's media type (the calendars' own Accept).
+const OTSContentType = "application/vnd.opentimestamps.v1"
+
 // The cache rule (c2sp.org/tlog-tiles): a full tile never changes; a
 // partial tile and the checkpoint do.
 const (
@@ -28,7 +43,9 @@ const (
 )
 
 // NewHandler serves the layout of tiles.go — "checkpoint", "tile/<L>/<N>[.p/<W>]",
-// "tile/entries/<N>[.p/<W>]" — relative to where it is mounted (strip the
+// "tile/entries/<N>[.p/<W>]" — and, when src is an AnchorSource,
+// "anchor/<size>.ots" (no-store: a pending proof is completed later) for a
+// size up to the newest checkpoint's, relative to where it is mounted (strip the
 // prefix first). Only what the newest checkpoint commits to is served: a
 // tile wider than its width at the checkpoint's size is 404 (a narrower
 // partial tile — an older checkpoint's — is served). No checkpoint = 404
@@ -47,6 +64,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	p := strings.TrimPrefix(r.URL.Path, "/")
+	if rest, ok := strings.CutPrefix(p, "anchor/"); ok {
+		h.anchor(w, r, rest)
+		return
+	}
 	var (
 		level, width int
 		n            int64
@@ -105,6 +126,38 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	write(w, "application/octet-stream", cache, data)
 }
 
+// anchor serves "anchor/<size>.ots".
+func (h *handler) anchor(w http.ResponseWriter, r *http.Request, name string) {
+	as, ok := h.src.(AnchorSource)
+	digits, isOTS := strings.CutSuffix(name, ".ots")
+	size, err := strconv.ParseInt(digits, 10, 64)
+	if !ok || !isOTS || err != nil || size <= 0 || strconv.FormatInt(size, 10) != digits {
+		notFound(w, r)
+		return
+	}
+	_, newest, signed, err := h.src.CheckpointNote(r.Context())
+	if err != nil {
+		w.Header().Set("Cache-Control", cacheNone)
+		http.Error(w, "the log cannot be read right now", http.StatusServiceUnavailable)
+		return
+	}
+	if !signed || size > newest {
+		notFound(w, r)
+		return
+	}
+	b, err := as.AnchorOTS(r.Context(), size)
+	switch {
+	case errors.Is(err, ErrNoAnchor):
+		notFound(w, r)
+		return
+	case err != nil:
+		w.Header().Set("Cache-Control", cacheNone)
+		http.Error(w, "the log cannot be read right now", http.StatusServiceUnavailable)
+		return
+	}
+	write(w, OTSContentType, cacheNone, b)
+}
+
 // notFound is the read side's 404, never cached: a tile beyond the newest
 // checkpoint, or the checkpoint before the first signature, exists later
 // (RP42-2: Cloudflare fronts the trust host).
@@ -124,7 +177,7 @@ func write(w http.ResponseWriter, contentType, cache string, b []byte) {
 	w.Header().Set("Cache-Control", cache)
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(b) // #nosec G705 -- a signed note (text/plain) or tile bytes (octet-stream) under nosniff, never HTML
+	_, _ = w.Write(b) // #nosec G705 -- a signed note (text/plain), tile bytes (octet-stream) or an .ots file under nosniff, never HTML
 }
 
 // MemorySource serves a Memory log, signing a checkpoint of its current

@@ -159,6 +159,8 @@ type Server struct {
 	// without a database. translogCheckpoint is its job.
 	translog           *logstore.Store
 	translogCheckpoint *translogCheckpointer
+	// translogAnchor anchors the signed checkpoints (K4c-3a, translog_anchors.go).
+	translogAnchor *translogAnchorer
 	// translogBuild is this process's server_build entry while it waits
 	// for the log (RP42-1, translog_read.go).
 	translogBuild *bootBuild
@@ -361,6 +363,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
 		s.translogCheckpoint.cosign = newCosignCollector(s.translog, translogWitnessesFromEnv(logger, os.Getenv), logger)
+		s.translogAnchor = newTranslogAnchorer(s.translog, translogAnchorsFromEnv(logger, os.Getenv), logger)
 		s.translogBuild = &bootBuild{}
 		s.translogCheckpoint.build = s.translogBuild
 		s.adminReads = adminread.New(s.db, s.translog)

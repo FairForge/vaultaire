@@ -98,6 +98,21 @@ groups:
           summary: "Transparency log: no fresh witness cosignature for {{ $value | humanizeDuration }} while the log grows"
           description: "The translog_checkpoint job signs, but no witness of TRANSLOG_WITNESSES has cosigned the newer checkpoints for over 2 h. The job's result names each witness's outcome (unreachable / refused / conflict / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select result from job_runs where job='translog_checkpoint'\"; vaultaire_translog_witness_cosign_total{outcome}. A conflict naming a LARGER size than the log's newest checkpoint is a restored database or a fork (docs/TRANSPARENCY.md § After a database restore)."
 
+      # K4c-3a: anchors configured (TRANSLOG_ANCHORS), the log signs, and no
+      # anchor of that kind arrived for over 2 h while newer checkpoints wait
+      # for one. An idle log (its newest checkpoint anchored) is silent.
+      - alert: TranslogAnchorStale
+        expr: |
+          (time() - max by (kind) (vaultaire_translog_anchor_timestamp_seconds)) > 7200
+          and on (kind) max by (kind) (vaultaire_translog_anchors_configured) > 0
+          and on (kind) (max by (kind) (vaultaire_translog_anchored_size) < on () group_left max(vaultaire_translog_checkpoint_size))
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transparency log: no {{ $labels.kind }} anchor for {{ $value | humanizeDuration }} while the log grows"
+          description: "The translog_anchor job has not anchored the newer signed checkpoints in {{ $labels.kind }} for over 2 h. Its result names each service's outcome (unreachable / refused / bad_answer): sudo -u postgres psql -At -d vaultaire -c \"select last_outcome, last_error, result from job_runs where job='translog_anchor'\"; vaultaire_translog_anchor_total{outcome}. Every calendar of TRANSLOG_ANCHORS down at once, or the job not running (PeriodicJobStale). docs/TRANSPARENCY.md § Anchors."
+
       # An append failed: a server_build at boot (never blocks the boot) or a
       # ceremony entry. The producer logged an Error line with the reason.
       - alert: TranslogAppendFailing

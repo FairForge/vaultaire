@@ -28,7 +28,7 @@ tests:
               job_name: webhook_retry
             exp_annotations:
               summary: "Periodic job webhook_retry has not succeeded in 3 hours"
-              description: "webhook_retry runs every hour (payment_reminders too; access_log_delivery every 5 minutes, account_export every minute, key_reencrypt, retired_blobs, renewal_stops and translog_checkpoint every 10 minutes, webhook_retry every 30 seconds) and last succeeded 3h 35m 0s ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
+              description: "webhook_retry runs every hour (payment_reminders too; access_log_delivery every 5 minutes, account_export every minute, key_reencrypt, retired_blobs, renewal_stops, translog_checkpoint and translog_anchor every 10 minutes, webhook_retry every 30 seconds) and last succeeded 3h 35m 0s ago. GET /api/v1/admin/jobs; journalctl -u 'vaultaire@*' | grep 'job run failed'."
       # A daily job's rule does not watch it.
       - eval_time: 3h35m
         alertname: JobStale
