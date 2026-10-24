@@ -421,3 +421,43 @@ func TestDNSCache_TheCallersDeadlineEndsTheLoop(t *testing.T) {
 func TestDNSCache_TheDefaultAttemptFloorIsTwoSeconds(t *testing.T) {
 	assert.Equal(t, 2*time.Second, (&dnsDialCache{}).attemptMin(), "net.Dialer's own floor per address")
 }
+
+// RP56-2 (the WP-P39 review; main's CI red on fb48d430): entry read the
+// cache, then called singleflight. A dial that read "no answer" and reached
+// DoChan only after another dial's flight had stored the answer and finished
+// started a SECOND lookup for an answer already cached — one extra resolver
+// query in the product, and calls 2 ≠ 1 in
+// TestDNSCache_ADialWhoseContextEndsDuringTheLookupReturnsAtItsDeadline under
+// -race. The flight now re-reads the cache first.
+func TestDNSCache_ADialThatMissedTheCacheJustBeforeAnotherFlightLandedDoesNotLookUpAgain(t *testing.T) {
+	r := &fakeResolver{answers: map[string][]string{}}
+	r.set("s3.lyve.example", "10.0.0.1")
+	c := newTestDNS(r, &fakeClock{t: time.Unix(1_800_000_000, 0)})
+	parked, release := make(chan struct{}), make(chan struct{})
+	var first atomic.Bool
+	c.beforeFlight = func(string) {
+		if first.CompareAndSwap(false, true) { // dial B: read "no answer", parks before DoChan
+			close(parked)
+			<-release
+		}
+	}
+	d := &fakeDial{}
+	dial := c.dialer(d.dial, 0)
+
+	bDone := make(chan error, 1)
+	go func() {
+		conn, err := dial(context.Background(), "tcp", "s3.lyve.example:443")
+		if conn != nil {
+			_ = conn.Close()
+		}
+		bDone <- err
+	}()
+	<-parked
+	dialOnce(t, dial, "s3.lyve.example:443") // dial A: its flight looks up, stores, finishes
+	require.Equal(t, int32(1), r.calls.Load())
+
+	close(release) // B reaches DoChan with the answer already cached
+	require.NoError(t, <-bDone)
+	assert.Equal(t, int32(1), r.calls.Load(), "the answer A's flight stored serves B: no second lookup")
+	assert.Equal(t, "10.0.0.1:443", d.last())
+}

@@ -105,6 +105,9 @@ type dnsDialCache struct {
 	dialAttemptMin time.Duration
 	entries        map[string]*dnsEntry
 	flight         singleflight.Group
+	// beforeFlight, when set, runs between the read of the cache and the
+	// singleflight call (a test seam: RP56-2's race lives there).
+	beforeFlight func(host string)
 }
 
 // lookupBound is how long one lookup may take.
@@ -142,7 +145,18 @@ func (c *dnsDialCache) entry(ctx context.Context, host string) *dnsEntry {
 	if e != nil && c.now().Before(e.expires) {
 		return e
 	}
+	if c.beforeFlight != nil {
+		c.beforeFlight(host)
+	}
 	ch := c.flight.DoChan(host, func() (any, error) {
+		// Another dial's flight may have stored a fresh answer between the
+		// read above and this call (RP56-2): it serves, no second lookup.
+		c.mu.Lock()
+		cur := c.entries[host]
+		c.mu.Unlock()
+		if cur != nil && c.now().Before(cur.expires) {
+			return cur, nil
+		}
 		// A refresh the waiting dial abandoned still completes for the next:
 		// under its own bound, never the dial's context.
 		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.lookupBound())
