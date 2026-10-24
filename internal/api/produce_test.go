@@ -94,6 +94,87 @@ func TestProduceBackupsAreTheBackupScripts(t *testing.T) {
 	assert.Equal(t, string(offBox[1]), strconv.Itoa(f.Backups.OffBoxDays))
 }
 
+// TestProducePITRIsTheInstallScript (Stage 1a Prompt 40): the point-in-time
+// archive the page describes is deploy/scripts/pg-pitr-install.sh's — the
+// vendor its endpoint names, the cipher it configures, the archive_timeout
+// it sets, and how far back it reaches: PITR_RETENTION_FULL weekly fulls
+// (the full timer names one day of the week).
+func TestProducePITRIsTheInstallScript(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "scripts", "pg-pitr-install.sh"))
+	require.NoError(t, err)
+	fact := func(name string) string {
+		m := regexp.MustCompile(`(?m)^` + name + `=(.+)$`).FindSubmatch(b)
+		require.NotNil(t, m, "%s moved out of pg-pitr-install.sh's facts", name)
+		return strings.Trim(string(m[1]), `'"`)
+	}
+	p := produce.All().Backups.PITR
+
+	vendors := map[string]string{"r2.cloudflarestorage.com": "Cloudflare R2"}
+	vendor, ok := vendors[fact("PITR_REPO_VENDOR_ENDPOINT")]
+	require.True(t, ok, "no vendor name for endpoint %s", fact("PITR_REPO_VENDOR_ENDPOINT"))
+	assert.Equal(t, vendor, p.Vendor)
+
+	ciphers := map[string]string{"aes-256-cbc": "AES-256"}
+	cipher, ok := ciphers[fact("PITR_CIPHER_TYPE")]
+	require.True(t, ok, "no cipher name for %s", fact("PITR_CIPHER_TYPE"))
+	assert.Equal(t, cipher, p.Cipher)
+
+	every, err := time.ParseDuration(fact("PITR_PG_ARCHIVE_TIMEOUT"))
+	require.NoError(t, err)
+	assert.Equal(t, every, time.Duration(p.EverySeconds)*time.Second, "archive_timeout = how far behind the archive runs")
+
+	assert.Regexp(t, `^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \*-\*-\* \d\d:\d\d:\d\d$`, fact("PITR_FULL_CALENDAR"), "the full backup is weekly")
+	fulls, err := strconv.Atoi(fact("PITR_RETENTION_FULL"))
+	require.NoError(t, err)
+	assert.Equal(t, fulls*7, p.Days, "count retention of weekly fulls: the oldest restorable point is at most fulls × 7 days old")
+	assert.LessOrEqual(t, p.Days, produce.All().Backups.UpToDays())
+
+	assert.Regexp(t, `(?m)^repo1-retention-full-type=count$`, string(b), "a time retention keeps the full older than the window")
+	assert.Regexp(t, `(?m)^repo1-cipher-type=\$PITR_CIPHER_TYPE$`, string(b))
+	assert.NotContains(t, string(b), "vaultaire-public", "the archive never goes to the public bucket")
+}
+
+// TestPITRRetentionAlarmIsThePagesNumber: PGPITRRetentionTooLong fires when
+// the oldest restorable point is one day older than the page's "up to N
+// days" — the copy rule's alarm.
+func TestPITRRetentionAlarmIsThePagesNumber(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "monitoring", "vaultaire-pitr.yml"))
+	require.NoError(t, err)
+	m := regexp.MustCompile(`time\(\) - vaultaire_pg_pitr_oldest_restorable_timestamp_seconds\) > (\d+) \* 86400`).FindSubmatch(b)
+	require.NotNil(t, m, "PGPITRRetentionTooLong's threshold moved")
+	assert.Equal(t, strconv.Itoa(produce.All().Backups.UpToDays()+1), string(m[1]))
+}
+
+// TestLegalBackupSentencesAreTheFacts: the privacy policy, terms, GDPR page,
+// DPA and BAA state the backup periods in words of their own; every such
+// sentence carries the produce file's numbers, and none of the sentences
+// that stopped being true (7 days, on the production host only) is left.
+func TestLegalBackupSentencesAreTheFacts(t *testing.T) {
+	dir := filepath.Join(repoRoot(t), "internal", "dashboard", "templates", "legal")
+	bk := produce.All().Backups
+	ageOut := regexp.MustCompile(`backups age out within (\d+) days`)
+	tech := regexp.MustCompile(`(\d+) days on the production host and (\d+) days off it, encrypted, and a continuous encrypted archive for point-in-time recovery reaching back (\d+) days`)
+	seenAge, seenTech := 0, 0
+	for _, name := range []string{"privacy.html", "terms.html", "gdpr.html", "dpa.html", "baa.html"} {
+		b, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 — the repo's own templates
+		require.NoError(t, err)
+		s := string(b)
+		for _, m := range ageOut.FindAllStringSubmatch(s, -1) {
+			seenAge++
+			assert.Equal(t, strconv.Itoa(bk.UpToDays()), m[1], "%s: %q", name, m[0])
+		}
+		for _, m := range tech.FindAllStringSubmatch(s, -1) {
+			seenTech++
+			assert.Equal(t, []string{strconv.Itoa(bk.OnBoxDays), strconv.Itoa(bk.OffBoxDays), strconv.Itoa(bk.PITR.Days)}, m[1:], name)
+		}
+		for _, stale := range []string{"7-day retention", "off-host copies", "age out within 7 days"} {
+			assert.NotContains(t, s, stale, "%s still says %q", name, stale)
+		}
+	}
+	assert.Equal(t, 5, seenAge, "one deletion sentence per page")
+	assert.Equal(t, 2, seenTech, "the DPA's and the GDPR page's backup measure")
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

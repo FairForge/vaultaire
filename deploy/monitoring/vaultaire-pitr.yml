@@ -1,0 +1,76 @@
+# Point-in-time recovery of the metadata database — install to /etc/prometheus/rules/ (see README).
+#
+# Series are written every minute by deploy/scripts/pg-pitr-metrics.sh (vaultaire-pitr-metrics.timer,
+# as postgres) into /var/lib/vaultaire-pitr/vaultaire_pitr.prom, read by node_exporter through the
+# root-owned symlink /var/lib/prometheus/node-exporter/vaultaire_pitr.prom (deploy/scripts/
+# pg-pitr-install.sh; docs/DEPLOY.md § Point-in-time recovery). Every series is written on every
+# run, at 0 when there is nothing to report, so a rule never waits for a first event:
+#   vaultaire_pg_archive_last_archived_timestamp_seconds  pg_stat_archiver.last_archived_time (0 = never/unknown)
+#   vaultaire_pg_archive_last_failed_timestamp_seconds    pg_stat_archiver.last_failed_time   (0 = never/unknown)
+#   vaultaire_pg_archive_failed_total                     pg_stat_archiver.failed_count
+#   vaultaire_pg_pitr_last_full_timestamp_seconds         newest full backup's end            (pgbackrest info)
+#   vaultaire_pg_pitr_last_diff_timestamp_seconds         newest differential OR full's end
+#   vaultaire_pg_pitr_oldest_restorable_timestamp_seconds the oldest backup's end: the earliest point a restore reaches
+#   vaultaire_pg_pitr_info_success / vaultaire_pg_archive_stats_success   1 = the source answered
+#   vaultaire_pg_pitr_metrics_timestamp_seconds           the writer's last run
+#
+# The RPO is the archive: archive_timeout = 60 s switches a segment every minute the cluster
+# writes (the app writes job_runs every 30 s), so a segment older than 10 min means the archive
+# has stopped and the RPO with it. Triage:
+#   sudo -u postgres psql -c 'SELECT * FROM pg_stat_archiver'
+#   sudo -u postgres pgbackrest --stanza=vaultaire check        switches WAL, waits for its archive
+#   sudo -u postgres pgbackrest --stanza=vaultaire info
+#   tail /var/log/pgbackrest/vaultaire-archive-push-async.log   the async pusher's errors (R2, cipher, key)
+#   du -sh /var/lib/postgresql/18/main/pg_wal /var/spool/pgbackrest   WAL piles up while the archive fails
+groups:
+  - name: vaultaire-pitr
+    rules:
+      - alert: PGArchiveFailing
+        expr: vaultaire_pg_archive_last_failed_timestamp_seconds > vaultaire_pg_archive_last_archived_timestamp_seconds
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL WAL archiving is failing"
+          description: "pg_stat_archiver's last failure is newer than its last success for 5 minutes: WAL segments are not reaching the pgBackRest repository (R2 bucket stored-pg-pitr), so point-in-time recovery stops at the last archived segment and pg_wal grows on the box. `tail /var/log/pgbackrest/vaultaire-archive-push-async.log` names the cause (the R2 key in /etc/pgbackrest/pgbackrest.conf rotated in .env? re-run deploy/scripts/pg-pitr-install.sh); `sudo -u postgres pgbackrest --stanza=vaultaire check` after the fix."
+
+      - alert: PGArchiveStale
+        expr: (time() - vaultaire_pg_archive_last_archived_timestamp_seconds) > 600 or absent(vaultaire_pg_archive_last_archived_timestamp_seconds)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No WAL segment archived in > 10 min"
+          description: "archive_timeout (60 s) switches a WAL segment every minute the cluster writes, and the app writes every 30 s: no segment archived for over 10 minutes means the archive has stopped (archive_mode off after a restart? a hung archive-push?), or the metrics writer has (PGPITRMetricsStale says). The RPO of the database is the age of this timestamp. `sudo -u postgres psql -c 'SELECT * FROM pg_stat_archiver'` and `SHOW archive_mode`."
+
+      - alert: PGPITRBackupStale
+        expr: (time() - vaultaire_pg_pitr_last_full_timestamp_seconds) > 8 * 86400 or (time() - vaultaire_pg_pitr_last_diff_timestamp_seconds) > 26 * 3600 or absent(vaultaire_pg_pitr_last_full_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No full pgBackRest backup in 8 d, or no differential in 26 h"
+          description: "The weekly full (Sunday 01:30 UTC) or the daily differential (Monday–Saturday 01:30) has not completed — or the repository did not answer `pgbackrest info` (vaultaire_pg_pitr_info_success 0). WAL archiving still covers recovery from the last backup, but a restore replays more WAL, and retention only expires old backups after a full succeeds (PGPITRRetentionTooLong next). `systemctl status vaultaire-pitr-backup@full vaultaire-pitr-backup@diff` and `sudo -u postgres pgbackrest --stanza=vaultaire info`."
+
+      - alert: PGPITRRetentionTooLong
+        # The copy rule's alarm (contract rule 8): the produce page and the privacy policy say a
+        # record deleted from the database stays in a backup up to 30 days. Four weekly fulls keep
+        # the oldest restorable point at most 28 days old; 31 days means expiry has stopped (no
+        # full has succeeded) and the sentence is no longer true. internal/api/produce_test.go
+        # holds this threshold to the page's number + 1.
+        expr: vaultaire_pg_pitr_oldest_restorable_timestamp_seconds > 0 and (time() - vaultaire_pg_pitr_oldest_restorable_timestamp_seconds) > 31 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The oldest restorable point of the database archive is older than 31 days"
+          description: "pgBackRest keeps four full backups (repo1-retention-full=4, weekly) and expires older ones — with their WAL — after each successful full. A backup older than 31 days is still in the repository, so records deleted from the database more than 30 days ago are still in a backup: the produce page and the privacy policy say up to 30 days. Fix the weekly full (PGPITRBackupStale), then `sudo -u postgres pgbackrest --stanza=vaultaire expire` and check `info`."
+
+      - alert: PGPITRMetricsStale
+        expr: (time() - vaultaire_pg_pitr_metrics_timestamp_seconds) > 600 or absent(vaultaire_pg_pitr_metrics_timestamp_seconds)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The PITR metrics have not been written in > 10 min"
+          description: "vaultaire-pitr-metrics.timer (pg-pitr-metrics.sh as postgres, every minute) has stopped writing /var/lib/vaultaire-pitr/vaultaire_pitr.prom, or node_exporter no longer reads it through /var/lib/prometheus/node-exporter/vaultaire_pitr.prom: every other PITR alert reads stale values. `systemctl status vaultaire-pitr-metrics.timer vaultaire-pitr-metrics.service`."

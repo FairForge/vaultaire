@@ -1,0 +1,186 @@
+# promtool unit test of vaultaire-pitr.yml (Stage 1a Prompt 40). Run with the rule file beside it
+# (`rule_files` resolve relative to this file):
+#   d=$(mktemp -d); cp deploy/monitoring/vaultaire-pitr.yml deploy/monitoring/tests/vaultaire-pitr_test.yml $d/
+#   promtool test rules $d/vaultaire-pitr_test.yml
+# Samples are at most 4 min apart (a sample older than the 5 min lookback is no sample).
+# Timestamps in the series are unix seconds of the test's own clock (time() = eval_time), so a
+# series `0+60x…` is "fresh at every sample".
+rule_files:
+  - vaultaire-pitr.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A healthy box, 30 days in: archiving every hour sample (each value is its own sample time),
+  # a full 3 days old, a diff 10 h old, the oldest restorable point 20 days old, the writer
+  # running. Nothing fires.
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_pg_archive_last_archived_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+3600x730'
+      - series: 'vaultaire_pg_archive_last_failed_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x730'
+      - series: 'vaultaire_pg_pitr_last_full_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '2332800x730'
+      - series: 'vaultaire_pg_pitr_last_diff_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '2556000x730'
+      - series: 'vaultaire_pg_pitr_oldest_restorable_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '864000x730'
+      - series: 'vaultaire_pg_pitr_metrics_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+3600x730'
+    alert_rule_test:
+      - eval_time: 720h
+        alertname: PGArchiveFailing
+        exp_alerts: []
+      - eval_time: 720h
+        alertname: PGArchiveStale
+        exp_alerts: []
+      - eval_time: 720h
+        alertname: PGPITRBackupStale
+        exp_alerts: []
+      - eval_time: 720h
+        alertname: PGPITRRetentionTooLong
+        exp_alerts: []
+      - eval_time: 720h
+        alertname: PGPITRMetricsStale
+        exp_alerts: []
+
+  # Archive failing: the last failure is newer than the last success from minute 10 on. Pages
+  # after 5 min, not before.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pg_archive_last_archived_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x10 600x30'
+      - series: 'vaultaire_pg_archive_last_failed_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x10 660+60x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PGArchiveFailing
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: PGArchiveFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "PostgreSQL WAL archiving is failing"
+              description: "pg_stat_archiver's last failure is newer than its last success for 5 minutes: WAL segments are not reaching the pgBackRest repository (R2 bucket stored-pg-pitr), so point-in-time recovery stops at the last archived segment and pg_wal grows on the box. `tail /var/log/pgbackrest/vaultaire-archive-push-async.log` names the cause (the R2 key in /etc/pgbackrest/pgbackrest.conf rotated in .env? re-run deploy/scripts/pg-pitr-install.sh); `sudo -u postgres pgbackrest --stanza=vaultaire check` after the fix."
+
+  # Archive stopped without failing (archive_mode off): the last success stays at 60 s. More
+  # than 10 min old + 2 min = fires at 13 min, not at 11.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pg_archive_last_archived_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '60x30'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: PGArchiveStale
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: PGArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "No WAL segment archived in > 10 min"
+              description: "archive_timeout (60 s) switches a WAL segment every minute the cluster writes, and the app writes every 30 s: no segment archived for over 10 minutes means the archive has stopped (archive_mode off after a restart? a hung archive-push?), or the metrics writer has (PGPITRMetricsStale says). The RPO of the database is the age of this timestamp. `sudo -u postgres psql -c 'SELECT * FROM pg_stat_archiver'` and `SHOW archive_mode`."
+
+  # Never archived on this box (the series is written at 0 from the first run): fires too.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pg_archive_last_archived_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x30'
+      - series: 'vaultaire_pg_pitr_metrics_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: PGArchiveStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "No WAL segment archived in > 10 min"
+              description: "archive_timeout (60 s) switches a WAL segment every minute the cluster writes, and the app writes every 30 s: no segment archived for over 10 minutes means the archive has stopped (archive_mode off after a restart? a hung archive-push?), or the metrics writer has (PGPITRMetricsStale says). The RPO of the database is the age of this timestamp. `sudo -u postgres psql -c 'SELECT * FROM pg_stat_archiver'` and `SHOW archive_mode`."
+      - eval_time: 15m
+        alertname: PGPITRMetricsStale
+        exp_alerts: []
+
+  # No diff for 27 h (the full is 2 d old): warns. A Sunday (full, no diff) does not: the diff
+  # series carries the full's time.
+  - interval: 4m
+    input_series:
+      - series: 'vaultaire_pg_pitr_last_full_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x500'
+      - series: 'vaultaire_pg_pitr_last_diff_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x500'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: PGPITRBackupStale
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: PGPITRBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "No full pgBackRest backup in 8 d, or no differential in 26 h"
+              description: "The weekly full (Sunday 01:30 UTC) or the daily differential (Monday–Saturday 01:30) has not completed — or the repository did not answer `pgbackrest info` (vaultaire_pg_pitr_info_success 0). WAL archiving still covers recovery from the last backup, but a restore replays more WAL, and retention only expires old backups after a full succeeds (PGPITRRetentionTooLong next). `systemctl status vaultaire-pitr-backup@full vaultaire-pitr-backup@diff` and `sudo -u postgres pgbackrest --stanza=vaultaire info`."
+
+  # The oldest restorable point is day 1 (0 would read as "unknown"): 30 days old at 744 h
+  # (quiet), past 31 days from 768 h, firing an hour later.
+  - interval: 4m
+    input_series:
+      - series: 'vaultaire_pg_pitr_oldest_restorable_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '86400x12000'
+    alert_rule_test:
+      - eval_time: 744h
+        alertname: PGPITRRetentionTooLong
+        exp_alerts: []
+      - eval_time: 794h
+        alertname: PGPITRRetentionTooLong
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "The oldest restorable point of the database archive is older than 31 days"
+              description: "pgBackRest keeps four full backups (repo1-retention-full=4, weekly) and expires older ones — with their WAL — after each successful full. A backup older than 31 days is still in the repository, so records deleted from the database more than 30 days ago are still in a backup: the produce page and the privacy policy say up to 30 days. Fix the weekly full (PGPITRBackupStale), then `sudo -u postgres pgbackrest --stanza=vaultaire expire` and check `info`."
+
+  # An unknown oldest point (0: info failed, or no backup yet) never reads as "too long".
+  - interval: 4m
+    input_series:
+      - series: 'vaultaire_pg_pitr_oldest_restorable_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x12000'
+    alert_rule_test:
+      - eval_time: 794h
+        alertname: PGPITRRetentionTooLong
+        exp_alerts: []
+
+  # The writer stopped at minute 5: warns after 10 min + 5 min.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pg_pitr_metrics_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x5 300x40'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: PGPITRMetricsStale
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: PGPITRMetricsStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "The PITR metrics have not been written in > 10 min"
+              description: "vaultaire-pitr-metrics.timer (pg-pitr-metrics.sh as postgres, every minute) has stopped writing /var/lib/vaultaire-pitr/vaultaire_pitr.prom, or node_exporter no longer reads it through /var/lib/prometheus/node-exporter/vaultaire_pitr.prom: every other PITR alert reads stale values. `systemctl status vaultaire-pitr-metrics.timer vaultaire-pitr-metrics.service`."

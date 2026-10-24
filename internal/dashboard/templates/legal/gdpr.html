@@ -1,7 +1,7 @@
 {{define "title"}}GDPR Compliance, Stored{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: September 30, 2026</p>
+    <p class="text-muted">Last updated: October 24, 2026</p>
     <h1>GDPR Compliance</h1>
     <p>Stored is committed to compliance with the General Data Protection Regulation (EU) 2016/679 ("GDPR"). This page describes how our service maps to GDPR requirements. For the full legal framework, see our <a href="/legal/privacy">Privacy Policy</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
 
@@ -24,7 +24,7 @@
     <ul>
         <li><strong>Data minimization:</strong> We store only the objects you upload and the minimal account metadata required to operate the service (email, hashed password, billing information). We do not collect analytics, behavioral data, or advertising profiles.</li>
         <li><strong>Purpose limitation:</strong> Your data is processed solely for the purpose of providing object storage and delivery. We do not access, analyze, or profile the content of stored objects.</li>
-        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our deletion job erases your objects, keys and account records on the scheduled date; backups age out within 7 days. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
+        <li><strong>Storage limitation:</strong> Account data is retained only for the duration of your account. Upon account deletion, a 30-day grace period allows data recovery, after which the account is closed and our deletion job erases your objects, keys and account records on the scheduled date; backups age out within 30 days. Large objects are stored in deduplicated blocks: the blocks of your objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another customer stores, which remains as that customer's data.</li>
     </ul>
 
     <h2 id="erasure">Article 17, Right to Erasure</h2>
@@ -72,7 +72,7 @@
         <li><strong>Integrity:</strong> ETag (MD5) verification on every upload, Object Lock (WORM) for immutable retention, MFA Delete for versioned objects.</li>
         <li><strong>Audit logging:</strong> API operations, account access, and administrative actions are logged.</li>
         <li><strong>Breach notification:</strong> Automated breach tracking with 72-hour notification deadline, severity assessment, and affected user notification (see below).</li>
-        <li><strong>Backups:</strong> Daily PostgreSQL backups with 7-day retention, currently on the production host (off-host copies planned before launch).</li>
+        <li><strong>Backups:</strong> Database backups: a daily copy kept 7 days on the production host and 30 days off it, encrypted, and a continuous encrypted archive for point-in-time recovery reaching back 28 days.</li>
     </ul>
 
     <h2 id="breach-notification">Articles 33/34, Breach Notification</h2>
@@ -126,7 +126,7 @@
             <tr><td>iDrive Inc.</td><td>Object storage, Standard tier, per-bucket region</td><td>United States / EU</td></tr>
             <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover</td><td>United States</td></tr>
             <tr><td>Geyser Data Inc.</td><td>Tape archive, Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
-            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
+            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets and the encrypted point-in-time archive of the database</td><td>Global (edge network) / United States</td></tr>
             <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
             <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>
             <tr><td>Resend Inc.</td><td>Transactional e-mail, when enabled</td><td>United States</td></tr>

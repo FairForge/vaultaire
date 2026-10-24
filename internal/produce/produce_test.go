@@ -27,6 +27,9 @@ func TestValidate_RefusesWhatTheCopyRulesRefuse(t *testing.T) {
 		"a period of zero":     func(f *File) { f.Retention[0].Days = 0 },
 		"an unknown action":    func(f *File) { f.Retention[0].Action = "archive" },
 		"a gate without flag":  func(f *File) { f.AdminReads.RequiresFlag = "" },
+		"pitr without days":    func(f *File) { f.Backups.PITR.Days = 0 },
+		"pitr without vendor":  func(f *File) { f.Backups.PITR.Vendor = "" },
+		"pitr unqualified":     func(f *File) { f.Backups.PITR.What = "We cannot read the archive." },
 	}
 	for name, mutate := range cases {
 		f, err := Parse(landing.ProduceJSON())
@@ -40,4 +43,9 @@ func TestParse_RefusesAnUnknownField(t *testing.T) {
 	b := strings.Replace(string(landing.ProduceJSON()), `"caveat"`, `"caveats_typo"`, 1)
 	_, err := Parse([]byte(b))
 	assert.Error(t, err)
+}
+
+func TestBackups_UpToDaysIsTheLongest(t *testing.T) {
+	assert.Equal(t, 30, Backups{OnBoxDays: 7, OffBoxDays: 30, PITR: PITR{Days: 28}}.UpToDays())
+	assert.Equal(t, 35, Backups{OnBoxDays: 7, OffBoxDays: 30, PITR: PITR{Days: 35}}.UpToDays())
 }
