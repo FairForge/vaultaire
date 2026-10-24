@@ -11,14 +11,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/recovery"
 	"github.com/FairForge/vaultaire/internal/recovery/client"
 	"github.com/FairForge/vaultaire/internal/recovery/realm"
@@ -45,8 +49,19 @@ type httpTestRealm struct {
 	realm          *realm.Realm
 	srv            *httptest.Server
 	down           atomic.Bool  // answer Unavailable (503), as a realm whose store fails
+	hang           atomic.Bool  // answer nothing until the caller gives up (a box that accepts and stalls)
 	deletes        atomic.Int32 // Delete requests answered OK
 	lifetime       atomic.Int64 // exp - nbf of the last token accepted
+
+	mu   sync.Mutex
+	seen map[string]int // requests per token subject, whatever the answer
+}
+
+// asked is how many requests the realm received for sub, answered or not.
+func (r *httpTestRealm) asked(sub string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.seen[sub]
 }
 
 func startHTTPTestRealm(t *testing.T, idByte byte) *httpTestRealm {
@@ -77,12 +92,24 @@ func (r *httpTestRealm) reply(w http.ResponseWriter, code int, resp recovery.Cli
 // serve answers a SecretsRequest that rides the handshake (Delete,
 // Register1, Recover1), the way cmd/recovery-realm's handshake path does.
 func (r *httpTestRealm) serve(w http.ResponseWriter, hr *http.Request) {
+	raw, _ := io.ReadAll(hr.Body)
+	req, err := recovery.UnmarshalClientRequest(raw)
+	if err == nil {
+		r.mu.Lock()
+		if r.seen == nil {
+			r.seen = map[string]int{}
+		}
+		r.seen[tokenSubject(req.AuthToken)]++
+		r.mu.Unlock()
+	}
+	if r.hang.Load() {
+		<-hr.Context().Done()
+		return
+	}
 	if r.down.Load() {
 		r.reply(w, http.StatusServiceUnavailable, recovery.ClientResponse{Status: recovery.ClientUnavailable})
 		return
 	}
-	raw, _ := io.ReadAll(hr.Body)
-	req, err := recovery.UnmarshalClientRequest(raw)
 	if err != nil || req.Handshake == nil || req.Kind != recovery.KindSecretsRequest || req.Realm != r.id {
 		r.reply(w, http.StatusBadRequest, recovery.ClientResponse{Status: recovery.ClientDecodingError})
 		return
@@ -147,6 +174,16 @@ func (r *httpTestRealm) validate(raw string) (realm.Auth, error) {
 	}
 	r.lifetime.Store(int64(c.ExpiresAt.Sub(c.NotBefore.Time)))
 	return realm.Auth{Tenant: c.Issuer, Subject: c.Subject}, nil
+}
+
+// tokenSubject reads a token's sub without checking it (the fixture's
+// bookkeeping of who was asked, never the realm's rule).
+func tokenSubject(raw string) string {
+	var c jwt.RegisteredClaims
+	if _, _, err := jwt.NewParser().ParseUnverified(raw, &c); err != nil {
+		return ""
+	}
+	return c.Subject
 }
 
 // holds reports whether the realm still keeps secret material for sub.
@@ -331,4 +368,127 @@ func TestAccountDeletionRunner_RecoveryNotConfiguredIsANote(t *testing.T) {
 	var meta string
 	require.NoError(t, f.db.QueryRow(`SELECT metadata::text FROM audit_logs WHERE tenant_id = $1 AND action = 'account.erased'`, f.tenantID).Scan(&meta))
 	assert.Contains(t, meta, `"realms_not_configured": true`)
+}
+
+// seedBare makes the fixture's user due with a tenant and nothing stored:
+// the second account of a run whose first is f's.
+func (f *deletionFixture) seedBare(scheduledAt time.Time) {
+	f.exec(`INSERT INTO users (id, email, password_hash, company, status, deletion_scheduled_at, deletion_reason, created_at, updated_at)
+	        VALUES ($1, $2, 'x', 'Runner Co', 'pending_deletion', $3, 'runner test', NOW(), NOW())`, f.userID, f.email, scheduledAt)
+	f.exec(`INSERT INTO tenants (id, name, email, access_key, secret_key, plan)
+	        VALUES ($1, 'Runner Co', $2, $3, $4, 'free')`, f.tenantID, f.email, "VKRN"+f.suffix, "SKRN"+f.suffix)
+	f.exec(`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, storage_used_bytes, tier) VALUES ($1, 1000000, 0, 'standard')`, f.tenantID)
+}
+
+// twoDueAccounts: f's account (due first) and g's, both registered at a
+// and b, erased by f's runner with a short realm HTTP timeout.
+func twoDueAccounts(t *testing.T, a, b *httpTestRealm) (f, g *deletionFixture, subF, subG string) {
+	t.Helper()
+	f, g = setupDeletionFixture(t), setupDeletionFixture(t)
+	f.seed(time.Now().Add(-2 * time.Hour))
+	g.seedBare(time.Now().Add(-time.Hour))
+	v := testRecoveryVault(t, a, b)
+	subF, subG = registerAt(t, v, f.userID, a, b), registerAt(t, v, g.userID, a, b)
+	f.runner.Recovery = v
+	f.runner.realmHTTP = &http.Client{Timeout: 150 * time.Millisecond}
+	f.runner.onlyDue = func(d account.Due) bool { return d.UserID == f.userID || d.UserID == g.userID }
+	return f, g, subF, subG
+}
+
+func realmCount(r *httpTestRealm, outcome string) float64 {
+	return testutil.ToFloat64(accountDeletionRealms.WithLabelValues(r.id.String(), outcome))
+}
+
+// RP54-4 (the WP-P38 review): a realm that gives no answer at all is asked
+// once per run. Before, every due tenant waited its own 30 s on it — 200
+// tenants and two dead realms were 3.3 h of a 6 h run.
+func TestAccountDeletionRunner_SilentRealmIsAskedOncePerRun(t *testing.T) {
+	a, b := startHTTPTestRealm(t, 0x5a), startHTTPTestRealm(t, 0x5b)
+	f, g, subF, subG := twoDueAccounts(t, a, b)
+	b.hang.Store(true)
+	aDeleted, bUnreachable := realmCount(a, realmDeleted), realmCount(b, realmUnreachable)
+
+	res, err := f.runner.RunOnce(context.Background())
+	require.Error(t, err)
+	require.Len(t, res.Tenants, 2)
+	for _, te := range res.Tenants {
+		assert.Equal(t, outcomeDeferred, te.Outcome, te.TenantID)
+		assert.Contains(t, te.Error, b.id.String(), "the error names the realm")
+		assert.Equal(t, 1, te.RealmsDeleted, "realm a's Delete went through for %s", te.TenantID)
+		assert.Equal(t, 1, te.RealmsDeferred)
+	}
+	assert.Equal(t, g.tenantID, res.Tenants[1].TenantID)
+	assert.Contains(t, res.Tenants[1].Error, "no answer earlier in this run", "the second tenant is deferred with the first's reason")
+	assert.Positive(t, b.asked(subF), "the first tenant asked the silent realm")
+	assert.Zero(t, b.asked(subG), "the second tenant's erasure sent the silent realm nothing")
+	assert.Equal(t, int32(2), a.deletes.Load(), "realm a got both Deletes")
+	assert.False(t, a.holds(t, subF))
+	assert.False(t, a.holds(t, subG))
+	assert.Equal(t, aDeleted+2, realmCount(a, realmDeleted))
+	assert.Equal(t, bUnreachable+1, realmCount(b, realmUnreachable), "counted once: the second tenant did not ask")
+
+	// The next run asks again.
+	b.hang.Store(false)
+	res, err = f.runner.RunOnce(context.Background())
+	require.NoError(t, err)
+	require.Len(t, res.Tenants, 2)
+	assert.Equal(t, outcomeErased, res.Tenants[0].Outcome)
+	assert.Equal(t, outcomeErased, res.Tenants[1].Outcome)
+	assert.False(t, b.holds(t, subF))
+	assert.False(t, b.holds(t, subG))
+}
+
+// A realm that answers — 503, or a refused token — is no proof it is gone:
+// it is asked for every tenant, and each outcome is counted under its name
+// (RP54-3: a realm refusing the token used to defer every erasure every run
+// with no metric).
+func TestAccountDeletionRunner_AnsweringRealmIsAskedForEveryTenant(t *testing.T) {
+	for _, tc := range []struct {
+		name, outcome string
+		break_        func(b *httpTestRealm)
+	}{
+		{"unavailable", realmUnavailable, func(b *httpTestRealm) { b.down.Store(true) }},
+		{"invalid_auth", realmInvalidAuth, func(b *httpTestRealm) { _, _ = io.ReadFull(rand.Reader, b.tokenKey) }}, // the realm's key rotated
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := startHTTPTestRealm(t, 0x6a), startHTTPTestRealm(t, 0x6b)
+			f, _, subF, subG := twoDueAccounts(t, a, b)
+			tc.break_(b)
+			before := realmCount(b, tc.outcome)
+
+			res, err := f.runner.RunOnce(context.Background())
+			require.Error(t, err)
+			require.Len(t, res.Tenants, 2)
+			assert.Positive(t, b.asked(subF))
+			assert.Positive(t, b.asked(subG), "an answering realm is asked for the second tenant too")
+			assert.NotContains(t, res.Tenants[1].Error, "no answer earlier in this run")
+			assert.Equal(t, before+2, realmCount(b, tc.outcome))
+			assert.Equal(t, int32(2), a.deletes.Load())
+		})
+	}
+}
+
+// Every configured realm's four outcomes exist from boot: the rule reads an
+// increase, and a series born at 1 is none (RP14-9).
+func TestAccountDeletionRealmSeries_ExistBeforeTheFirstDelete(t *testing.T) {
+	a := startHTTPTestRealm(t, 0x7a)
+	v := testRecoveryVault(t, a)
+	v.initRealmSeries()
+	reg := prometheus.NewPedanticRegistry()
+	require.NoError(t, reg.Register(accountDeletionRealms))
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				labels[lp.GetName()] = lp.GetValue()
+			}
+			if labels["realm"] == a.id.String() {
+				got[labels["outcome"]] = true
+			}
+		}
+	}
+	assert.Equal(t, map[string]bool{realmDeleted: true, realmInvalidAuth: true, realmUnavailable: true, realmUnreachable: true}, got)
 }

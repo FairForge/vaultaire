@@ -11,6 +11,10 @@
 #   vaultaire_backup_run_last_success_timestamp_seconds     the whole run finished (written last):
 #                                                           configs tar — the only backup of .env —
 #                                                           rules tar + upload, retention
+#   vaultaire_backup_offbox_retention_undeleted_files       old files (past 30 days, by the date in
+#   vaultaire_backup_offbox2_retention_undeleted_files      the name) the last Sync / Blomp retention
+#                                                           pass could not delete — a count, not a
+#                                                           timestamp (RP54-6, Prompt 39 Part 0)
 #
 # A run that fails writes nothing — the timestamps simply age. 26 h = one daily
 # run missed with two hours of slack; `or absent(...)` covers a box where the
@@ -60,3 +64,14 @@ groups:
         annotations:
           summary: "No second off-box copy (Blomp) of the database dump in > 26 h"
           description: "The dump has not reached Blomp (rclone crypt remote) with a verified size for over 26 hours. Sync still holds the off-box copy (BackupOffboxStale says), so this is a warning: `grep OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the step (login from BLOMP_* in .env, crypt remote in configs/blomp-backup.env, Blomp 503s or a full account)."
+      - alert: BackupOffboxRetentionStuck
+        # A count per leg, labelled `leg` so the two alerts never share a label set. The Sync
+        # leg also fails the run (BackupRunIncomplete); the Blomp leg never does — this is
+        # the only signal that a backup holding deleted records outlives its 30 days there.
+        expr: label_replace(vaultaire_backup_offbox_retention_undeleted_files > 0, "leg", "sync", "", "") or label_replace(vaultaire_backup_offbox2_retention_undeleted_files > 0, "leg", "blomp", "", "")
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} backup file(s) past their 30 days could not be deleted from the {{ $labels.leg }} off-box leg"
+          description: "The last retention pass of pg-backup.sh listed old backups on {{ $labels.leg }} it could not delete. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days: that holds only while this is 0. `grep -e 'could not delete' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names them; the next run retries every one."

@@ -140,6 +140,10 @@ type AccountDeletionRunner struct {
 	Recovery *recoveryVault
 	// realmHTTP is the realms' HTTP client (nil = a 15 s timeout).
 	realmHTTP *http.Client
+	// realmsSilent is this run's realms that gave no answer (realm id → the
+	// error), reset by every RunOnce: they are not asked again in the run
+	// (recovery_erasure.go, RP54-4).
+	realmsSilent map[string]string
 
 	BatchSize      int
 	MaxRunTime     time.Duration
@@ -320,6 +324,7 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 		return res, errors.New("account deletion: runner not configured")
 	}
 	start := r.now()
+	r.realmsSilent = map[string]string{}
 
 	// The walks earlier erasures owe a lagging backend (erasure_settle.go),
 	// first: they are the oldest debts.

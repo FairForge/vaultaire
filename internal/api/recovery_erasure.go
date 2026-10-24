@@ -4,10 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/recovery"
@@ -40,6 +45,37 @@ const (
 	recoveryTokenGrace = time.Minute
 )
 
+// The outcomes of one realm's Delete, as vaultaire_account_deletion_realms_total
+// counts them (RP54-3): deleted; invalid_auth = the realm refused the token (a
+// rotated key, or its clock behind ours past its 5 s leeway on nbf); unavailable
+// = it answered without confirming (5xx, Unavailable, rate limited, an answer
+// that is not one); unreachable = no answer at all (a dial that failed, nothing
+// back within the deadline).
+const (
+	realmDeleted     = "deleted"
+	realmInvalidAuth = "invalid_auth"
+	realmUnavailable = "unavailable"
+	realmUnreachable = "unreachable"
+)
+
+var accountDeletionRealms = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "vaultaire_account_deletion_realms_total",
+	Help: "Recovery-realm Deletes sent by the account-deletion runner, by realm and outcome (deleted, invalid_auth, unavailable, unreachable).",
+}, []string{"realm", "outcome"})
+
+// initRealmSeries starts every configured realm's outcomes at 0, so the rule's
+// increase sees the first refusal after a restart (RP14-9).
+func (v *recoveryVault) initRealmSeries() {
+	if v == nil {
+		return
+	}
+	for _, r := range v.realms {
+		for _, o := range []string{realmDeleted, realmInvalidAuth, realmUnavailable, realmUnreachable} {
+			accountDeletionRealms.WithLabelValues(r.ID, o)
+		}
+	}
+}
+
 // realmErasure is one user's Delete across the configured realms.
 type realmErasure struct {
 	deleted  int
@@ -59,9 +95,37 @@ func (r recoveryRealm) clientRealm() (client.Realm, error) {
 	return client.Realm{ID: id, Address: r.Address, PublicKey: pub}, nil
 }
 
+// realmOutcome names what a realm's Delete came to. ctx is the caller's:
+// once it is done the failure is ours (the tenant's deadline, a shutdown),
+// never the realm's — "" is counted as nothing.
+func realmOutcome(ctx context.Context, err error) string {
+	var urlErr *url.Error
+	var netErr net.Error
+	switch {
+	case err == nil:
+		return realmDeleted
+	case ctx.Err() != nil:
+		return ""
+	case errors.Is(err, client.ErrInvalidAuth):
+		return realmInvalidAuth
+	case errors.As(err, &urlErr), errors.As(err, &netErr), errors.Is(err, context.DeadlineExceeded):
+		// http.Client.Do's error, a body cut by the network, or the Delete's
+		// own 30 s: nothing came back.
+		return realmUnreachable
+	default:
+		return realmUnavailable
+	}
+}
+
 // eraseUser sends a Delete for userID's subject to every configured realm,
 // each on its own deadline. httpc nil = a client with a 15 s timeout.
-func (v *recoveryVault) eraseUser(ctx context.Context, userID string, httpc *http.Client) realmErasure {
+//
+// silent is the run's record of realms that gave no answer at all (RP54-4):
+// a realm in it is not asked again — the tenant is deferred with its reason —
+// and one whose Delete is unreachable is added to it, so a dead realm costs
+// one deadline per run, not one per due tenant. A realm that answered (a 5xx,
+// a refused token) is asked for every tenant. nil = ask every realm.
+func (v *recoveryVault) eraseUser(ctx context.Context, userID string, httpc *http.Client, silent map[string]string) realmErasure {
 	if httpc == nil {
 		httpc = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -86,11 +150,23 @@ func (v *recoveryVault) eraseUser(ctx context.Context, userID string, httpc *htt
 		return r.token(sub, v.now())
 	}}
 	for _, cr := range targets {
+		id := cr.ID.String()
+		if why, ok := silent[id]; ok {
+			out.deferred = append(out.deferred, id+": not asked, no answer earlier in this run ("+why+")")
+			continue
+		}
 		rctx, cancel := context.WithTimeout(ctx, recoveryEraseTimeout)
 		err := client.Delete(rctx, client.Config{Realms: []client.Realm{cr}, RegisterThreshold: 1, RecoverThreshold: 1, Transport: tr})
 		cancel()
+		outcome := realmOutcome(ctx, err)
+		if outcome != "" {
+			accountDeletionRealms.WithLabelValues(id, outcome).Inc()
+		}
 		if err != nil {
-			out.deferred = append(out.deferred, cr.ID.String()+": "+err.Error())
+			if outcome == realmUnreachable && silent != nil {
+				silent[id] = err.Error()
+			}
+			out.deferred = append(out.deferred, id+": "+err.Error())
 			continue
 		}
 		out.deleted++
@@ -132,7 +208,10 @@ func (r *AccountDeletionRunner) eraseRealms(ctx context.Context, d account.Due, 
 		return fmt.Errorf("a realm token minted at %s may still register until %s — the realms are asked at the next run",
 			at.UTC().Format(time.RFC3339), at.Add(recoveryTokenLifetime+recoveryTokenGrace).UTC().Format(time.RFC3339))
 	}
-	res := r.Recovery.eraseUser(ctx, d.UserID, r.realmHTTP)
+	if r.realmsSilent == nil {
+		r.realmsSilent = map[string]string{}
+	}
+	res := r.Recovery.eraseUser(ctx, d.UserID, r.realmHTTP, r.realmsSilent)
 	te.RealmsDeleted, te.RealmsDeferred = res.deleted, len(res.deferred)
 	if len(res.deferred) > 0 {
 		return fmt.Errorf("%d of %d realms did not confirm the delete: %s",

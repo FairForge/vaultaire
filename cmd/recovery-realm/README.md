@@ -29,7 +29,7 @@ A secret source that is set but unusable refuses the boot. A key is never logged
 
 ## Wire
 
-`POST /req` only: a `ClientRequest` (CBOR) with the tenant's JWT inside and the request under Noise NK to the realm's static key. Register2, Recover2 and Recover3 are refused unless an established session carries them. Sessions are keyed by (tenant, subject, session id) and live 5 minutes from last use. A refused token gets 401 `InvalidAuth`, whether it is missing, expired, has the wrong `aud`, an unknown `kid`, `exp − nbf` over 86 400 s, or a scope other than `user`.
+`POST /req` only: a `ClientRequest` (CBOR) with the tenant's JWT inside and the request under Noise NK to the realm's static key. Register2, Recover2 and Recover3 are refused unless an established session carries them. Sessions are keyed by (tenant, subject, session id) and live 5 minutes from last use. With the table full (100,000; 8 per subject), a request that rode the handshake (Delete, Register1, Recover1) is still applied and answered, with session lifetime 0 (no session kept); a handshake carrying nothing answers `Unavailable` (RP54-2). A refused token gets 401 `InvalidAuth`, whether it is missing, expired, has the wrong `aud`, an unknown `kid`, `exp − nbf` over 86 400 s, or a scope other than `user`.
 
 ## Enrol
 

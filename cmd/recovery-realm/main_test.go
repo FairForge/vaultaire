@@ -413,3 +413,42 @@ func TestRecoveryRealm_SessionsBoundedPerSubject(t *testing.T) {
 	assert.True(t, newest, "the newest session is the one kept")
 	assert.True(t, r.srv.putSession(sessionKey{tenant: "stored", sub: "someone-else", id: 1}, &session{}))
 }
+
+// RP54-2 (the WP-P38 review): a request that rides the handshake (Delete,
+// Register1, Recover1) was applied BEFORE the session was stored, so with the
+// table full the realm answered Unavailable for a Delete it had already
+// done. It is answered now, with no session kept (lifetime 0 — the client's
+// next request opens a new one); a handshake that carries nothing still
+// answers Unavailable on a full table.
+func TestRecoveryRealm_FullSessionTableStillAnswersADelete(t *testing.T) {
+	ctx := context.Background()
+	r := startRealm(t, 0x54)
+	cfg := networkConfig(r)
+	require.NoError(t, client.Register(ctx, cfg, []byte("2580"), []byte("s"), []byte("opaque-sub"), 5))
+
+	r.srv.mu.Lock()
+	clear(r.srv.sessions)
+	clear(r.srv.bySubject)
+	r.srv.mu.Unlock()
+	for i := 0; i < maxSessions; i++ {
+		require.True(t, r.srv.putSession(sessionKey{tenant: "stored", sub: fmt.Sprintf("other-%d", i), id: 1}, &session{}))
+	}
+	okBefore := testutil.ToFloat64(r.srv.metrics.requests.WithLabelValues("delete", "ok"))
+
+	// A fresh transport: no session of its own to reuse, so the Delete rides a handshake.
+	cfg.Transport = &client.HTTPTransport{Token: cfg.Transport.(*client.HTTPTransport).Token}
+	require.NoError(t, client.Delete(ctx, cfg), "the realm answers the Delete it applied")
+
+	rec, _, err := r.store.Load(ctx, "stored", "opaque-sub")
+	require.NoError(t, err)
+	assert.Equal(t, realm.NotRegistered, rec.State, "the record is gone")
+	assert.False(t, rec.HoldsSecretMaterial())
+	assert.Equal(t, okBefore+1, testutil.ToFloat64(r.srv.metrics.requests.WithLabelValues("delete", "ok")))
+	r.srv.mu.Lock()
+	assert.Len(t, r.srv.sessions, maxSessions, "no session was stored past the bound")
+	r.srv.mu.Unlock()
+
+	code, resp := handshakeOnly(t, r, token(t, r.idHex))
+	assert.Equal(t, http.StatusServiceUnavailable, code, "a handshake with no request still needs a slot")
+	assert.Equal(t, recovery.ClientUnavailable, resp.Status)
+}
