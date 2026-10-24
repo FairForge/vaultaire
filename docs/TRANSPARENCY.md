@@ -285,6 +285,23 @@ cat /root/translog.vkey                     # the VERIFIER key: public
 
 Losing the key loses nothing already signed: a new key is a new ceremony entry signed by the new key, and readers pin both. A leaked key is the same, plus a `key_retired` entry for it and a `reference` to the incident's write-up.
 
+## Recovery realms
+
+A recovery realm (keystone K5, `cmd/recovery-realm`, docs/reviews/K5-PROBE.md) is enrolled by a `key_ceremony` entry with `action: realm_enrolled` and `key_role: recovery_realm_key`, appended through the same `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code). The realm's identity is its **Noise static public key**: clients pin it (the `public_key` the recovery token endpoint returns), and a key a reader cannot find in the log is not one of our realms. The log's `key_fingerprint` field holds a hash, so the fingerprint is `sha256:` of the 32-byte public key: a reader hashes the key its client pins and looks for the entry. Like every ceremony the entry has **no free text** (RP37-10) — the realm id, the operator and what the realm promises are said in the `reference`d document, never in the entry (the shape before Prompt 37 carried a `statement` the log has refused since Prompt 30; no realm was ever enrolled with it).
+
+On the realm's box, with the realm's own environment (the key is read from its credential, never typed):
+
+```sh
+recovery-realm enrolment > /root/realm-enrolment.json   # {"action":"realm_enrolled","key_role":"recovery_realm_key","key_fingerprint":"sha256:…","participants":1,"shares":0,"threshold":0,…,"reference":""}
+```
+
+Set `"reference"` to the pull request or docs page that names the realm (id, operator, address), add `"mfa_code"` and POST it as in the signing-key ceremony above. 201 `{"index": n}`. `TestRecoveryRealm_EnrolmentIsAValidCeremonyEntry` decodes that body exactly as the route does and keeps it valid against the log's own rules. Rules:
+
+- One entry per realm key. A re-keyed realm is a `key_retired` entry for the old fingerprint and a `realm_enrolled` entry for the new one, both referencing the page that says so. Clients drop a key that has a `key_retired` entry.
+- A realm under another operator (F-19's second realm) is enrolled the same way; the referenced page names the operator's organisation, never a person.
+- Our copy never says "hardware attempt limits" until two realms under different control are both enrolled. Until then it is "attempt-limited by our realm" (F-19).
+- Nothing about a user is ever logged here: a realm's records are keyed by an opaque subject the log never sees.
+
 ## The checkpoint job
 
 `translog_checkpoint`, every 10 min (+90 s at boot, 2 min ceiling), under the job lock: when the log grew past the newest checkpoint it computes the root from the stored hashes, **proves the log extends the newest checkpoint** (a consistency proof verified by `transparency-dev/merkle`), and signs. A log that does not extend its last checkpoint is a failed run with the Error line `translog checkpoint: nothing signed … does not extend checkpoint N` — **never re-sign over it**: that is the event the log exists to expose; investigate the database (restore? manual SQL?) first. Result in `job_runs.result`: `{size, checkpoint_size, highwater_size, signed, root, reason, refused, note}` (`reason`: `unchanged`, `empty`, `no signing key`, `already signed`; `refused`: below).
