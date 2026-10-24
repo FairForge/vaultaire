@@ -14,7 +14,7 @@ restart. Backed by the `feature_flags` table (migration 059).
   `translog_customer_view`): on for a tenant when its row OR the global state
   (global row, else default) is on — a tenant row only turns it on. `Set` of a
   tenant OFF row while it is on globally = `ErrNotExemptible` (API 409
-  `flag_not_exemptible`). **`GlobalOnly(key)`** (`translog_public`, `recovery_vault` — both read
+  `flag_not_exemptible`). **`GlobalOnly(key)`** (`translog_public`, `recovery_vault`, `legal_le_pages` — read
   before authentication): `Set` of a tenant row = `ErrGlobalOnly` (API 400
   `flag_global_only`).
 - **`SetWriteGuard(g)`**: `g(ctx, Change{Key, TenantID, Clear, Enabled})` runs
@@ -69,6 +69,7 @@ are re-exported from `dashboard/handlers`); the `Register` calls are in
 | `sync_backend` | false | per tenant in `api.resolvePutStorageClass` (`tierPlacementGate`): a bucket with `tier_preference = 'sync'` (operator-set) places on the Sync.com WebDAV bridge (`sync` driver) only for a tenant with the flag. **Never a global row** — Sync's terms forbid reselling the service without its written consent |
 | `blomp_backend` | false | per tenant in `api.resolvePutStorageClass` (`tierPlacementGate`): a bucket with `tier_preference = 'blomp'` (operator-set) places on Blomp's Swift storage (`blomp` driver) only for a tenant with the flag; written sealed unless `BLOMP_ALLOW_UNSEALED` (`internal/drivers/swift_README.md`) |
 | `sia_backend` | false | per tenant in `api.resolvePutStorageClass` (`tierPlacementGate`): a bucket with `tier_preference = 'sia'` (operator-set) places on Sia through s3d (`sia` driver), whole objects, only for a tenant with the flag; written sealed unless `SIA_ALLOW_UNSEALED` |
+| `legal_le_pages` | false | global only: `dashboard.LegalLE` (`legal_le.go`) — `/legal/law-enforcement` + `/legal/what-we-can-produce` on the canonical origin and the trust host (plan 43.4, Stage 1a Prompt 38); OFF = a `no-store` 404 on both. Constant `produce.FlagLegalLEPages` |
 
 Adding a flag = key constant + `Register` call + call site (+ a `flagInfos`
 entry in `dashboard/handlers/admin_flags.go`). No schema change.

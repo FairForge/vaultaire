@@ -1,0 +1,526 @@
+{
+  "_about": "The ONE source of the 'what we can produce' page (plan 43.4, Trust lane item 2, contract rules 7 and 8). Every row is a code fact under test (internal/api/produce_test.go): account rows ARE the GDPR export's sections and their fields (account_export_sections.go), retention rows ARE the retention job's policies (retention.go), backup periods are deploy/scripts/pg-backup.sh's, every table and column named exists in the migrated schema, the SSE-C row's columns are what a Private bucket's object row holds (proved by a write). Mode names and sentences are never here: the page renders modes.json through internal/modes. A row with requires_flag is rendered only while that flag is ON globally. Change the code and this file together.",
+  "modes": [
+    "private",
+    "standard",
+    "public"
+  ],
+  "account": [
+    {
+      "section": "user",
+      "label": "Your account",
+      "fields": [
+        "id",
+        "email",
+        "company",
+        "role",
+        "status",
+        "email_verified",
+        "created_at",
+        "updated_at",
+        "deletion_scheduled_at",
+        "deletion_reason",
+        "signup_referrer",
+        "signup_utm_source",
+        "signup_utm_medium",
+        "signup_utm_campaign"
+      ]
+    },
+    {
+      "section": "security",
+      "label": "Two-factor sign-in",
+      "fields": [
+        "enabled",
+        "action",
+        "success",
+        "ip",
+        "user_agent",
+        "created_at"
+      ]
+    },
+    {
+      "section": "tenant",
+      "label": "The organisation (tenant)",
+      "fields": [
+        "id",
+        "name",
+        "email",
+        "primary_access_key_id",
+        "plan",
+        "created_at",
+        "suspended_at",
+        "slug"
+      ]
+    },
+    {
+      "section": "quota",
+      "label": "Quota and the house you built",
+      "fields": [
+        "storage_limit_bytes",
+        "storage_used_bytes",
+        "bandwidth_limit_bytes",
+        "bandwidth_used_bytes",
+        "tier",
+        "pin_hot_bytes",
+        "updated_at",
+        "floor",
+        "standard_tb",
+        "vault_tb",
+        "room"
+      ]
+    },
+    {
+      "section": "entitlement",
+      "label": "What was bought, and until when",
+      "fields": [
+        "standard_tb",
+        "vault_tb",
+        "pin_hot_tb",
+        "period",
+        "paid_through",
+        "renewal",
+        "provider",
+        "next_standard_tb",
+        "next_vault_tb",
+        "next_pin_hot_tb",
+        "next_period",
+        "lapsed_at",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "section": "payments",
+      "label": "Payments and receipts",
+      "fields": [
+        "id",
+        "provider",
+        "provider_id",
+        "kind",
+        "purpose",
+        "status",
+        "amount_cents",
+        "credit_cents",
+        "crypto_amount",
+        "crypto_currency",
+        "rate",
+        "period_start",
+        "period_end",
+        "standard_tb",
+        "vault_tb",
+        "pin_hot_tb",
+        "period",
+        "invoice_number",
+        "refund_of",
+        "note",
+        "metadata",
+        "created_at",
+        "settled_at"
+      ]
+    },
+    {
+      "section": "buckets",
+      "label": "Buckets and their settings",
+      "fields": [
+        "name",
+        "mode",
+        "visibility",
+        "ssec_required",
+        "region",
+        "data_residency",
+        "versioning",
+        "object_lock_enabled",
+        "default_retention_mode",
+        "default_retention_days",
+        "mfa_delete_enabled",
+        "sse_enabled",
+        "cors_origins",
+        "cors_rules",
+        "cache_max_age_secs",
+        "bandwidth_budget_bytes",
+        "cdn_force_download",
+        "tier_preference",
+        "logging_enabled",
+        "logging_target_bucket",
+        "logging_prefix",
+        "inventory_enabled",
+        "inventory_schedule",
+        "inventory_target_bucket",
+        "inventory_prefix",
+        "inventory_format",
+        "metadata",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "section": "bucket_notifications",
+      "label": "Bucket notifications",
+      "fields": [
+        "bucket",
+        "event_filter",
+        "target_type",
+        "target_url",
+        "enabled",
+        "created_at"
+      ]
+    },
+    {
+      "section": "objects",
+      "label": "Files (the current version of each)",
+      "fields": [
+        "bucket",
+        "key",
+        "size",
+        "etag",
+        "content_type",
+        "floor",
+        "backend",
+        "last_modified",
+        "created_at",
+        "last_accessed",
+        "metadata",
+        "tags",
+        "content_disposition",
+        "content_encoding",
+        "content_language",
+        "cache_control",
+        "http_expires",
+        "website_redirect_location",
+        "server_side_encryption",
+        "deduplicated"
+      ]
+    },
+    {
+      "section": "object_versions",
+      "label": "Earlier versions of files",
+      "fields": [
+        "bucket",
+        "key",
+        "version_id",
+        "size",
+        "etag",
+        "content_type",
+        "is_latest",
+        "is_delete_marker",
+        "created_at"
+      ]
+    },
+    {
+      "section": "object_locks",
+      "label": "Object locks and legal holds",
+      "fields": [
+        "bucket",
+        "key",
+        "retention_mode",
+        "retain_until_date",
+        "legal_hold",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "section": "multipart_uploads",
+      "label": "Uploads in progress",
+      "fields": [
+        "upload_id",
+        "bucket",
+        "key",
+        "status",
+        "content_type",
+        "storage_class",
+        "metadata",
+        "created_at"
+      ]
+    },
+    {
+      "section": "api_keys",
+      "label": "Access keys",
+      "fields": [
+        "id",
+        "key_id",
+        "is_primary",
+        "name",
+        "permissions",
+        "bucket_scope",
+        "ip_allowlist",
+        "expires_at",
+        "revoked_at",
+        "last_used",
+        "created_at"
+      ]
+    },
+    {
+      "section": "bandwidth_usage",
+      "label": "Daily transfer totals",
+      "fields": [
+        "date",
+        "ingress_bytes",
+        "egress_bytes",
+        "requests"
+      ]
+    },
+    {
+      "section": "events",
+      "label": "API and dashboard events",
+      "fields": [
+        "id",
+        "type",
+        "data",
+        "created_at"
+      ]
+    },
+    {
+      "section": "webhooks",
+      "label": "Webhook endpoints",
+      "fields": [
+        "id",
+        "url",
+        "events",
+        "enabled",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "section": "oauth_accounts",
+      "label": "Linked Google or GitHub sign-in",
+      "fields": [
+        "provider",
+        "linked_at"
+      ]
+    },
+    {
+      "section": "sessions",
+      "label": "Dashboard sign-in sessions",
+      "fields": [
+        "created_at",
+        "last_active_at",
+        "expires_at",
+        "ip",
+        "user_agent"
+      ]
+    },
+    {
+      "section": "signup",
+      "label": "Waitlist sign-up",
+      "fields": [
+        "created_at",
+        "source",
+        "referrer",
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "plan_std_tb",
+        "plan_vault_tb",
+        "room",
+        "country",
+        "ip",
+        "user_agent"
+      ]
+    },
+    {
+      "section": "exports",
+      "label": "Data export requests",
+      "fields": [
+        "id",
+        "status",
+        "format",
+        "file_size_bytes",
+        "attempts",
+        "created_at",
+        "completed_at",
+        "expires_at"
+      ]
+    },
+    {
+      "section": "audit_trail",
+      "label": "The account's audit trail",
+      "fields": [
+        "at",
+        "event_type",
+        "action",
+        "resource",
+        "result",
+        "severity",
+        "ip",
+        "user_agent",
+        "metadata"
+      ]
+    }
+  ],
+  "retention": [
+    {
+      "table": "s3_access_log",
+      "days": 30,
+      "action": "delete",
+      "holds": [
+        "bucket",
+        "object_key",
+        "operation",
+        "source_ip",
+        "user_agent",
+        "logged_at"
+      ],
+      "what": "The request log of your buckets: each request's bucket, object name, operation, client IP address and user agent."
+    },
+    {
+      "table": "events",
+      "days": 90,
+      "action": "delete",
+      "holds": [
+        "type",
+        "data",
+        "created_at"
+      ],
+      "what": "API and dashboard events of the account."
+    },
+    {
+      "table": "quota_usage_events",
+      "days": 90,
+      "action": "delete",
+      "holds": [
+        "operation",
+        "bytes_delta",
+        "object_key"
+      ],
+      "what": "Quota usage events (no longer written; older rows are purged)."
+    },
+    {
+      "table": "stripe_events",
+      "days": 90,
+      "action": "delete",
+      "holds": [
+        "event_type",
+        "data"
+      ],
+      "what": "Card payment provider event bodies (Stripe)."
+    },
+    {
+      "table": "payment_events",
+      "days": 90,
+      "action": "delete",
+      "holds": [
+        "provider",
+        "event_type",
+        "data"
+      ],
+      "what": "Payment provider event bodies of every provider, except the record of a subscription still to be cancelled, kept until the account is erased."
+    },
+    {
+      "table": "cdn_access_log",
+      "days": 2,
+      "action": "delete",
+      "holds": [
+        "bucket",
+        "object_key",
+        "country",
+        "referer",
+        "accessed_at"
+      ],
+      "what": "Public-link visits: object name, the visitor's country and referring page; no IP address. Rolled into daily counts, then purged."
+    },
+    {
+      "table": "webhook_deliveries",
+      "days": 30,
+      "action": "delete",
+      "holds": [
+        "status",
+        "response_code",
+        "created_at"
+      ],
+      "what": "Webhook delivery attempts."
+    },
+    {
+      "table": "webhook_outbox",
+      "days": 30,
+      "action": "delete",
+      "holds": [
+        "state",
+        "attempts",
+        "created_at"
+      ],
+      "what": "Finished webhook deliveries (a pending one is kept until it finishes)."
+    },
+    {
+      "table": "waitlist_signups",
+      "days": 90,
+      "action": "scrub",
+      "scrub": [
+        "ip_address",
+        "user_agent"
+      ],
+      "holds": [
+        "email",
+        "ip_address",
+        "user_agent",
+        "country"
+      ],
+      "what": "A waitlist sign-up's IP address and user agent are blanked; the sign-up itself is kept."
+    }
+  ],
+  "exports_days": 7,
+  "kept": [
+    {
+      "table": "audit_logs",
+      "holds": [
+        "action",
+        "resource",
+        "ip",
+        "user_agent",
+        "performed_by"
+      ],
+      "what": "The audit trail: key and password changes, sign-ins, account and operator actions, each with the client IP address and user agent. Kept for the life of the service; an account's own entries are removed when it is erased."
+    }
+  ],
+  "backups": {
+    "on_box_days": 7,
+    "off_box_days": 30
+  },
+  "private_ssec": {
+    "table": "object_head_cache",
+    "holds": [
+      {
+        "column": "object_key",
+        "what": "the object's name, as you wrote it"
+      },
+      {
+        "column": "size_bytes",
+        "what": "its size"
+      },
+      {
+        "column": "etag",
+        "what": "its ETag: for a file uploaded in one request, the MD5 of its plaintext"
+      },
+      {
+        "column": "content_type",
+        "what": "its content type"
+      },
+      {
+        "column": "metadata",
+        "what": "the metadata you attach (x-amz-meta-*)"
+      },
+      {
+        "column": "ssec_key_md5",
+        "what": "the MD5 of your key, so a request with a different key is refused"
+      },
+      {
+        "column": "updated_at",
+        "what": "when it was written"
+      },
+      {
+        "column": "last_accessed",
+        "what": "when it was last read"
+      }
+    ]
+  },
+  "admin_reads": {
+    "requires_flag": "translog_admin_reads",
+    "text": "Every time an operator reads a customer's metadata through the admin API or the admin dashboard, an entry is appended to our transparency log before the read is served. The entry names no customer: it carries a commitment only that customer can check."
+  },
+  "builds": {
+    "requires_flag": "translog_public",
+    "text": "Every server build we run is appended to our public transparency log."
+  },
+  "caveat": "No storage provider can promise that it will not be able to read in the future: a server can be changed to keep the keys it is sent, and an app can be changed to send a key away, from the day of the change. Encrypting with your own tools before you upload leaves nothing of ours to change."
+}

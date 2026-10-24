@@ -83,6 +83,18 @@ type File struct {
 // forbiddenWords no sentence may say (contract line 8).
 var forbiddenWords = []string{"zero-knowledge", "zero knowledge", "zero‑knowledge", "zeroknowledge"}
 
+// ForbiddenWord returns the first forbidden word text contains, else "" —
+// for other generated copy held to this table's rules (internal/produce).
+func ForbiddenWord(text string) string {
+	low := strings.ToLower(text)
+	for _, w := range forbiddenWords {
+		if strings.Contains(low, w) {
+			return w
+		}
+	}
+	return ""
+}
+
 // Validate is what makes the table loadable: exactly Private, Standard and
 // Public in that order, every name and sentence non-empty, a pre-key
 // sentence for every sentence that needs the key, no "Vault" mode, no
