@@ -61,6 +61,8 @@ LAB bolt load: state=NotRegistered revision=0 holds_secret_material=false
 - `account_deletion`: `ok`, last success 04:34:30 UTC today (before #939), `result {"settling": null}`; **0** users `pending_deletion`, so the next run (04:30 UTC 2026-10-25) erases nobody; no run was triggered by this review. The first prod erasure under this build will carry `realms_not_configured: true`.
 - Deploy of main's tip (run 40104392996), step "Reproducible client builds": the four rows OK, then `this checkout's sdk-wasm bc06f7a6… is listed (6 s)`, `sdk-js beea90d7… is listed (0 s)`; no `::warning::`.
 
+**After the fixes:** `/version` `70ad59463bf7` (build 2026-10-24T16:24:39Z) = main's tip after #945; active slot 8000 since 16:47:45 UTC: 120 journal lines, **0** `"level":"error"`; still no row for the three flags; `account_deletion` `ok` (04:34 UTC).
+
 ## Fixes (this review)
 
 | PR | What | RED on main | Mutation → caught by |
