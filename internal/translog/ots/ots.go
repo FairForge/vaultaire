@@ -95,14 +95,48 @@ func namesOnly(proof []byte, calendar string) error {
 	if err != nil {
 		return err
 	}
+	return sequencesNameOnly(f.Sequences, calendar)
+}
+
+// sequencesNameOnly is namesOnly over already-parsed sequences (the Upgrade
+// tail has no file to parse).
+func sequencesNameOnly(seqs []opentimestamps.Sequence, calendar string) error {
 	want := strings.TrimSuffix(calendar, "/")
-	for _, seq := range f.Sequences {
+	for _, seq := range seqs {
 		if a := seq.GetAttestation(); a.CalendarServerURL != "" && strings.TrimSuffix(a.CalendarServerURL, "/") != want {
 			return fmt.Errorf("%w: a pending attestation names %s, asked %s (a pool? configure the calendar itself)",
 				ErrBadAnswer, a.CalendarServerURL, calendar)
 		}
 	}
 	return nil
+}
+
+// tailSequences parses a calendar's upgrade answer — a timestamp with NO
+// file header — structurally: the library's parser reads only whole files,
+// so the answer is parsed under a throwaway 32-byte digest, which is no part
+// of the parsed sequences. fileOf cannot do this job (RP50-1, WP-P36's lab):
+// its header carries exactly 32 digest bytes, and the commitment at a REAL
+// calendar's pending attestation is the computed message, prepend/append-
+// wrapped by the calendar (alice's is 44 bytes) — every real upgrade was
+// refused as "not a SHA-256" and no real pending proof could ever complete.
+func tailSequences(timestamp []byte) ([]opentimestamps.Sequence, error) {
+	head, err := serialize(&opentimestamps.File{Digest: make([]byte, 32)})
+	if err != nil {
+		return nil, err
+	}
+	f, err := parse(append(head, timestamp...))
+	if err != nil {
+		return nil, err
+	}
+	if len(f.Sequences) == 0 {
+		return nil, fmt.Errorf("%w: no attestation", ErrBadAnswer)
+	}
+	for _, seq := range f.Sequences {
+		if a := seq.GetAttestation(); a.CalendarServerURL == "" && a.BitcoinBlockHeight == 0 {
+			return nil, fmt.Errorf("%w: a path that ends in no attestation", ErrBadAnswer)
+		}
+	}
+	return f.Sequences, nil
 }
 
 // Upgrade asks calendar to complete every pending attestation of proof that
@@ -142,18 +176,14 @@ func (c *Client) Upgrade(ctx context.Context, calendar string, proof []byte) (ou
 		if err := classify(status); err != nil {
 			return nil, false, err
 		}
-		tail, err := fileOf(commitment, body)
+		tseqs, err := tailSequences(body)
 		if err != nil {
 			return nil, false, err
 		}
-		if err := namesOnly(tail, calendar); err != nil {
+		if err := sequencesNameOnly(tseqs, calendar); err != nil {
 			return nil, false, err
 		}
-		tf, err := parse(tail)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, t := range tf.Sequences {
+		for _, t := range tseqs {
 			// The library's own splice (UpgradeSequence): the path to the
 			// pending attestation, then the calendar's path from there.
 			kept = append(kept, append(slices.Clone(seq[:len(seq)-1]), t...))
