@@ -1,10 +1,14 @@
 package clientbuilds
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,4 +76,90 @@ func TestClientBuildManifest_ReproCheckFailsOnADifferentHash(t *testing.T) {
 
 	require.Error(t, err, "a wrong hash fails the deploy: %s", out)
 	assert.Contains(t, string(out), "REFUSED")
+}
+
+// RP51-3 (Stage 1a Prompt 38): between an sdk merge and its manifest row,
+// main builds client bytes the log does not list, and translog-verify
+// -client refuses them. No CI check can demand the row (it names the MERGE
+// commit, which no sdk PR knows), so the Deploy job's script builds the
+// CHECKOUT's own clients after the rows and warns — never fails — when one is
+// not listed.
+
+// reproCheck runs the script on rows, building only sdk-js from the
+// checkout (no WASM build), and returns its output and error.
+func reproCheck(t *testing.T, rows []translog.ClientBuild) (string, error) {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("runs the repro script (git archive + a build)")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed")
+	}
+	root, err := filepath.Abs("../../..")
+	require.NoError(t, err)
+	raw, err := json.Marshal(map[string]any{"clients": rows})
+	require.NoError(t, err)
+	mf := filepath.Join(t.TempDir(), "manifest.json")
+	require.NoError(t, os.WriteFile(mf, raw, 0o600))
+	cmd := exec.Command("bash", filepath.Join(root, "scripts", "repro-check-clients.sh"), mf)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "REPRO_CHECKOUT_CLIENTS="+translog.ClientSDKJS)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func checkoutSHA256(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("../../..", rel))
+	require.NoError(t, err)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// A manifest whose rows all rebuild, none of which is the checkout's sdk-js:
+// the deploy passes and the log says which client and hash are unlisted.
+func TestClientBuildManifest_ReproCheckWarnsOnAnUnlistedCheckoutBuild(t *testing.T) {
+	old := translog.ClientBuild{Client: translog.ClientSDKJS, Version: "0.1.0", SourceCommit: h40,
+		SHA256:    "4766be3dba6d856dea354cbb2c8c90a024eb585c51234d0f3271e906e9f9d7d0", // the real 0.1.0 row
+		Toolchain: "none", Recipe: "scripts/build-client.sh"}
+	head := checkoutSHA256(t, "sdk/js/e2ee/index.mjs")
+	require.NotEqual(t, old.SHA256, head, "precondition: the checkout's sdk-js is not 0.1.0's")
+
+	out, err := reproCheck(t, []translog.ClientBuild{old})
+
+	require.NoError(t, err, "an unlisted checkout build never fails the deploy: %s", out)
+	assert.Contains(t, out, old.SHA256+" OK", "the row itself rebuilt")
+	assert.Contains(t, out, "::warning::")
+	assert.Contains(t, out, "sdk-js "+head, "the warning names the client and the hash")
+}
+
+// The checkout's build listed (a row at HEAD with its hash): no warning.
+func TestClientBuildManifest_ReproCheckListedCheckoutBuildIsQuiet(t *testing.T) {
+	root, err := filepath.Abs("../../..")
+	require.NoError(t, err)
+	headCommit, err := exec.Command("git", "-C", root, "rev-parse", "HEAD").Output()
+	require.NoError(t, err)
+	committed, err := exec.Command("git", "-C", root, "show", "HEAD:sdk/js/e2ee/index.mjs").Output()
+	require.NoError(t, err)
+	sum := sha256.Sum256(committed)
+	if hex.EncodeToString(sum[:]) != checkoutSHA256(t, "sdk/js/e2ee/index.mjs") {
+		t.Skip("sdk/js/e2ee/index.mjs has uncommitted changes")
+	}
+	row := translog.ClientBuild{Client: translog.ClientSDKJS, Version: "9.9.9", SourceCommit: strings.TrimSpace(string(headCommit)),
+		SHA256: hex.EncodeToString(sum[:]), Toolchain: "none", Recipe: "scripts/build-client.sh"}
+
+	out, err := reproCheck(t, []translog.ClientBuild{row})
+
+	require.NoError(t, err, out)
+	assert.NotContains(t, out, "::warning::", out)
+	assert.Contains(t, out, "listed")
+}
+
+// The script checks every client of the closed list by default.
+func TestReproCheckClients_DefaultsToTheClosedClientList(t *testing.T) {
+	raw, err := os.ReadFile("../../../scripts/repro-check-clients.sh")
+	require.NoError(t, err)
+	m := regexp.MustCompile(`(?m)^checkout_clients=\$\{REPRO_CHECKOUT_CLIENTS:-([^}]*)\}$`).FindSubmatch(raw)
+	require.NotNil(t, m, "the script names its default list")
+	assert.Equal(t, translog.BuildClients(), strings.Fields(string(m[1])))
 }

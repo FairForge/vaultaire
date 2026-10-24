@@ -71,6 +71,8 @@ jobs:
         # Every row of the client manifest rebuilt from its OWN source commit
         # (K4c-3b): the deploy fails when a hash differs from what the
         # transparency log will publish (internal/translog/clientbuilds).
+        # Then this checkout's own clients: one no row lists is a ::warning::
+        # (translog-verify -client refuses it), never a failure (RP51-3).
         run: scripts/repro-check-clients.sh
 
       - name: Upload artifact

@@ -6,6 +6,14 @@
 # log will publish must be the bytes the commit builds. Run by deploy.yml's
 # build job and by TestClientBuildManifest_ReproCheckFailsOnADifferentHash.
 #
+# Then the CHECKOUT's own clients are built and each is looked up in the
+# manifest (RP51-3, Stage 1a Prompt 38): between an sdk merge and its row,
+# main ships client bytes no row lists, and translog-verify -client refuses
+# them. No CI check can demand the row — it names the MERGE commit, which no
+# sdk PR knows — so this only WARNS (a ::warning:: line naming the client and
+# the hash); it never fails the deploy, not even when the build itself fails.
+# REPRO_CHECKOUT_CLIENTS narrows the list (the tests build sdk-js only).
+#
 # Usage: scripts/repro-check-clients.sh [manifest.json]
 set -euo pipefail
 
@@ -56,5 +64,23 @@ while IFS= read -r row; do
 		fail=1
 	fi
 done <<<"$rows"
+
+# The checkout's clients (RP51-3). The default list is translog's closed list
+# (TestReproCheckClients_DefaultsToTheClosedClientList).
+checkout_clients=${REPRO_CHECKOUT_CLIENTS:-sdk-wasm sdk-js}
+for client in $checkout_clients; do
+	start=$SECONDS
+	out="$work/checkout-$client"
+	if ! bash "$root/scripts/build-client.sh" "$client" "$out"; then
+		echo "::warning::repro-check-clients: this checkout's $client did not build — whether main ships a listed build is unknown"
+		continue
+	fi
+	got=$(shasum -a 256 "$out" | cut -d' ' -f1)
+	if jq -e --arg c "$client" --arg h "$got" 'any(.clients[]; .client == $c and .sha256 == $h)' "$manifest" >/dev/null; then
+		echo "repro-check-clients: this checkout's $client $got is listed ($((SECONDS - start)) s)"
+	else
+		echo "::warning::repro-check-clients: this checkout builds $client $got, which no row of the client manifest lists — translog-verify -client refuses it until a row names it ($((SECONDS - start)) s)"
+	fi
+done
 
 exit $fail
