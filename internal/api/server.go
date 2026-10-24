@@ -1636,6 +1636,7 @@ func (s *Server) Start() error {
 		}
 		s.accountDeletion.Sessions = s.sessionStore
 		s.accountDeletion.Keys = s.tenantKeys
+		s.accountDeletion.Recovery = s.recovery
 		s.jobs.Register(s.accountDeletion.spec())
 	}
 	// Routing truth (WP-R7-5): every backend_name on record must be a

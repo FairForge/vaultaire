@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +55,10 @@ import (
 //	   is asked what it still holds for the tenant — blobs behind a delete
 //	   marker, blobs no row names — and it is deleted. A backend that cannot
 //	   be listed or refuses a delete defers the tenant.
+//	   Then the RECOVERY REALMS (recovery_erasure.go, RP52-3): the user's
+//	   record at every realm of RECOVERY_REALMS_FILE gets a Delete on its own
+//	   token; a realm that does not confirm defers the tenant, and so does a
+//	   realm token minted within its life (it could still Register).
 //	c. Rows — account.EraseRows: one transaction over every tenant/user
 //	   table (the contract is tested against information_schema), users and
 //	   tenants last, ledgers kept and scrubbed.
@@ -125,6 +130,13 @@ type AccountDeletionRunner struct {
 	// Sessions revokes the user's dashboard sessions (nil-safe; the DB
 	// store's rows are deleted by EraseRows anyway).
 	Sessions dashauth.SessionStore
+	// Recovery is the recovery vault's minter (recovery_tokens.go): the
+	// erasure deletes the user's record at each of its realms
+	// (recovery_erasure.go). Nil = not configured: nothing is asked, the run
+	// carries a note.
+	Recovery *recoveryVault
+	// realmHTTP is the realms' HTTP client (nil = a 15 s timeout).
+	realmHTTP *http.Client
 
 	BatchSize      int
 	MaxRunTime     time.Duration
@@ -193,8 +205,15 @@ type TenantErasure struct {
 	// KeysShredded counts the tenant key versions deleted with the rows
 	// (WP-R8-1): from then on every blob sealed under them — a copy the
 	// sweep missed, a backup of a backend — is unreadable.
-	KeysShredded int64  `json:"keys_shredded,omitempty"`
-	Error        string `json:"error,omitempty"`
+	KeysShredded int64 `json:"keys_shredded,omitempty"`
+	// RealmsDeleted are the recovery realms that confirmed the Delete of the
+	// user's record (a realm holding none confirms too); RealmsDeferred did
+	// not, and the tenant is deferred. RealmsNotConfigured: no recovery
+	// vault, nothing asked (RP52-3).
+	RealmsDeleted       int    `json:"realms_deleted"`
+	RealmsDeferred      int    `json:"realms_deferred"`
+	RealmsNotConfigured bool   `json:"realms_not_configured,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 // AccountDeletionResult is one run's outcome.
@@ -339,6 +358,15 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 			res.Errors = append(res.Errors, fmt.Sprintf("tenant %s deferred: %s", d.TenantID, te.Error))
 		}
 	}
+	unasked := 0
+	for _, te := range res.Tenants {
+		if te.RealmsNotConfigured && (te.Outcome == outcomeErased || te.Outcome == outcomeSettling) {
+			unasked++
+		}
+	}
+	if unasked > 0 {
+		res.Notes = append(res.Notes, realmsNotConfiguredNote(unasked))
+	}
 	res.Duration = r.now().Sub(start).String()
 	owed := r.settles
 	res.owed = &owed
@@ -452,6 +480,12 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 				zap.Int("objects_deleted", te.ObjectsDeleted), zap.Any("swept", te.Swept))
 			return te
 		}
+	}
+
+	// b3. The user's record at the recovery realms, while the user row exists
+	// (recovery_erasure.go): a realm that does not confirm defers the tenant.
+	if err := r.eraseRealms(ctx, d, &te); err != nil {
+		return r.defer_(te, log, "recovery realms", err)
 	}
 
 	// A backend whose listing lags cannot prove itself empty today: the walk
@@ -573,6 +607,11 @@ func (r *AccountDeletionRunner) auditMeta(ctx context.Context, te TenantErasure,
 		"unswept_backends": te.UnsweptBackends,
 		"rows":             te.Rows,
 		"keys_shredded":    te.KeysShredded,
+		"realms_deleted":   te.RealmsDeleted,
+		"realms_deferred":  te.RealmsDeferred,
+	}
+	if te.RealmsNotConfigured {
+		meta["realms_not_configured"] = true
 	}
 	if te.Error != "" {
 		// An erased account with an error: the pass after the row erase did

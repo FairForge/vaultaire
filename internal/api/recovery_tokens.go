@@ -203,18 +203,28 @@ func (v *recoveryVault) mint(userID string) ([]recoveryRealmToken, error) {
 	now := v.now()
 	out := make([]recoveryRealmToken, 0, len(v.realms))
 	for _, r := range v.realms {
-		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"iss": r.tenant, "sub": sub, "aud": r.ID, "scope": "user",
-			"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(recoveryTokenLifetime).Unix(),
-		})
-		tok.Header["kid"] = r.Kid
-		s, err := tok.SignedString(r.key)
+		s, err := r.token(sub, now)
 		if err != nil {
-			return nil, fmt.Errorf("sign the token for realm %s: %w", r.ID, err)
+			return nil, err
 		}
 		out = append(out, recoveryRealmToken{ID: r.ID, Address: r.Address, PublicKey: r.PublicKey, Token: s})
 	}
 	return out, nil
+}
+
+// token is the realm's HS256 token for sub: the one set of claims both the
+// route and the erasure (recovery_erasure.go) send, never a longer life.
+func (r recoveryRealm) token(sub string, now time.Time) (string, error) {
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"iss": r.tenant, "sub": sub, "aud": r.ID, "scope": "user",
+		"iat": now.Unix(), "nbf": now.Unix(), "exp": now.Add(recoveryTokenLifetime).Unix(),
+	})
+	tok.Header["kid"] = r.Kid
+	s, err := tok.SignedString(r.key)
+	if err != nil {
+		return "", fmt.Errorf("sign the token for realm %s: %w", r.ID, err)
+	}
+	return s, nil
 }
 
 // perUserLimiter allows n events per user per window (in-process: a slot
