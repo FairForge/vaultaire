@@ -28,6 +28,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	dashmw "github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/email"
@@ -764,6 +765,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.router.Use(s.requestLimitsMiddleware)
 	s.router.Use(s.versionMiddleware)
 	s.router.Use(s.loggingMiddleware)
+	// A request carrying S3 credentials is the S3 API's, on every host,
+	// before any route matches (RP56-1).
+	s.router.Use(s.s3CredentialGate)
 	s.router.Use(s.siteStatsMiddleware)
 
 	// Every background job is registered with the one scheduler (WP-R13-3);
@@ -1102,6 +1106,43 @@ func (s *Server) setupRoutes() {
 	s.registerS3CatchAll()
 }
 
+// whoamiPath is the one route outside the S3 API that verifies an
+// AWS-scheme signature itself (whoami.go): the credential gate leaves it to
+// its route.
+const whoamiPath = "/api/v1/whoami"
+
+// s3CredentialGate sends a request carrying AWS-scheme credentials
+// (signedS3Request: a SigV4 or SigV2 Authorization header, or a presigned
+// query) to the S3 API before any route matches (RP56-1, the WP-P39 review).
+// The web routes — the dashboard's public pages, /docs, /status, /changelog,
+// /legal/*, /llms.txt, /health, /version, /metrics — sit ahead of the S3
+// catch-all on every host and none of them looks at credentials, so a
+// customer's signed GetObject of key "privacy" in bucket "legal" got the
+// privacy page as the object's bytes (200), and every key of a bucket named
+// "dashboard" a 303. Every host: prod's S3 endpoint is today also its web
+// host (stored.ge), so routing by host alone could not fix it.
+//
+// Not sent: a Bearer JWT, an API-key header, a session cookie (never S3 —
+// /api/v1/…, /auth/… and /webhook/… keep their own auth); OPTIONS (the CORS
+// preflight is answered before any authentication, s3_cors.go); GET
+// /api/v1/whoami (it verifies SigV4 itself); a trust host on a public
+// origin (contract rule 11: never the S3 API — TrustHostRouter answers it
+// before this router, and the translog routes' trust branch 404s it behind).
+func (s *Server) s3CredentialGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions || !signedS3Request(r) ||
+			(r.Method == http.MethodGet && r.URL.Path == whoamiPath) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if hs := s.hostSet(); hs.TrustPublic() && hs.IsTrustHost(r.Host) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.s3Handler()(w, r)
+	})
+}
+
 // registerS3CatchAll mounts the S3 API: every method of every unmatched
 // path goes to handleS3Request, except OPTIONS, which is the browser's CORS
 // preflight and is answered before any authentication (s3_cors.go). chi
@@ -1291,10 +1332,19 @@ func getPublicEndpoint(port int) string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
+// handleLogin is the JSON sign-in: POST /auth/login {"email","password"[,
+// "code"]} → a 24 h JWT. An account with MFA on must send "code" — a TOTP
+// code (accepted once, RFC 6238 § 5.2) or a backup code (single use), the
+// dashboard's /login/verify-2fa rule; before Prompt 40 this route minted a
+// JWT on the password alone for such an account, the admin's included, and
+// the admin API took it. Every outcome is an auth.* audit row (the
+// dashboard's LoginEvent) with via "api:password" | "api:totp" |
+// "api:backup_code".
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1304,6 +1354,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	valid, err := s.auth.ValidatePassword(r.Context(), req.Email, req.Password)
 	if err != nil || !valid {
+		ev := handlers.LoginEvent{Action: "auth.login_failed", Email: req.Email, Via: "api:password", Reason: "unknown_user"}
+		if u, uErr := s.auth.GetUserByEmail(r.Context(), req.Email); uErr == nil && u != nil {
+			ev.UserID, ev.TenantID, ev.Reason = u.ID, u.TenantID, "bad_password"
+		}
+		handlers.RecordLoginEvent(r.Context(), s.db, ev)
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -1314,11 +1369,38 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ev := handlers.LoginEvent{UserID: user.ID, TenantID: user.TenantID, Email: user.Email}
+	mfaOn, err := s.auth.IsMFAEnabled(r.Context(), user.ID)
+	if err != nil { // fail closed: no token without knowing whether a second factor is owed
+		s.logger.Error("login: read mfa state", zap.String("user_id", user.ID), zap.Error(err))
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+	if mfaOn {
+		via, reason := s.loginSecondFactor(r.Context(), user.ID, strings.TrimSpace(req.Code))
+		ev.Via = via
+		if reason != "" {
+			ev.Action, ev.Reason = "auth.mfa_failed", reason
+			handlers.RecordLoginEvent(r.Context(), s.db, ev)
+			msg := "Invalid credentials"
+			if reason == "code_required" {
+				msg = "MFA code required: send \"code\" (a TOTP code or a backup code)"
+			}
+			http.Error(w, msg, http.StatusUnauthorized)
+			return
+		}
+		ev.Action = "auth.mfa_succeeded"
+	} else {
+		ev.Action, ev.Via = "auth.login_succeeded", "api:password"
+	}
+
 	token, err := s.auth.GenerateJWT(user)
 	if err != nil {
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
+
+	handlers.RecordLoginEvent(r.Context(), s.db, ev)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
@@ -1327,6 +1409,44 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		s.logger.Error("failed to encode login response", zap.Error(err))
 	}
+}
+
+// loginSecondFactor checks the JSON sign-in's code for an MFA account: a
+// TOTP code first (accepted once), else a backup code (consumed). via names
+// the factor tried; reason is "" when it passed, else code_required |
+// replayed_code | bad_code (the dashboard's reasons).
+func (s *Server) loginSecondFactor(ctx context.Context, userID, code string) (via, reason string) {
+	if code == "" {
+		return "api:totp", "code_required"
+	}
+	secret, err := s.auth.GetMFASecret(ctx, userID)
+	if err == nil && s.mfaService != nil && s.mfaService.ValidateCode(secret, code) {
+		if !s.auth.ConsumeTOTPCode(userID, code) {
+			return "api:totp", "replayed_code"
+		}
+		return "api:totp", ""
+	}
+	if ok, _ := s.auth.ValidateBackupCode(ctx, userID, code); ok {
+		return "api:backup_code", ""
+	}
+	if looksLikeTOTP(code) {
+		return "api:totp", "bad_code"
+	}
+	return "api:backup_code", "bad_code"
+}
+
+// looksLikeTOTP: six digits — what an authenticator shows (the audit row
+// names the factor the caller meant).
+func looksLikeTOTP(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for _, c := range code {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {

@@ -32,7 +32,7 @@ func (s *Server) siteStatsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		name, ok := sitestats.PagePath(r.URL.Path)
-		if !ok || (name == "/" && isS3RootRequest(r)) {
+		if !ok || (name == "/" && signedS3Request(r)) {
 			next.ServeHTTP(w, r)
 			return
 		}

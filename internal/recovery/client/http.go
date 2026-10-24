@@ -173,7 +173,7 @@ func (h *HTTPTransport) transport(ctx context.Context, realm Realm, sess *httpSe
 func (h *HTTPTransport) post(ctx context.Context, realm Realm, req recovery.ClientRequest) (recovery.ClientResponse, error) {
 	token, err := h.Token(ctx, realm)
 	if err != nil {
-		return recovery.ClientResponse{}, fmt.Errorf("%w: token for realm %s: %w", ErrInvalidAuth, realm.ID, err)
+		return recovery.ClientResponse{}, fmt.Errorf("%w: %w: token for realm %s: %w", ErrInvalidAuth, ErrTokenMint, realm.ID, err)
 	}
 	req.Realm, req.AuthToken = realm.ID, token
 	body, err := req.MarshalCBOR()

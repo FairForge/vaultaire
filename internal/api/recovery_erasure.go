@@ -97,7 +97,8 @@ func (r recoveryRealm) clientRealm() (client.Realm, error) {
 
 // realmOutcome names what a realm's Delete came to. ctx is the caller's:
 // once it is done the failure is ours (the tenant's deadline, a shutdown),
-// never the realm's — "" is counted as nothing.
+// never the realm's — "" is counted as nothing; so is a realm token we could
+// not mint (client.ErrTokenMint, RP56-6).
 func realmOutcome(ctx context.Context, err error) string {
 	var urlErr *url.Error
 	var netErr net.Error
@@ -105,6 +106,10 @@ func realmOutcome(ctx context.Context, err error) string {
 	case err == nil:
 		return realmDeleted
 	case ctx.Err() != nil:
+		return ""
+	case errors.Is(err, client.ErrTokenMint):
+		// Our own Token() failed: the realm was never asked (RP56-6). It
+		// still defers the tenant, with the reason.
 		return ""
 	case errors.Is(err, client.ErrInvalidAuth):
 		return realmInvalidAuth
