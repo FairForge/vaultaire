@@ -71,6 +71,15 @@ GOLANGCI_LINT := go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$
 lint: lint-version-check
 	$(GOLANGCI_LINT) run ./...
 
+# The js/wasm side of sdk/wasm (RP51-2): `make lint` skips its build tag, and
+# `go run` under GOOS=js builds the linter itself for js (sdk/CLAUDE.md). So the
+# pinned linter is built for the HOST into a temporary GOBIN, then run with
+# GOOS=js GOARCH=wasm. CI's lint step runs it; it must stay at 0 issues.
+lint-wasm: lint-version-check
+	@bin=$$(mktemp -d "$${TMPDIR:-/tmp}/lint-wasm.XXXXXX") && trap 'rm -rf "$$bin"' EXIT && \
+		GOBIN="$$bin" GOOS= GOARCH= go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) && \
+		GOOS=js GOARCH=wasm "$$bin/golangci-lint" run ./sdk/wasm/
+
 lint-version-check:
 	@grep -q 'version: $(GOLANGCI_LINT_VERSION)$$' .github/workflows/ci.yml || \
 		{ echo "Makefile GOLANGCI_LINT_VERSION=$(GOLANGCI_LINT_VERSION) differs from .github/workflows/ci.yml"; exit 1; }
@@ -85,7 +94,7 @@ gosec:
 deadcode:
 	go run golang.org/x/tools/cmd/deadcode@v0.50.0 ./cmd/vaultaire
 
-.PHONY: fmt lint lint-version-check gosec deadcode
+.PHONY: fmt lint lint-wasm lint-version-check gosec deadcode
 
 # Build the binary
 # Regenerate internal/api/landing.html from its sources (internal/api/landing/).
