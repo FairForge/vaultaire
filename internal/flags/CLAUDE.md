@@ -14,8 +14,9 @@ restart. Backed by the `feature_flags` table (migration 059).
   `translog_customer_view`): on for a tenant when its row OR the global state
   (global row, else default) is on — a tenant row only turns it on. `Set` of a
   tenant OFF row while it is on globally = `ErrNotExemptible` (API 409
-  `flag_not_exemptible`). **`GlobalOnly(key)`** (`translog_public`): `Set` of a
-  tenant row = `ErrGlobalOnly`.
+  `flag_not_exemptible`). **`GlobalOnly(key)`** (`translog_public`, `recovery_vault` — both read
+  before authentication): `Set` of a tenant row = `ErrGlobalOnly` (API 400
+  `flag_global_only`).
 - **`SetWriteGuard(g)`**: `g(ctx, Change{Key, TenantID, Clear, Enabled})` runs
   BEFORE every `Set`/`Unset` writes (after the two rules above); an error =
   `ErrChangeRefused` wrapping it, nothing written. The API server installs it
