@@ -2,7 +2,7 @@
 
 *2026-10-24. Split into two sessions. **Session A** ran Part 0; its findings are in
 [`WP-P38-PART0.md`](WP-P38-PART0.md), in its own PRs. **Session B** ran Part A (43.4) and
-this docs PR: #938, then this. Part 0 was **in flight** when this PR opened (below). **No migration** (the next is still **108**).*
+this docs PR: #938, then this (#942). Part 0 was in flight when #942 opened and **merged after it** — #940 `2e772d2e`, #939 `a2dfce6b`, #943 `2546cbee`; the WP-P38 post-merge review's Step 0 brought this note, STATUS, the plan and CLAUDE.md up to the merged code (`WP-P38-REVIEW.md`). **No migration** (the next is still **108**).*
 
 Lane: Trust (43.4, Trust lane charter item 2). Contract rule 7 (the trust host is its own
 surface), rule 8 (claim nothing we do not do: every sentence about what we hold, keep
@@ -13,23 +13,26 @@ or can hand over is a code fact under test).
 - **#937** (the WP-P37 review's RP52-1/2) merged before Part A started; #938 was rebased on it (`8d17d96f`).
 - `recovery_vault` OFF and `RECOVERY_*` unset on prod; `translog_public` OFF. Both expected.
 
-## Part 0 — see `WP-P38-PART0.md`
+## Part 0 — merged; the findings are [`WP-P38-PART0.md`](WP-P38-PART0.md)
 
-**In flight when this note was written (2026-10-24 ~13:50 UTC).** Session A's PRs
-had not merged:
+Session A's PRs landed after this note's first version (#942, 14:11 UTC):
 
-- **#939** (RP52-3: an account erasure reaches the recovery realms — a Delete per realm
-  of `RECOVERY_REALMS_FILE` on its own token; a realm that does not confirm defers the
-  tenant): open, unarmed, DIRTY after #938 (both appended to `internal/api/CLAUDE.md`).
-- **#940** (RP51-3: the client repro check builds the checkout's own clients and warns):
-  armed, in CI.
-- `make lint-wasm`: no PR seen yet.
-- `WP-P38-PART0.md` is not on main yet. The link above resolves once Session A's PR
-  lands it.
+- **#940** `2e772d2e` (13:59 UTC) — RP51-3: `scripts/repro-check-clients.sh` builds the
+  checkout's own clients after the manifest rows and prints a `::warning::` naming any
+  client and hash no row lists; never a failure (a build that fails is a warning too).
+- **#939** `a2dfce6b` (14:14 UTC) — RP52-3: the deletion runner's stage b3
+  (`internal/api/recovery_erasure.go`): before the row erase, every realm of
+  `RECOVERY_REALMS_FILE` gets a `Delete` for the user's subject on a token with the
+  mint's claims; a realm that does not confirm, or a `recovery.tokens_issued` row
+  younger than 10 min + 1 min, defers the tenant; `realms_deleted` / `realms_deferred` /
+  `realms_not_configured` on `account.erased`. Not configured (prod) = nothing asked, a
+  note on the run.
+- **#943** `2546cbee` (14:51 UTC) — RP51-2: `make lint-wasm` and its CI step, plus the
+  note itself.
 
-**Owed when #939 merges** (by Session A, or by the RP54 review): the CLAUDE.md
-`RECOVERY_*` rows saying the deletion runner now deletes at the realms, read from #939's
-merged diff, never from this note; STATUS's Part 0 line; the ledger row's Part 0 facts.
+The CLAUDE.md `RECOVERY_*` rows, the account-deletion paragraph, the Build/Lint block
+and the client-build sentence were updated from those merged diffs by the post-merge
+review's Step 0 (`WP-P38-REVIEW.md`), not from any note.
 
 ## Part A — 43.4: "what we can produce" and the law-enforcement policy (#938)
 
