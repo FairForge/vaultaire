@@ -157,3 +157,22 @@ func TestLegal_OneSource(t *testing.T) {
 		t.Fatal("the receipt needs lines under the name")
 	}
 }
+
+// IsWebHost (Stage 1a Prompt 39): the names a browser's page view is
+// answered on as a website — never an s3., cdn. or trust. host.
+func TestIsWebHost(t *testing.T) {
+	today := Hosts{Canonical: "https://stored.ge", S3: "https://stored.ge", CDN: "https://cdn.stored.ge", Trust: "https://trust.stored.ge"}
+	target := Hosts{Canonical: "https://stored.cloud", S3: "https://s3.stored.cloud", CDN: "https://cdn.stored.cloud", Trust: "https://trust.stored.cloud",
+		Aliases: []string{"stored.ge", "www.stored.ge", "www.stored.cloud"}}
+	dev := Defaults(8000)
+	for _, h := range []Hosts{today, target} {
+		for _, host := range []string{"stored.cloud", "STORED.CLOUD:443", "www.stored.cloud", "stored.ge", "www.stored.ge", "stored.pics", "www.stored.pics"} {
+			assert.True(t, h.IsWebHost(host), "%s on %s", host, h.Canonical)
+		}
+		for _, host := range []string{"s3.stored.cloud", "s3.stored.ge", "cdn.stored.cloud", "cdn.stored.ge", "trust.stored.cloud", "trust.stored.ge", "evil.example", "", "api.stored.cloud"} {
+			assert.False(t, h.IsWebHost(host), "%s on %s", host, h.Canonical)
+		}
+	}
+	assert.True(t, dev.IsWebHost("localhost:8000"), "a development origin is its own web host")
+	assert.False(t, target.IsWebHost("localhost"))
+}

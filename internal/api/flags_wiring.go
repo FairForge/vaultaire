@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/modes"
@@ -154,6 +155,12 @@ func registerFlags(fl *flags.Service) {
 	// owner opens them once counsel has written the policy (F-36).
 	fl.Register(produce.FlagLegalLEPages, false)
 	fl.GlobalOnly(produce.FlagLegalLEPages)
+	// Stage 1a Prompt 39: /legal/refunds and /legal/dmca on the web host.
+	// Default OFF = the web 404, global only: every commitment on them is a
+	// marked DRAFT until the owner's words land (F-28 refunds, F-37 the DMCA
+	// agent).
+	fl.Register(dashboard.FlagLegalDraftPages, false)
+	fl.GlobalOnly(dashboard.FlagLegalDraftPages)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

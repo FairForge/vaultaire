@@ -273,6 +273,24 @@ func (h Hosts) IsTrustHost(host string) bool {
 	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
 }
 
+// IsWebHost reports whether host is a web name — where a browser's page view
+// is answered as a website (the HTML 404 of internal/api/web_host.go, Stage 1a
+// Prompt 39): the canonical host, an alias, the brand and legacy domains and
+// www.<each>, whatever the environment says (prod's canonical origin is
+// stored.ge today and stored.cloud answers too). Never an S3, CDN or trust
+// host.
+func (h Hosts) IsWebHost(host string) bool {
+	host = normHost(host)
+	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) {
+		return false
+	}
+	if host == hostOf(h.Canonical) || h.IsAlias(host) {
+		return true
+	}
+	bare := strings.TrimPrefix(host, "www.")
+	return bare == BrandDomain || isLegacy(bare)
+}
+
 func isLegacy(host string) bool {
 	for _, d := range LegacyDomains {
 		if host == d {
