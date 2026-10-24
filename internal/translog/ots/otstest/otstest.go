@@ -38,6 +38,11 @@ type Calendar struct {
 	// Reverse puts the "reverse" operation (0xf2) on the pending path — one
 	// the library does not implement (computing the commitment panics).
 	Reverse bool
+	// RealShape makes the pending path the REAL calendars' shape: the
+	// attestation right after an append, NO trailing sha256 — so the
+	// commitment the client asks for is digest‖nonce (44 bytes, alice's
+	// shape), not a SHA-256 (WP-P36's lab P2, RP50-1).
+	RealShape bool
 	// known maps each answered commitment (hex) to its submission order, and
 	// lostBefore makes the calendar answer 404 for ever for commitments
 	// submitted before it — a calendar that lost them (WP-P36, RP48-2).
@@ -62,6 +67,17 @@ func New(t testing.TB) *Calendar {
 	t.Cleanup(c.srv.Close)
 	c.URL = c.srv.URL
 	return c
+}
+
+// record keeps a submitted commitment's order, for Lose.
+func (c *Calendar) record(hexCom string) {
+	c.mu.Lock()
+	if c.known == nil {
+		c.known = map[string]int{}
+	}
+	c.known[hexCom] = c.submitSeq
+	c.submitSeq++
+	c.mu.Unlock()
 }
 
 // Confirm makes every later GET /timestamp answer a Bitcoin attestation.
@@ -99,19 +115,21 @@ func (c *Calendar) serve(w http.ResponseWriter, r *http.Request) {
 		nonce := make([]byte, 16)
 		_, _ = rand.Read(nonce)
 		seq := opentimestamps.Sequence{op(0xf0, nonce), op(0x08, nil), {Attestation: &opentimestamps.Attestation{CalendarServerURL: url}}}
-		if c.Reverse {
+		switch {
+		case c.Reverse:
 			seq = append(opentimestamps.Sequence{{Operation: &opentimestamps.Operation{Name: "reverse", Tag: 0xf2}}}, seq...)
-		} else {
+		case c.RealShape:
+			// A real calendar's pending path: append a 12-byte nonce, then
+			// the attestation — the commitment is digest‖nonce, 44 bytes.
+			nonce = nonce[:12]
+			seq = opentimestamps.Sequence{op(0xf0, nonce), {Attestation: &opentimestamps.Attestation{CalendarServerURL: url}}}
+			com := append(append([]byte{}, d...), nonce...)
+			c.record(hex.EncodeToString(com))
+		default:
 			// The commitment the client will ask for: the sequence applied to
 			// the digest (append nonce, then sha256).
 			com := sha256.Sum256(append(append([]byte{}, d...), nonce...))
-			c.mu.Lock()
-			if c.known == nil {
-				c.known = map[string]int{}
-			}
-			c.known[hex.EncodeToString(com[:])] = c.submitSeq
-			c.submitSeq++
-			c.mu.Unlock()
+			c.record(hex.EncodeToString(com[:]))
 		}
 		write(w, d, seq)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/timestamp/"):

@@ -50,6 +50,36 @@ func TestOTS_SubmitUpgradeCombine(t *testing.T) {
 	assert.False(t, done)
 }
 
+// WP-P36's lab-found P2, restored by the WP-P36 review (RP50-1 — the fix was
+// built and lab-proven but never reached #931): a REAL calendar's pending
+// attestation sits after append/prepend ops with NO trailing sha256, so the
+// commitment the library computes is the wrapped message (alice's is 44
+// bytes), not a SHA-256 — and the upgrade answer used to be parsed through
+// fileOf, whose header carries exactly 32 digest bytes: every real upgrade
+// was "bad_answer: a commitment of 44 bytes, not a SHA-256" and no real
+// pending proof could ever complete.
+func TestOTS_UpgradeOfARealShapedCommitment(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	cal := otstest.New(t)
+	cal.RealShape = true
+	c := ots.NewClient("test")
+	p, err := c.Submit(ctx, cal.URL, sha256.Sum256([]byte("a checkpoint note")))
+	require.NoError(t, err)
+	cal.ConfirmAt(972833)
+
+	// Act
+	up, complete, err := c.Upgrade(ctx, cal.URL, p)
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, complete)
+	_, atts, err := ots.Describe(up)
+	require.NoError(t, err)
+	require.NotEmpty(t, atts)
+	assert.Equal(t, uint64(972833), atts[0].BitcoinHeight)
+}
+
 // A pending attestation is completed only by the calendar configured, and
 // only when it names that calendar: a calendar must not send the log to an
 // address of its choosing.
