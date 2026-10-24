@@ -15,7 +15,7 @@
 **The first ten.**
 
 1. The master-key install (F-14): on-box ceremony into a `host+tpm2` systemd credential, dedicated service user, `age-plugin-sss` 2-of-3 escrow, the rewritten runbook; fix `generatedObjectWriter` plaintext into encrypted buckets before the flip.
-2. The per-mode privacy table generated from `modes.json` (41.0), the "what we can produce" page and the law-enforcement policy (43.4).
+2. The per-mode privacy table generated from `modes.json` (41.0), the "what we can produce" page and the law-enforcement policy (43.4). **Built dark 2026-10-24 (Stage 1a Prompt 38, #938):** `/legal/what-we-can-produce` and `/legal/law-enforcement` on the canonical origin and `trust.stored.cloud`, behind `legal_le_pages` (OFF = 404); every row of the produce page is a code fact under test (`internal/api/landing/produce.json`, `internal/api/produce_test.go`); the policy's procedure is a marked DRAFT for counsel (**F-36**); `docs/reviews/43.4-PROBE.md`, `docs/reviews/WP-P38.md`.
 3. The transparency log in its cheap form (43.6): signed statements, OpenTimestamps, a Rekor mirror; the first entries are the master-key ceremony and every client build hash.
 4. Phase 43.1 inventory from the export's section list, 43.3 the retention clocks (owner confirms the table).
 5. Phase 43.2 disassociation, including Ente's server pattern: e-mail encrypted at rest under a server key, keyed hash for lookup.
