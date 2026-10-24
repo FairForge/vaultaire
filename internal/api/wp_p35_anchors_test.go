@@ -46,7 +46,7 @@ func newAnchorLab(t *testing.T) *anchorLab {
 	a, b := otstest.New(t), otstest.New(t)
 	anchors := []translogAnchor{{Kind: logstore.AnchorKindOTS, Service: a.URL}, {Kind: logstore.AnchorKindOTS, Service: b.URL}}
 	logstore.SetAnchors(anchorServices(anchors))
-	job := newTranslogAnchorer(store, anchors, zap.NewNop())
+	job := newTranslogAnchorer(store, anchors, nil, zap.NewNop())
 	job.JobName = "translog_anchor_test"
 	job.upgradeAfter = 0
 	return &anchorLab{store: store, job: job, a: a, b: b}
@@ -165,8 +165,8 @@ func TestAnchorJob_OTSUpgrade_NewRowNeverUpdate(t *testing.T) {
 	require.NoError(t, err)
 	_, atts, err := ots.Describe(served)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []ots.Attestation{{BitcoinHeight: 900000}, {Calendar: l.b.URL}}, atts,
-		"served: a's complete path and b's pending one")
+	assert.ElementsMatch(t, []ots.Attestation{{BitcoinHeight: 900000}, {Calendar: l.a.URL}, {Calendar: l.b.URL}}, atts,
+		"served: a's complete path, and both pending paths beside it (RP48-3)")
 }
 
 func TestParseTranslogAnchors_AllOrNone(t *testing.T) {
@@ -215,7 +215,7 @@ func TestAnchorJob_Unset_NoOp(t *testing.T) {
 	signer, err := translog.NewSigner(skey)
 	require.NoError(t, err)
 	store := logstore.New(logstoretest.PrivateLog(t), signer)
-	job := newTranslogAnchorer(store, translogAnchorsFromEnv(zap.NewNop(), func(string) string { return "" }), zap.NewNop())
+	job := newTranslogAnchorer(store, translogAnchorsFromEnv(zap.NewNop(), func(string) string { return "" }), nil, zap.NewNop())
 	job.JobName = "translog_anchor_unset_test"
 
 	rep, err := job.spec().Run(context.Background())

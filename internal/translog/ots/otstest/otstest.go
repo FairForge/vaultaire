@@ -38,6 +38,20 @@ type Calendar struct {
 	// Reverse puts the "reverse" operation (0xf2) on the pending path — one
 	// the library does not implement (computing the commitment panics).
 	Reverse bool
+	// known maps each answered commitment (hex) to its submission order, and
+	// lostBefore makes the calendar answer 404 for ever for commitments
+	// submitted before it — a calendar that lost them (WP-P36, RP48-2).
+	known      map[string]int
+	submitSeq  int
+	lostBefore int
+}
+
+// Lose makes every commitment answered so far 404 for ever, Confirm or not:
+// the calendar lost them (RP48-2).
+func (c *Calendar) Lose() {
+	c.mu.Lock()
+	c.lostBefore = c.submitSeq
+	c.mu.Unlock()
 }
 
 // New starts one; it stops when t ends.
@@ -54,6 +68,14 @@ func New(t testing.TB) *Calendar {
 func (c *Calendar) Confirm() {
 	c.mu.Lock()
 	c.confirmed = true
+	c.mu.Unlock()
+}
+
+// ConfirmAt is Confirm with the Bitcoin attestation's block height chosen.
+func (c *Calendar) ConfirmAt(height uint64) {
+	c.mu.Lock()
+	c.confirmed = true
+	c.height = height
 	c.mu.Unlock()
 }
 
@@ -79,6 +101,17 @@ func (c *Calendar) serve(w http.ResponseWriter, r *http.Request) {
 		seq := opentimestamps.Sequence{op(0xf0, nonce), op(0x08, nil), {Attestation: &opentimestamps.Attestation{CalendarServerURL: url}}}
 		if c.Reverse {
 			seq = append(opentimestamps.Sequence{{Operation: &opentimestamps.Operation{Name: "reverse", Tag: 0xf2}}}, seq...)
+		} else {
+			// The commitment the client will ask for: the sequence applied to
+			// the digest (append nonce, then sha256).
+			com := sha256.Sum256(append(append([]byte{}, d...), nonce...))
+			c.mu.Lock()
+			if c.known == nil {
+				c.known = map[string]int{}
+			}
+			c.known[hex.EncodeToString(com[:])] = c.submitSeq
+			c.submitSeq++
+			c.mu.Unlock()
 		}
 		write(w, d, seq)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/timestamp/"):
@@ -90,8 +123,10 @@ func (c *Calendar) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		c.mu.Lock()
 		ok, h := c.confirmed, c.height
+		idx, knows := c.known[strings.TrimPrefix(r.URL.Path, "/timestamp/")]
+		lost := knows && idx < c.lostBefore
 		c.mu.Unlock()
-		if !ok {
+		if lost || !ok {
 			http.Error(w, "Pending confirmation in Bitcoin blockchain", http.StatusNotFound)
 			return
 		}
@@ -121,4 +156,15 @@ func write(w http.ResponseWriter, msg []byte, seq opentimestamps.Sequence) {
 	b := (&opentimestamps.File{Digest: msg, Sequences: []opentimestamps.Sequence{seq}}).SerializeInstructionSequences()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	_, _ = w.Write(b)
+}
+
+// PendingProof is a whole .ots file of digest whose one path ends in a
+// pending attestation naming url — what a pool's answer looks like once
+// stored (WP-P36, RP48-1: Submit refuses such an answer, so a test that
+// needs one builds it here, with the library's serialiser).
+func PendingProof(digest [32]byte, url string) []byte {
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	seq := opentimestamps.Sequence{op(0xf0, nonce), op(0x08, nil), {Attestation: &opentimestamps.Attestation{CalendarServerURL: url}}}
+	return (&opentimestamps.File{Digest: digest[:], Sequences: []opentimestamps.Sequence{seq}}).SerializeToFile()
 }

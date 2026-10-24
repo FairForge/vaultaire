@@ -71,9 +71,10 @@ const (
 	AnchorBadAnswer   = "bad_answer"
 )
 
-// AnchorOutcomes lists every outcome.
+// AnchorOutcomes lists every outcome (AnchorResubmitted counts the one
+// re-submission of a pending proof past the horizon, RP48-2).
 func AnchorOutcomes() []string {
-	return []string{AnchorOK, AnchorUpgraded, AnchorUnreachable, AnchorRefused, AnchorBadAnswer}
+	return []string{AnchorOK, AnchorUpgraded, AnchorResubmitted, AnchorUnreachable, AnchorRefused, AnchorBadAnswer}
 }
 
 // AnchorKinds lists the kinds of migration 106.
@@ -82,10 +83,33 @@ func AnchorKinds() []string { return []string{AnchorKindOTS, AnchorKindRekor} }
 // AnchorService is one configured service.
 type AnchorService struct{ Kind, Service string }
 
-// SetAnchors sets vaultaire_translog_anchors_configured and creates every
+// configuredAnchors is what SetAnchors was given: the per-service state
+// collector exports a series per CONFIGURED service only (RP48-1: bounded —
+// TRANSLOG_ANCHORS admits at most 8 — and a service taken out of the
+// configuration stops alerting, whatever old rows name it).
+var (
+	configuredAnchorsMu sync.Mutex
+	configuredAnchors   []AnchorService
+)
+
+// ConfiguredAnchors is the configured services, for the state collector.
+func ConfiguredAnchors() []AnchorService {
+	configuredAnchorsMu.Lock()
+	defer configuredAnchorsMu.Unlock()
+	out := make([]AnchorService, len(configuredAnchors))
+	copy(out, configuredAnchors)
+	return out
+}
+
+// SetAnchors sets vaultaire_translog_anchors_configured, creates every
 // (kind, service, outcome) series at 0 — the services are named only by
-// TRANSLOG_ANCHORS, read at boot (as SetWitnesses).
+// TRANSLOG_ANCHORS, read at boot (as SetWitnesses) — and keeps the list for
+// the per-service state collector.
 func SetAnchors(services []AnchorService) {
+	configuredAnchorsMu.Lock()
+	configuredAnchors = make([]AnchorService, len(services))
+	copy(configuredAnchors, services)
+	configuredAnchorsMu.Unlock()
 	n := map[string]int{}
 	for _, a := range services {
 		n[a.Kind]++
@@ -244,17 +268,31 @@ type AnchorStateCollector struct {
 	db     *sql.DB
 	logger *zap.Logger
 	ttl    time.Duration
+	now    func() time.Time
 
 	size, at, pending *prometheus.Desc
+	// Per configured service (RP48-1: one dead calendar of two must be
+	// visible): the largest checkpoint it has a row for, when its newest
+	// anchor arrived, and its oldest pending proof's age.
+	svcSize, svcAt, svcOldest *prometheus.Desc
 
 	mu   sync.Mutex
 	when time.Time
 	vals map[string][3]float64
+	// svcVals: per "kind|service" — max size, newest received epoch, oldest
+	// pending received epoch (0 = none).
+	svcVals map[string][3]float64
 }
 
 // NewAnchorStateCollector builds it.
 func NewAnchorStateCollector(db *sql.DB, logger *zap.Logger) *AnchorStateCollector {
-	return &AnchorStateCollector{db: db, logger: logger, ttl: stateTTL,
+	return &AnchorStateCollector{db: db, logger: logger, ttl: stateTTL, now: time.Now,
+		svcSize: prometheus.NewDesc("vaultaire_translog_anchored_size_by_service",
+			"Tree size of the largest checkpoint this configured service has an anchor row for, any state (0 = none; a series per service of TRANSLOG_ANCHORS).", []string{"kind", "service"}, nil),
+		svcAt: prometheus.NewDesc("vaultaire_translog_anchor_timestamp_by_service_seconds",
+			"When this configured service's newest anchor row was received (0 = never). TranslogAnchorServiceStale reads it against the newest checkpoint.", []string{"kind", "service"}, nil),
+		svcOldest: prometheus.NewDesc("vaultaire_translog_anchor_oldest_pending_seconds",
+			"Age of this configured service's oldest pending proof with no complete row (0 = none pending). TranslogAnchorNotCompleting warns past the re-submission horizon.", []string{"kind", "service"}, nil),
 		size: prometheus.NewDesc("vaultaire_translog_anchored_size",
 			"Tree size of the largest checkpoint with an anchor of this kind, pending or complete (read from translog_anchors; 0 = none).", []string{"kind"}, nil),
 		at: prometheus.NewDesc("vaultaire_translog_anchor_timestamp_seconds",
@@ -269,11 +307,14 @@ func (c *AnchorStateCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.size
 	ch <- c.at
 	ch <- c.pending
+	ch <- c.svcSize
+	ch <- c.svcAt
+	ch <- c.svcOldest
 }
 
 // Collect implements prometheus.Collector.
 func (c *AnchorStateCollector) Collect(ch chan<- prometheus.Metric) {
-	vals := c.read()
+	vals, svc := c.read()
 	if vals == nil {
 		return // never read: unknown, not zero
 	}
@@ -283,13 +324,27 @@ func (c *AnchorStateCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.at, prometheus.GaugeValue, v[1], k)
 		ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, v[2], k)
 	}
+	// Per CONFIGURED service (≤ 8): rows of services no longer configured
+	// are left out, a configured service with no rows yet is zeros — so the
+	// per-service stale rule sees a calendar that never answered.
+	now := c.now()
+	for _, a := range ConfiguredAnchors() {
+		v := svc[a.Kind+"|"+a.Service]
+		oldest := 0.0
+		if v[2] > 0 {
+			oldest = now.Sub(time.Unix(int64(v[2]), 0)).Seconds()
+		}
+		ch <- prometheus.MustNewConstMetric(c.svcSize, prometheus.GaugeValue, v[0], a.Kind, a.Service)
+		ch <- prometheus.MustNewConstMetric(c.svcAt, prometheus.GaugeValue, v[1], a.Kind, a.Service)
+		ch <- prometheus.MustNewConstMetric(c.svcOldest, prometheus.GaugeValue, oldest, a.Kind, a.Service)
+	}
 }
 
-func (c *AnchorStateCollector) read() map[string][3]float64 {
+func (c *AnchorStateCollector) read() (map[string][3]float64, map[string][3]float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.db == nil || (c.vals != nil && time.Since(c.when) < c.ttl) {
-		return c.vals
+		return c.vals, c.svcVals
 	}
 	c.when = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -302,7 +357,7 @@ func (c *AnchorStateCollector) read() map[string][3]float64 {
 		if c.logger != nil {
 			c.logger.Warn("translog metrics: could not read translog_anchors", zap.Error(err))
 		}
-		return c.vals
+		return c.vals, c.svcVals
 	}
 	defer func() { _ = rows.Close() }()
 	vals := map[string][3]float64{}
@@ -310,13 +365,38 @@ func (c *AnchorStateCollector) read() map[string][3]float64 {
 		var k string
 		var v [3]float64
 		if err := rows.Scan(&k, &v[0], &v[1], &v[2]); err != nil {
-			return c.vals
+			return c.vals, c.svcVals
 		}
 		vals[k] = v
 	}
 	if rows.Err() != nil {
-		return c.vals
+		return c.vals, c.svcVals
 	}
-	c.vals = vals
-	return c.vals
+	srows, err := c.db.QueryContext(ctx, `SELECT kind, service, MAX(checkpoint_size),
+	        COALESCE(EXTRACT(EPOCH FROM MAX(received_at)), 0),
+	        COALESCE(EXTRACT(EPOCH FROM MIN(received_at) FILTER (WHERE state = 'pending' AND NOT EXISTS (
+	            SELECT 1 FROM translog_anchors x WHERE x.checkpoint_size = a.checkpoint_size AND x.kind = a.kind
+	              AND x.service = a.service AND x.state = 'complete'))), 0)
+	    FROM translog_anchors a GROUP BY kind, service`)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("translog metrics: could not read translog_anchors per service", zap.Error(err))
+		}
+		return c.vals, c.svcVals
+	}
+	defer func() { _ = srows.Close() }()
+	svc := map[string][3]float64{}
+	for srows.Next() {
+		var k, sv string
+		var v [3]float64
+		if err := srows.Scan(&k, &sv, &v[0], &v[1], &v[2]); err != nil {
+			return c.vals, c.svcVals
+		}
+		svc[k+"|"+sv] = v
+	}
+	if srows.Err() != nil {
+		return c.vals, c.svcVals
+	}
+	c.vals, c.svcVals = vals, svc
+	return c.vals, c.svcVals
 }

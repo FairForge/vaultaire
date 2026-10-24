@@ -57,18 +57,39 @@ func TestOTS_UpgradeAsksOnlyTheCalendarItNames(t *testing.T) {
 	// Arrange
 	ctx := context.Background()
 	cal := otstest.New(t)
-	cal.PendingURL = "http://127.0.0.1:1/elsewhere"
 	cal.Confirm()
 	c := ots.NewClient("test")
-	p, err := c.Submit(ctx, cal.URL, sha256.Sum256([]byte("x")))
-	require.NoError(t, err)
+	// A stored proof naming another URL (Submit refuses such an answer since
+	// RP48-1, so the test builds it): Upgrade must not ask that URL.
+	p := otstest.PendingProof(sha256.Sum256([]byte("x")), "http://127.0.0.1:1/elsewhere")
 
 	// Act
-	_, _, err = c.Upgrade(ctx, cal.URL, p)
+	_, _, err := c.Upgrade(ctx, cal.URL, p)
 
 	// Assert
 	assert.ErrorIs(t, err, ots.ErrPending)
 	assert.Zero(t, cal.Gets.Load(), "never asked")
+}
+
+// RP48-1: a calendar whose answer's pending attestation names another URL —
+// every aggregator pool, e.g. a.pool.opentimestamps.org, whose attestations
+// name alice/bob — is refused at Submit: such a proof would never be asked
+// again (Upgrade asks only the configured calendar) and could never
+// complete. The error names both URLs. An Upgrade tail is held to the same
+// rule.
+func TestOTS_SubmitRefusesAPoolsAnswer(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	cal := otstest.New(t)
+	cal.PendingURL = "https://alice.btc.calendar.opentimestamps.org"
+
+	// Act
+	_, err := ots.NewClient("test").Submit(ctx, cal.URL, sha256.Sum256([]byte("x")))
+
+	// Assert
+	require.ErrorIs(t, err, ots.ErrBadAnswer)
+	assert.Contains(t, err.Error(), "https://alice.btc.calendar.opentimestamps.org")
+	assert.Contains(t, err.Error(), cal.URL)
 }
 
 func TestOTS_CalendarFailuresAreClassified(t *testing.T) {

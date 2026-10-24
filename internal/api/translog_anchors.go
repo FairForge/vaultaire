@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -47,6 +49,14 @@ const (
 	// received: a calendar puts its aggregate in a Bitcoin block every few
 	// blocks, and every ask before that is a 404.
 	anchorUpgradeAfter = 30 * time.Minute
+	// A pending proof still not complete this long after it was received is
+	// re-submitted to the same calendar ONCE (RP48-2: the calendar may have
+	// lost the commitment; Bitcoin confirms in hours — the lab's proof
+	// completed within 3 h — so 48 h is lost, not slow). Migration 107's
+	// 'resubmitted' state holds the fresh proof, one per row by the unique
+	// index. TranslogAnchorNotCompleting warns on the same horizon.
+	anchorResubmitAfter   = 48 * time.Hour
+	anchorResubmitsPerRun = 8
 )
 
 // errRekorNotBuilt: a rekor line in TRANSLOG_ANCHORS.
@@ -135,20 +145,55 @@ type translogAnchorer struct {
 	client  *ots.Client
 	logger  *zap.Logger
 	now     func() time.Time
+	// db reads the job's own last job_runs.result at the first run, so the
+	// upgrade cursor survives a deploy (RP48-2, the vault_parity pattern);
+	// nil (a lab) = start from the beginning.
+	db *sql.DB
 	// upgradeAfter: anchorUpgradeAfter (a test sets 0).
 	upgradeAfter time.Duration
-	JobName      string
+	// resubmitAfter: anchorResubmitAfter (a test sets 0).
+	resubmitAfter time.Duration
+	JobName       string
+	// cursors: per service, where the upgrade pass stopped (nil until the
+	// first run loads them from job_runs.result).
+	cursors map[string]logstore.AnchorCursor
 }
 
-func newTranslogAnchorer(store *logstore.Store, anchors []translogAnchor, logger *zap.Logger) *translogAnchorer {
+func newTranslogAnchorer(store *logstore.Store, anchors []translogAnchor, db *sql.DB, logger *zap.Logger) *translogAnchorer {
 	if store == nil {
 		return nil
 	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &translogAnchorer{store: store, anchors: anchors, client: ots.NewClient("vaultaire-translog (+https://stored.cloud)"),
-		logger: logger, now: time.Now, upgradeAfter: anchorUpgradeAfter, JobName: translogAnchorJobName}
+	return &translogAnchorer{store: store, anchors: anchors, db: db, client: ots.NewClient("vaultaire-translog (+https://stored.cloud)"),
+		logger: logger, now: time.Now, upgradeAfter: anchorUpgradeAfter, resubmitAfter: anchorResubmitAfter, JobName: translogAnchorJobName}
+}
+
+// loadCursors is where each service's upgrade pass stopped last, from the
+// job's own last result (once per process; the runs then keep it in memory).
+func (a *translogAnchorer) loadCursors(ctx context.Context) map[string]logstore.AnchorCursor {
+	if a.cursors != nil {
+		return a.cursors
+	}
+	a.cursors = map[string]logstore.AnchorCursor{}
+	if a.db == nil {
+		return a.cursors
+	}
+	var raw []byte
+	if err := a.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, a.JobName).Scan(&raw); err != nil || len(raw) == 0 {
+		return a.cursors
+	}
+	var prev anchorResult
+	if json.Unmarshal(raw, &prev) != nil {
+		return a.cursors
+	}
+	for svc, o := range prev.Anchors {
+		if o != nil && o.Cursor != nil {
+			a.cursors[svc] = *o.Cursor
+		}
+	}
+	return a.cursors
 }
 
 // anchorResult is the run's job_runs.result; Anchors is absent when no
@@ -163,12 +208,18 @@ type anchorOutcome struct {
 	Kind      string `json:"kind"`
 	Submitted int    `json:"submitted"`
 	Upgraded  int    `json:"upgraded"`
+	// Resubmitted: pending proofs past the horizon re-submitted to the same
+	// calendar — once per proof, by migration 107's unique index (RP48-2).
+	Resubmitted int `json:"resubmitted,omitempty"`
 	// Pending: proofs asked to complete that the calendar has not put in a
 	// Bitcoin block yet.
 	Pending int `json:"pending"`
 	// Outcome is the run's worst: ok, or the first failure.
 	Outcome string `json:"outcome"`
 	Detail  string `json:"detail,omitempty"`
+	// Cursor is where the upgrade pass stopped, read back at the next boot
+	// (RP48-2: every pending row is asked within a bounded number of runs).
+	Cursor *logstore.AnchorCursor `json:"cursor,omitempty"`
 }
 
 func (a *translogAnchorer) spec() jobSpec {
@@ -179,23 +230,29 @@ func (a *translogAnchorer) spec() jobSpec {
 					Note: "no anchors configured (TRANSLOG_ANCHORS unset)"}, nil
 			}
 			res := anchorResult{Anchors: map[string]*anchorOutcome{}}
+			cursors := a.loadCursors(ctx)
 			var mu sync.Mutex
 			var wg sync.WaitGroup
 			var dbErr error
 			for _, an := range a.anchors {
 				wg.Add(1)
-				go func(an translogAnchor) {
+				go func(an translogAnchor, cur logstore.AnchorCursor) {
 					defer wg.Done()
-					o, err := a.service(ctx, an)
+					o, err := a.service(ctx, an, cur)
 					mu.Lock()
 					defer mu.Unlock()
 					res.Anchors[an.Service] = o
 					if err != nil && dbErr == nil {
 						dbErr = err
 					}
-				}(an)
+				}(an, cursors[an.Service])
 			}
 			wg.Wait()
+			for svc, o := range res.Anchors {
+				if o.Cursor != nil {
+					a.cursors[svc] = *o.Cursor
+				}
+			}
 			rep := jobReport{Result: res, Note: anchorNote(res.Anchors)}
 			for _, o := range res.Anchors {
 				rep.Rows += int64(o.Submitted + o.Upgraded)
@@ -204,10 +261,10 @@ func (a *translogAnchorer) spec() jobSpec {
 		}}
 }
 
-// service runs one service: submit, then upgrade. A failed call is the
-// outcome (and stops that service's calls this run); only a database error
-// is returned.
-func (a *translogAnchorer) service(ctx context.Context, an translogAnchor) (*anchorOutcome, error) {
+// service runs one service: submit, re-submit what the horizon passed, then
+// upgrade from the cursor. A failed call is the outcome (and stops that
+// service's calls this run); only a database error is returned.
+func (a *translogAnchorer) service(ctx context.Context, an translogAnchor, cur logstore.AnchorCursor) (*anchorOutcome, error) {
 	o := &anchorOutcome{Kind: an.Kind, Outcome: logstore.AnchorOK}
 	fail := func(err error) {
 		o.Outcome, o.Detail = anchorOutcomeOf(err), err.Error()
@@ -237,12 +294,42 @@ func (a *translogAnchorer) service(ctx context.Context, an translogAnchor) (*anc
 		o.Submitted++
 		logstore.CountAnchor(an.Kind, an.Service, logstore.AnchorOK)
 	}
-	pending, err := a.store.PendingAnchors(ctx, an.Kind, an.Service, a.now().Add(-a.upgradeAfter), anchorUpgradesPerRun)
+	resub, err := a.store.ResubmittableAnchors(ctx, an.Kind, an.Service, a.now().Add(-a.resubmitAfter), anchorResubmitsPerRun)
 	if err != nil {
 		o.Outcome, o.Detail = "error", err.Error()
 		return o, err
 	}
+	for _, r := range resub {
+		var digest [32]byte
+		copy(digest[:], r.Digest)
+		cctx, cancel := context.WithTimeout(ctx, anchorCallTimeout)
+		proof, err := a.client.Submit(cctx, an.Service, digest)
+		cancel()
+		if err != nil {
+			fail(err)
+			return o, nil
+		}
+		if err := a.store.AddAnchor(ctx, logstore.Anchor{Size: r.Size, Kind: an.Kind, Service: an.Service,
+			State: logstore.AnchorResubmitted, Proof: proof, Digest: r.Digest}); err != nil {
+			o.Outcome, o.Detail = "error", err.Error()
+			return o, err
+		}
+		o.Resubmitted++
+		logstore.CountAnchor(an.Kind, an.Service, logstore.AnchorResubmitted)
+	}
+	pending, next, err := a.store.PendingAnchorsFrom(ctx, an.Kind, an.Service, a.now().Add(-a.upgradeAfter), cur, anchorUpgradesPerRun)
+	if err != nil {
+		o.Outcome, o.Detail = "error", err.Error()
+		return o, err
+	}
+	o.Cursor = &next
+	// A checkpoint completed this run is not asked again through its other
+	// row (a pending and a resubmitted proof complete to the ONE row).
+	done := map[int64]bool{}
 	for _, p := range pending {
+		if done[p.Size] {
+			continue
+		}
 		cctx, cancel := context.WithTimeout(ctx, anchorCallTimeout)
 		proof, complete, err := a.client.Upgrade(cctx, an.Service, p.Proof)
 		cancel()
@@ -260,6 +347,7 @@ func (a *translogAnchorer) service(ctx context.Context, an translogAnchor) (*anc
 			return o, err
 		}
 		o.Upgraded++
+		done[p.Size] = true
 		logstore.CountAnchor(an.Kind, an.Service, logstore.AnchorUpgraded)
 	}
 	return o, nil
