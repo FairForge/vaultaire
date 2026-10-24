@@ -21,8 +21,9 @@ type memEntry struct {
 
 // MemoryStore keeps records in memory (tests, labs). Safe for concurrent use.
 type MemoryStore struct {
-	mu sync.Mutex
-	m  map[recordKey]memEntry
+	mu  sync.Mutex
+	m   map[recordKey]memEntry
+	seq uint64 // the last revision handed out, store-wide (RP52-1)
 }
 
 // NewMemoryStore returns an empty store.
@@ -46,7 +47,8 @@ func (s *MemoryStore) CompareAndSwap(_ context.Context, tenant, sub string, rev 
 		delete(s.m, k)
 		return nil
 	}
-	s.m[k] = memEntry{rev: rev + 1, rec: next}
+	s.seq++
+	s.m[k] = memEntry{rev: s.seq, rec: next}
 	return nil
 }
 
@@ -74,8 +76,25 @@ func OpenBoltStore(path string) (*BoltStore, error) {
 	}
 	db.NoSync = false
 	if err := db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists(recordsBucket)
-		return err
+		b, err := tx.CreateBucketIfNotExists(recordsBucket)
+		if err != nil {
+			return err
+		}
+		// Revisions come from the bucket's sequence (RP52-1); a file written
+		// before holds per-record revisions counted from 1, so the sequence
+		// starts past the largest of them.
+		var top uint64
+		if err := b.ForEach(func(_, v []byte) error {
+			rev, _, err := decodeEntry(v)
+			top = max(top, rev)
+			return err
+		}); err != nil {
+			return err
+		}
+		if top > b.Sequence() {
+			return b.SetSequence(top)
+		}
+		return nil
 	}); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init realm store %s: %w", path, err)
@@ -137,7 +156,15 @@ func (s *BoltStore) CompareAndSwap(ctx context.Context, tenant, sub string, rev 
 		if next.State == NotRegistered {
 			return b.Delete(k)
 		}
-		return b.Put(k, encodeEntry(rev+1, next))
+		// A revision is never reused, a Delete included (RP52-1): counted
+		// per record, a deleted-then-re-registered record was back at the
+		// revision a stale Recover2 had loaded, and its write put the
+		// deleted secret back.
+		seq, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+		return b.Put(k, encodeEntry(seq, next))
 	})
 }
 

@@ -379,3 +379,37 @@ func TestRecoveryRealm_EnrolmentIsAValidCeremonyEntry(t *testing.T) {
 	assert.Equal(t, "recovery_realm_key", entry.KeyRole)
 	assert.Equal(t, "sha256:"+hex.EncodeToString(fp[:]), entry.KeyFingerprint, "a reader hashes the pinned Noise key")
 }
+
+// RP52-2: the session table is bounded per subject, not only in total. One
+// signed-in user with one valid token used to be able to open maxSessions
+// sessions under distinct ids and lock every other user out (Unavailable)
+// until they idled away. A subject now holds at most maxSessionsPerSubject;
+// a new one evicts that subject's least recently used.
+func TestRecoveryRealm_SessionsBoundedPerSubject(t *testing.T) {
+	r := startRealm(t, 0x52)
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		sess := &session{}
+		sess.lastUsed.Store(now.Add(time.Duration(i) * time.Millisecond).UnixNano())
+		require.True(t, r.srv.putSession(sessionKey{tenant: "stored", sub: "greedy", id: uint32(i)}, sess))
+	}
+	r.srv.mu.Lock()
+	held := 0
+	for k := range r.srv.sessions {
+		if k.sub == "greedy" {
+			held++
+		}
+	}
+	_, newest := r.srv.sessions[sessionKey{tenant: "stored", sub: "greedy", id: 999}]
+	kept := 0
+	for id := 1000 - maxSessionsPerSubject; id < 1000; id++ {
+		if _, ok := r.srv.sessions[sessionKey{tenant: "stored", sub: "greedy", id: uint32(id)}]; ok {
+			kept++
+		}
+	}
+	r.srv.mu.Unlock()
+	assert.Equal(t, maxSessionsPerSubject, kept, "the least recently used go first: the newest are what remain")
+	assert.LessOrEqual(t, held, maxSessionsPerSubject, "one subject holds a bounded share of the table")
+	assert.True(t, newest, "the newest session is the one kept")
+	assert.True(t, r.srv.putSession(sessionKey{tenant: "stored", sub: "someone-else", id: 1}, &session{}))
+}
