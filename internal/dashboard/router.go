@@ -210,16 +210,6 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		}
 
 		// --- Legal pages (public) ---
-		legalPages := map[string]string{
-			"privacy":  "templates/legal/privacy.html",
-			"terms":    "templates/legal/terms.html",
-			"dpa":      "templates/legal/dpa.html",
-			"cookies":  "templates/legal/cookies.html",
-			"aup":      "templates/legal/aup.html",
-			"baa":      "templates/legal/baa.html",
-			"gdpr":     "templates/legal/gdpr.html",
-			"data-act": "templates/legal/data-act.html",
-		}
 		for slug, tmplPath := range legalPages {
 			pageTmpl := template.Must(baseTmpl.Clone())
 			template.Must(pageTmpl.ParseFS(Templates, tmplPath))

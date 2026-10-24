@@ -61,8 +61,10 @@ func NewLegalLE(fl *flags.Service) *LegalLE {
 	return l
 }
 
-func (l *LegalLE) on() bool {
-	return l.flags != nil && l.flags.Enabled(produce.FlagLegalLEPages, "")
+func (l *LegalLE) on() bool { return legalLEOn(l.flags) }
+
+func legalLEOn(fl *flags.Service) bool {
+	return fl != nil && fl.Enabled(produce.FlagLegalLEPages, "")
 }
 
 // LegalLENotFound is the pages' 404 on the canonical origin while the flag

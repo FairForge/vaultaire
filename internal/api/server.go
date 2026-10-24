@@ -946,6 +946,13 @@ func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
 	}
 }
 
+// docsPages are the customer guides by slug → path ("" = the hub); the
+// routes and the sitemap read them (RP56-3).
+var docsPages = map[string]string{
+	"": "/docs", "getting-started": "/docs/getting-started",
+	"rclone": "/docs/rclone", "faq": "/docs/faq",
+}
+
 func (s *Server) setupRoutes() {
 	s.router.Get("/health", s.handleHealthEnhanced)
 	s.router.Get("/health/live", s.handleLiveness)
@@ -968,10 +975,7 @@ func (s *Server) setupRoutes() {
 
 	// Customer docs (1B.3): hub + goldmark-rendered guides; the Swagger API
 	// reference moved from /docs to /docs/api.
-	for slug, path := range map[string]string{
-		"": "/docs", "getting-started": "/docs/getting-started",
-		"rclone": "/docs/rclone", "faq": "/docs/faq",
-	} {
+	for slug, path := range docsPages {
 		s.router.Get(path, s.handleDocsPage(slug))
 		s.router.Head(path, s.handleDocsPage(slug))
 	}
