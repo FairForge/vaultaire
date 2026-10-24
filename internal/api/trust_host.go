@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/translog"
 )
@@ -32,7 +33,9 @@ func TrustHostRouter(h hosts.Hosts, trust, fallback http.Handler) http.Handler {
 // newTrustRouter is what a trust host serves: GET and HEAD of
 // /translog/checkpoint, /translog/tile/… and /translog/anchor/<size>.ots
 // (K4c-3a) (behind translog_public, a
-// signed or presigned S3 request 404), /.well-known/security.txt, and a 404
+// signed or presigned S3 request 404), /legal/law-enforcement and
+// /legal/what-we-can-produce with their layout's six static files (43.4,
+// behind legal_le_pages), /.well-known/security.txt, and a 404
 // for everything else — any path, any method, signed or not (D-P33-6: a 404,
 // not a 301 to the canonical origin; no trust page exists yet). Its own
 // middleware is the main router's minus the alias redirect and the site
@@ -57,6 +60,9 @@ func (s *Server) newTrustRouter() http.Handler {
 			r.Head(p, serve)
 		}
 	}
+	// 43.4: the law-enforcement policy and "what we can produce" with the
+	// files their layout loads, behind legal_le_pages (OFF = this 404).
+	dashboard.NewLegalLE(s.flags).Mount(r, trustNotFound, true)
 	r.Get("/.well-known/security.txt", s.handleSecurityTxt)
 	r.Head("/.well-known/security.txt", s.handleSecurityTxt)
 	return r
@@ -69,5 +75,5 @@ func trustNotFound(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write([]byte("404 not found: this host serves the transparency log only (/translog/checkpoint, /translog/tile/…, /translog/anchor/…)\n"))
+	_, _ = w.Write([]byte("404 not found: this host serves the transparency log (/translog/checkpoint, /translog/tile/…, /translog/anchor/…) and its legal pages only\n"))
 }

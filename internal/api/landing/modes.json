@@ -5,7 +5,7 @@
       "id": "private",
       "name": "Private",
       "server_holds": {
-        "text": "Your files as ciphertext. The key is never stored: with SSE-C it reaches our server with each request, which uses it for that request only; with client-side encryption it never reaches us. We still see object names, sizes, counts, timestamps and when they are read."
+        "text": "Your files as ciphertext. The key is never stored: with SSE-C it reaches our server with each request, which uses it for that request only; with client-side encryption it never reaches us. We still see object names, sizes, content types, the metadata you attach, counts, timestamps and when they are read; with SSE-C, also the MD5 of your key and, for a file uploaded in one request, the MD5 of its contents (its ETag)."
       },
       "customer": {
         "text": "Only you keep the key: we store your files encrypted and never store the key, so we cannot read them at rest or recover them if the key is lost."

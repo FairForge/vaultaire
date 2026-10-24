@@ -1,0 +1,70 @@
+{{define "title"}}What we can produce, Stored{{end}}
+{{define "nav"}}
+<nav class="navbar">
+    <div class="nav-brand">
+        <a href="{{host "web"}}/"><svg viewBox="0 0 14 14" aria-hidden="true" focusable="false"><path fill="currentColor" d="M0 0h14v1h-14zM0 1h1v5h-1zM13 1h1v13h-1zM0 9h4v1h-4zM0 10h1v1h-1zM0 11h4v1h-4zM3 12h1v1h-1zM0 13h4v1h-4zM5 13h8v1h-8z"/></svg><span>Stored</span></a>
+    </div>
+    <div class="nav-links">
+        <button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button>
+    </div>
+</nav>
+{{end}}
+{{define "footer"}}
+<footer class="footer">
+    <div class="container">
+        <span>&copy; 2026 FairForge LLC &mdash; Stored</span>
+        <span class="footer-links">
+            <a href="{{host "web"}}/legal/privacy">Privacy</a>
+            <a href="{{host "web"}}/legal/terms">Terms</a>
+            <a href="/legal/law-enforcement">Law enforcement</a>
+        </span>
+    </div>
+</footer>
+{{end}}
+{{define "content"}}
+<div class="card">
+    <h1>What we can produce</h1>
+    <p>This page lists the records we hold about an account, how long we keep each, and what we do not hold and so cannot hand over to anyone, including in answer to a court order. It is generated from the code that keeps the records, and a test fails when the two disagree. How we answer requests is on the <a href="/legal/law-enforcement">law-enforcement page</a>.</p>
+
+    <h2 id="files">Files, by bucket mode</h2>
+    <p>Every bucket is in one of these modes. What we hold of a file depends on its bucket's mode:</p>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Mode</th><th>What we hold</th><th>What it means</th></tr></thead>
+        <tbody>
+        {{range .Modes}}<tr><td><strong>{{.Name}}</strong></td><td>{{.ServerHolds}}</td><td>{{.Customer}}</td></tr>
+        {{end}}</tbody>
+    </table></div>
+
+    <h3 id="ssec">A file written with your own key (SSE-C)</h3>
+    <p>For each such file our records hold, readable by us:</p>
+    <ul>
+        {{range .SSEC.Holds}}<li>{{.What}} (<code>{{.Column}}</code>)</li>
+        {{end}}</ul>
+    <p>The key itself is in none of our records. The file's stored bytes are encrypted under it, so the bytes we could hand over are ciphertext.</p>
+
+    <h2 id="account">Account records</h2>
+    <p>These are the sections of the data export an account holder can download from the account settings: the account's records as we hold them, field by field.</p>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Section</th><th>What it is</th><th>Fields</th></tr></thead>
+        <tbody>
+        {{range .Account}}<tr><td><code>{{.Section}}</code></td><td>{{.Label}}</td><td><code>{{.Fields}}</code></td></tr>
+        {{end}}</tbody>
+    </table></div>
+
+    <h2 id="logs">Service records and how long we keep them</h2>
+    <div class="table-wrap"><table>
+        <thead><tr><th>Record</th><th>What it holds</th><th>Kept</th></tr></thead>
+        <tbody>
+        {{range .Retention}}<tr><td><code>{{.Table}}</code></td><td>{{.What}}</td><td>{{.Days}} days{{if .Scrub}}, then <code>{{.Scrub}}</code> blanked{{else}}, then deleted{{end}}</td></tr>
+        {{end}}{{range .Kept}}<tr><td><code>{{.Table}}</code></td><td>{{.What}}</td><td>for the life of the service</td></tr>
+        {{end}}<tr><td>Data export files</td><td>The file an export request produces.</td><td>{{.ExportsDays}} days, then deleted</td></tr>
+        </tbody>
+    </table></div>
+    <p>Database backups are kept {{.Backups.OnBoxDays}} days on our server and {{.Backups.OffBoxDays}} days off it, so a record deleted from the database can remain in a backup for up to {{.Backups.OffBoxDays}} days.</p>
+    {{if .AdminReads}}<p>{{.AdminReads}}</p>{{end}}
+    {{if .Builds}}<p>{{.Builds}}</p>{{end}}
+
+    <h2 id="limits">What no page like this can promise</h2>
+    <p>{{.Caveat}}</p>
+</div>
+{{end}}

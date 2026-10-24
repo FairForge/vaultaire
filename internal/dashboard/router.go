@@ -223,6 +223,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			template.Must(pageTmpl.ParseFS(Templates, tmplPath))
 			pub.Get("/legal/"+slug, handlers.HandleLegalPage(pageTmpl))
 		}
+		// 43.4: the law-enforcement policy and "what we can produce",
+		// behind legal_le_pages (the same handlers serve the trust host).
+		NewLegalLE(deps.Flags).Mount(pub, LegalLENotFound, false)
 		pub.Get("/compliance/gdpr", http.RedirectHandler("/legal/gdpr", http.StatusMovedPermanently).ServeHTTP)
 		pub.Get("/compliance/data-act", http.RedirectHandler("/legal/data-act", http.StatusMovedPermanently).ServeHTTP)
 

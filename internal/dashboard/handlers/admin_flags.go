@@ -41,6 +41,7 @@ var flagInfos = map[string]flagInfo{
 	"blomp_backend":   {2, "Lets this tenant's buckets with tier_preference 'blomp' (operator-set, SQL only) store on Blomp's Swift storage (one container, ~3 writes/s, plain HTTP). Writes are sealed with SSE-S3 unless BLOMP_ALLOW_UNSEALED is set (testing). Per tenant first."},
 	"sia_backend":     {2, "Lets this tenant's buckets with tier_preference 'sia' (operator-set, SQL only) store whole objects on Sia through the s3d gateway. Writes are sealed with SSE-S3 unless SIA_ALLOW_UNSEALED is set. Per tenant first."},
 	"parallel_get":    {2, "Large whole-object downloads (64 MiB and up) on iDrive/Wasabi are read as 8 parallel 16 MiB ranges with hedging behind the one client stream (2–4× a single backend connection). Off = one backend GET per client GET. Per tenant first, then global."},
+	"legal_le_pages":  {1, "Serves /legal/law-enforcement and /legal/what-we-can-produce (plan 43.4) on the canonical origin and the trust host. Global only. The policy's procedure is a marked DRAFT until counsel writes it (F-36): open it only then."},
 	"egress_throttle": {2, "The egress allowance as a rate cap: a tenant past its monthly allowance has GetObject and /cdn bodies paced (never billed). Off = nothing is slowed, the decision is only counted (vaultaire_egress_would_throttle_total). With the global row on, a tenant row with the flag off exempts that tenant."},
 }
 

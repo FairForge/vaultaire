@@ -11,6 +11,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/payments"
+	"github.com/FairForge/vaultaire/internal/produce"
 )
 
 // Day-one feature flags (1.13 live-iteration kit). Adding a flag is a key
@@ -147,6 +148,12 @@ func registerFlags(fl *flags.Service) {
 	// before authentication, so a tenant row could open nothing: refused.
 	fl.Register(flagRecoveryVault, false)
 	fl.GlobalOnly(flagRecoveryVault)
+	// 43.4: the law-enforcement policy and the "what we can produce" page
+	// (/legal/law-enforcement, /legal/what-we-can-produce) on the canonical
+	// origin and the trust host. Default OFF = 404 on both, global only: the
+	// owner opens them once counsel has written the policy (F-36).
+	fl.Register(produce.FlagLegalLEPages, false)
+	fl.GlobalOnly(produce.FlagLegalLEPages)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class
