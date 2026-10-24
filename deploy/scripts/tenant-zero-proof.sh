@@ -375,7 +375,9 @@ step_modes() {
 
 step_dogfood() {
   local b=$TZP_DOGFOOD_BUCKET f n=0
-  [ -n "${TZP_DOGFOOD_DIR:-}" ] && [ -d "$TZP_DOGFOOD_DIR" ] || die "dogfood: TZP_DOGFOOD_DIR names no directory"
+  if [ -z "${TZP_DOGFOOD_DIR:-}" ] || [ ! -d "$TZP_DOGFOOD_DIR" ]; then
+    die "dogfood: TZP_DOGFOOD_DIR names no directory"
+  fi
   if [ "$(q "SELECT count(*) FROM buckets WHERE tenant_id='$TZP_TENANT' AND name='$b'")" = 0 ]; then
     create_bucket "$b"
   fi
