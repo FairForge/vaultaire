@@ -21,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -334,6 +335,35 @@ func (s *Server) handleRecoveryTokens(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeRateLimit, "rate_limited", fmt.Sprintf("at most %d token requests an hour", recoveryTokensPerHour), "")
 		return
 	}
+	// The mint and the erasure agree (RP54-1, the WP-P38 post-merge
+	// review): the deletion runner's stage b3 Deletes the user's record at
+	// every realm and reads the recovery.tokens_issued row to know a token
+	// may still be live (recovery_erasure.go). So, in ONE transaction: the
+	// user row under FOR SHARE — an account whose erasure is due gets no
+	// token (during the grace period nothing is blocked, D-16) — then the
+	// trail row, committed before a token leaves. No trail, no token.
+	if s.db == nil {
+		writeManagementError(w, ErrTypeUnavailable, "recovery_unavailable", "the recovery vault needs the database", "")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.logger.Error("recovery tokens: begin", zap.Error(err))
+		writeManagementError(w, ErrTypeUnavailable, "recovery_unavailable", "could not read the account", "")
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	exists, due, err := account.DueShared(r.Context(), tx, userID, v.now())
+	if err != nil {
+		s.logger.Error("recovery tokens: read the account", zap.Error(err))
+		writeManagementError(w, ErrTypeUnavailable, "recovery_unavailable", "could not read the account", "")
+		return
+	}
+	if !exists || due {
+		writeManagementError(w, ErrTypeConflict, "account_erasure_due",
+			"the account's deletion date has passed: no recovery token is issued while it is erased", "")
+		return
+	}
 	realms, err := v.mint(userID)
 	if err != nil {
 		s.logger.Error("recovery tokens", zap.Error(err))
@@ -342,8 +372,17 @@ func (s *Server) handleRecoveryTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	// The audit row names the user (it is the operator's trail) and never
 	// the opaque subject: the trail must not become the join table.
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, TenantID: tenantID, EventType: "recovery",
-		Action: "recovery.tokens_issued", Metadata: map[string]any{"realms": len(realms)}})
+	if err := audit.RecordTx(r.Context(), tx, audit.Entry{UserID: userID, TenantID: tenantID, EventType: "recovery",
+		Action: "recovery.tokens_issued", Metadata: map[string]any{"realms": len(realms)}}); err != nil {
+		s.logger.Error("recovery tokens: the trail could not be written — nothing issued", zap.Error(err))
+		writeManagementError(w, ErrTypeUnavailable, "trail_not_written", "the token issue could not be recorded; nothing was issued", "")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.logger.Error("recovery tokens: the trail could not be committed — nothing issued", zap.Error(err))
+		writeManagementError(w, ErrTypeUnavailable, "trail_not_written", "the token issue could not be recorded; nothing was issued", "")
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"realms": realms})
 }

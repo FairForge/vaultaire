@@ -331,3 +331,44 @@ func TestRecoveryTokens_Config(t *testing.T) {
 		})
 	}
 }
+
+// RP54-1 (the WP-P38 post-merge review, closing RP53-3): the mint refuses
+// once the account's erasure is due. During the grace period nothing is
+// blocked (D-16); past the date the runner may be erasing, and a token
+// minted then could Register at a realm after the runner's Delete.
+func TestRecoveryTokens_RefusedOnceTheErasureIsDue(t *testing.T) {
+	f := newRecoveryFixture(t)
+	f.open(t)
+	_, err := f.db.db.Exec(`UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() + INTERVAL '1 day' WHERE id = $1`, f.user.ID)
+	require.NoError(t, err)
+	w := f.post(f.jwt)
+	require.Equal(t, http.StatusOK, w.Code, "the grace period blocks nothing: %s", w.Body.String())
+
+	_, err = f.db.db.Exec(`UPDATE users SET deletion_scheduled_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, f.user.ID)
+	require.NoError(t, err)
+	w = f.post(f.jwt)
+	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "account_erasure_due")
+	assert.NotContains(t, w.Body.String(), `"token"`)
+	var rows int
+	require.NoError(t, f.db.db.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE user_id = $1 AND action = 'recovery.tokens_issued'`, f.user.ID).Scan(&rows))
+	assert.Equal(t, 1, rows, "only the grace-period mint left a trail")
+}
+
+// RP54-1 (closing RP53-4): no trail, no token. The deletion runner reads the
+// recovery.tokens_issued row to know a token may still be live; a mint whose
+// row cannot be written must not serve its tokens. The row's tenant_id is a
+// varchar(255): a tenant id past it fails the insert and nothing else.
+func TestRecoveryTokens_NoTrailNoTokens(t *testing.T) {
+	f := newRecoveryFixture(t)
+	f.open(t)
+	tok, err := f.s.auth.GenerateJWT(&auth.User{ID: f.user.ID, Email: f.user.Email, TenantID: strings.Repeat("t", 300)})
+	require.NoError(t, err)
+	w := f.post(tok)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "trail_not_written")
+	assert.NotContains(t, w.Body.String(), `"token"`)
+	var rows int
+	require.NoError(t, f.db.db.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE user_id = $1 AND action = 'recovery.tokens_issued'`, f.user.ID).Scan(&rows))
+	assert.Zero(t, rows)
+}
