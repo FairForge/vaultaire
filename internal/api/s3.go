@@ -362,6 +362,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			a := auth.NewAuth(s.db, s.logger)
 			a.MissingSignedHeader = s.missingSignedHeaderHint
 			tenantID, scope, err = a.ValidateRequest(r)
+			if err != nil && r.Header.Get("Authorization") == "" && s.serveWebNotFound(w, r) {
+				return // a browser's typo on the web host: the 404 page, not AccessDenied XML
+			}
 			if err != nil {
 				s.logger.Info("authentication failed", // the client's outcome (E4.2)
 					zap.Error(err),

@@ -80,6 +80,14 @@ func shouldRedirectToCanonical(h hosts.Hosts, r *http.Request) bool {
 	if h.IsS3Host(r.Host) || !h.IsAlias(r.Host) {
 		return false
 	}
+	return isBrowserPageView(r)
+}
+
+// isBrowserPageView is the gate's request half, whatever the host: GET or
+// HEAD, no Authorization, no x-amz-* header, no presigned query, Accept names
+// text/html, not an operational or machine path. The web host's 404 and
+// launch redirects use it too (web_host.go).
+func isBrowserPageView(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}

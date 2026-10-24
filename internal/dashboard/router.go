@@ -226,6 +226,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// 43.4: the law-enforcement policy and "what we can produce",
 		// behind legal_le_pages (the same handlers serve the trust host).
 		NewLegalLE(deps.Flags).Mount(pub, LegalLENotFound, false)
+		// Prompt 39: refunds and DMCA, behind legal_draft_pages (OFF = the
+		// web 404, legal_draft.go).
+		NewLegalDraft(deps.Flags).Mount(pub)
 		pub.Get("/compliance/gdpr", http.RedirectHandler("/legal/gdpr", http.StatusMovedPermanently).ServeHTTP)
 		pub.Get("/compliance/data-act", http.RedirectHandler("/legal/data-act", http.StatusMovedPermanently).ServeHTTP)
 
