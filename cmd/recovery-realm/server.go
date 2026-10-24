@@ -30,6 +30,9 @@ const (
 	maxEnvelope     = recovery.MaxRequestBody + maxTokenLength + 256
 	sessionLifetime = 5 * time.Minute
 	maxSessions     = 100_000
+	// maxSessionsPerSubject bounds one user's share of the table (RP52-2):
+	// the SDK keeps one session per realm, so a few cover retries.
+	maxSessionsPerSubject = 8
 )
 
 var ops = []string{"handshake", "register1", "register2", "recover1", "recover2", "recover3", "delete", "unknown"}
@@ -102,6 +105,23 @@ type server struct {
 
 	mu       sync.Mutex
 	sessions map[sessionKey]*session
+	// bySubject indexes sessions by (tenant, subject) for the per-subject
+	// bound (RP52-2); kept in step with sessions by putSession/deleteLocked.
+	bySubject map[subjectKey]map[uint32]struct{}
+}
+
+type subjectKey struct{ tenant, sub string }
+
+// deleteLocked removes one session and its index entry; s.mu is held.
+func (s *server) deleteLocked(key sessionKey) {
+	delete(s.sessions, key)
+	sk := subjectKey{key.tenant, key.sub}
+	if ids := s.bySubject[sk]; ids != nil {
+		delete(ids, key.id)
+		if len(ids) == 0 {
+			delete(s.bySubject, sk)
+		}
+	}
 }
 
 func (s *server) routes() http.Handler {
@@ -286,7 +306,7 @@ func (s *server) getSession(key sessionKey) *session {
 		return nil
 	}
 	if sess.idle(s.now()) {
-		delete(s.sessions, key)
+		s.deleteLocked(key)
 		return nil
 	}
 	return sess
@@ -295,17 +315,45 @@ func (s *server) getSession(key sessionKey) *session {
 func (s *server) putSession(key sessionKey, sess *session) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.sessions[key]; !exists && len(s.sessions) >= maxSessions {
-		return false
+	sk := subjectKey{key.tenant, key.sub}
+	if _, exists := s.sessions[key]; !exists {
+		// A subject at its bound gives up its least recently used session:
+		// one user can crowd out only themselves (RP52-2).
+		if ids := s.bySubject[sk]; len(ids) >= maxSessionsPerSubject {
+			var oldest sessionKey
+			var at int64
+			for id := range ids {
+				k := sessionKey{tenant: key.tenant, sub: key.sub, id: id}
+				sess := s.sessions[k]
+				if sess == nil { // an index entry with no session: drop it first
+					oldest = k
+					break
+				}
+				if t := sess.lastUsed.Load(); at == 0 || t < at {
+					oldest, at = k, t
+				}
+			}
+			s.deleteLocked(oldest)
+		}
+		if len(s.sessions) >= maxSessions {
+			return false
+		}
 	}
 	s.sessions[key] = sess
+	if s.bySubject == nil {
+		s.bySubject = map[subjectKey]map[uint32]struct{}{}
+	}
+	if s.bySubject[sk] == nil {
+		s.bySubject[sk] = map[uint32]struct{}{}
+	}
+	s.bySubject[sk][key.id] = struct{}{}
 	return true
 }
 
 func (s *server) dropSession(key sessionKey) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.sessions, key)
+	s.deleteLocked(key)
 }
 
 // sweepSessions drops idle sessions until ctx ends.
@@ -321,7 +369,7 @@ func (s *server) sweepSessions(ctx context.Context) {
 			now := s.now()
 			for k, sess := range s.sessions {
 				if sess.idle(now) {
-					delete(s.sessions, k)
+					s.deleteLocked(k)
 				}
 			}
 			s.mu.Unlock()

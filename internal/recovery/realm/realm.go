@@ -77,7 +77,9 @@ var ErrConflict = errors.New("realm: record changed concurrently")
 // Store keeps records. Load of an absent record returns the zero Record
 // (NotRegistered) and revision 0. CompareAndSwap writes next only when the
 // record is still at rev (else ErrConflict) and returns once the write is
-// durable; a NotRegistered next deletes the record.
+// durable; a NotRegistered next deletes the record. A revision is never
+// handed out twice, across records and deletes (RP52-1): a stale write
+// must conflict even after the record was deleted and registered anew.
 type Store interface {
 	Load(ctx context.Context, tenant, sub string) (Record, uint64, error)
 	CompareAndSwap(ctx context.Context, tenant, sub string, rev uint64, next Record) error

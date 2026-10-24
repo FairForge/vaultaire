@@ -232,3 +232,37 @@ func TestRealm_StateMachine(t *testing.T) {
 	_, err = r.Handle(ctx, realm.Auth{Tenant: "stored"}, recovery.SecretsRequest{Op: recovery.OpRecover1})
 	assert.ErrorIs(t, err, realm.ErrBadRequest)
 }
+
+// RP52-1: a revision is never reused, a Delete included. A Recover2 that
+// loaded the record, then lost the race to a Delete and a fresh Register2,
+// must conflict — not write the deleted record (its secret material) back
+// over the new registration. Revisions restarted at 0 when a record was
+// deleted, so the stale write's revision matched again.
+func TestRecovery_StaleWriteAfterDeleteAndReregister_Conflicts(t *testing.T) {
+	ctx := context.Background()
+	for name, mk := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			st := mk()
+			first := realm.Record{State: realm.Registered, AllowedGuesses: 5, Version: [16]byte{1}, EncryptedSecret: [recovery.EncryptedSecretSize]byte{0xaa}}
+			require.NoError(t, st.CompareAndSwap(ctx, "stored", "sub", 0, first))
+
+			// A Recover2 loads the record…
+			stale, rev, err := st.Load(ctx, "stored", "sub")
+			require.NoError(t, err)
+
+			// …meanwhile the user deletes it and registers anew.
+			require.NoError(t, st.CompareAndSwap(ctx, "stored", "sub", rev, realm.Record{}))
+			_, r0, err := st.Load(ctx, "stored", "sub")
+			require.NoError(t, err)
+			second := realm.Record{State: realm.Registered, AllowedGuesses: 5, Version: [16]byte{2}}
+			require.NoError(t, st.CompareAndSwap(ctx, "stored", "sub", r0, second))
+
+			// The Recover2's commit of the stale record must not land.
+			stale.AttemptedGuesses++
+			assert.ErrorIs(t, st.CompareAndSwap(ctx, "stored", "sub", rev, stale), realm.ErrConflict)
+			got, _, err := st.Load(ctx, "stored", "sub")
+			require.NoError(t, err)
+			assert.Equal(t, [16]byte{2}, got.Version, "the new registration survives; the deleted secret stays deleted")
+		})
+	}
+}
