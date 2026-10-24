@@ -133,6 +133,24 @@ func TestClientBuildManifest_ReproCheckWarnsOnAnUnlistedCheckoutBuild(t *testing
 	assert.Contains(t, out, "sdk-js "+head, "the warning names the client and the hash")
 }
 
+// RP54-7 (the WP-P38 review): a checkout build that exits 0 and writes
+// nothing is a warning too — `got=$(shasum …)` under set -e used to end the
+// script, failing the deploy the step promises never to fail.
+func TestClientBuildManifest_ReproCheckWarnsWhenTheCheckoutBuildWritesNothing(t *testing.T) {
+	old := translog.ClientBuild{Client: translog.ClientSDKJS, Version: "0.1.0", SourceCommit: h40,
+		SHA256:    "4766be3dba6d856dea354cbb2c8c90a024eb585c51234d0f3271e906e9f9d7d0", // the real 0.1.0 row
+		Toolchain: "none", Recipe: "scripts/build-client.sh"}
+	silent := filepath.Join(t.TempDir(), "build-nothing.sh")
+	require.NoError(t, os.WriteFile(silent, []byte("#!/usr/bin/env bash\nexit 0\n"), 0o700))
+	t.Setenv("REPRO_CHECKOUT_BUILD", silent)
+
+	out, err := reproCheck(t, []translog.ClientBuild{old})
+
+	require.NoError(t, err, "a checkout build with no output never fails the deploy: %s", out)
+	assert.Contains(t, out, old.SHA256+" OK", "the row itself rebuilt")
+	assert.Contains(t, out, "::warning::repro-check-clients: this checkout's sdk-js built nothing")
+}
+
 // The checkout's build listed (a row at HEAD with its hash): no warning.
 func TestClientBuildManifest_ReproCheckListedCheckoutBuildIsQuiet(t *testing.T) {
 	root, err := filepath.Abs("../../..")
