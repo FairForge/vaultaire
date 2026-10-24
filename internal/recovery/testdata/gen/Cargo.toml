@@ -1,0 +1,30 @@
+# Golden-vector generator for internal/recovery (K5). Uses ONLY the MIT
+# juicebox-sdk crates (pinned to the commit docs/reviews/K5-PROBE.md read)
+# and the RustCrypto/dalek crates at the versions that commit's Cargo.lock
+# pins. Never the AGPL software realm. Run: cargo run --release > ../vectors.json
+[package]
+name = "recovery_vectors"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+juicebox_marshalling = { git = "https://github.com/juicebox-systems/juicebox-sdk", rev = "2e0f544e3fd0bd0997a034f73c8efb6fade3690c" }
+juicebox_noise = { git = "https://github.com/juicebox-systems/juicebox-sdk", rev = "2e0f544e3fd0bd0997a034f73c8efb6fade3690c" }
+juicebox_oprf = { git = "https://github.com/juicebox-systems/juicebox-sdk", rev = "2e0f544e3fd0bd0997a034f73c8efb6fade3690c" }
+juicebox_realm_api = { git = "https://github.com/juicebox-systems/juicebox-sdk", rev = "2e0f544e3fd0bd0997a034f73c8efb6fade3690c" }
+juicebox_secret_sharing = { git = "https://github.com/juicebox-systems/juicebox-sdk", rev = "2e0f544e3fd0bd0997a034f73c8efb6fade3690c" }
+argon2 = "=0.5.2"
+blake2 = "=0.10.6"
+chacha20poly1305 = "=0.10.1"
+curve25519-dalek = { version = "=4.1.3", features = ["rand_core", "digest"] }
+digest = "=0.10.7"
+hex = "=0.4.3"
+rand_core = "=0.6.4"
+serde = "=1.0.195"
+serde_json = "=1.0.111"
+sha2 = "=0.10.8"
+x25519-dalek = { version = "=2.0.0", features = ["static_secrets", "reusable_secrets"] }
