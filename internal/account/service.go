@@ -225,6 +225,28 @@ func (s *Service) StillDue(ctx context.Context, userID string, now time.Time) (b
 	return due, tx.Commit()
 }
 
+// DueShared reads the user under FOR SHARE inside the caller's transaction
+// and reports whether the row exists and whether its erasure is due (status
+// pending and the date passed). A writer holding FOR UPDATE — StillDue, the
+// erase transaction — waits for the caller's transaction, so what the caller
+// commits beside this read (an audit row) is committed against the state it
+// read. The recovery-token mint uses it (RP54-1): no realm token is issued
+// for an account whose erasure is owed, and the token's trail commits with
+// the check.
+func DueShared(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (exists, due bool, err error) {
+	var status string
+	var at sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, deletion_scheduled_at FROM users WHERE id = $1 FOR SHARE`, userID).Scan(&status, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read user %s: %w", userID, err)
+	}
+	return true, status == StatusPending && at.Valid && at.Time.Before(now), nil
+}
+
 func lockedStillDue(ctx context.Context, tx *sql.Tx, userID string, now time.Time) (bool, error) {
 	var status string
 	var at sql.NullTime

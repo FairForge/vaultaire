@@ -70,8 +70,11 @@ import (
 //
 // A cancel wins any time before stage c: the user row is re-read under FOR
 // UPDATE before every batch and inside the erase transaction. Objects a
-// batch already deleted are gone — the grace period is the time to change
-// one's mind, the walk is not.
+// batch already deleted are gone, and so is the record stage b3 deleted at
+// the realms (the client registers its recovery secret again) — the grace
+// period is the time to change one's mind, the walk is not. Past the date
+// the mint issues no realm token (RP54-1, recovery_tokens.go), so no token
+// minted after b3's check can Register behind the Delete.
 
 const (
 	accountDeletionJob      = "account_deletion"
@@ -503,7 +506,8 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 	if errors.Is(err, account.ErrNotPending) {
 		r.forgetSettles(ctx, d.TenantID, log)
 		te.Outcome = outcomeCancelled
-		log.Warn("account deletion: cancelled before the row erase; objects already deleted are gone")
+		log.Warn("account deletion: cancelled before the row erase; objects already deleted are gone, and so is the user's record at the recovery realms",
+			zap.Int("objects_deleted", te.ObjectsDeleted), zap.Int("realms_deleted", te.RealmsDeleted))
 		return te
 	}
 	if err != nil {
