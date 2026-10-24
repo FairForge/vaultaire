@@ -100,8 +100,9 @@ func newRecoveryFixture(t *testing.T) *recoveryFixture {
 
 func (f *recoveryFixture) open(t *testing.T) {
 	t.Helper()
-	require.NoError(t, f.fl.Set(context.Background(), flagRecoveryVault, "*", true, "test"))
-	t.Cleanup(func() { _ = f.fl.Unset(context.Background(), flagRecoveryVault, "*") })
+	// Global ON modelled by this fixture's own default: never a '*' row of a
+	// real flag on the shared test database (internal/flags/CLAUDE.md).
+	f.fl.Register(flagRecoveryVault, true)
 }
 
 func (f *recoveryFixture) post(bearer string, mod ...func(*http.Request)) *httptest.ResponseRecorder {
@@ -152,8 +153,10 @@ func TestRecoveryTokens_DarkWhenFlagOff_404(t *testing.T) {
 		r.AddCookie(&http.Cookie{Name: dashauth.SessionCookieName, Value: session})
 	}).Code)
 
-	// A per-tenant row does not open it: global only.
-	require.NoError(t, f.fl.Set(context.Background(), flagRecoveryVault, f.user.TenantID, true, "test"))
+	// A per-tenant row cannot be written (the gate is read before
+	// authentication, so only the global row means anything — RP44-2's
+	// rule for translog_public); the route stays dark.
+	require.ErrorIs(t, f.fl.Set(context.Background(), flagRecoveryVault, f.user.TenantID, true, "test"), flags.ErrGlobalOnly)
 	t.Cleanup(func() { _ = f.fl.Unset(context.Background(), flagRecoveryVault, f.user.TenantID) })
 	assert.Equal(t, http.StatusNotFound, f.post(f.jwt).Code)
 

@@ -143,8 +143,10 @@ func registerFlags(fl *flags.Service) {
 	fl.OnWins(flagTranslogCustomerView)
 	fl.GlobalOnly(flagTranslogPublic)
 	// K5: the recovery vault's token minter (POST /api/v1/recovery/tokens).
-	// Default OFF, global: a 404 to everyone until the owner opens it.
+	// Default OFF, global: a 404 to everyone until the owner opens it. Read
+	// before authentication, so a tenant row could open nothing: refused.
 	fl.Register(flagRecoveryVault, false)
+	fl.GlobalOnly(flagRecoveryVault)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class
