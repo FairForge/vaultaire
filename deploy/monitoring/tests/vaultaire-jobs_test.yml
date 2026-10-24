@@ -43,3 +43,32 @@ tests:
       - eval_time: 4h
         alertname: PeriodicJobStale
         exp_alerts: []
+
+  # RP54-3: a realm refusing the token is named with its outcome; a realm that
+  # deletes, and the other realm's zeros, stay silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_account_deletion_realms_total{realm="1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",outcome="invalid_auth"}'
+        values: '0x120 1x120'
+      - series: 'vaultaire_account_deletion_realms_total{realm="1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",outcome="deleted"}'
+        values: '0+1x240'
+      - series: 'vaultaire_account_deletion_realms_total{realm="1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",outcome="unreachable"}'
+        values: '0x240'
+    alert_rule_test:
+      - eval_time: 1h
+        alertname: AccountDeletionRealmRefusing
+        exp_alerts: []
+      - eval_time: 3h
+        alertname: AccountDeletionRealmRefusing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              realm: 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a
+              outcome: invalid_auth
+            exp_annotations:
+              summary: "Recovery realm 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a did not confirm an account erasure's Delete (invalid_auth)"
+              description: "The account-deletion runner deferred a tenant because realm 1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a answered invalid_auth in the last 2 h. invalid_auth: the realm refused the token — compare its token key with RECOVERY_TOKEN_KEYS and its clock with ours (nbf, 5 s leeway); it will not heal by itself. unavailable: it answered 5xx or Unavailable. unreachable: no answer at all — the run stopped asking it after the first tenant. The erasure is owed on its date; GET /api/v1/admin/jobs → account_deletion.last_error names the tenant."
+      # Two hours after the last refusal the increase is 0 again.
+      - eval_time: 4h1m
+        alertname: AccountDeletionRealmRefusing
+        exp_alerts: []

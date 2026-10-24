@@ -77,6 +77,11 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	assert.Contains(t, rules["JobStale"].expr, "vaultaire_job_last_success_timestamp_seconds")
 	assert.Contains(t, rules["JobFailing"].expr, `vaultaire_job_runs_total{outcome="error"}`)
 	assert.Contains(t, rules["AccountDeletionDeferred"].expr, `vaultaire_account_deletion_tenants_total{result="deferred"}`)
+	// RP54-3: the realm that defers an erasure is named, by outcome.
+	require.Contains(t, rules, "AccountDeletionRealmRefusing")
+	assert.Equal(t, "warning", rules["AccountDeletionRealmRefusing"].severity)
+	assert.Contains(t, rules["AccountDeletionRealmRefusing"].expr, `vaultaire_account_deletion_realms_total{outcome!="deleted"}`)
+	assert.Contains(t, rules["AccountDeletionRealmRefusing"].expr, "sum by (realm, outcome)")
 	// A write destroyed by a stale-copy delete (WP-R13-2) is a customer's
 	// object: it pages.
 	require.Contains(t, rules, "StaleCopyLostWrite")
@@ -142,7 +147,7 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 		require.Contains(t, rules, name)
 	}
 	assert.Equal(t, "critical", rules["TenantKeysUnwrapFailing"].severity, "a tenant's encrypted reads are 500s")
-	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_stale_copy_lost_writes_total",
+	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_account_deletion_realms_total", "vaultaire_stale_copy_lost_writes_total",
 		"vaultaire_key_rotation_pending", "vaultaire_tenant_keys_unwrap_failures"} {
 		assert.True(t, strings.Contains(raw, series), "the rule file documents %s", series)
 	}

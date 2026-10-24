@@ -6,6 +6,8 @@
 #   vaultaire_job_runs_total{job_name,outcome}          runs in this process: ok / error / interrupted
 #   vaultaire_account_deletion_tenants_total{result}    erased / deferred / cancelled / settling (rows erased, a lagging
 #                                                        listing's walk still owed — not a failure; RB-1, erasure_settle.go)
+#   vaultaire_account_deletion_realms_total{realm,outcome} recovery-realm Deletes of the runner's stage b3: deleted / invalid_auth /
+#                                                        unavailable / unreachable, every configured realm at 0 from boot (RP54-3)
 #   vaultaire_stale_copy_lost_writes_total{source}      objects whose bytes the delete of a stale copy removed while a
 #                                                        write of the same key was in flight (reclaim / delete / overwrite)
 #   vaultaire_account_exports_total{result}             GDPR exports: completed / retried / failed / expired (WP-R10-3b)
@@ -76,6 +78,21 @@ groups:
         annotations:
           summary: "An account erasure is being deferred"
           description: "The account-deletion runner could not finish a tenant whose grace period ended (Stripe refused the cancel, a backend refused a delete, or STRIPE_SECRET_KEY is unset with a subscription on the row). It retries every hour; the erasure is owed on its date. GET /api/v1/admin/jobs → account_deletion.last_error names the tenant and the reason."
+
+      # RP54-3 (Stage 1a Prompt 39 Part 0). A recovery realm that does not
+      # confirm a Delete defers the tenant (stage b3, recovery_erasure.go), and
+      # AccountDeletionDeferred says a tenant waits — this one names the realm
+      # and why. invalid_auth never heals by retrying: the realm's token key
+      # was rotated without RECOVERY_TOKEN_KEYS, or its clock is behind ours
+      # past its 5 s leeway on nbf. unreachable is asked once per run (RP54-4).
+      - alert: AccountDeletionRealmRefusing
+        expr: sum by (realm, outcome) (increase(vaultaire_account_deletion_realms_total{outcome!="deleted"}[2h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recovery realm {{ $labels.realm }} did not confirm an account erasure's Delete ({{ $labels.outcome }})"
+          description: "The account-deletion runner deferred a tenant because realm {{ $labels.realm }} answered {{ $labels.outcome }} in the last 2 h. invalid_auth: the realm refused the token — compare its token key with RECOVERY_TOKEN_KEYS and its clock with ours (nbf, 5 s leeway); it will not heal by itself. unavailable: it answered 5xx or Unavailable. unreachable: no answer at all — the run stopped asking it after the first tenant. The erasure is owed on its date; GET /api/v1/admin/jobs → account_deletion.last_error names the tenant."
 
       # WP-R13-2 (Review R13-06). A stale copy of an object — the hot copy of a
       # demoted object, the blob an overwrite left on another backend — is
