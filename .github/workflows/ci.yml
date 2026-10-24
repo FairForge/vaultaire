@@ -107,6 +107,11 @@ jobs:
         with:
           version: v2.14.0
 
+      # sdk/wasm under GOOS=js GOARCH=wasm: the step above skips its build
+      # tag (RP51-2). The same pinned version, built for the runner.
+      - name: Lint (sdk/wasm, js/wasm)
+        run: make lint-wasm
+
       - name: Deploy scripts
         run: |
           bash deploy/scripts/pg-backup_test.sh
