@@ -15,6 +15,10 @@
 #   vaultaire_backup_offbox2_retention_undeleted_files      the name) the last Sync / Blomp retention
 #                                                           pass could not delete — a count, not a
 #                                                           timestamp (RP54-6, Prompt 39 Part 0)
+#   vaultaire_backup_offbox_retention_last_run_timestamp_seconds   the Sync / Blomp retention
+#   vaultaire_backup_offbox2_retention_last_run_timestamp_seconds  pass listed its leg and tried
+#                                                           every old file — what makes the
+#                                                           count above fresh (RP55-1, Prompt 40)
 #
 # A run that fails writes nothing — the timestamps simply age. 26 h = one daily
 # run missed with two hours of slack; `or absent(...)` covers a box where the
@@ -75,3 +79,16 @@ groups:
         annotations:
           summary: "{{ $value }} backup file(s) past their 30 days could not be deleted from the {{ $labels.leg }} off-box leg"
           description: "The last retention pass of pg-backup.sh listed old backups on {{ $labels.leg }} it could not delete. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days: that holds only while this is 0. `grep -e 'could not delete' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names them; the next run retries every one."
+
+      - alert: BackupOffboxRetentionNotRunning
+        # RP55-1 (Stage 1a Prompt 40): a retention pass whose listing fails writes no
+        # undeleted-files count, so BackupOffboxRetentionStuck keeps reading the last pass that
+        # listed — 0 for ever while the leg fills. The pass that listed says when; > 26 h (one
+        # daily run missed with two hours of slack) or never = the count is not evidence.
+        expr: label_replace((time() - vaultaire_backup_offbox_retention_last_run_timestamp_seconds) > 26 * 3600, "leg", "sync", "", "") or label_replace(absent(vaultaire_backup_offbox_retention_last_run_timestamp_seconds), "leg", "sync", "", "") or label_replace((time() - vaultaire_backup_offbox2_retention_last_run_timestamp_seconds) > 26 * 3600, "leg", "blomp", "", "") or label_replace(absent(vaultaire_backup_offbox2_retention_last_run_timestamp_seconds), "leg", "blomp", "", "")
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The {{ $labels.leg }} off-box leg's backup retention has not listed it in > 26 h"
+          description: "pg-backup.sh's retention pass for {{ $labels.leg }} has not listed the leg for over 26 hours (or never has on this box), so nothing past its 30 days is being deleted there and BackupOffboxRetentionStuck reads an old count. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days. `grep -e 'listing' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the failure."

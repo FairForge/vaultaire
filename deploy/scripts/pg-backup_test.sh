@@ -128,7 +128,8 @@ echo "\$*" >> "$TMP/rclone.log"
 [ -e "$TMP/rclone-\$1-fails" ] && { echo "fake rclone: \$1 failed" >&2; exit 1; }
 case "\$*" in *blompcrypt:*)
   echo "\$RCLONE_CONFIG_BLOMPBK_USER|\$RCLONE_CONFIG_BLOMPBK_KEY|\$RCLONE_CONFIG_BLOMPCRYPT_REMOTE|\$RCLONE_CONFIG_BLOMPCRYPT_TYPE" > "$TMP/rclone2-env"
-  [ -e "$TMP/rclone2-fails" ] && { echo "fake rclone: blomp unreachable" >&2; exit 1; } ;;
+  [ -e "$TMP/rclone2-fails" ] && { echo "fake rclone: blomp unreachable" >&2; exit 1; }
+  [ "\$1" = lsf ] && [ -e "$TMP/rclone2-lsf-fails" ] && { echo "fake rclone: blomp listing failed" >&2; exit 1; } ;;
 esac
 to_path() { case "\$1" in blompcrypt:*) printf '%s/%s' "$REMOTE2" "\${1#blompcrypt:}" ;; *) printf '%s/%s' "$REMOTE" "\${1#syncbk:}" ;; esac; }
 case "\$1" in
@@ -309,6 +310,34 @@ check "4h: run timestamp written" [ -f "$METRICS/$RUN_METRIC.prom" ]
 rm -f "$TMP/rclone-deletefile-fails"; sleep 1; run_backup >/dev/null || true
 check "4i: the next run deletes them and exports 0" grep -qx "$UNDELETED2 0" "$METRICS/$UNDELETED2.prom"
 check "4i: gone" [ -z "$(find "$REMOTE2" -name "*_${old}_*")" ]
+
+# 4j. RP55-1: a retention pass that LISTED its leg says so with a timestamp per leg; a
+#     listing that fails writes none, so the undeleted-files gauge left from an older pass
+#     is never read as fresh (BackupOffboxRetentionNotRunning).
+RAN=vaultaire_backup_offbox_retention_last_run_timestamp_seconds
+RAN2=vaultaire_backup_offbox2_retention_last_run_timestamp_seconds
+reset_run; run_backup >/dev/null || true
+for m in "$RAN" "$RAN2"; do
+  f=$METRICS/$m.prom
+  if [ -f "$f" ] && grep -qE "^$m [0-9]{10}$" "$f" && grep -q "^# TYPE $m gauge" "$f"; then pass "4j: $m written after a pass that listed its leg"; else fail "4j: $m missing or malformed: $(cat "$f" 2>/dev/null)"; fi
+done
+ran2_before=$(cat "$METRICS/$RAN2.prom" 2>/dev/null); ran_before=$(cat "$METRICS/$RAN.prom" 2>/dev/null)
+sleep 1
+# The Blomp listing fails (the upload works): the Blomp timestamp stays, the Sync one moves.
+touch "$TMP/rclone2-lsf-fails"
+rm -rf "${ROOT:?}/backups"/*; run_backup >/dev/null 2>&1 || true
+rm -f "$TMP/rclone2-lsf-fails"
+check "4j: a failed Blomp listing is logged" grep -q 'OFFBOX2 FAILED - stage=offbox2: listing blompcrypt: failed' "$ROOT/logs/backup.log"
+check "4j: a failed Blomp listing writes no new $RAN2" [ "$(cat "$METRICS/$RAN2.prom" 2>/dev/null)" = "$ran2_before" ]
+check "4j: the Sync leg's listing worked: $RAN moved" [ "$(cat "$METRICS/$RAN.prom" 2>/dev/null)" != "$ran_before" ]
+# The Sync listing fails: the run fails at retention, no Sync timestamp.
+sleep 1; ran_before=$(cat "$METRICS/$RAN.prom" 2>/dev/null)
+rm -rf "${ROOT:?}/backups"/*; touch "$TMP/rclone-lsf-fails"; run_backup >/dev/null 2>&1 || true; rm -f "$TMP/rclone-lsf-fails"
+check "4j: a failed Sync listing writes no new $RAN" [ "$(cat "$METRICS/$RAN.prom" 2>/dev/null)" = "$ran_before" ]
+check "4j: BackupOffboxRetentionNotRunning rule" grep -q "alert: BackupOffboxRetentionNotRunning" "$RULES"
+for m in "$RAN" "$RAN2"; do
+  check "4j: the rule reads $m and its absence" grep -q "absent($m)" "$RULES"
+done
 
 # 4g. its alert rule.
 check "4g: BackupSecondOffboxStale rule on $OFFBOX2_METRIC" grep -q "alert: BackupSecondOffboxStale" "$RULES"

@@ -70,3 +70,44 @@ tests:
       - eval_time: 20m
         alertname: BackupOffboxRetentionStuck
         exp_alerts: []
+
+  # RP55-1 (Prompt 40): the Sync pass lists every run (its timestamp is its own sample time);
+  # the Blomp pass last listed at t=100 s. Past 26 h + `for:` only the blomp leg fires.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_offbox_retention_last_run_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x1700'
+      - series: 'vaultaire_backup_offbox2_retention_last_run_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '100x1700'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: BackupOffboxRetentionNotRunning
+        exp_alerts: []
+      - eval_time: 26h15m
+        alertname: BackupOffboxRetentionNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              leg: blomp
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "The blomp off-box leg's backup retention has not listed it in > 26 h"
+              description: "pg-backup.sh's retention pass for blomp has not listed the leg for over 26 hours (or never has on this box), so nothing past its 30 days is being deleted there and BackupOffboxRetentionStuck reads an old count. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days. `grep -e 'listing' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the failure."
+
+  # A leg whose pass never listed it on this box (the counter lesson: a series born at its
+  # first success never pages by itself) fires on absence, labelled with its leg.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_offbox_retention_last_run_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackupOffboxRetentionNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              leg: blomp
+            exp_annotations:
+              summary: "The blomp off-box leg's backup retention has not listed it in > 26 h"
+              description: "pg-backup.sh's retention pass for blomp has not listed the leg for over 26 hours (or never has on this box), so nothing past its 30 days is being deleted there and BackupOffboxRetentionStuck reads an old count. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days. `grep -e 'listing' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the failure."

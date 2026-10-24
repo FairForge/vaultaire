@@ -26,9 +26,15 @@
 #                                                           retention pass could not delete
 #                                                           (a gauge, written by every pass
 #                                                           that listed the leg; RP54-6)
+#   vaultaire_backup_offbox{,2}_retention_last_run_timestamp_seconds
+#                                                           the pass that wrote that gauge: a
+#                                                           listing that fails writes neither, so
+#                                                           an old count is never read as fresh
+#                                                           (RP55-1)
 # Rules: deploy/monitoring/vaultaire-backup.yml (BackupStale / BackupOffboxStale /
 # BackupRunIncomplete, > 26 h or absent; BackupSecondOffboxStale for the Blomp leg;
-# BackupOffboxRetentionStuck when either leg keeps a file past its 30 days).
+# BackupOffboxRetentionStuck when either leg keeps a file past its 30 days;
+# BackupOffboxRetentionNotRunning when either leg's retention has not listed it in 26 h).
 #
 # Every failure is ONE log line `BACKUP FAILED - stage=<stage>: <what>` — the explicit
 # fail() calls, and (ERR trap, set in main) any command in main that set -e would otherwise
@@ -174,6 +180,7 @@ offbox2_retention() {
     fi
   done <<< "$listing"
   write_metric vaultaire_backup_offbox2_retention_undeleted_files "old backup files (past the 30 days, by the date in the name) the last Blomp retention pass could not delete (pg-backup.sh)" "$undeleted"
+  write_metric vaultaire_backup_offbox2_retention_last_run_timestamp_seconds "unix time the last Blomp retention pass listed the leg and tried every old file (pg-backup.sh; the undeleted-files gauge is as old as this, RP55-1)"
   [ "$undeleted" = 0 ] || { offbox2_failed "$undeleted old file(s) could not be deleted"; return 1; }
 }
 
@@ -266,6 +273,7 @@ main() {
     fi
   done <<< "$listing"
   write_metric vaultaire_backup_offbox_retention_undeleted_files "old backup files (past the 30 days, by the date in the name) the last Sync retention pass could not delete (pg-backup.sh)" "$undeleted"
+  write_metric vaultaire_backup_offbox_retention_last_run_timestamp_seconds "unix time the last Sync retention pass listed the leg and tried every old file (pg-backup.sh; the undeleted-files gauge is as old as this, RP55-1)"
   [ "$undeleted" = 0 ] || fail "OFFBOX: $undeleted old file(s) could not be deleted"
   if [ "$OFFBOX2_OK" = true ]; then STAGE=offbox2; offbox2_retention || true; STAGE=retention; fi
 
