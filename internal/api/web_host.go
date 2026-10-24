@@ -52,12 +52,32 @@ func (s *Server) webRedirect(target string) http.HandlerFunc {
 	}
 }
 
-// registerWebRedirects mounts the launch paths before the S3 catch-all.
-// /pricing goes to the landing's pricing section: prices.json feeds it, so
-// it is the one place the prices are (TestWebHost_SignupAndPricingRedirect).
-func (s *Server) registerWebRedirects() {
+// webOnly serves a web page view with page; any other request is the S3
+// API's, exactly as before.
+func (s *Server) webOnly(page http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.webPageView(r) {
+			s.handleS3Request(w, r)
+			return
+		}
+		page.ServeHTTP(w, r)
+	}
+}
+
+// registerWebPages mounts, before the S3 catch-all, the launch paths and the
+// dark legal pages — for a web page view only. /pricing goes to the
+// landing's pricing section: prices.json feeds it, so it is the one place
+// the prices are (TestWebHost_SignupAndPricingRedirect). /legal/refunds and
+// /legal/dmca are behind legal_draft_pages (OFF = the 404 page).
+func (s *Server) registerWebPages() {
 	for path, target := range map[string]string{"/signup": "/register", "/pricing": "/#pricing", "/pricing/": "/#pricing"} {
 		h := s.webRedirect(target)
+		s.router.Get(path, h)
+		s.router.Head(path, h)
+	}
+	drafts := dashboard.NewLegalDraft(s.flags)
+	for _, path := range drafts.Paths() {
+		h := s.webOnly(drafts)
 		s.router.Get(path, h)
 		s.router.Head(path, h)
 	}

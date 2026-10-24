@@ -1093,9 +1093,10 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/changelog", s.handleChangelog)
 	s.router.Head("/changelog", s.handleChangelog)
 
-	// The paths a launch reader types (web_host.go): a browser's page view
-	// 301s, anything else is the S3 API's.
-	s.registerWebRedirects()
+	// The paths a launch reader types and the dark legal pages
+	// (web_host.go): for a browser's page view on a web host only, anything
+	// else is the S3 API's.
+	s.registerWebPages()
 
 	s.logger.Info("Registering S3 catch-all handler")
 	s.registerS3CatchAll()

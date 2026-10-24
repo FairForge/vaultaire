@@ -5,8 +5,6 @@ import (
 	"html/template"
 	"net/http"
 
-	"github.com/go-chi/chi/v5"
-
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
@@ -74,24 +72,29 @@ func (l *LegalDraft) on() bool {
 	return l.flags != nil && l.flags.Enabled(FlagLegalDraftPages, "")
 }
 
-// Mount registers GET and HEAD of both pages on r, answering WebNotFound
-// while the flag is OFF.
-func (l *LegalDraft) Mount(r chi.Router) {
-	for p, tmpl := range l.pages {
-		render := middleware.SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_ = tmpl.ExecuteTemplate(w, "base", l.data())
-		}))
-		h := func(w http.ResponseWriter, r *http.Request) {
-			if !l.on() {
-				WebNotFound(w, r)
-				return
-			}
-			render.ServeHTTP(w, r)
-		}
-		r.Get(p, h)
-		r.Head(p, h)
+// Paths are the pages' paths.
+func (l *LegalDraft) Paths() []string {
+	out := make([]string, 0, len(l.pages))
+	for p := range l.pages {
+		out = append(out, p)
 	}
+	return out
+}
+
+// ServeHTTP renders the page at r's path, or WebNotFound while the flag is
+// OFF. The API server mounts it for a web page view only (internal/api
+// web_host.go): any other request to these paths — a signed GetObject of a
+// bucket named "legal" — is the S3 API's.
+func (l *LegalDraft) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	tmpl, ok := l.pages[r.URL.Path]
+	if !ok || !l.on() {
+		WebNotFound(w, r)
+		return
+	}
+	middleware.SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = tmpl.ExecuteTemplate(w, "base", l.data())
+	})).ServeHTTP(w, r)
 }
 
 // LegalDraftMode is one mode as the DMCA page shows it.

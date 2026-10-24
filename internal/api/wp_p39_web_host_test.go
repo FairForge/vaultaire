@@ -197,9 +197,24 @@ func TestLegalDraftPages_FlagOffIsTheWeb404(t *testing.T) {
 	for _, env := range []map[string]string{prodTodayHosts, prodTargetHosts} {
 		h := webServer(t, env)
 		for _, p := range legalDraftPaths {
-			for _, accept := range []string{browserAccept, "*/*"} {
-				w := webReq{host: "stored.cloud", path: p, accept: accept}.do(h)
-				assertWeb404(t, w, p+" "+accept)
+			assertWeb404(t, webReq{host: "stored.cloud", path: p, accept: browserAccept}.do(h), p)
+			if env["VAULTAIRE_ALIAS_HOSTS"] == "" { // an alias 301s to the canonical origin first
+				assertWeb404(t, webReq{host: "stored.ge", path: p, accept: browserAccept}.do(h), "stored.ge"+p)
+			}
+		}
+	}
+	// Anything else at these paths is the S3 API's, flag ON or OFF: a GetObject
+	// of key "refunds" in a bucket named "legal" (the lab found the dashboard
+	// mount shadowing it on every host).
+	for _, on := range [][]string{nil, {dashboard.FlagLegalDraftPages}} {
+		h := webServer(t, prodTargetHosts, on...)
+		for _, p := range legalDraftPaths {
+			for _, q := range []webReq{
+				{host: "stored.cloud", path: p, accept: "*/*"},
+				{host: "s3.stored.cloud", path: p, accept: browserAccept},
+				{host: "stored.cloud", path: p, accept: browserAccept, header: map[string]string{"Authorization": "AWS4-HMAC-SHA256 Credential=VLT_NOPE/20261024/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=00"}},
+			} {
+				assertS3XML(t, q.do(h), fmt.Sprintf("%v %s%s %s", on, q.host, p, q.accept))
 			}
 		}
 	}
