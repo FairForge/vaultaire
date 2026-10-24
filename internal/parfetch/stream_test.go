@@ -275,10 +275,20 @@ func TestStream_BudgetExhaustedDegradesToFreeParts(t *testing.T) {
 	assert.Equal(t, int64(1<<20), b.InUse(), "the stream gave back exactly what it took")
 }
 
+// RP53-7 (the WP-P38 post-merge review): part 0 is a free part, so the
+// budget is charged only by the prefetch of parts 1–5 — which runs beside
+// Next(). The test waits until part 1's fetch has been called (its room was
+// taken before the call, admit) instead of assuming the prefetch won the
+// race; the assertion is then exact, not timing-dependent.
 func TestStream_BudgetIsReturnedAfterClose(t *testing.T) {
 	b := NewBudget(1 << 30)
 	data, sizes := parts(64, 4096)
+	part1 := make(chan struct{})
+	var once sync.Once
 	fetch := func(ctx context.Context, i int) ([]byte, error) {
+		if i == 1 {
+			once.Do(func() { close(part1) })
+		}
 		if i > 5 {
 			<-ctx.Done()
 			return nil, ctx.Err()
@@ -288,7 +298,12 @@ func TestStream_BudgetIsReturnedAfterClose(t *testing.T) {
 	s := Start(context.Background(), Config{Window: 1 << 20, MaxParts: 16, FreeParts: 1, Budget: b}, sizes, fetch)
 	_, err := s.Next()
 	require.NoError(t, err)
-	assert.Positive(t, b.InUse())
+	select {
+	case <-part1:
+	case <-time.After(5 * time.Second):
+		t.Fatal("part 1 was never fetched")
+	}
+	assert.Positive(t, b.InUse(), "parts past the free one are charged while the stream holds them")
 	s.Close()
 	assert.Equal(t, int64(0), b.InUse())
 }
