@@ -101,6 +101,7 @@ deadcode:
 # landing_build_test.go fails when the sources and the generated file drift.
 landing:
 	python3 internal/api/landing/build.py
+	python3 internal/api/landing/favicon.py
 
 # Drive the house builder in headless Chrome (internal/api/landing/browser).
 landing-browser:

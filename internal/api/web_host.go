@@ -75,6 +75,7 @@ func (s *Server) registerWebPages() {
 		s.router.Get(path, h)
 		s.router.Head(path, h)
 	}
+	s.registerWebFiles()
 	drafts := dashboard.NewLegalDraft(s.flags)
 	for _, path := range drafts.Paths() {
 		h := s.webOnly(drafts)

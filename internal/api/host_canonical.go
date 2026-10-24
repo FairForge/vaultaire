@@ -83,11 +83,10 @@ func shouldRedirectToCanonical(h hosts.Hosts, r *http.Request) bool {
 	return isBrowserPageView(r)
 }
 
-// isBrowserPageView is the gate's request half, whatever the host: GET or
-// HEAD, no Authorization, no x-amz-* header, no presigned query, Accept names
-// text/html, not an operational or machine path. The web host's 404 and
-// launch redirects use it too (web_host.go).
-func isBrowserPageView(r *http.Request) bool {
+// isAnonymousFetch: GET or HEAD carrying nothing an S3 client sends — no
+// Authorization, no x-amz-* header, no presigned or x-amz-* query. The half
+// of isBrowserPageView a crawler's fetch of /robots.txt passes too (RP56-3).
+func isAnonymousFetch(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
@@ -109,6 +108,17 @@ func isBrowserPageView(r *http.Request) bool {
 		if strings.HasPrefix(strings.ToLower(k), "x-amz-") {
 			return false
 		}
+	}
+	return true
+}
+
+// isBrowserPageView is the gate's request half, whatever the host: GET or
+// HEAD, no Authorization, no x-amz-* header, no presigned query, Accept names
+// text/html, not an operational or machine path. The web host's 404 and
+// launch redirects use it too (web_host.go).
+func isBrowserPageView(r *http.Request) bool {
+	if !isAnonymousFetch(r) {
+		return false
 	}
 	if !strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html") {
 		return false

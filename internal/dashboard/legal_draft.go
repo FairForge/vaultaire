@@ -68,8 +68,10 @@ func NewLegalDraft(fl *flags.Service) *LegalDraft {
 	return l
 }
 
-func (l *LegalDraft) on() bool {
-	return l.flags != nil && l.flags.Enabled(FlagLegalDraftPages, "")
+func (l *LegalDraft) on() bool { return legalDraftOn(l.flags) }
+
+func legalDraftOn(fl *flags.Service) bool {
+	return fl != nil && fl.Enabled(FlagLegalDraftPages, "")
 }
 
 // Paths are the pages' paths.
