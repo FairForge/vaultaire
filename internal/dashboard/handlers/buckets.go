@@ -97,22 +97,11 @@ func HandleBuckets(tmpl *template.Template, db *sql.DB, dataPath string, regionU
 
 		data := sessionData(sd, "buckets")
 		withCSRF(r.Context(), data)
-		withRegionPicker(data, regionUp)
-
-		if db != nil {
-			buckets := listBuckets(r.Context(), db, sd.TenantID)
-			data["Buckets"] = buckets
-			data["BucketCount"] = len(buckets)
-		} else {
-			data["Buckets"] = nil
-			data["BucketCount"] = 0
-		}
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
-			logger.Error("render buckets", zap.Error(err))
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		}
+		// The one renderer of the list: it sets ModesCopy, which this
+		// handler's own copy of it never did (WP-P39 Part B — with
+		// modes_copy on, the page kept the legacy "Private" for a Standard
+		// bucket).
+		renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)
 	}
 }
 
