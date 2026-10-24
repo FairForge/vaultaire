@@ -65,8 +65,12 @@ warning in ntfy forever. Install it after the owner's routing-truth backfill
 (`docs/reviews/WP-R7-5.md`, bench tenants → erase). `vaultaire-synthetic.yml`
 stays out until `SYNTHETIC_CHECK_URL` is set (its absent-series rule fires).
 
-`pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes three `.prom` files —
-`vaultaire_backup_{,offbox_,run_}last_success_timestamp_seconds.prom` — into
+`pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes its `.prom` files —
+`vaultaire_backup_{,offbox_,offbox2_,run_}last_success_timestamp_seconds.prom` and,
+since Prompt 39 Part 0 (RP54-6), the per-leg counts
+`vaultaire_backup_offbox{,2}_retention_undeleted_files.prom` (old files a retention
+pass could not delete; `BackupOffboxRetentionStuck`, promtool test
+`tests/vaultaire-backup_test.yml`) — into
 **its own directory `/opt/vaultaire/metrics/`** (user1, 0755; files 0644 by
 atomic rename). node_exporter 1.7.0 on the box reads ONE textfile directory
 (`--collector.textfile.directory`, default `/var/lib/prometheus/node-exporter`,
@@ -85,7 +89,7 @@ sudo -u user1 install -d -m 0755 /opt/vaultaire/metrics
 for m in vaultaire_backup_last_success_timestamp_seconds vaultaire_backup_offbox_last_success_timestamp_seconds; do
   sudo -u user1 cp -p /var/lib/prometheus/node-exporter/$m.prom /opt/vaultaire/metrics/$m.prom
 done
-for m in vaultaire_backup_last_success_timestamp_seconds vaultaire_backup_offbox_last_success_timestamp_seconds vaultaire_backup_run_last_success_timestamp_seconds; do
+for m in vaultaire_backup_last_success_timestamp_seconds vaultaire_backup_offbox_last_success_timestamp_seconds vaultaire_backup_offbox2_last_success_timestamp_seconds vaultaire_backup_run_last_success_timestamp_seconds vaultaire_backup_offbox_retention_undeleted_files vaultaire_backup_offbox2_retention_undeleted_files; do
   ln -sfn /opt/vaultaire/metrics/$m.prom /var/lib/prometheus/node-exporter/$m.prom
 done
 chown root:root /var/lib/prometheus/node-exporter && chmod 0755 /var/lib/prometheus/node-exporter

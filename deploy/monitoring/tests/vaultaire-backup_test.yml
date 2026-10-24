@@ -1,0 +1,72 @@
+# promtool unit test of vaultaire-backup.yml — BackupOffboxRetentionStuck (RP54-6,
+# Stage 1a Prompt 39 Part 0). Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-backup.yml deploy/monitoring/tests/vaultaire-backup_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-backup_test.yml'
+# The rule file path below is relative to this file's directory as copied.
+rule_files:
+  - vaultaire-backup.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Both legs report; only Blomp kept two old files: one alert, leg=blomp, after `for:`.
+  # The timestamps are fresh so the stale rules stay quiet.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_offbox_retention_undeleted_files{instance="localhost:9100",job="node"}'
+        values: '0x30'
+      - series: 'vaultaire_backup_offbox2_retention_undeleted_files{instance="localhost:9100",job="node"}'
+        values: '2x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BackupOffboxRetentionStuck
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: BackupOffboxRetentionStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              leg: blomp
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "2 backup file(s) past their 30 days could not be deleted from the blomp off-box leg"
+              description: "The last retention pass of pg-backup.sh listed old backups on blomp it could not delete. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days: that holds only while this is 0. `grep -e 'could not delete' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names them; the next run retries every one."
+
+  # Both legs stuck at once: two alerts, never one label set (the `leg` label).
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_offbox_retention_undeleted_files{instance="localhost:9100",job="node"}'
+        values: '1x30'
+      - series: 'vaultaire_backup_offbox2_retention_undeleted_files{instance="localhost:9100",job="node"}'
+        values: '3x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: BackupOffboxRetentionStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              leg: sync
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "1 backup file(s) past their 30 days could not be deleted from the sync off-box leg"
+              description: "The last retention pass of pg-backup.sh listed old backups on sync it could not delete. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days: that holds only while this is 0. `grep -e 'could not delete' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names them; the next run retries every one."
+          - exp_labels:
+              severity: warning
+              leg: blomp
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "3 backup file(s) past their 30 days could not be deleted from the blomp off-box leg"
+              description: "The last retention pass of pg-backup.sh listed old backups on blomp it could not delete. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days: that holds only while this is 0. `grep -e 'could not delete' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names them; the next run retries every one."
+
+  # A clean pass (0 on both) or a box where the files do not exist yet: silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_offbox_retention_undeleted_files{instance="localhost:9100",job="node"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: BackupOffboxRetentionStuck
+        exp_alerts: []
