@@ -15,6 +15,22 @@
       "sha256": "4766be3dba6d856dea354cbb2c8c90a024eb585c51234d0f3271e906e9f9d7d0",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "sdk-wasm",
+      "version": "0.2.0",
+      "source_commit": "4a8aa6184574010d277301e1f4d63ac017e0aecc",
+      "sha256": "bc06f7a614c864f9eb1c0de690be55c997a66826ff891eb3e2eadc4b1fee9dcd",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "sdk-js",
+      "version": "0.2.0",
+      "source_commit": "4a8aa6184574010d277301e1f4d63ac017e0aecc",
+      "sha256": "beea90d70611834c07aa00fca19be68ff14cbd713d30d164f7cbd68ec5b7b151",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }
