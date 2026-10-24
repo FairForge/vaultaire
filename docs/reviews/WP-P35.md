@@ -75,7 +75,7 @@ All 12 mutations turned their tests red (O6, O9 first non-compiling, re-run comp
 ## Prod proof
 
 - #927 merged as `c5a90bdc` (Deploy run 40022371231), #928 as `65de8a76` (Deploy run 40030880018), both through the merge queue, both `/version`-checked by the Deploy job.
-- `TRANSLOG_ANCHORS` stays unset — a no-op proven: the boot Info line `translog anchors: none — signed checkpoints are not anchored in OpenTimestamps`; the `translog_anchor` job `ok` with result `{"note": "no anchors configured (TRANSLOG_ANCHORS unset)"}` and no `anchors` key; migration 106 applied with both triggers; 0 error lines; the rules installed after promtool SUCCESS.
+- `TRANSLOG_ANCHORS` stays unset — a no-op proven: the boot Info line `translog anchors: none — signed checkpoints are not anchored in OpenTimestamps`; the `translog_anchor` job `ok` with result `{"note": "no anchors configured (TRANSLOG_ANCHORS unset)"}` and no `anchors` key; migration 106 applied with both triggers; 0 error lines. **Correction (WP-P36 Step 0):** the six-rule file was promtool-tested on the box (/tmp) and NEVER installed — the box kept P34b's five-rule `bf955269…`, so `TranslogAnchorStale` was never live. WP-P36 replaced that rule and installed the seven-rule file.
 - No signing key on prod (owner ceremony): nothing is signed, so nothing can be anchored; `translog_anchors` has 0 rows by design.
 
 ## Departures (D-P35-n)
