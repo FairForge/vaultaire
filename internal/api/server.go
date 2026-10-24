@@ -173,6 +173,9 @@ type Server struct {
 	// adminReadHook replaces RecordAdminRead in the API's admin routes (a
 	// test hook; nil = RecordAdminRead).
 	adminReadHook func(ctx context.Context, actorID, scope, tenantID string) error
+	// recovery mints the recovery-vault realm tokens (K5,
+	// recovery_tokens.go); nil when not configured.
+	recovery *recoveryVault
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
 	// signed request to it (translog_read.go); nil = handleS3Request.
 	s3Fallback http.HandlerFunc
@@ -362,6 +365,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// rules (a source set but unusable refuses the boot); without one,
 	// entries append and nothing is signed.
 	translogSigner := translogSigningKeyOrFatal(logger, os.Getenv, os.ReadFile)
+	// The recovery vault's token minter (K5): the same rules; nothing set =
+	// not configured.
+	s.recovery = recoveryVaultOrFatal(logger, os.Getenv, os.ReadFile)
 	if s.db != nil {
 		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
@@ -992,6 +998,8 @@ func (s *Server) setupRoutes() {
 	s.router.Get("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 	// The transparency log's read side (K4): dark behind translog_public.
 	s.registerTranslogReadRoutes()
+	// The recovery vault's token minter (K5): dark behind recovery_vault.
+	s.registerRecoveryRoutes()
 	s.router.Head("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 	s.router.Options("/cdn/{slug}/{bucket}/*", s.handleCDNRequest)
 
