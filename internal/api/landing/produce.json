@@ -1,5 +1,5 @@
 {
-  "_about": "The ONE source of the 'what we can produce' page (plan 43.4, Trust lane item 2, contract rules 7 and 8). Every row is a code fact under test (internal/api/produce_test.go): account rows ARE the GDPR export's sections and their fields (account_export_sections.go), retention rows ARE the retention job's policies (retention.go), backup periods are deploy/scripts/pg-backup.sh's, every table and column named exists in the migrated schema, the SSE-C row's columns are what a Private bucket's object row holds (proved by a write). Mode names and sentences are never here: the page renders modes.json through internal/modes. A row with requires_flag is rendered only while that flag is ON globally. Change the code and this file together.",
+  "_about": "The ONE source of the 'what we can produce' page (plan 43.4, Trust lane item 2, contract rules 7 and 8). Every row is a code fact under test (internal/api/produce_test.go): account rows ARE the GDPR export's sections and their fields (account_export_sections.go), retention rows ARE the retention job's policies (retention.go), backup periods are deploy/scripts/pg-backup.sh's and the point-in-time archive's (where, cipher, how far behind, how far back) deploy/scripts/pg-pitr-install.sh's, every table and column named exists in the migrated schema, the SSE-C row's columns are what a Private bucket's object row holds (proved by a write). Mode names and sentences are never here: the page renders modes.json through internal/modes. A row with requires_flag is rendered only while that flag is ON globally. Change the code and this file together.",
   "modes": [
     "private",
     "standard",
@@ -475,7 +475,14 @@
   ],
   "backups": {
     "on_box_days": 7,
-    "off_box_days": 30
+    "off_box_days": 30,
+    "pitr": {
+      "days": 28,
+      "every_seconds": 60,
+      "vendor": "Cloudflare R2",
+      "cipher": "AES-256",
+      "what": "Like the backups, the archive holds every row the database holds, including the rows of an account erased within that time."
+    }
   },
   "private_ssec": {
     "table": "object_head_cache",

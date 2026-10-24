@@ -115,6 +115,7 @@ jobs:
       - name: Deploy scripts
         run: |
           bash deploy/scripts/pg-backup_test.sh
+          bash deploy/scripts/pg-pitr_test.sh
           bash deploy/scripts/vaultaire-switch_test.sh
           bash deploy/scripts/tenant-zero-proof_test.sh
 

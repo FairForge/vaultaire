@@ -495,6 +495,139 @@ does not list yet goes on a later run).
   upgrade session's scratchpad copy of them.
 - Still open from WP-R9-7: `-Fc` format and the drill as a script.
 
+## Point-in-time recovery
+
+Since **2026-10-24** (Stage 1a Prompt 40) the PostgreSQL 18 cluster is archived
+continuously by **pgBackRest 2.58** (Ubuntu package), stanza `vaultaire`, into the
+private R2 bucket **`stored-pg-pitr`** (path `/vaultaire`; never `vaultaire-public`),
+**`aes-256-cbc`** with a passphrase that exists in `/etc/pgbackrest/pgbackrest.conf`
+(`postgres:postgres 0640`) and in the owner's Keychain (`vaultaire-pgbackrest-cipher`)
+only — **without it the repository cannot be read**. The nightly `pg_dump` (§ Backups)
+stays as the independent logical copy.
+
+- **RPO ≤ ~61 s:** `archive_timeout = 60s` switches a WAL segment every minute the
+  cluster writes; `archive-async` pushes it (switch → archived: median 0.68 s, max
+  1.24 s over 10 segments, 2026-10-24).
+- **RTO 12.8 s measured** for the 473 MB cluster (the drill below: restore 6.9 s,
+  accepting connections at 10.2 s, promoted at 12.8 s).
+- **Backups:** a full every **Sunday 01:30 UTC**, a differential **Monday–Saturday
+  01:30** (`vaultaire-pitr-full.timer` / `-diff.timer` → `vaultaire-pitr-backup@{full,diff}.service`,
+  as postgres). The first full: 473.1 MB in 7.6 s, 79.4 MB in the repository (zstd).
+- **Retention — a code fact:** `repo1-retention-full=4` (count) of weekly fulls, so the
+  oldest restorable point is at most 28 days old; WAL older than the oldest full is
+  expired with it. The produce page and the privacy policy say a deleted record stays
+  in a backup up to 30 days; `internal/api/produce_test.go` parses the install script
+  and fails if either moves, and **`PGPITRRetentionTooLong`** fires at 31 days.
+  Expected repository size: ~80 MB per full + diffs + ~1 day of WAL per day kept
+  (the WAL directory is ~80 MB) — a few GB at four weeks.
+- **What it holds:** every database of the cluster (`vaultaire`, `vaultaire_prod`, the
+  Sia `indexd_zen` and the lab databases, `pitr_canary`) at every moment of those 28
+  days, including the rows of accounts erased since — the produce page says so.
+- **Alerts** (`deploy/monitoring/vaultaire-pitr.yml`, installed 2026-10-24 sha256
+  `f69bf673…`): `PGArchiveFailing` / `PGArchiveStale` page, `PGPITRBackupStale`,
+  `PGPITRRetentionTooLong`, `PGPITRMetricsStale` warn — from
+  `/var/lib/vaultaire-pitr/vaultaire_pitr.prom`, written each minute by
+  `vaultaire-pitr-metrics.timer` (as postgres) and read through the symlink
+  `/var/lib/prometheus/node-exporter/vaultaire_pitr.prom`.
+
+### Install (once; again after an R2 key rotation)
+
+`deploy/scripts/pg-pitr-install.sh` (tests: `bash deploy/scripts/pg-pitr_test.sh`, run
+by CI) is the source; the box gets a copy. As root, from a checkout:
+
+```bash
+# the passphrase alone on stdin, into a 0600 file the installer reads and deletes
+security find-generic-password -s vaultaire-pgbackrest-cipher -w | ssh vaultaire-slc 'umask 077; cat > /tmp/pitr-cipher'
+sudo bash deploy/scripts/pg-pitr-install.sh /tmp/pitr-cipher
+```
+
+It installs the package, writes the conf (S3 key from `R2_*` in `configs/.env`, the
+endpoint `<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`), copies `pg-pitr-metrics.sh` and
+`pg-pitr-drill.sh` to `/usr/local/lib/vaultaire-pitr/` (root 0755), installs and
+enables the timers, runs `stanza-create`, and sets `archive_mode = on`,
+`archive_command = 'pgbackrest --stanza=vaultaire archive-push %p'`,
+`archive_timeout = '60s'` with `ALTER SYSTEM` (backing up `postgresql.auto.conf` as
+`.bak-pitr-<ts>` first, only when one changes). A passphrase that differs from the
+installed one is refused: a repository's passphrase never changes. Then, by hand:
+
+1. **The restart `archive_mode` needs**, at a quiet minute: `vaultaire-switch status`
+   and `gh run list --workflow deploy.yml` show no deploy running, then
+   `sudo systemctl restart postgresql@18-main`. 2026-10-24: 22:29:34.9 → 22:29:37.3 UTC
+   (2.4 s); the app logged 0 errors in 22:29:04–22:30:37 (66 lines); PostgreSQL ended
+   23 connections (7 app, 15 `indexd_zen`, 1 s3d lab), all reconnected.
+2. `sudo -u postgres pgbackrest --stanza=vaultaire check` — a segment reaches R2.
+3. The first full: `sudo systemctl start vaultaire-pitr-backup@full.service`.
+4. The rules: `promtool test rules` with `vaultaire-pitr.yml` and its test copied into
+   one directory, `install -m 0644` into `/etc/prometheus/rules/`, reload (README).
+
+### The drill
+
+```bash
+sudo /usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh
+```
+
+Writes a row to `pitr_canary` (a scratch database on the live cluster), notes the
+server's time T and the live `object_head_cache` count, writes a second row, waits for
+that WAL to be archived (`pgbackrest check`), then restores **to T into a scratch
+cluster** — `/var/lib/postgresql/18/pitr-drill`, port 5499, Unix socket in its own
+directory, no TCP, `--archive-mode=off` and `archive_mode=off` on the command line, so
+the promoted scratch cluster pushes nothing into the live repository (checked: no
+timeline-2 file in `archive/vaultaire/18-1` after the drill) — and checks: the first
+row present, the second absent, `object_head_cache` equal to the count at T (± 25).
+It stops and deletes the scratch cluster, pass or fail (`PITR_DRILL_KEEP=1` keeps a
+failed one). It refuses a scratch directory that exists, is the live one, or contains
+it. **2026-10-24 22:33:44 UTC: `PITR DRILL PASS target=2026-10-24 22:33:46.946318+00
+restore_s=6.910 accept_s=10.225 rto_s=12.842 ohc_restored=507 ohc_live_at_t=507`.**
+
+### Restoring the database (the real thing)
+
+The order matters: what writes by itself between the disaster and the restore?
+
+1. **Stop BOTH app slots first** — a slot that boots appends `server_build` to the
+   transparency log, and a running slot writes rows: `sudo systemctl stop
+   vaultaire@8000 vaultaire@8001` (`vaultaire-switch` has no "stop all"; HAProxy
+   answers 503 meanwhile). Stop the cluster's other writers too — the restore rewinds
+   every database on it: `sudo -u user1 XDG_RUNTIME_DIR=/run/user/$(id -u user1)
+   systemctl --user stop 'indexd@*' 's3d@*'` — and the backup timers:
+   `sudo systemctl stop vaultaire-pitr-full.timer vaultaire-pitr-diff.timer`.
+2. **Pause merges:** a merge to `main` deploys and starts a slot.
+   `gh workflow disable deploy.yml` (from a checkout), and nothing enters the queue.
+3. **Stop PostgreSQL and keep the damaged cluster:** `sudo systemctl stop
+   postgresql@18-main`; a clean stop archives the last segments — check
+   `ls /var/lib/postgresql/18/main/pg_wal/archive_status/*.ready` is empty (else
+   `sudo -u postgres pgbackrest --stanza=vaultaire --no-archive-async archive-push
+   /var/lib/postgresql/18/main/pg_wal/<segment>` for each while the files are still there) — then `sudo mv /var/lib/postgresql/18/main
+   /var/lib/postgresql/18/main.broken-$(date -u +%Y%m%dT%H%M)` and
+   `sudo -u postgres install -d -m 0700 /var/lib/postgresql/18/main`.
+4. **Restore to the LATEST point unless told otherwise:**
+   `sudo -u postgres pgbackrest --stanza=vaultaire restore`, then
+   `sudo systemctl start postgresql@18-main` and wait for
+   `SELECT pg_is_in_recovery()` = `f`. Every `tenant_key_versions` row created after
+   the chosen point is gone with it, and whatever was sealed under such a key **can
+   never be opened** — the reason the default is the latest point. Even the latest
+   loses up to a minute: objects written in it have bytes on a backend and no row —
+   orphans, found by the `chunk_orphans` job (`POST /api/v1/admin/chunk-orphans`, dry
+   run) and `cmd/tools/target-orphans`.
+5. **An earlier point** (`--type=time --target='<UTC time>' --target-action=promote`,
+   only when the owner says so — an operator's mistake to undo) means more: every
+   object written after it is such an orphan, and every object deleted after it comes
+   back as a row naming a blob `retired_blobs` has already deleted — the daily
+   `routing_truth` job reports them `missing`.
+6. **The transparency log:** read `docs/TRANSPARENCY.md` § After a database restore.
+   A restore to before the newest signed checkpoint leaves the database behind the
+   high-water file and the log **freezes by design** (`TranslogFrozen`,
+   `TranslogCheckpointRefused`) until `translog-restore` re-appends the lost entries
+   from the witness. Never delete the high-water file.
+7. **Back in service:** `sudo systemctl start vaultaire@$(cat /opt/vaultaire/ACTIVE_PORT)`
+   (HAProxy points at it), the other writers and the timers again,
+   `gh workflow enable deploy.yml`; then a new full at once
+   (`sudo systemctl start vaultaire-pitr-backup@full.service`) — the restore opened a
+   new timeline, archived into the same repository. Keep `main.broken-*` until the
+   owner says otherwise.
+
+**The box lost too:** a new box with PostgreSQL 18, then `pg-pitr-install.sh` (the
+passphrase from the Keychain, the R2 key from the Cloudflare dashboard), steps 3–7.
+
 ## Monitoring
 
 ```

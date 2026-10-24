@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -66,4 +67,30 @@ func TestLegalLE_PagesFollowTheFlag(t *testing.T) {
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, LegalLEAssets[0], nil))
 	assert.Equal(t, http.StatusNotFound, w.Code, "no asset routes")
+}
+
+// TestLegalLE_ProducePageStatesTheBackupFacts (Stage 1a Prompt 40): the
+// rendered "what we can produce" page states both backup mechanisms with
+// the produce file's numbers — the dumps' lives, the point-in-time
+// archive's vendor, cipher, lag and reach — and the longest of them as the
+// "up to" bound.
+func TestLegalLE_ProducePageStatesTheBackupFacts(t *testing.T) {
+	fl := flags.New(nil, zap.NewNop())
+	fl.Register(produce.FlagLegalLEPages, true)
+	r := chi.NewRouter()
+	NewLegalLE(fl).Mount(r, LegalLENotFound, false)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/legal/what-we-can-produce", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	b := produce.All().Backups
+	body := w.Body.String()
+	for _, want := range []string{
+		fmt.Sprintf("kept %d days on our server and %d days off it", b.OnBoxDays, b.OffBoxDays),
+		fmt.Sprintf("at most %d seconds behind, to %s, encrypted with %s on our server", b.PITR.EverySeconds, b.PITR.Vendor, b.PITR.Cipher),
+		fmt.Sprintf("any moment of the last %d days", b.PITR.Days),
+		b.PITR.What,
+		fmt.Sprintf("remain in a backup for up to %d days", b.UpToDays()),
+	} {
+		assert.Contains(t, body, want)
+	}
 }

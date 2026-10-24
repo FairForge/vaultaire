@@ -52,10 +52,29 @@ type KeptRow struct {
 	What  string   `json:"what"`
 }
 
-// Backups are the database backups' lives, in days.
+// Backups are the database backups' lives, in days, and the point-in-time
+// archive (Stage 1a Prompt 40): where it is, how it is encrypted, how far
+// behind the database it runs and how far back it reaches — each the
+// install script's own value (deploy/scripts/pg-pitr-install.sh).
 type Backups struct {
-	OnBoxDays  int `json:"on_box_days"`
-	OffBoxDays int `json:"off_box_days"`
+	OnBoxDays  int  `json:"on_box_days"`
+	OffBoxDays int  `json:"off_box_days"`
+	PITR       PITR `json:"pitr"`
+}
+
+// PITR is the continuous archive of the database (pgBackRest).
+type PITR struct {
+	Days         int    `json:"days"`
+	EverySeconds int    `json:"every_seconds"`
+	Vendor       string `json:"vendor"`
+	Cipher       string `json:"cipher"`
+	What         string `json:"what"`
+}
+
+// UpToDays is the longest a record deleted from the database can remain in
+// any backup: the page's and the legal pages' "up to N days".
+func (b Backups) UpToDays() int {
+	return max(b.OnBoxDays, b.OffBoxDays, b.PITR.Days)
 }
 
 // Column is one column of a table and what it holds.
@@ -126,9 +145,13 @@ func Validate(f File) error {
 		}
 		texts = append(texts, k.What)
 	}
-	if f.ExportsDays <= 0 || f.Backups.OnBoxDays <= 0 || f.Backups.OffBoxDays <= 0 {
+	if f.ExportsDays <= 0 || f.Backups.OnBoxDays <= 0 || f.Backups.OffBoxDays <= 0 || f.Backups.PITR.Days <= 0 || f.Backups.PITR.EverySeconds <= 0 {
 		return fmt.Errorf("produce: a period is missing")
 	}
+	if f.Backups.PITR.Vendor == "" || f.Backups.PITR.Cipher == "" || f.Backups.PITR.What == "" {
+		return fmt.Errorf("produce: backups.pitr incomplete")
+	}
+	texts = append(texts, f.Backups.PITR.What)
 	if f.PrivateSSEC.Table == "" || len(f.PrivateSSEC.Holds) == 0 {
 		return fmt.Errorf("produce: private_ssec incomplete")
 	}

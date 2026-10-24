@@ -1,7 +1,7 @@
 {{define "title"}}Data Processing Agreement, Stored{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: September 30, 2026</p>
+    <p class="text-muted">Last updated: October 24, 2026</p>
     <h1>Data Processing Agreement</h1>
     <p>This Data Processing Agreement ("DPA") supplements the <a href="/legal/terms">Terms of Service</a> and is entered into between the customer identified below ("Controller") and FairForge LLC ("Processor", "Stored") pursuant to Article 28 of the General Data Protection Regulation (EU) 2016/679 ("GDPR").</p>
 
@@ -56,7 +56,7 @@
         <li><strong>Access controls</strong>, production access is limited to authorized personnel via SSH key authentication. Customer data access requires S3 credentials (access key + secret key) or authenticated dashboard session.</li>
         <li><strong>Authentication</strong>, passwords hashed with bcrypt (cost 10), TOTP two-factor authentication available, session tokens are cryptographically random, dashboard accounts lock for 15 minutes after 10 failed sign-ins.</li>
         <li><strong>Monitoring</strong>, S3 access logs retained 30 days, event and usage records 90 days, public-link access logs 2 days after aggregation, webhook delivery records 30 days, payment-provider event records 90 days, data-export files 7 days (all purged automatically by a nightly job); the payment ledger (amounts, periods bought, receipt numbers) is kept as the accounting record and, on an account erasure, loses every link to the account and any cryptocurrency address or transaction id; every sign-in outcome, credential change and administrative action is written to an audit log; authentication-failure bursts page the operator.</li>
-        <li><strong>Backups</strong>, daily PostgreSQL backups with 7-day retention, currently held on the production host (off-host copies are planned before launch); object data itself lives with the storage sub-processors, not on that host.</li>
+        <li><strong>Backups</strong>, database backups: a daily copy kept 7 days on the production host and 30 days off it, encrypted, and a continuous encrypted archive for point-in-time recovery reaching back 28 days; object data itself lives with the storage sub-processors, not in these backups.</li>
     </ul>
 
     <h2 id="sub-processors">Sub-processors</h2>
@@ -73,7 +73,7 @@
             <tr><td>iDrive Inc.</td><td>Object storage, Standard tier, per-bucket region</td><td>United States / EU</td></tr>
             <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover</td><td>United States</td></tr>
             <tr><td>Geyser Data Inc.</td><td>Tape archive, Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
-            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets</td><td>Global (edge network) / United States</td></tr>
+            <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; R2 storage for public-read buckets and the encrypted point-in-time archive of the database</td><td>Global (edge network) / United States</td></tr>
             <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
             <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>
             <tr><td>Resend Inc.</td><td>Transactional e-mail, when enabled</td><td>United States</td></tr>
@@ -103,7 +103,7 @@
     <p>Upon termination of the service agreement:</p>
     <ul>
         <li>The Controller may export all stored data via the S3-compatible API or the data export feature in account settings.</li>
-        <li>After the 30-day grace period following an account deletion request, the account is closed, the subscription is cancelled and the Processor's automated deletion job erases the Controller's objects, metadata and account records from production on that date; database backups age out within 7 days of the erasure. Large objects are stored in deduplicated blocks: the blocks of the Controller's objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another Controller stores, which remains as that Controller's data.</li>
+        <li>After the 30-day grace period following an account deletion request, the account is closed, the subscription is cancelled and the Processor's automated deletion job erases the Controller's objects, metadata and account records from production on that date; database backups age out within 30 days of the erasure. Large objects are stored in deduplicated blocks: the blocks of the Controller's objects are released on that date and deleted by the storage collector once its seven-day safety period has passed, except a block that is byte-for-byte identical to one another Controller stores, which remains as that Controller's data.</li>
         <li>The Processor will provide written confirmation of deletion upon request.</li>
     </ul>
 
