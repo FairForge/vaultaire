@@ -41,7 +41,7 @@ curl: curl --aws-sigv4 "aws:amz:us-east-1:s3" --user "KEY:SECRET" {S3}/bucket/ke
 
 ### JSON API (Bearer JWT)
 POST /auth/register  {"email","password","company"} -> {"accessKeyId","secretAccessKey","endpoint"} (shown once)
-POST /auth/login     {"email","password"} -> {"token","tenant_id"} (24 h JWT)
+POST /auth/login     {"email","password"[,"code"]} -> {"token","tenant_id"} (24 h JWT; "code" = a TOTP or backup code, required when 2FA is on)
 POST /auth/password-reset {"email"}; POST /auth/password-reset/complete {"token","new_password"}
 Send the JWT as: Authorization: Bearer <token>
 

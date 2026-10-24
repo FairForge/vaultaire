@@ -162,11 +162,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// --- Public auth routes ---
 		pub.Get("/login", renderAuthPage(baseTmpl, "login", deps))
 		pub.Post("/login", loginRL.Limit(handleLogin(baseTmpl, deps, lockout, mfaGate)).ServeHTTP)
-		// When signups are closed, the register page redirects to the homepage
-		// (waitlist). The POST is still gated server-side at CreateUserWithTenant.
+		// When signups are closed, the register page redirects to the
+		// landing's waitlist, the anchor its own CTAs use (RP56-4: "/" landed
+		// a /signup reader on the hero). The POST is still gated server-side
+		// at CreateUserWithTenant.
 		pub.Get("/register", func(w http.ResponseWriter, r *http.Request) {
 			if deps.Auth != nil && !deps.Auth.SignupsEnabled() {
-				http.Redirect(w, r, "/", http.StatusSeeOther)
+				http.Redirect(w, r, "/#waitlist", http.StatusSeeOther)
 				return
 			}
 			renderAuthPage(baseTmpl, "register", deps)(w, r)

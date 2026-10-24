@@ -236,14 +236,22 @@ func (s *Server) s3Handler() http.HandlerFunc {
 	return s.handleS3Request
 }
 
-// signedS3Request: the request carries S3 credentials (a header signature or
-// a presigned query) — it is addressed to the S3 API.
+// signedS3Request: the request carries AWS-scheme S3 credentials — it is
+// addressed to the S3 API. The one predicate of the credential gate
+// (s3CredentialGate), the translog routes, the trust host and "/"
+// (RP56-1): an Authorization header of the AWS4-HMAC-SHA256 or the SigV2
+// "AWS" scheme (case-insensitive, RFC 9110 § 11.1), or a presigned query —
+// X-Amz-Algorithm=AWS4-HMAC-SHA256, X-Amz-Signature, X-Amz-Credential, or
+// SigV2's AWSAccessKeyId with Signature. Any other Authorization (a Bearer
+// JWT, Basic) is never S3: it was, before RP56-1, here.
 func signedS3Request(r *http.Request) bool {
-	if r.Header.Get("Authorization") != "" {
+	scheme, _, _ := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " ")
+	if strings.EqualFold(scheme, presignAlgorithm) || strings.EqualFold(scheme, "AWS") {
 		return true
 	}
 	q := r.URL.Query()
-	return q.Has("X-Amz-Signature") || q.Has("X-Amz-Credential") || q.Has("Signature") || q.Has("AWSAccessKeyId")
+	return isPresignedRequest(r) || q.Has("X-Amz-Signature") || q.Has("X-Amz-Credential") ||
+		(q.Has("AWSAccessKeyId") && q.Has("Signature"))
 }
 
 // registerTranslogAdminRoutes mounts the ceremony route on the admin group.

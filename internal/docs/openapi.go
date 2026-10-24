@@ -621,11 +621,11 @@ func generateAuthPaths() map[string]*PathItem {
 		},
 		"/auth/login": {
 			Post: withBody(publicOp("Auth", "Log in and mint a JWT", "Login",
-				"Validates the password and returns the Bearer JWT (HS256, 24 h) used by every /api/v1 endpoint. Rate limited 5/min per IP.",
+				"Validates the password — and, when the account has two-factor authentication on, the `code` — and returns the Bearer JWT (HS256, 24 h) used by every /api/v1 endpoint. Every outcome is written to the audit trail. Rate limited 5/min per IP.",
 				map[string]Response{
 					"200": jsonResp("Token issued", ref("LoginResponse")),
 					"400": textResp("Malformed JSON"),
-					"401": textResp("`Invalid credentials`"),
+					"401": textResp("`Invalid credentials` (a wrong password, or a wrong or reused code), or `MFA code required: …` (two-factor authentication is on and no `code` was sent)"),
 					"404": textResp("`User not found` (the password validated but the user row could not be loaded)"),
 					"429": refResp("AuthRateLimited"),
 					"500": textResp("`Failed to generate token`"),
@@ -1925,6 +1925,7 @@ func generateJSONSchemas() map[string]Schema {
 		"LoginRequest": object("", map[string]*Schema{
 			"email":    str(""),
 			"password": str(""),
+			"code":     str("Required when the account has two-factor authentication on: a 6-digit TOTP code (accepted once) or a backup code (single use)"),
 		}, "email", "password"),
 		"LoginResponse": object("", map[string]*Schema{
 			"token":     str("The Bearer JWT (HS256, valid 24 h)"),

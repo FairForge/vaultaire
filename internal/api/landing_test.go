@@ -98,9 +98,11 @@ func TestLanding_FooterLinks(t *testing.T) {
 	}
 }
 
-// isS3RootRequest must keep authenticated ListBuckets working: a request to "/"
-// with SigV4 auth (header or presigned query) is an S3 call, not a browser visit.
-func TestIsS3RootRequest(t *testing.T) {
+// signedS3Request must keep authenticated ListBuckets working: a request to
+// "/" with AWS-scheme credentials (header or presigned query) is an S3 call,
+// not a browser visit — and, since RP56-1, nothing else is: a Bearer JWT or
+// a Basic header is never S3 (the credential gate's predicate).
+func TestSignedS3Request(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(*http.Request)
@@ -111,19 +113,34 @@ func TestIsS3RootRequest(t *testing.T) {
 		{"sigv4 authorization header", func(r *http.Request) {
 			r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=...")
 		}, true},
-		{"presigned query", func(r *http.Request) {
-			q := r.URL.Query()
-			q.Set("X-Amz-Algorithm", "AWS4-HMAC-SHA256")
-			r.URL.RawQuery = q.Encode()
+		{"sigv4 scheme in lower case", func(r *http.Request) {
+			r.Header.Set("Authorization", "aws4-hmac-sha256 Credential=...")
 		}, true},
+		{"sigv2 authorization header", func(r *http.Request) { r.Header.Set("Authorization", "AWS AKID:c2ln") }, true},
+		{"bearer jwt", func(r *http.Request) { r.Header.Set("Authorization", "Bearer eyJ...") }, false},
+		{"basic", func(r *http.Request) { r.Header.Set("Authorization", "Basic dTpw") }, false},
+		{"a scheme that only starts with AWS", func(r *http.Request) { r.Header.Set("Authorization", "AWSX foo") }, false},
+		{"presigned query", func(r *http.Request) { setQuery(r, "X-Amz-Algorithm", "AWS4-HMAC-SHA256") }, true},
+		{"presigned signature", func(r *http.Request) { setQuery(r, "X-Amz-Signature", "00") }, true},
+		{"presigned credential", func(r *http.Request) { setQuery(r, "X-Amz-Credential", "AKID/20261024/us-east-1/s3/aws4_request") }, true},
+		{"sigv2 presigned", func(r *http.Request) { setQuery(r, "AWSAccessKeyId", "AKID", "Signature", "c2ln") }, true},
+		{"a bare Signature (an OAuth callback, a share link)", func(r *http.Request) { setQuery(r, "Signature", "x") }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			tt.setup(req)
-			assert.Equal(t, tt.want, isS3RootRequest(req))
+			assert.Equal(t, tt.want, signedS3Request(req))
 		})
 	}
+}
+
+func setQuery(r *http.Request, kv ...string) {
+	q := r.URL.Query()
+	for i := 0; i+1 < len(kv); i += 2 {
+		q.Set(kv[i], kv[i+1])
+	}
+	r.URL.RawQuery = q.Encode()
 }
 
 // The page tells one example story everywhere it shows storage: photos and

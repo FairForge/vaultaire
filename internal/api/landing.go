@@ -73,7 +73,7 @@ func (s *Server) landingPage(open bool) []byte {
 // requests are delegated to the S3 handler untouched. Only anonymous GET/HEAD "/"
 // (which would otherwise return 403 AccessDenied) is served the landing page.
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if isS3RootRequest(r) {
+	if signedS3Request(r) { // the credential gate sends these first; the defence behind it
 		s.handleS3Request(w, r)
 		return
 	}
@@ -88,12 +88,4 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(page)
-}
-
-// isS3RootRequest reports whether a request to "/" is an authenticated S3 call
-// (ListBuckets) rather than a browser visit. ListBuckets cannot be anonymous, so
-// the presence of SigV4 auth — header or presigned query — is a reliable signal.
-func isS3RootRequest(r *http.Request) bool {
-	return r.Header.Get("Authorization") != "" ||
-		r.URL.Query().Get("X-Amz-Algorithm") != ""
 }

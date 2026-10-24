@@ -64,6 +64,11 @@ var (
 	ErrTransient = errors.New("recovery: not enough realms answered")
 	// ErrInvalidAuth: a realm refused the token.
 	ErrInvalidAuth = errors.New("recovery: a realm refused the token")
+	// ErrTokenMint: the caller's Token func failed, so the realm was never
+	// asked. Wrapped together with ErrInvalidAuth (the client treats the
+	// realm as one that refused), but a caller that counts realm outcomes
+	// must not charge it to the realm (RP56-6).
+	ErrTokenMint = errors.New("recovery: the realm token could not be minted")
 	// ErrMisbehavingRealm: answers that fail their proofs or commitments
 	// left too few realms.
 	ErrMisbehavingRealm = errors.New("recovery: realms returned inconsistent material")

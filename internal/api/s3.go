@@ -312,8 +312,11 @@ func (p *S3Parser) parseHeaders(req *S3Request, r *http.Request) {
 
 // handleS3Request handles S3-compatible API requests
 func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/health" || r.URL.Path == "/ready" ||
-		r.URL.Path == "/metrics" || r.URL.Path == "/version" {
+	// An unsigned non-GET of an operational path answers an empty 200, as it
+	// always has; a SIGNED request there is a bucket's (RP56-1: the four are
+	// valid bucket names, and the credential gate sends them here).
+	if !signedS3Request(r) && (r.URL.Path == "/health" || r.URL.Path == "/ready" ||
+		r.URL.Path == "/metrics" || r.URL.Path == "/version") {
 		return
 	}
 

@@ -16,15 +16,26 @@
 #   morning: morning bench_cleanup modes dogfood transparency
 # `all` = both lists in one go (a lab: no night in between).
 #
-# Root on the box: it reads JWT_SECRET from the .env (a 10 min JWT per call, never
-# printed), psql as the postgres role, /metrics on the active slot. The management and
-# admin API go to the active slot; the S3 calls go to TZP_ENDPOINT. A temporary key
+# The admin JWT is a real sign-in's (RP56-5, Stage 1a Prompt 40): tenant zero's user is
+# the admin, MFA on — sign in with the password AND the authenticator code, keep the token
+# in a file only root reads, and pass the file. The script never mints a token (it used to
+# sign its own with the box's JWT signing secret: audit rows and admin reads with no sign-in or MFA
+# behind them); it checks the token names tenant zero's user and lasts the run.
+#
+#   curl -s https://stored.ge/auth/login -H 'Content-Type: application/json' \
+#     -d '{"email":"…","password":"…","code":"123456"}' | jq -r .token > tzp.jwt   # 24 h
+#   (copy it to the box as /root/tzp.jwt, mode 0600)
+#   sudo -S -p '' TZP_TENANT=tenant-… TZP_ADMIN_JWT_FILE=/root/tzp.jwt bash tenant-zero-proof.sh …
+#
+# Root on the box: psql as the postgres role, /metrics on the active slot. The management
+# and admin API go to the active slot; the S3 calls go to TZP_ENDPOINT. A temporary key
 # (`p39-proof-temp`) is minted through POST /api/v1/manage/keys and deleted on exit.
 #
-# Lab: TZP_ENV_FILE, TZP_ADMIN_BASE, TZP_ENDPOINT and TZP_PSQL point it at a local server.
+# Lab: TZP_ADMIN_BASE, TZP_ENDPOINT and TZP_PSQL point it at a local server;
+# TZP_ADMIN_JWT (the token itself) may stand in for the file there.
 set -euo pipefail
 
-TZP_ENV_FILE=${TZP_ENV_FILE:-/opt/vaultaire/configs/.env}
+TZP_JWT_MIN_LEFT=${TZP_JWT_MIN_LEFT:-1800} # the token must outlive the run: refused with less left
 TZP_ENDPOINT=${TZP_ENDPOINT:-https://stored.ge}
 TZP_PSQL=${TZP_PSQL:-runuser -u postgres -- psql -d vaultaire}
 TZP_FLAG_SETTLE=${TZP_FLAG_SETTLE:-20} # the flag service caches ~15 s
@@ -35,17 +46,23 @@ MIB=1048576
 
 # --- pure helpers (pg-backup.sh's pattern: the _test.sh sources this file) -------------
 
-# env_value KEY FILE — the value of the first KEY= line of an .env file with ONE level of
-# surrounding quotes removed (db-password.sh's rule: everything after the first `=`).
-env_value() {
-  local line value
-  line=$(grep -m1 "^$1=" "$2") || return 1
-  value=${line#"$1"=}
-  case "$value" in
-    \"*\") value=${value#\"}; value=${value%\"} ;;
-    \'*\') value=${value#\'}; value=${value%\'} ;;
-  esac
-  printf '%s' "$value"
+# jwt_check TOKEN TENANT USER_ID MIN_LEFT — the token names USER_ID and TENANT and is
+# valid for at least MIN_LEFT more seconds. Its payload only: the server checks the
+# signature (and users.password_changed_at) on every call.
+jwt_check() {
+  T="$1" TT="$2" U="$3" L="$4" python3 - <<'PY'
+import os, sys, json, base64, time
+try:
+    p = os.environ["T"].split(".")[1]
+    c = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+except Exception:
+    sys.exit("the admin JWT is not a JWT")
+if c.get("tenant_id") != os.environ["TT"] or c.get("user_id") != os.environ["U"]:
+    sys.exit("the admin JWT is not tenant zero's user's (user_id/tenant_id)")
+left = int(c.get("exp", 0)) - int(time.time())
+if left < int(os.environ["L"]):
+    sys.exit("the admin JWT has %ds left; the run needs %ss — sign in again" % (max(left, 0), os.environ["L"]))
+PY
 }
 
 # valid_tenant ID — a real tenant id: never empty, never the global '*' row.
@@ -120,21 +137,27 @@ q() { # q SQL — one psql statement, unaligned
   "${psql[@]}" -At -v ON_ERROR_STOP=1 -c "$1"
 }
 
-# mint_jwt — a 10 min management JWT for the tenant's user, signed with JWT_SECRET from
-# the .env (passed through the environment, never argv, never printed).
+# load_admin_jwt — the token from TZP_ADMIN_JWT_FILE (a file other users cannot read)
+# or TZP_ADMIN_JWT, into $WORK/auth; refuses to start without one.
+ADMIN_JWT=
+load_admin_jwt() {
+  if [ -n "${TZP_ADMIN_JWT_FILE:-}" ]; then
+    [ -f "$TZP_ADMIN_JWT_FILE" ] || die "TZP_ADMIN_JWT_FILE=$TZP_ADMIN_JWT_FILE is not a file"
+    local mode
+    mode=$(stat -c '%a' "$TZP_ADMIN_JWT_FILE" 2>/dev/null || stat -f '%Lp' "$TZP_ADMIN_JWT_FILE")
+    [[ "$mode" =~ ^[0-7]?[0-7]00$ ]] || die "TZP_ADMIN_JWT_FILE: other users can read it (mode $mode); chmod 600"
+    ADMIN_JWT=$(tr -d ' \n\r' < "$TZP_ADMIN_JWT_FILE")
+  else
+    ADMIN_JWT=${TZP_ADMIN_JWT:-}
+  fi
+  [ -n "$ADMIN_JWT" ] || die "no admin JWT: sign in with MFA (POST /auth/login with \"code\") and pass TZP_ADMIN_JWT_FILE — see the header"
+}
+
+# refresh_auth — the header of the next call; the token is re-checked (it must still have
+# a minute) so a run that outlives it stops at a clean refusal, not a 401 mid-step.
 refresh_auth() {
-  local secret
-  secret=$(env_value JWT_SECRET "$TZP_ENV_FILE") || die "no JWT_SECRET in $TZP_ENV_FILE"
-  SEC="$secret" U="$USER_ID" E="$USER_EMAIL" TT="$TZP_TENANT" python3 - > "$WORK/auth" <<'PY'
-import os, json, hmac, hashlib, base64, time
-b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
-now = int(time.time())
-h = b(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-p = b(json.dumps({"user_id": os.environ["U"], "email": os.environ["E"], "tenant_id": os.environ["TT"],
-                  "iss": "vaultaire", "iat": now, "exp": now + 600}).encode())
-s = b(hmac.new(os.environ["SEC"].encode(), (h + "." + p).encode(), hashlib.sha256).digest())
-print("Authorization: Bearer " + h + "." + p + "." + s)
-PY
+  jwt_check "$ADMIN_JWT" "$TZP_TENANT" "$USER_ID" 60 || die "admin JWT"
+  printf 'Authorization: Bearer %s\n' "$ADMIN_JWT" > "$WORK/auth"
 }
 
 API_CODE=
@@ -454,11 +477,13 @@ main() {
     morning-all) steps=(morning bench_cleanup modes dogfood transparency) ;;
   esac
 
+  load_admin_jwt
   WORK=$(mktemp -d); chmod 700 "$WORK"
   trap cleanup EXIT
   USER_EMAIL=$(q "SELECT email FROM tenants WHERE id='$TZP_TENANT'")
   USER_ID=$(q "SELECT id FROM users WHERE email='$USER_EMAIL'")
   [ -n "$USER_ID" ] || die "no user for the tenant"
+  jwt_check "$ADMIN_JWT" "$TZP_TENANT" "$USER_ID" "$TZP_JWT_MIN_LEFT" || die "admin JWT"
 
   local kj
   api POST /api/v1/manage/keys "{\"name\":\"$TZP_KEY_NAME\"}"

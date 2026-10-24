@@ -46,12 +46,39 @@ for bad in "" "*"; do
   fi
 done
 
-# --- 3. env_value: db-password.sh's parsing rule ---------------------------------------
-printf 'JWT_SECRET_OLD=stale\nJWT_SECRET="ab=c==d"\nX=1\n' > "$TMP/env"
-eq "env_value: quoted value with =, longer key skipped" "$(env_value JWT_SECRET "$TMP/env")" "ab=c==d"
-printf "JWT_SECRET='sq'\n" > "$TMP/env"
-eq "env_value: single quotes" "$(env_value JWT_SECRET "$TMP/env")" "sq"
-if env_value MISSING "$TMP/env" > /dev/null; then fail "env_value: a missing key returned 0"; else pass "env_value: a missing key returns 1"; fi
+# --- 3. the admin JWT is a real sign-in's, never one minted from JWT_SECRET (RP56-5) ----
+# Before Prompt 40 the script signed its own 10 min admin JWTs with the box's JWT_SECRET:
+# the audit rows and the transparency log's admin reads named the admin with no sign-in
+# or MFA behind them. Now it takes the token POST /auth/login answered to the admin's
+# password AND MFA code, and checks it names tenant zero's user before any call.
+if grep -q 'JWT_SECRET' "$SCRIPT"; then fail "the script still reads JWT_SECRET"; else pass "the script never reads JWT_SECRET"; fi
+jwt() { # jwt USER TENANT EXP — an unsigned token of that payload (the server checks the signature)
+  python3 -c '
+import sys, json, base64
+b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+print(b(b"{\"alg\":\"HS256\"}") + "." + b(json.dumps({"user_id": sys.argv[1], "tenant_id": sys.argv[2], "exp": int(sys.argv[3])}).encode()) + ".sig")' "$@"
+}
+NOW=$(date +%s)
+U=4b1c0c47-0000-4000-8000-000000000001
+eq "jwt_check: tenant zero's user, 2 h left" "$(jwt_check "$(jwt $U tenant-abc $((NOW + 7200)))" tenant-abc $U 1800 2>&1 && echo ok)" ok
+for c in "another tenant|$(jwt $U tenant-other $((NOW + 7200)))" \
+         "another user|$(jwt 4b1c0c47-0000-4000-8000-000000000002 tenant-abc $((NOW + 7200)))" \
+         "expired|$(jwt $U tenant-abc $((NOW - 5)))" \
+         "10 min left of the 30 the run needs|$(jwt $U tenant-abc $((NOW + 600)))" \
+         "not a JWT|not-a-jwt" "empty|"; do
+  if jwt_check "${c#*|}" tenant-abc $U 1800 > /dev/null 2>&1; then fail "jwt_check accepted: ${c%%|*}"; else pass "jwt_check refuses: ${c%%|*}"; fi
+done
+# main refuses to start without the token — before any key, flag or bucket — and refuses a
+# token file other users can read.
+if out=$(TZP_TENANT=tenant-abc TZP_ADMIN_BASE=http://127.0.0.1:9 bash "$SCRIPT" preflight 2>&1); then
+  fail "main ran without an admin JWT"
+elif grep -q "TZP_ADMIN_JWT" <<< "$out"; then pass "main refuses to start without an admin JWT"
+else fail "main without an admin JWT failed for another reason: $out"; fi
+jwt $U tenant-abc $((NOW + 7200)) > "$TMP/jwt"; chmod 644 "$TMP/jwt"
+if out=$(TZP_TENANT=tenant-abc TZP_ADMIN_BASE=http://127.0.0.1:9 TZP_ADMIN_JWT_FILE="$TMP/jwt" bash "$SCRIPT" preflight 2>&1); then
+  fail "main ran with a world-readable token file"
+elif grep -q "other users can read" <<< "$out"; then pass "main refuses a token file other users can read"
+else fail "main with a 0644 token file failed for another reason: $out"; fi
 
 # --- 4. make_body: exact size, the same bytes for a seed, other bytes for another ------
 make_body 3145728 seed-a "$TMP/a1"
