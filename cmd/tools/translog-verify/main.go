@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -54,6 +55,8 @@ type options struct {
 	maxAge           time.Duration
 	now              func() time.Time
 	anchors          bool
+	client           string
+	clientName       string
 }
 
 // keyList is a repeatable -witness flag.
@@ -74,6 +77,8 @@ func main() {
 	flag.IntVar(&o.min, "min", -1, "how many of the -witness keys must have cosigned (default: 1 with any -witness, else 0)")
 	flag.DurationVar(&o.maxAge, "max-age", 24*time.Hour, "a cosignature older than this does not count (0 = no limit)")
 	flag.BoolVar(&o.anchors, "anchors", false, "also fetch the checkpoint's OpenTimestamps proof, check its digest, keep it beside -state and print its state (verify it with `ots verify`)")
+	flag.StringVar(&o.client, "client", "", "a client artefact file: fail unless its SHA-256 is listed in a client_build entry the checkpoint commits to (K4c-3b: clients refuse an unlisted build)")
+	flag.StringVar(&o.clientName, "client-name", "", "with -client: the client the entry must name (sdk-wasm, sdk-js)")
 	flag.Parse()
 	o.witnesses = ws
 	if err := run(os.Stdout, o); err != nil {
@@ -154,6 +159,12 @@ func run(out io.Writer, o options) error {
 			return fmt.Errorf("inclusion of entry %d: %w", o.entry, err)
 		}
 		_, _ = fmt.Fprintf(out, "entry %d: included OK\n%s\n", o.entry, body)
+	}
+
+	if o.client != "" {
+		if err := clientListed(ctx, out, c, cp, o.client, o.clientName); err != nil {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(o.state), 0o700); err != nil {
@@ -237,4 +248,51 @@ func anchors(ctx context.Context, out io.Writer, c *translog.Client, cp translog
 	_, _ = fmt.Fprintf(out, "anchors: kept in %s; not verified here — that is the OpenTimestamps client's job:\n  ots verify -d %x %s   (needs a Bitcoin node: --bitcoin-node)\n", file, want, file)
 	_, _ = fmt.Fprintln(out, "anchor rekor: not built (D-P35-2: Rekor v2 takes only prehashed signatures; the log's key signs checkpoints only)")
 	return nil
+}
+
+// clientListed proves the artefact at path is a client build the log lists
+// (K4c-3b; plan 43.6: "clients refuse an unlisted build"): its SHA-256 must
+// be in a client_build entry the verified checkpoint commits to — matching
+// name, when one is given — with the inclusion proof checked. An artefact
+// the log does not list fails the run: that is the refusal, operator-side
+// (the refusal inside a client loader is K4c-3c).
+func clientListed(ctx context.Context, out io.Writer, c *translog.Client, cp translog.Checkpoint, path, name string) error {
+	f, err := os.Open(path) // #nosec G304 -- the operator's own artefact file
+	if err != nil {
+		return fmt.Errorf("read the client artefact: %w", err)
+	}
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	_ = f.Close()
+	if err != nil {
+		return fmt.Errorf("hash the client artefact: %w", err)
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	for n := int64(0); n*translog.TileWidth < cp.Size; n++ {
+		_, bodies, err := c.EntryBundle(ctx, cp, n)
+		if err != nil {
+			return fmt.Errorf("entry bundle %d: %w", n, err)
+		}
+		for i, b := range bodies {
+			d, err := translog.Decode(b)
+			if err != nil {
+				continue // an entry kind this build does not know
+			}
+			cb, ok := d.Entry.(translog.ClientBuild)
+			if !ok || cb.SHA256 != sum || (name != "" && cb.Client != name) {
+				continue
+			}
+			idx := n*translog.TileWidth + int64(i)
+			if _, err := c.VerifyInclusion(ctx, cp, idx); err != nil {
+				return fmt.Errorf("inclusion of the client_build entry %d: %w", idx, err)
+			}
+			_, _ = fmt.Fprintf(out, "client %s %s: sha256 %s listed at entry %d — inclusion OK\n  source commit %s, toolchain %s, recipe %s\n",
+				cb.Client, cb.Version, sum, idx, cb.SourceCommit, cb.Toolchain, cb.Recipe)
+			return nil
+		}
+	}
+	if name != "" {
+		return fmt.Errorf("client build not in the log: no %s entry lists sha256 %s in the %d entries the checkpoint commits to — refuse this build", name, sum, cp.Size)
+	}
+	return fmt.Errorf("client build not in the log: no client_build entry lists sha256 %s in the %d entries the checkpoint commits to — refuse this build", sum, cp.Size)
 }

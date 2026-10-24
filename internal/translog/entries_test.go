@@ -21,6 +21,11 @@ func validCeremony() KeyCeremony {
 		Participants: 1, Shares: 3, Threshold: 2, Reference: "https://github.com/FairForge/vaultaire/blob/" + strings.Repeat("ab", 20) + "/docs/ENCRYPTION.md"}
 }
 
+func validClientBuild() ClientBuild {
+	return ClientBuild{Client: ClientSDKWasm, Version: "0.1.0", SourceCommit: strings.Repeat("ab", 20),
+		SHA256: strings.Repeat("a7", 32), Toolchain: "go1.26.10", Recipe: "scripts/build-client.sh"}
+}
+
 func validAdminRead() AdminRead {
 	return AdminRead{Scope: ScopeTenantDetail, ActorRole: ActorRoleAdmin, Nonce: strings.Repeat("0a", 16), Commitment: strings.Repeat("c3", 32)}
 }
@@ -41,7 +46,7 @@ var forbiddenFieldTokens = map[string]bool{
 // carries nothing else.
 func TestTranslog_EntriesNeverNameATenant(t *testing.T) {
 	samples := map[string]Entry{KindServerBuild: validBuild(), KindKeyCeremony: validCeremony(), KindAdminRead: validAdminRead(),
-		KindLogPolicy: validLogPolicy()}
+		KindLogPolicy: validLogPolicy(), KindClientBuild: validClientBuild()}
 	require.ElementsMatch(t, Kinds(), keys(samples), "every kind has a sample here")
 
 	for kind, e := range samples {

@@ -1,0 +1,20 @@
+{
+  "clients": [
+    {
+      "client": "sdk-wasm",
+      "version": "0.1.0",
+      "source_commit": "bc004600576eaeebc96acdd8bb85a9530febb34d",
+      "sha256": "07685b5f6dba6a5419a9c64ef3d524839f71a1452ef79ee21193628163dcc911",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "sdk-js",
+      "version": "0.1.0",
+      "source_commit": "bc004600576eaeebc96acdd8bb85a9530febb34d",
+      "sha256": "4766be3dba6d856dea354cbb2c8c90a024eb585c51234d0f3271e906e9f9d7d0",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    }
+  ]
+}
