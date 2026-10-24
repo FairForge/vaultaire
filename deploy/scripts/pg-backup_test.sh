@@ -205,6 +205,7 @@ old=$(date -u -d '-40 days' +%Y%m%d); mkdir -p "$REMOTE/_ops/backups/2026/01"
 rm -rf "${ROOT:?}/backups"/*; sleep 1; run_backup >/dev/null
 check "3d: 40-day-old remote dump deleted by its name" [ ! -e "$REMOTE/_ops/backups/2026/01/vaultaire_${old}_030001.sql.gz" ]
 check "3d: fresh remote dumps kept ($(find "$REMOTE" -name 'vaultaire_*' | wc -l))" [ "$(find "$REMOTE" -name 'vaultaire_*.sql.gz' | wc -l)" = 2 ]
+check "3d: vaultaire_backup_offbox_retention_undeleted_files = 0 after a clean pass" grep -qx "vaultaire_backup_offbox_retention_undeleted_files 0" "$METRICS/vaultaire_backup_offbox_retention_undeleted_files.prom"
 
 # 3e. rclone cannot verify the dump's size (the `rclone size` failure that used to exit
 #     through set -e with no log line): logged with its stage, no off-box or run timestamp.
@@ -228,6 +229,10 @@ reset_run; old=$(date -u -d '-40 days' +%Y%m%d); mkdir -p "$REMOTE/_ops/backups/
 if run_backup 2>/dev/null; then fail "3g: a failed retention delete must fail the run"; else pass "3g: failed retention delete fails the run"; fi
 check "3g: logged with stage=retention" grep -q 'BACKUP FAILED - stage=retention' "$ROOT/logs/backup.log"
 check "3g: no run timestamp" [ ! -e "$METRICS/$RUN_METRIC.prom" ]
+# RP54-6: the count of old files the leg could not delete is exported (the run fails too).
+UNDELETED=vaultaire_backup_offbox_retention_undeleted_files
+check "3g: $UNDELETED = 1 ($(grep "^$UNDELETED " "$METRICS/$UNDELETED.prom" 2>/dev/null))" grep -qx "$UNDELETED 1" "$METRICS/$UNDELETED.prom"
+check "3g: it is a gauge with its help line" grep -q "^# TYPE $UNDELETED gauge" "$METRICS/$UNDELETED.prom"
 
 # 3h. the alert rule exists for the new timestamp (> 26 h or absent).
 RULES=$HERE/../monitoring/vaultaire-backup.yml
@@ -287,10 +292,31 @@ reset_run; old=$(date -u -d '-40 days' +%Y%m%d); mkdir -p "$REMOTE2/2026/01"
 run_backup >/dev/null || true
 check "4f: 40-day-old Blomp dump deleted by its name" [ ! -e "$REMOTE2/2026/01/vaultaire_${old}_030001.sql.gz" ]
 check "4f: the fresh one kept" [ "$(find "$REMOTE2" -name 'vaultaire_*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+UNDELETED2=vaultaire_backup_offbox2_retention_undeleted_files
+check "4f: $UNDELETED2 = 0 after a clean pass" grep -qx "$UNDELETED2 0" "$METRICS/$UNDELETED2.prom"
+
+# 4h. RP54-6: an old Blomp file that cannot be deleted never fails the run, but it is
+#     counted where Prometheus reads it (the produce page's "up to 30 days" rests on it).
+reset_run; old=$(date -u -d '-40 days' +%Y%m%d); mkdir -p "$REMOTE2/2026/01"
+: > "$REMOTE2/2026/01/vaultaire_${old}_030001.sql.gz"; : > "$REMOTE2/2026/01/prometheus_${old}_030001.tar.gz"
+touch "$TMP/rclone-deletefile-fails"
+if run_backup 2>/dev/null; then pass "4h: a failed Blomp retention delete does not fail the run"; else fail "4h: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+check "4h: logged" grep -q 'OFFBOX2 FAILED - stage=offbox2: 2 old file(s) could not be deleted' "$ROOT/logs/backup.log"
+check "4h: $UNDELETED2 = 2 ($(grep "^$UNDELETED2 " "$METRICS/$UNDELETED2.prom" 2>/dev/null))" grep -qx "$UNDELETED2 2" "$METRICS/$UNDELETED2.prom"
+check "4h: the Sync leg's count is 0" grep -qx "vaultaire_backup_offbox_retention_undeleted_files 0" "$METRICS/vaultaire_backup_offbox_retention_undeleted_files.prom"
+check "4h: run timestamp written" [ -f "$METRICS/$RUN_METRIC.prom" ]
+# 4i. the next run deletes them: the count goes back to 0.
+rm -f "$TMP/rclone-deletefile-fails"; sleep 1; run_backup >/dev/null || true
+check "4i: the next run deletes them and exports 0" grep -qx "$UNDELETED2 0" "$METRICS/$UNDELETED2.prom"
+check "4i: gone" [ -z "$(find "$REMOTE2" -name "*_${old}_*")" ]
 
 # 4g. its alert rule.
 check "4g: BackupSecondOffboxStale rule on $OFFBOX2_METRIC" grep -q "alert: BackupSecondOffboxStale" "$RULES"
 check "4g: it covers absence" grep -q "absent($OFFBOX2_METRIC)" "$RULES"
+check "4g: BackupOffboxRetentionStuck rule" grep -q "alert: BackupOffboxRetentionStuck" "$RULES"
+for m in "$UNDELETED" "$UNDELETED2"; do
+  check "4g: a rule reads $m" grep -q "$m > 0" "$RULES"
+done
 rm -f "$ROOT/configs/blomp-backup.env"
 
 exit $FAILED

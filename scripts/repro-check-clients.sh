@@ -12,7 +12,8 @@
 # them. No CI check can demand the row — it names the MERGE commit, which no
 # sdk PR knows — so this only WARNS (a ::warning:: line naming the client and
 # the hash); it never fails the deploy, not even when the build itself fails.
-# REPRO_CHECKOUT_CLIENTS narrows the list (the tests build sdk-js only).
+# REPRO_CHECKOUT_CLIENTS narrows the list (the tests build sdk-js only);
+# REPRO_CHECKOUT_BUILD replaces the checkout's build script (a test seam).
 #
 # Usage: scripts/repro-check-clients.sh [manifest.json]
 set -euo pipefail
@@ -68,14 +69,20 @@ done <<<"$rows"
 # The checkout's clients (RP51-3). The default list is translog's closed list
 # (TestReproCheckClients_DefaultsToTheClosedClientList).
 checkout_clients=${REPRO_CHECKOUT_CLIENTS:-sdk-wasm sdk-js}
+checkout_build=${REPRO_CHECKOUT_BUILD:-$root/scripts/build-client.sh}
 for client in $checkout_clients; do
 	start=$SECONDS
 	out="$work/checkout-$client"
-	if ! bash "$root/scripts/build-client.sh" "$client" "$out"; then
+	if ! bash "$checkout_build" "$client" "$out"; then
 		echo "::warning::repro-check-clients: this checkout's $client did not build — whether main ships a listed build is unknown"
 		continue
 	fi
-	got=$(shasum -a 256 "$out" | cut -d' ' -f1)
+	# A build that exits 0 with no output is a warning as well, never the
+	# set -e end of the step (RP54-7).
+	if [ ! -s "$out" ] || ! got=$(shasum -a 256 "$out" | cut -d' ' -f1) || [ -z "$got" ]; then
+		echo "::warning::repro-check-clients: this checkout's $client built nothing — whether main ships a listed build is unknown"
+		continue
+	fi
 	if jq -e --arg c "$client" --arg h "$got" 'any(.clients[]; .client == $c and .sha256 == $h)' "$manifest" >/dev/null; then
 		echo "repro-check-clients: this checkout's $client $got is listed ($((SECONDS - start)) s)"
 	else

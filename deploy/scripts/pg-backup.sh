@@ -22,8 +22,13 @@
 #   vaultaire_backup_run_last_success_timestamp_seconds     the WHOLE run finished: configs
 #                                                           tar (the only backup of .env),
 #                                                           rules tar + its upload, retention
+#   vaultaire_backup_offbox{,2}_retention_undeleted_files   old files the Sync / Blomp
+#                                                           retention pass could not delete
+#                                                           (a gauge, written by every pass
+#                                                           that listed the leg; RP54-6)
 # Rules: deploy/monitoring/vaultaire-backup.yml (BackupStale / BackupOffboxStale /
-# BackupRunIncomplete, > 26 h or absent; BackupSecondOffboxStale for the Blomp leg).
+# BackupRunIncomplete, > 26 h or absent; BackupSecondOffboxStale for the Blomp leg;
+# BackupOffboxRetentionStuck when either leg keeps a file past its 30 days).
 #
 # Every failure is ONE log line `BACKUP FAILED - stage=<stage>: <what>` — the explicit
 # fail() calls, and (ERR trap, set in main) any command in main that set -e would otherwise
@@ -90,15 +95,16 @@ env_value_from() {
   printf '%s' "$value"
 }
 
-# write_metric NAME HELP — writes `NAME <now>` to METRICS_DIR/NAME.prom (atomic rename,
-# world-readable: node_exporter runs as its own user). Non-fatal: a backup that landed
+# write_metric NAME HELP [VALUE] — writes `NAME <VALUE>` (default: now, unix seconds) to
+# METRICS_DIR/NAME.prom (atomic rename, world-readable: node_exporter runs as its own user). Non-fatal: a backup that landed
 # is a success whatever the metrics directory says; the absence then raises the alert.
 # Every step is checked here: the ERR trap is not inherited by functions, so a printf
 # or chmod failing under set -e (a full disk) used to end the run with no line at all.
 write_metric() {
-  local name=$1 help=$2 tmp
+  local name=$1 help=$2 value=${3:-} tmp
+  [ -n "$value" ] || value=$(date +%s)
   tmp=$(mktemp "$METRICS_DIR/.$name.XXXXXX" 2>>"$LOG") || { metric_failed "cannot write to $METRICS_DIR"; return 0; }
-  printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' "$name" "$help" "$name" "$name" "$(date +%s)" > "$tmp" || { rm -f "$tmp"; metric_failed "cannot write $name"; return 0; }
+  printf '# HELP %s %s\n# TYPE %s gauge\n%s %s\n' "$name" "$help" "$name" "$name" "$value" > "$tmp" || { rm -f "$tmp"; metric_failed "cannot write $name"; return 0; }
   chmod 0644 "$tmp" || { rm -f "$tmp"; metric_failed "cannot chmod $name"; return 0; }
   mv -f "$tmp" "$METRICS_DIR/$name.prom" || { rm -f "$tmp"; metric_failed "cannot publish $name"; return 0; }
 }
@@ -167,6 +173,7 @@ offbox2_retention() {
       rclone deletefile "$OFFBOX2_REMOTE$rel" 2>>"$LOG" || undeleted=$((undeleted + 1))
     fi
   done <<< "$listing"
+  write_metric vaultaire_backup_offbox2_retention_undeleted_files "old backup files (past the 30 days, by the date in the name) the last Blomp retention pass could not delete (pg-backup.sh)" "$undeleted"
   [ "$undeleted" = 0 ] || { offbox2_failed "$undeleted old file(s) could not be deleted"; return 1; }
 }
 
@@ -258,6 +265,7 @@ main() {
       fi
     fi
   done <<< "$listing"
+  write_metric vaultaire_backup_offbox_retention_undeleted_files "old backup files (past the 30 days, by the date in the name) the last Sync retention pass could not delete (pg-backup.sh)" "$undeleted"
   [ "$undeleted" = 0 ] || fail "OFFBOX: $undeleted old file(s) could not be deleted"
   if [ "$OFFBOX2_OK" = true ]; then STAGE=offbox2; offbox2_retention || true; STAGE=retention; fi
 

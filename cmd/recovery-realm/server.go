@@ -254,11 +254,18 @@ func (s *server) handshake(ctx context.Context, w http.ResponseWriter, who realm
 	}
 	sess := &session{transport: t}
 	sess.lastUsed.Store(s.now().UnixNano())
+	lifetime := sessionLifetime
 	if !s.putSession(key, sess) {
-		s.fail(w, recovery.ClientUnavailable, op)
-		return
+		if req.Kind == recovery.KindHandshakeOnly {
+			s.fail(w, recovery.ClientUnavailable, op)
+			return
+		}
+		// The table is full but the request it carried is already applied
+		// (RP54-2: a Delete done and answered Unavailable): answer it and keep
+		// no session — lifetime 0, so the client opens a new one next time.
+		lifetime = 0
 	}
-	s.reply(w, http.StatusOK, recovery.ClientResponse{Handshake: &resp, SessionLifetime: sessionLifetime}, op, outcome)
+	s.reply(w, http.StatusOK, recovery.ClientResponse{Handshake: &resp, SessionLifetime: lifetime}, op, outcome)
 }
 
 func (s *server) transport(ctx context.Context, w http.ResponseWriter, who realm.Auth, key sessionKey, ct []byte) {
