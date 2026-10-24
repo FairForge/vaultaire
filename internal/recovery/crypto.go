@@ -388,6 +388,9 @@ func EncryptSecret(key [32]byte, secret []byte) ([EncryptedSecretSize]byte, erro
 	var padded [MaxSecretLength + 1]byte
 	padded[0] = byte(len(secret))
 	copy(padded[1:], secret)
+	// #nosec G407 -- the Juicebox wire format (the MIT golden vectors): the
+	// key is single-use, derived per registration from a fresh OPRF scalar,
+	// and seals exactly this one message.
 	aead.Seal(out[:0], make([]byte, chacha20poly1305.NonceSize), padded[:], nil)
 	clear(padded[:])
 	return out, nil
