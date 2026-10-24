@@ -67,6 +67,12 @@ jobs:
         # the same bytes (RP37-9: two binaries for one sha on 2026-10-22).
         run: GOOS=linux GOARCH=amd64 scripts/repro-check.sh vaultaire-linux
 
+      - name: Reproducible client builds
+        # Every row of the client manifest rebuilt from its OWN source commit
+        # (K4c-3b): the deploy fails when a hash differs from what the
+        # transparency log will publish (internal/translog/clientbuilds).
+        run: scripts/repro-check-clients.sh
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:

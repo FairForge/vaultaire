@@ -161,6 +161,9 @@ type Server struct {
 	translogCheckpoint *translogCheckpointer
 	// translogAnchor anchors the signed checkpoints (K4c-3a, translog_anchors.go).
 	translogAnchor *translogAnchorer
+	// translogClients is the client-build manifest until each row is in the
+	// log (K4c-3b, translog_clients.go).
+	translogClients *clientBuilds
 	// translogBuild is this process's server_build entry while it waits
 	// for the log (RP42-1, translog_read.go).
 	translogBuild *bootBuild
@@ -366,6 +369,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		s.translogAnchor = newTranslogAnchorer(s.translog, translogAnchorsFromEnv(logger, os.Getenv), s.db, logger)
 		s.translogBuild = &bootBuild{}
 		s.translogCheckpoint.build = s.translogBuild
+		s.translogClients = &clientBuilds{}
+		s.translogCheckpoint.clients = s.translogClients
 		s.adminReads = adminread.New(s.db, s.translog)
 	}
 
@@ -1589,6 +1594,7 @@ func (s *Server) Start() error {
 	// The transparency log's server_build entry (K4): once per distinct
 	// binary, in the background — never blocks the boot.
 	s.startServerBuildEntry()
+	s.startClientBuildEntries()
 
 	// Every payment provider's readiness, every 60 s: the gauge
 	// vaultaire_payment_provider_ready and the entitlement_lapse job's

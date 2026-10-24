@@ -275,3 +275,52 @@ func TestVerify_Anchors_PrintsStateAndChecksTheDigest(t *testing.T) {
 	require.NoError(t, run(&none, options{url: serve(nil), vkey: vkey, state: filepath.Join(t.TempDir(), "checkpoint"), entry: -1, anchors: true}))
 	assert.Contains(t, none.String(), "anchors: none served for checkpoint 9")
 }
+
+// K4c-3b (plan 43.6: "clients refuse an unlisted build"): -client proves the
+// artefact's SHA-256 is in a client_build entry the verified checkpoint
+// commits to; an artefact the log does not list — one flipped byte — fails
+// the run. The refusal inside a client loader is K4c-3c; this is what the
+// refusal means for an operator and an auditor today.
+func TestVerify_Client_ListedAndUnlisted(t *testing.T) {
+	// Arrange: a log whose entry 2 lists the artefact, among entries of
+	// other kinds.
+	skey, vkey, err := translog.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	artefact := []byte("the wasm bytes of the sdk key core")
+	sum := sha256.Sum256(artefact)
+	m := logOf(t, 2, -1)
+	body, err := translog.Encode(translog.ClientBuild{Client: translog.ClientSDKWasm, Version: "0.1.0",
+		SourceCommit: strings.Repeat("ab", 20), SHA256: hex.EncodeToString(sum[:]),
+		Toolchain: "go1.26.10", Recipe: "scripts/build-client.sh"}, time.Now())
+	require.NoError(t, err)
+	_, err = m.Append(body)
+	require.NoError(t, err)
+	url := serveLog(t, m, skey)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "e2ee.wasm")
+	require.NoError(t, os.WriteFile(file, artefact, 0o600))
+	var out bytes.Buffer
+
+	// Act + Assert: listed, with the inclusion proof checked.
+	require.NoError(t, run(&out, options{url: url, vkey: vkey, state: filepath.Join(dir, "st"), entry: -1,
+		client: file, clientName: "sdk-wasm"}))
+	assert.Contains(t, out.String(), "listed at entry 2")
+	assert.Contains(t, out.String(), "inclusion OK")
+	assert.Contains(t, out.String(), hex.EncodeToString(sum[:]))
+
+	// One flipped byte: not in the log, the run fails.
+	flipped := append([]byte(nil), artefact...)
+	flipped[0] ^= 1
+	bad := filepath.Join(dir, "evil.wasm")
+	require.NoError(t, os.WriteFile(bad, flipped, 0o600))
+	err = run(&out, options{url: url, vkey: vkey, state: filepath.Join(dir, "st2"), entry: -1, client: bad})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in the log")
+	assert.Contains(t, err.Error(), "refuse this build")
+
+	// The right bytes under the wrong client name: refused too.
+	err = run(&out, options{url: url, vkey: vkey, state: filepath.Join(dir, "st3"), entry: -1,
+		client: file, clientName: "sdk-js"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in the log")
+}

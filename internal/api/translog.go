@@ -82,6 +82,9 @@ type translogCheckpointer struct {
 	// build is this process's boot entry while it waits for the log
 	// (RP42-1): each run tries it first, then checkpoints.
 	build *bootBuild
+	// clients is the client-build manifest's rows the log refused so far
+	// (K4c-3b): retried like build, before the checkpoint.
+	clients *clientBuilds
 	// cosign submits each new checkpoint to the witnesses (K4c-2,
 	// translog_witnesses.go); nil = TRANSLOG_WITNESSES unset.
 	cosign  *cosignCollector
@@ -102,6 +105,7 @@ func (c *translogCheckpointer) spec() jobSpec {
 	return jobSpec{Name: c.JobName, Every: 10 * time.Minute, BootDelay: 90 * time.Second, MaxRunTime: 2 * time.Minute,
 		Run: func(ctx context.Context) (jobReport, error) {
 			c.build.try(ctx, c.store, c.logger, true)
+			c.clients.try(ctx, c.store, c.logger, true)
 			res, err := c.store.Checkpoint(ctx)
 			if res.Signed {
 				c.logger.Info("translog checkpoint signed", zap.Int64("size", res.Size), zap.String("root", res.Root))

@@ -33,6 +33,11 @@ const (
 	// of what the log records and who may read it (Stage 1a Prompt 34a,
 	// RP44-2): appended BEFORE the row is written, never naming the tenant.
 	KindLogPolicy = "log_policy"
+	// KindClientBuild: a client artefact release (K4c-3b, Stage 1a Prompt
+	// 36; plan 43.6 "clients refuse an unlisted build", TRUST.md item 3) —
+	// one entry per distinct (client, sha256), from the reviewed manifest
+	// (internal/translog/clientbuilds), appended at boot like server_build.
+	KindClientBuild = "client_build"
 
 	// entryVersion is the body's "v": a change of any kind's fields is a
 	// new version — except key_ceremony's v1 schema of #884 (a free-text
@@ -122,6 +127,70 @@ func (b ServerBuild) validate() error {
 	}
 	if !reGoVer.MatchString(b.GoVersion) {
 		return errors.New("go_version: a Go version string")
+	}
+	return nil
+}
+
+// The clients a client_build entry can name (a CLOSED list: a new client is
+// a code change here and a manifest row, never free text).
+const (
+	ClientSDKWasm = "sdk-wasm" // sdk/go/e2ee compiled to WebAssembly (sdk/wasm → e2ee.wasm)
+	ClientSDKJS   = "sdk-js"   // the JS binding that loads it (sdk/js/e2ee/index.mjs)
+)
+
+var buildClients = []string{ClientSDKWasm, ClientSDKJS}
+
+// BuildClients lists the clients.
+func BuildClients() []string { return append([]string(nil), buildClients...) }
+
+// ClientBuild is a client artefact release: the hash a loader (and
+// translog-verify -client) checks an artefact against. Every field is a
+// closed list or a fixed shape (RP37-10): no free text, no person, no
+// tenant. The recipe is a script path in this repository at the source
+// commit, so anyone can rebuild the artefact and compare
+// (scripts/build-client.sh; reproducibility is gated in the Deploy job by
+// scripts/repro-check-clients.sh).
+type ClientBuild struct {
+	Client       string `json:"client"`        // one of BuildClients()
+	Version      string `json:"version"`       // the release's version, MAJOR.MINOR.PATCH
+	SourceCommit string `json:"source_commit"` // the commit the artefact builds from, 40 hex
+	SHA256       string `json:"sha256"`        // SHA-256 of the artefact as published, 64 hex
+	Toolchain    string `json:"toolchain"`     // the Go toolchain the recipe pins (go.mod's), or "none" for a file published as-is
+	Recipe       string `json:"recipe"`        // the build script's path at the source commit
+}
+
+// Kind implements Entry.
+func (ClientBuild) Kind() string { return KindClientBuild }
+
+// DedupKey: one entry per distinct (client, sha256), never twice.
+func (b ClientBuild) DedupKey() string {
+	return KindClientBuild + ":" + b.Client + ":" + b.SHA256
+}
+
+var (
+	reVersion = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+	reCommit  = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	reRecipe  = regexp.MustCompile(`^scripts/[a-z0-9._-]{1,60}\.sh$`)
+)
+
+func (b ClientBuild) validate() error {
+	if !contains(buildClients, b.Client) {
+		return fmt.Errorf("client: one of %s", strings.Join(buildClients, ", "))
+	}
+	if !reVersion.MatchString(b.Version) {
+		return errors.New("version: MAJOR.MINOR.PATCH")
+	}
+	if !reCommit.MatchString(b.SourceCommit) {
+		return errors.New("source_commit: 40 lowercase hex")
+	}
+	if !reSHA256.MatchString(b.SHA256) {
+		return errors.New("sha256: 64 lowercase hex")
+	}
+	if b.Toolchain != "none" && !reGoVer.MatchString(b.Toolchain) {
+		return errors.New("toolchain: a Go version string, or none")
+	}
+	if !reRecipe.MatchString(b.Recipe) {
+		return errors.New("recipe: scripts/<name>.sh")
 	}
 	return nil
 }
@@ -447,7 +516,7 @@ func strictUnmarshal(raw []byte, v any) error {
 
 // Kinds lists every entry kind.
 func Kinds() []string {
-	return []string{KindServerBuild, KindKeyCeremony, KindAdminRead, KindLogPolicy}
+	return []string{KindServerBuild, KindKeyCeremony, KindAdminRead, KindLogPolicy, KindClientBuild}
 }
 
 // AllowedFields is a kind's allow-list: the JSON fields of its "entry".
@@ -462,6 +531,8 @@ func AllowedFields(kind string) []string {
 		return []string{"scope", "actor_role", "nonce", "commitment"}
 	case KindLogPolicy:
 		return []string{"flag", "action", "enabled", "scope", "nonce", "commitment"}
+	case KindClientBuild:
+		return []string{"client", "version", "source_commit", "sha256", "toolchain", "recipe"}
 	}
 	return nil
 }
@@ -536,6 +607,10 @@ func Decode(body []byte) (Decoded, error) {
 		var p LogPolicy
 		err = strictUnmarshal(raw.Entry, &p)
 		d.Entry = p
+	case KindClientBuild:
+		var b ClientBuild
+		err = strictUnmarshal(raw.Entry, &b)
+		d.Entry = b
 	default:
 		return Decoded{}, fmt.Errorf("translog: decode: unknown kind %q", raw.Kind)
 	}
