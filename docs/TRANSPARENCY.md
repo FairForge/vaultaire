@@ -287,19 +287,19 @@ Losing the key loses nothing already signed: a new key is a new ceremony entry s
 
 ## Recovery realms
 
-A recovery realm (keystone K5, `cmd/recovery-realm`, docs/reviews/K5-PROBE.md) is enrolled by a `key_ceremony` entry with `ceremony: recovery_realm`, appended through the same `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code). The realm's identity is its **Noise static public key**: clients pin it (the `public_key` the recovery token endpoint returns), and a key a reader cannot find in the log is not one of our realms. The log's `key_fingerprint` field holds a hash, so the fingerprint is `sha256:` of the 32-byte public key, and the statement carries the key itself and the realm id so a reader can match it to the configuration a client pins.
+A recovery realm (keystone K5, `cmd/recovery-realm`, docs/reviews/K5-PROBE.md) is enrolled by a `key_ceremony` entry with `action: realm_enrolled` and `key_role: recovery_realm_key`, appended through the same `POST /api/v1/admin/translog/ceremony` (admin JWT + a fresh TOTP code). The realm's identity is its **Noise static public key**: clients pin it (the `public_key` the recovery token endpoint returns), and a key a reader cannot find in the log is not one of our realms. The log's `key_fingerprint` field holds a hash, so the fingerprint is `sha256:` of the 32-byte public key: a reader hashes the key its client pins and looks for the entry. Like every ceremony the entry has **no free text** (RP37-10) — the realm id, the operator and what the realm promises are said in the `reference`d document, never in the entry (the shape before Prompt 37 carried a `statement` the log has refused since Prompt 30; no realm was ever enrolled with it).
 
 On the realm's box, with the realm's own environment (the key is read from its credential, never typed):
 
 ```sh
-recovery-realm enrolment > /root/realm-enrolment.json   # {"ceremony":"recovery_realm","key_fingerprint":"sha256:…","participants":1,"statement":"Recovery realm <id> enrolled with Noise public key <hex>. …"}
+recovery-realm enrolment > /root/realm-enrolment.json   # {"action":"realm_enrolled","key_role":"recovery_realm_key","key_fingerprint":"sha256:…","participants":1,"shares":0,"threshold":0,…,"reference":""}
 ```
 
-Add `"mfa_code"` and POST it as in the signing-key ceremony above. 201 `{"index": n}`. `TestRecoveryRealm_EnrolmentIsAValidCeremonyEntry` keeps that body valid against the log's own rules. Rules:
+Set `"reference"` to the pull request or docs page that names the realm (id, operator, address), add `"mfa_code"` and POST it as in the signing-key ceremony above. 201 `{"index": n}`. `TestRecoveryRealm_EnrolmentIsAValidCeremonyEntry` decodes that body exactly as the route does and keeps it valid against the log's own rules. Rules:
 
-- One entry per realm key. A re-keyed realm is a new entry whose statement names the realm id and says the old key is retired. Clients drop a key whose realm has a newer entry.
-- A realm under another operator (F-19's second realm) is enrolled the same way; the statement names the operator's organisation, never a person.
-- The statement never says "hardware attempt limits" until two realms under different control are both enrolled. Until then the copy is "attempt-limited by our realm" (F-19).
+- One entry per realm key. A re-keyed realm is a `key_retired` entry for the old fingerprint and a `realm_enrolled` entry for the new one, both referencing the page that says so. Clients drop a key that has a `key_retired` entry.
+- A realm under another operator (F-19's second realm) is enrolled the same way; the referenced page names the operator's organisation, never a person.
+- Our copy never says "hardware attempt limits" until two realms under different control are both enrolled. Until then it is "attempt-limited by our realm" (F-19).
 - Nothing about a user is ever logged here: a realm's records are keyed by an opaque subject the log never sees.
 
 ## The checkpoint job

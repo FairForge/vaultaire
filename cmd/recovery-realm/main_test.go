@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -354,20 +355,27 @@ func TestRecoveryRealm_LostSessionsAreReopened(t *testing.T) {
 	assert.Positive(t, testutil.ToFloat64(r1.srv.metrics.requests.WithLabelValues("unknown", "missing_session")))
 }
 
-// The enrolment body is a key_ceremony the transparency log accepts as is.
+// The enrolment body is a key_ceremony the transparency log accepts as is:
+// decoded exactly as POST /api/v1/admin/translog/ceremony decodes it (an
+// unknown field — the removed free-text statement — refused), then the
+// log's own validation (RP37-10: no free text in a ceremony).
 func TestRecoveryRealm_EnrolmentIsAValidCeremonyEntry(t *testing.T) {
 	r := startRealm(t, 0x3c)
 	c := config{id: r.srv.id, staticSecret: r.srv.staticSecret}
 	body, err := enrolment(c)
 	require.NoError(t, err)
-	fp := sha256.Sum256(r.srv.staticPublic[:])
-	assert.Equal(t, "sha256:"+hex.EncodeToString(fp[:]), body["key_fingerprint"])
-	assert.Contains(t, body["statement"], hex.EncodeToString(r.srv.staticPublic[:]))
-	assert.Contains(t, body["statement"], r.idHex)
-	assert.NotContains(t, strings.ToLower(body["statement"].(string)), "hardware attempt limit")
-	_, err = translog.Encode(translog.KeyCeremony{
-		Ceremony: body["ceremony"].(string), KeyFingerprint: body["key_fingerprint"].(string),
-		Participants: body["participants"].(int), Statement: body["statement"].(string),
-	}, time.Now())
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	var entry translog.KeyCeremony
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	require.NoError(t, dec.Decode(&entry), "the ceremony route's decoder: %s", raw)
+	_, err = translog.Encode(entry, time.Now())
 	require.NoError(t, err, "the log's own validation")
+
+	fp := sha256.Sum256(r.srv.staticPublic[:])
+	assert.Equal(t, "realm_enrolled", entry.Action)
+	assert.Equal(t, "recovery_realm_key", entry.KeyRole)
+	assert.Equal(t, "sha256:"+hex.EncodeToString(fp[:]), entry.KeyFingerprint, "a reader hashes the pinned Noise key")
 }

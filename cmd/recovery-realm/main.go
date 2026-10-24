@@ -46,6 +46,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/recovery"
 	"github.com/FairForge/vaultaire/internal/recovery/realm"
 	"github.com/FairForge/vaultaire/internal/recovery/secret"
+	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -154,23 +155,22 @@ func newServer(c config, store realm.Store, reg prometheus.Registerer, logger *z
 }
 
 // enrolment is the body of the key_ceremony entry that records this realm
-// (POST /api/v1/admin/translog/ceremony, plus the admin's mfa_code). The
-// fingerprint is sha256 of the realm's Noise public key (the log's field
-// holds a hash); the statement carries the key itself and the realm id, so
-// a reader matches them to the configuration a client pins.
-func enrolment(c config) (map[string]any, error) {
+// (POST /api/v1/admin/translog/ceremony, plus the admin's mfa_code): the
+// closed-list shape of RP37-10, no free text. The fingerprint is sha256 of
+// the realm's Noise public key — the key a client pins (the token
+// endpoint's public_key) — so a reader hashes the pinned key and finds the
+// entry; a key no entry names is not one of our realms.
+func enrolment(c config) (translog.KeyCeremony, error) {
 	pub, err := recovery.NoisePublicKey(c.staticSecret)
 	if err != nil {
-		return nil, err
+		return translog.KeyCeremony{}, err
 	}
 	fp := sha256.Sum256(pub[:])
-	return map[string]any{
-		"ceremony":        "recovery_realm",
-		"key_fingerprint": "sha256:" + hex.EncodeToString(fp[:]),
-		"participants":    1,
-		"statement": fmt.Sprintf("Recovery realm %s enrolled with Noise public key %s. "+
-			"Juicebox protocol, attempt-limited by this realm. Not hardware-enforced until a second realm "+
-			"under different control exists (F-19).", c.id, hex.EncodeToString(pub[:])),
+	return translog.KeyCeremony{
+		Action:         "realm_enrolled",
+		KeyRole:        "recovery_realm_key",
+		KeyFingerprint: "sha256:" + hex.EncodeToString(fp[:]),
+		Participants:   1,
 	}, nil
 }
 
