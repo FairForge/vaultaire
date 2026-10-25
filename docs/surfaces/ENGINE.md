@@ -28,3 +28,5 @@
 **What this lane never does.** Add a feature without its mode declaration (line 2). Introduce a second key derivation (line 4). Touch the chunker identity (line 6).
 
 **Added 2026-10-24 (Stage 1a Prompt 40).** The metadata database's durability has a stated RPO and RTO: point-in-time recovery (pgBackRest into R2, encrypted; RPO ≤ ~61 s, RTO 12.8 s measured by the drill), beside the nightly dump (`docs/DEPLOY.md` § Point-in-time recovery). A request carrying S3 credentials is the S3 API's on every host before any route (CLAUDE.md Architecture Decision 8).
+
+**Added 2026-10-25 (Stage 1a Prompt 41).** The recovery drill runs itself (monthly, the 2nd at 02:10 UTC) and leaves a metric a rule watches — a backup nobody has restored is a hope; the installer re-runs as a no-op and has a path for a box lost too; the two sign-in doors share one per-account lockout (`docs/reviews/WP-P41.md`).

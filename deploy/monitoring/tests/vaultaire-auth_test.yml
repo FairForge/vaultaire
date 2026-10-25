@@ -40,6 +40,8 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: warning
+              instance: app
+              job: vaultaire
             exp_annotations:
               summary: "Accounts are being locked out"
               description: "3 accounts locked in 15 minutes — a credential-stuffing run against known e-mails (on the dashboard form or POST /auth/login) or a customer's broken automation. The locked addresses are the auth.login_locked rows in audit_logs (metadata->>'via' names the door: password, totp, api:password, api:totp)."
