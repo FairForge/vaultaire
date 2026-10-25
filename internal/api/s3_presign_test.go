@@ -142,8 +142,8 @@ func expectTenantLookup(mock sqlmock.Sqlmock) {
 
 // primaryKeyRow is what LookupCredential scans for a live primary row.
 func primaryKeyRow(tenantID, secret string) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}).
-		AddRow(tenantID, secret, []byte(`["*"]`), "{}", "{}", nil, nil, true)
+	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}).
+		AddRow(tenantID, secret, nil, nil, []byte(`["*"]`), "{}", "{}", nil, nil, true)
 }
 
 func TestIsPresignedRequest(t *testing.T) {
@@ -215,7 +215,7 @@ func TestVerifyPresignedURL_InvalidAccessKey(t *testing.T) {
 
 	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs("NONEXISTENT000000000").
-		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}))
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}))
 
 	now := time.Now().UTC()
 	q := signPresignedURL("GET", "/bucket/key", "localhost:8000", "NONEXISTENT000000000", testSecretKey, 3600, now)
@@ -534,10 +534,10 @@ func TestHandleGetPresignedURL(t *testing.T) {
 	}
 
 	// The URL is signed on the live primary ROW (auth.PrimaryPair).
-	mock.ExpectQuery(`SELECT key_id, COALESCE\(secret_key, ''\) FROM api_keys`).
+	mock.ExpectQuery(`SELECT key_id, COALESCE\(secret_key, ''\), secret_wrapped, secret_key_version FROM api_keys`).
 		WithArgs(testPresignTenantID).
-		WillReturnRows(sqlmock.NewRows([]string{"key_id", "secret_key"}).
-			AddRow(testAccessKey, testSecretKey))
+		WillReturnRows(sqlmock.NewRows([]string{"key_id", "secret_key", "secret_wrapped", "secret_key_version"}).
+			AddRow(testAccessKey, testSecretKey, nil, nil))
 
 	r := httptest.NewRequest("GET", "/api/v1/presigned?bucket=mybucket&key=myfile.txt&method=PUT&expires=7200", nil)
 	ctx := context.WithValue(r.Context(), tenantIDKey, testPresignTenantID)

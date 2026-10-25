@@ -116,7 +116,7 @@ func (f *wholeKeyFixture) retiredBlobs(t *testing.T) map[string]string {
 func (f *wholeKeyFixture) pendingWhole(t *testing.T) int64 {
 	t.Helper()
 	var chunk, whole int64
-	require.NoError(t, f.db.QueryRow(keyRotationPendingSQL, crypto.SSEAlgorithm, f.tenantID).Scan(&chunk, &whole))
+	require.NoError(t, f.db.QueryRow(keyRotationPendingSQL, crypto.SSEAlgorithm, f.tenantID).Scan(&chunk, &whole, new(int64)))
 	return whole
 }
 

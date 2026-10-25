@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/auth"
+	"go.uber.org/zap"
 )
 
 func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
@@ -51,9 +53,16 @@ func (s *Server) handleGetPresignedURL(w http.ResponseWriter, r *http.Request) {
 
 	// Signed on the tenant's live primary pair — the api_keys row, so a
 	// rotation kills every URL minted before it (WP-R5-14).
-	accessKey, secretKey, err := auth.PrimaryPair(r.Context(), s.db, tenantID)
-	if err != nil {
+	accessKey, secretKey, err := s.s3Auth().PrimaryPair(r.Context(), tenantID)
+	switch {
+	case errors.Is(err, auth.ErrKeyNotFound):
 		http.Error(w, `{"error":"tenant credentials not found"}`, http.StatusNotFound)
+		return
+	case err != nil:
+		// A read that failed, or a wrapped secret that did not open (the
+		// Error line is the opener's): ours, never a 404.
+		s.logger.Error("presign: primary pair", zap.String("tenant_id", tenantID), zap.Error(err))
+		http.Error(w, `{"error":"internal_error"}`, http.StatusInternalServerError)
 		return
 	}
 

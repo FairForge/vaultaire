@@ -151,6 +151,8 @@ func (s *Server) handleRotateTenantKey(w http.ResponseWriter, r *http.Request) {
 //	       versions (WP-R2-1 C2) — also the key_reencrypt job's backlog;
 //	       what stays is skipped on purpose (archive backend, open demotion,
 //	       parity row, export: the run's note says which)
+//	credential: live wrapped S3 secrets (api_keys not revoked, sts_tokens
+//	       not expired) below it (plan 43.7) — the job's credential pass
 type keyRotationPendingCollector struct {
 	db     *sql.DB
 	logger *zap.Logger
@@ -166,7 +168,7 @@ const keyRotationPendingTTL = 15 * time.Second
 func newKeyRotationPendingCollector(db *sql.DB, logger *zap.Logger) *keyRotationPendingCollector {
 	return &keyRotationPendingCollector{db: db, logger: logger,
 		desc: prometheus.NewDesc("vaultaire_key_rotation_pending",
-			"Encrypted data still sealed under an older version of its tenant's key, by kind: chunk (index rows) | whole (SSE-S3 blobs: head rows and retained non-current versions) — the key_reencrypt job's backlog. Read from the tables.",
+			"Encrypted data still sealed under an older version of its tenant's key, by kind: chunk (index rows) | whole (SSE-S3 blobs: head rows and retained non-current versions) | credential (live wrapped S3 secrets, plan 43.7) — the key_reencrypt job's backlog. Read from the tables.",
 			[]string{"kind"}, nil)}
 }
 
@@ -177,7 +179,7 @@ func (c *keyRotationPendingCollector) Collect(ch chan<- prometheus.Metric) {
 	if counts == nil {
 		return // never read: unknown, not zero
 	}
-	for _, kind := range []string{"chunk", "whole"} {
+	for _, kind := range []string{"chunk", "whole", "credential"} {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.GaugeValue, counts[kind], kind)
 	}
 }
@@ -200,7 +202,11 @@ const keyRotationPendingSQL = `
 		  WHERE h.encryption_algorithm = $1 AND NOT h.is_chunked AND COALESCE(h.encryption_key_version, 1) < cur.v)
 		+ (SELECT COUNT(*) FROM ` + usage.RetainedVersionsFrom + `
 		    AND v.encryption_algorithm = $1
-		    AND COALESCE(v.encryption_key_version, 1) < (SELECT c.v FROM cur c WHERE c.tenant_id = v.tenant_id))`
+		    AND COALESCE(v.encryption_key_version, 1) < (SELECT c.v FROM cur c WHERE c.tenant_id = v.tenant_id)),
+		(SELECT COUNT(*) FROM api_keys ak JOIN cur ON cur.tenant_id = ak.tenant_id
+		  WHERE ak.revoked_at IS NULL AND ak.secret_wrapped IS NOT NULL AND ak.secret_key_version < cur.v)
+		+ (SELECT COUNT(*) FROM sts_tokens s JOIN cur ON cur.tenant_id = s.tenant_id
+		    WHERE s.expires_at > NOW() AND s.secret_wrapped IS NOT NULL AND s.secret_key_version < cur.v)`
 
 func (c *keyRotationPendingCollector) read() map[string]float64 {
 	c.mu.Lock()
@@ -211,13 +217,13 @@ func (c *keyRotationPendingCollector) read() map[string]float64 {
 	c.at = time.Now() // stamped on failure too: a dead database costs one query per TTL
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	var chunk, whole int64
-	if err := c.db.QueryRowContext(ctx, keyRotationPendingSQL, crypto.SSEAlgorithm, "").Scan(&chunk, &whole); err != nil {
+	var chunk, whole, credential int64
+	if err := c.db.QueryRowContext(ctx, keyRotationPendingSQL, crypto.SSEAlgorithm, "").Scan(&chunk, &whole, &credential); err != nil {
 		if c.logger != nil {
 			c.logger.Warn("key rotation metrics: could not read the backlog", zap.Error(err))
 		}
 		return c.counts
 	}
-	c.counts = map[string]float64{"chunk": float64(chunk), "whole": float64(whole)}
+	c.counts = map[string]float64{"chunk": float64(chunk), "whole": float64(whole), "credential": float64(credential)}
 	return c.counts
 }

@@ -41,7 +41,7 @@ func TestBypassPermission_IsValidAndGrantsNoOperation(t *testing.T) {
 
 func TestGenerateSTSToken_NeverInheritsTheBypass(t *testing.T) {
 	mint := func(parent, requested []string) ([]string, error) {
-		tok, err := GenerateSTSToken(context.Background(), nil, "t", "p", &KeyScope{Permissions: parent}, STSRequest{Permissions: requested})
+		tok, err := GenerateSTSToken(context.Background(), nil, nil, "t", "p", &KeyScope{Permissions: parent}, STSRequest{Permissions: requested})
 		if err != nil {
 			return nil, err
 		}

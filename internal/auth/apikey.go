@@ -164,12 +164,20 @@ func (a *AuthService) persistAPIKey(ctx context.Context, db execer, k *APIKey) e
 	if err != nil {
 		return fmt.Errorf("encode api key permissions: %w", err)
 	}
+	// Wrapped under the tenant's key when the server has a master key
+	// (plan 43.7; a new key and a rotation's successor both come here).
+	wrapped, wrapVersion, err := sealSecret(ctx, a.credKeys, k.TenantID, k.Key, k.Secret)
+	if err != nil {
+		return err
+	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key,
+		                      secret_wrapped, secret_key_version,
 		                      permissions, bucket_scope, ip_allowlist, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (key_id) DO NOTHING
 	`, k.ID, k.UserID, k.TenantID, k.IsPrimary, k.Name, k.Key, string(secretHash), k.Secret,
+		nullBytes(wrapped), wrapVersion,
 		permJSON, pq.Array(k.BucketScope), pq.Array(k.IPAllowlist),
 		k.ExpiresAt, k.CreatedAt)
 	if err != nil {
@@ -196,14 +204,19 @@ func (a *AuthService) indexAPIKey(k *APIKey) {
 }
 
 // indexAPIKeyLocked is indexAPIKey under cacheMu. A primary key also becomes
-// the tenant's pair in memory (what ValidateS3Request hands back).
+// the tenant's access key in memory. The maps keep a COPY without the
+// secret (plan 43.7): the caller's key carries it once, to the response that
+// shows it; nothing after reads it from memory (LookupCredential reads the
+// row).
 func (a *AuthService) indexAPIKeyLocked(k *APIKey) {
-	a.apiKeys[k.Key] = k
+	mem := *k
+	mem.Secret = ""
+	a.apiKeys[k.Key] = &mem
 	if tenant, ok := a.tenants[k.TenantID]; ok {
 		a.keyIndex[k.Key] = tenant
 		if k.IsPrimary && k.RevokedAt == nil {
 			tenant.AccessKey = k.Key
-			tenant.SecretKey = k.Secret
+			tenant.SecretKey = ""
 		}
 	}
 }
@@ -258,19 +271,33 @@ func (a *AuthService) GetPrimaryAPIKey(_ context.Context, tenantID string) (*API
 // PrimaryPair reads the tenant's live primary pair from the database — the
 // one row every surface that signs on the tenant's behalf (the export
 // download link, the presigned-URL route) must use. ErrKeyNotFound when the
-// tenant has no live primary.
-func PrimaryPair(ctx context.Context, db *sql.DB, tenantID string) (accessKey, secretKey string, err error) {
-	if db == nil {
+// tenant has no live primary. A wrapped secret is opened with keys under the
+// credential lookup's one rule (openStoredSecret): never the plaintext when a
+// wrapped form exists.
+//
+// A method of Auth so every signer gets the opener from the one place the api
+// builds an Auth (Server.s3Auth).
+func (a *Auth) PrimaryPair(ctx context.Context, tenantID string) (accessKey, secretKey string, err error) {
+	if a.db == nil {
 		return "", "", errors.New("database not initialized")
 	}
-	err = db.QueryRowContext(ctx, `
-		SELECT key_id, COALESCE(secret_key, '') FROM api_keys
-		WHERE tenant_id = $1 AND is_primary AND revoked_at IS NULL`, tenantID).Scan(&accessKey, &secretKey)
+	var (
+		plaintext string
+		wrapped   []byte
+		version   sql.NullInt64
+	)
+	err = a.db.QueryRowContext(ctx, `
+		SELECT key_id, COALESCE(secret_key, ''), secret_wrapped, secret_key_version FROM api_keys
+		WHERE tenant_id = $1 AND is_primary AND revoked_at IS NULL`, tenantID).Scan(&accessKey, &plaintext, &wrapped, &version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", ErrKeyNotFound
 	}
 	if err != nil {
 		return "", "", fmt.Errorf("read primary pair of %s: %w", tenantID, err)
+	}
+	secretKey, err = openStoredSecret(ctx, a.keys, a.logger, "api_keys", tenantID, accessKey, plaintext, wrapped, version)
+	if err != nil {
+		return "", "", fmt.Errorf("primary pair of %s: %w", tenantID, err)
 	}
 	return accessKey, secretKey, nil
 }

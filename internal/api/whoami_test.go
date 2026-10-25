@@ -100,7 +100,7 @@ func TestWhoami_PrimaryScopedAndSTS(t *testing.T) {
 	assert.NotContains(t, string(body), sk)
 
 	// an STS token of the primary: temporary, its own expiry, the parent's scope narrowed
-	tok, err := auth.GenerateSTSToken(context.Background(), f.db, f.tenantID, f.rootAK,
+	tok, err := auth.GenerateSTSToken(context.Background(), f.db, nil, f.tenantID, f.rootAK,
 		&auth.KeyScope{Permissions: []string{"*"}}, auth.STSRequest{Permissions: []string{"GetObject"}, BucketScope: []string{f.bucket}, TTL: 600})
 	require.NoError(t, err)
 	resp, body = whoami(t, ts, tok.AccessKey, tok.SecretKey, nil)

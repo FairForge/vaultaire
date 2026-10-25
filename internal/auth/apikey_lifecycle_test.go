@@ -28,7 +28,7 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	key, err := svc.GenerateAPIKey(context.Background(), user.ID, "scoped", &KeyCreateOptions{Permissions: []string{"GetObject"}})
 	require.NoError(t, err)
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	require.Equal(t, user.TenantID, cred.TenantID)
@@ -66,7 +66,7 @@ func TestRevokeAPIKey_OtherUsersKeyIsNotFound(t *testing.T) {
 
 	assert.Error(t, svc.RevokeAPIKey(context.Background(), other.ID, key.ID))
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	_, err = a.LookupCredential(context.Background(), key.Key)
 	assert.NoError(t, err, "another user's revoke attempt must not touch the key")
 }
@@ -82,7 +82,7 @@ func TestRotateAPIKey_PersistsNewKeyAndRevokesOld(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, old.Key, rotated.Key)
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	_, err = a.LookupCredential(context.Background(), old.Key)
 	assert.Error(t, err, "the rotated-away key must stop authenticating")
 
@@ -104,7 +104,7 @@ func TestSetAPIKeyExpiration_PersistsAndAppliesToS3Auth(t *testing.T) {
 	past := time.Now().Add(-time.Minute)
 	require.NoError(t, svc.SetAPIKeyExpiration(context.Background(), user.ID, key.ID, past))
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	require.NotNil(t, cred.Scope.ExpiresAt, "expires_at must be persisted")
@@ -121,7 +121,7 @@ func TestGenerateAPIKey_PermissionsOnlyPersists(t *testing.T) {
 	key, err := svc.GenerateAPIKey(context.Background(), user.ID, "ro", &KeyCreateOptions{Permissions: []string{"GetObject"}})
 	require.NoError(t, err)
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"GetObject"}, cred.Scope.Permissions)
@@ -140,7 +140,7 @@ func TestLookupCredential_CorruptPermissionsFailClosed(t *testing.T) {
 	_, err = db.Exec(`UPDATE api_keys SET permissions = '"not-an-array"'::jsonb WHERE id = $1`, key.ID)
 	require.NoError(t, err)
 
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 	cred, err := a.LookupCredential(context.Background(), key.Key)
 	require.NoError(t, err)
 	assert.Empty(t, cred.Scope.Permissions)

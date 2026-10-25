@@ -65,6 +65,9 @@ func AttemptsAWSHeader(header string) bool {
 type Auth struct {
 	db     *sql.DB
 	logger *zap.Logger
+	// keys opens wrapped secrets (plan 43.7); nil = no master key, and a
+	// wrapped row is then refused as ours (openStoredSecret).
+	keys CredentialKeys
 
 	// MissingSignedHeader supplies the value a client most plausibly signed
 	// for a header that is in SignedHeaders but absent from the request —
@@ -77,11 +80,14 @@ type Auth struct {
 	MissingSignedHeader func(r *http.Request, tenantID, name string) (string, bool)
 }
 
-// NewAuth creates a new Auth handler
-func NewAuth(db *sql.DB, logger *zap.Logger) *Auth {
+// NewAuth creates a new Auth handler. keys is the tenant key store's
+// credential seam (nil without a master key); the api builds every Auth in
+// one place, Server.s3Auth (TestNewAuth_EveryCallSiteHasTheOpener).
+func NewAuth(db *sql.DB, logger *zap.Logger, keys CredentialKeys) *Auth {
 	return &Auth{
 		db:     db,
 		logger: logger,
+		keys:   keys,
 	}
 }
 
@@ -206,20 +212,22 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 
 	var (
 		tenantID, secretKey      string
+		wrapped                  []byte
+		wrapVersion              sql.NullInt64
 		permJSON                 []byte
 		bucketScope, ipAllowlist pq.StringArray
 		expiresAt, revokedAt     sql.NullTime
 		isPrimary                bool
 	)
 	err := a.db.QueryRowContext(ctx, `
-		SELECT COALESCE(ak.tenant_id, ''), COALESCE(ak.secret_key, ''),
+		SELECT COALESCE(ak.tenant_id, ''), COALESCE(ak.secret_key, ''), ak.secret_wrapped, ak.secret_key_version,
 		       COALESCE(ak.permissions, '["*"]'::jsonb),
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
 		       ak.expires_at, ak.revoked_at, ak.is_primary
 		FROM api_keys ak
 		WHERE ak.key_id = $1
-	`, accessKey).Scan(&tenantID, &secretKey, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary)
+	`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary)
 	switch {
 	case err == nil:
 		if revokedAt.Valid {
@@ -248,11 +256,15 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		if expiresAt.Valid {
 			scope.ExpiresAt = &expiresAt.Time
 		}
+		secret, err := openStoredSecret(ctx, a.keys, a.logger, "api_keys", tenantID, accessKey, secretKey, wrapped, wrapVersion)
+		if err != nil {
+			return nil, err
+		}
 		a.logger.Debug("authenticated tenant (api key)",
 			zap.String("tenant_id", tenantID),
 			zap.Bool("primary", isPrimary),
 			zap.Int("permissions", len(scope.Permissions)))
-		return &Credential{tenantID, secretKey, scope}, nil
+		return &Credential{tenantID, secret, scope}, nil
 	case !errors.Is(err, sql.ErrNoRows):
 		a.logger.Error("database error during auth", zap.Error(err))
 		return nil, fmt.Errorf("auth lookup failed: %w", err)
@@ -268,12 +280,13 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 			parentExpiresAt               sql.NullTime
 		)
 		err = a.db.QueryRowContext(ctx, `
-			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
+			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.secret_wrapped, s.secret_key_version,
+			       s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
 			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at
 			FROM sts_tokens s
 			LEFT JOIN api_keys ak ON ak.key_id = s.parent_key_id
 			WHERE s.access_key = $1
-		`, accessKey).Scan(&tenantID, &secretKey, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
+		`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
 			&parentFound, &parentRevoked, &parentExpiresAt)
 		switch {
 		case err == nil:
@@ -297,8 +310,12 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 					zap.String("tenant_id", tenantID), zap.Error(jsonErr))
 				scope.Permissions = nil
 			}
+			secret, err := openStoredSecret(ctx, a.keys, a.logger, "sts_tokens", tenantID, accessKey, secretKey, wrapped, wrapVersion)
+			if err != nil {
+				return nil, err
+			}
 			a.logger.Debug("authenticated tenant (STS token)", zap.String("tenant_id", tenantID))
-			return &Credential{tenantID, secretKey, scope}, nil
+			return &Credential{tenantID, secret, scope}, nil
 		case !errors.Is(err, sql.ErrNoRows):
 			a.logger.Error("database error during STS auth", zap.Error(err))
 			return nil, fmt.Errorf("auth lookup failed: %w", err)

@@ -29,10 +29,11 @@ import (
 var allocationSites = map[string]string{
 	// The PUT budget (CHUNK_PUT_BUDGET_BYTES, chunk_put_budget.go): every chunk's
 	// buffers are held from it before the chunk is stored.
-	"crypto/chunker.go:ChunkContextDepth":  "PUT budget: each chunk (≤ 16 MiB) is held before it is stored; the chunker's own look-ahead is chunkerLookahead + 1 chunks + its 16 MiB work buffer (≤ 64 MiB per write)",
-	"crypto/chunk_encryption.go:sealChunk": "PUT budget: the ciphertext is part of the chunk's hold (chunk + compressed + sealed, shrunk to the real sizes)",
-	"crypto/chunker.go:Chunk":              "not a request path: the whole-buffer chunker (cmd/tools/dedup-migrate); the server uses ChunkContextDepth",
-	"crypto/chunker.go:ChunkBytes":         "not a request path: the whole-buffer chunker (tests, tools)",
+	"crypto/chunker.go:ChunkContextDepth":      "PUT budget: each chunk (≤ 16 MiB) is held before it is stored; the chunker's own look-ahead is chunkerLookahead + 1 chunks + its 16 MiB work buffer (≤ 64 MiB per write)",
+	"crypto/credential_wrap.go:sealCredential": "per credential write: format byte + nonce + an S3 secret (40–64 bytes) + the GCM tag — under 100 bytes (plan 43.7)",
+	"crypto/chunk_encryption.go:sealChunk":     "PUT budget: the ciphertext is part of the chunk's hold (chunk + compressed + sealed, shrunk to the real sizes)",
+	"crypto/chunker.go:Chunk":                  "not a request path: the whole-buffer chunker (cmd/tools/dedup-migrate); the server uses ChunkContextDepth",
+	"crypto/chunker.go:ChunkBytes":             "not a request path: the whole-buffer chunker (tests, tools)",
 	// The GET budget (LARGE_GET_PARALLEL_BUDGET_BYTES, s3_large_get.go).
 	"api/s3_large_get.go:openParallelGet":    "GET budget: parts of the parallel ranged reader (parfetch)",
 	"api/s3_large_get.go:openParallelSealed": "GET budget: segment-aligned parts of the parallel sealed reader (parfetch)",

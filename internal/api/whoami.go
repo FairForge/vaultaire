@@ -111,9 +111,7 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		// verifyPresignedURL looked up and verified X-Amz-Credential's id.
 		keyID = auth.PresignedAccessKey(r)
 	default:
-		a := auth.NewAuth(s.db, s.logger)
-		a.MissingSignedHeader = s.missingSignedHeaderHint
-		tenantID, scope, err = a.ValidateRequest(r)
+		tenantID, scope, err = s.s3Auth().ValidateRequest(r)
 		if err != nil {
 			reason, known := authFailureReason(err)
 			recordAuthFailure(r, reason, known)

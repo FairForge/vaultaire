@@ -126,7 +126,7 @@ func TestWhoami_STSExpiredAndDeadParent(t *testing.T) {
 	ctx := context.Background()
 
 	// an expired STS token: key_expired on both paths
-	tok, err := auth.GenerateSTSToken(ctx, f.db, f.tenantID, f.rootAK,
+	tok, err := auth.GenerateSTSToken(ctx, f.db, nil, f.tenantID, f.rootAK,
 		&auth.KeyScope{Permissions: []string{"*"}}, auth.STSRequest{Permissions: []string{"GetObject"}, TTL: 900})
 	require.NoError(t, err)
 	f.exec(`UPDATE sts_tokens SET expires_at = NOW() - INTERVAL '1 minute' WHERE access_key = $1`, tok.AccessKey)
@@ -141,7 +141,7 @@ func TestWhoami_STSExpiredAndDeadParent(t *testing.T) {
 
 	// an STS token whose parent key is revoked: refused on both paths
 	pak, _ := f.key("GetObject")
-	tok, err = auth.GenerateSTSToken(ctx, f.db, f.tenantID, pak,
+	tok, err = auth.GenerateSTSToken(ctx, f.db, nil, f.tenantID, pak,
 		&auth.KeyScope{Permissions: []string{"GetObject"}}, auth.STSRequest{Permissions: []string{"GetObject"}, TTL: 900})
 	require.NoError(t, err)
 	f.exec(`UPDATE api_keys SET revoked_at = NOW() WHERE key_id = $1`, pak)

@@ -16,7 +16,7 @@ import (
 // used to pass its HasPrefix and reach the parser while the S3 credential
 // gate did not see it as credentials. Both answer the same question now.
 func TestValidateRequest_TheSchemeNeedsItsSpace(t *testing.T) {
-	a := NewAuth(nil, zap.NewNop())
+	a := NewAuth(nil, zap.NewNop(), nil)
 	for _, tc := range []struct {
 		header  string
 		wantErr string
