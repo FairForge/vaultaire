@@ -360,6 +360,27 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     0 at 087 and 092). If any exist, ship a guard one deploy ahead: the old
     reader refuses a row whose artefact `retired_blobs` lists. Owner decision
     2026-10-17: this checklist line, no guard built until it is needed.
+  - **Rollback past the wrapped S3 secrets is impossible once
+    `credential_plaintext_drop` is on** (plan 43.7, Stage 1a Prompt 42 PR C).
+    From then on writers store an S3 secret only wrapped under its tenant's
+    key, and the `key_reencrypt` job nulls the plaintext of every older row
+    whose wrap opens back to it. A build older than PR B (migration 108,
+    #969) reads only the plaintext column: every S3 request would answer
+    `SignatureDoesNotMatch`, and turning the flag off does not bring the
+    nulled secrets back. **`vaultaire-switch` refuses such a build** (chosen
+    over a runbook line: the mistake is a one-way door and a refusal cannot be
+    forgotten in an incident): `deploy`, `restart` and `rollback` all go
+    through `start_and_switch`, which first checks that the slot's binary
+    carries the wrap's HKDF label `stored/credential/v1` (every build since
+    PR B does; `TestCredentialWrap_TheSwitchMarkerIsTheHKDFLabel` holds the
+    script and the code to one string). A binary without it starts only while
+    the flag's global row reads `f` (`runuser -u postgres -- psql` on
+    `DB_NAME`); on, or unreadable, it is refused before the slot is touched
+    (`… predates the wrapped S3 secrets … credential_plaintext_drop is on`).
+    A restore of the database from before the drop (`§ Restoring the
+    database`) brings the plaintext back with it — that, not a rollback, is
+    the way to an older build. The script is installed by hand like every
+    `deploy/**` change.
 - **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
   and the credential cache are per process, the egress month counter is one
   per process, and the synthetic check would run twice — none of that is safe

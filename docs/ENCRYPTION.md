@@ -123,6 +123,24 @@ tenant through the front door. Since Stage 1a Prompt 42 (PR B):
   restart, the first run(s) wrap every live row.
 - The process no longer loads any secret into memory at boot (and keeps none
   for a key it creates): every credential decision reads its row per request.
+- **The drop (PR C, flag `credential_plaintext_drop`, default OFF, global
+  only).** On: the writers store no plaintext where they wrapped (api_keys,
+  sts_tokens, the tenants mirror — a server with no master key still writes
+  the plaintext: a secret is never stored nowhere), and each `key_reencrypt`
+  run nulls the plaintext of every row whose wrap opens back to exactly it,
+  of every dead row (a revoked key, an expired token: none authenticates), and
+  the tenants mirror once the live primary has none
+  (`credentials_plaintext_dropped`, `mirrors_plaintext_dropped`). A wrap that
+  does not open keeps its plaintext (and is counted in `credential_failures`).
+  **Turning it on is refused** — 409 `master_key_absent` without a master key,
+  409 `credentials_not_wrapped` (with the count) while a live row holds only
+  the plaintext — on the admin API and the dashboard alike; nothing is
+  written. The owner's order: the F-14 ceremony, one deploy (or restart), a
+  `key_reencrypt` run reporting the backlog wrapped, then the flag. After it
+  a pg_dump holds no usable S3 secret without the master key
+  (`TestDump_RestoredWithoutTheMasterKeyHasNoUsableSecret`). A rollback to a
+  build before PR B is then impossible; `vaultaire-switch` refuses one
+  (`docs/DEPLOY.md` § Zero-downtime deploys, "Rollback past the wrapped S3 secrets").
 
 ## Setting the master key (the on-box ceremony)
 

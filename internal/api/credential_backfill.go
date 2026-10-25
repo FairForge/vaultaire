@@ -128,7 +128,135 @@ func (k *KeyReencryptRunner) wrapCredentials(ctx context.Context, res *KeyReencr
 			res.CredentialsWrapped++
 		}
 	}
+	if k.dropPlaintext != nil && k.dropPlaintext() {
+		return k.dropPlaintextPass(ctx, keys, batch, res)
+	}
 	return nil
+}
+
+// dropCandidatesSQL reads the rows whose plaintext the drop owes: a wrapped
+// row still holding it, and a dead row (a revoked key, a key with no tenant,
+// an expired token — none ever authenticates: the lookup refuses it before
+// any secret is read) holding it with or without a wrap.
+const dropCandidatesSQL = `
+	SELECT * FROM (
+		SELECT 'api_keys' AS tbl, key_id, COALESCE(tenant_id, '') AS tenant_id, secret_key, secret_wrapped, secret_key_version,
+		       (revoked_at IS NOT NULL OR tenant_id IS NULL) AS dead
+		  FROM api_keys
+		 WHERE secret_key IS NOT NULL AND ($1 = '' OR tenant_id = $1)
+		   AND (secret_wrapped IS NOT NULL OR revoked_at IS NOT NULL OR tenant_id IS NULL)
+		UNION ALL
+		SELECT 'sts_tokens', access_key, tenant_id, secret_key, secret_wrapped, secret_key_version, expires_at <= NOW()
+		  FROM sts_tokens
+		 WHERE secret_key IS NOT NULL AND ($1 = '' OR tenant_id = $1)
+		   AND (secret_wrapped IS NOT NULL OR expires_at <= NOW())
+	) c LIMIT $2`
+
+// dropPlaintextPass is the PR C half of the pass: a live row's plaintext is
+// nulled only after its wrapped form opened back to exactly it; the write is
+// guarded on the plaintext and the wrap the check saw. Then the tenants
+// mirror is nulled where the tenant's live primary has no plaintext left.
+func (k *KeyReencryptRunner) dropPlaintextPass(ctx context.Context, keys credentialStore, batch int, res *KeyReencryptResult) error {
+	rows, err := k.db.QueryContext(ctx, dropCandidatesSQL, k.onlyScope, batch)
+	if err != nil {
+		return fmt.Errorf("read plaintext secrets to drop: %w", err)
+	}
+	type dropRow struct {
+		credentialRow
+		dead bool
+	}
+	var due []dropRow
+	for rows.Next() {
+		var r dropRow
+		if err := rows.Scan(&r.table, &r.keyID, &r.tenantID, &r.plaintext, &r.wrapped, &r.version, &r.dead); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan plaintext secret: %w", err)
+		}
+		due = append(due, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("read plaintext secrets to drop: %w", err)
+	}
+	_ = rows.Close()
+
+	for _, r := range due {
+		if ctx.Err() != nil {
+			return nil
+		}
+		dropped, err := k.dropOne(ctx, keys, r.credentialRow, r.dead)
+		switch {
+		case err != nil:
+			res.CredentialFailures++
+			res.fail("plaintext (%s) of %s kept: %v", r.table, r.tenantID, err)
+			k.logger.Warn("key re-encrypt: a plaintext secret was kept (its wrap does not open back to it)",
+				zap.String("table", r.table), zap.String("tenant_id", r.tenantID), zap.Error(err))
+		case dropped:
+			res.CredentialsPlaintextDropped++
+		default:
+			res.CredentialsRaced++
+		}
+	}
+
+	out, err := k.db.ExecContext(ctx, `
+		UPDATE tenants SET secret_key = NULL
+		 WHERE id IN (SELECT t.id FROM tenants t
+		               WHERE t.secret_key IS NOT NULL AND ($1 = '' OR t.id = $1)
+		                 AND EXISTS (SELECT 1 FROM api_keys ak
+		                              WHERE ak.tenant_id = t.id AND ak.is_primary AND ak.revoked_at IS NULL
+		                                AND ak.secret_wrapped IS NOT NULL AND ak.secret_key IS NULL)
+		               LIMIT $2)`, k.onlyScope, batch)
+	if err != nil {
+		return fmt.Errorf("drop the tenants mirrors: %w", err)
+	}
+	n, err := out.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("drop the tenants mirrors: %w", err)
+	}
+	res.MirrorsPlaintextDropped += int(n)
+	return nil
+}
+
+// dropOne nulls one row's plaintext: a live row only once its wrap opened
+// back to exactly that plaintext; a dead row (it never authenticates) as it
+// is. dropped = false: the row changed first.
+func (k *KeyReencryptRunner) dropOne(ctx context.Context, keys credentialStore, r credentialRow, dead bool) (bool, error) {
+	if r.wrapped != nil && !dead {
+		if !r.version.Valid {
+			return false, fmt.Errorf("wrapped without a key version")
+		}
+		back, err := keys.OpenCredential(ctx, r.tenantID, r.keyID, int(r.version.Int64), r.wrapped)
+		if err != nil {
+			return false, fmt.Errorf("the wrap does not open: %w", err)
+		}
+		if !bytes.Equal(back, []byte(r.plaintext.String)) {
+			return false, fmt.Errorf("the wrap opens to another secret")
+		}
+	}
+	var q string
+	switch r.table {
+	case "api_keys":
+		q = `UPDATE api_keys SET secret_key = NULL
+		      WHERE key_id = $1 AND secret_key = $2 AND secret_wrapped IS NOT DISTINCT FROM $3`
+	case "sts_tokens":
+		q = `UPDATE sts_tokens SET secret_key = NULL
+		      WHERE access_key = $1 AND secret_key = $2 AND secret_wrapped IS NOT DISTINCT FROM $3`
+	default:
+		return false, fmt.Errorf("unknown credential table %q", r.table)
+	}
+	var wrapped any
+	if r.wrapped != nil {
+		wrapped = r.wrapped
+	}
+	out, err := k.db.ExecContext(ctx, q, r.keyID, r.plaintext.String, wrapped)
+	if err != nil {
+		return false, fmt.Errorf("null the plaintext: %w", err)
+	}
+	n, err := out.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("null the plaintext: %w", err)
+	}
+	return n == 1, nil
 }
 
 // wrapOne seals one row's secret under the tenant's newest version, checks
