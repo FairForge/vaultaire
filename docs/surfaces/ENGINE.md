@@ -26,3 +26,5 @@
 10. The attested data plane (41.4) once the EPYC box exists.
 
 **What this lane never does.** Add a feature without its mode declaration (line 2). Introduce a second key derivation (line 4). Touch the chunker identity (line 6).
+
+**Added 2026-10-24 (Stage 1a Prompt 40).** The metadata database's durability has a stated RPO and RTO: point-in-time recovery (pgBackRest into R2, encrypted; RPO ≤ ~61 s, RTO 12.8 s measured by the drill), beside the nightly dump (`docs/DEPLOY.md` § Point-in-time recovery). A request carrying S3 credentials is the S3 API's on every host before any route (CLAUDE.md Architecture Decision 8).

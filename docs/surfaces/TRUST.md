@@ -28,6 +28,6 @@
 **Added 2026-10-14 (F-20, F-21; plan 43.7, 43.8).**
 
 11. The key broker now, on a rented SEV-SNP VM, unwrapping per tenant (43.7, F-20) — after the F-14 ceremony, migrated by the `PREVIOUS` re-wrap; it replaces item 7 (the KEK leaves the box rather than hiding in its TPM).
-12. Before launch, two holes closed: `api_keys.secret_key` wrapped under the tenant's key; the pg dumps encrypted with `age` before they exist on disk (43.7).
+12. Before launch, two holes closed: `api_keys.secret_key` wrapped under the tenant's key; the pg dumps encrypted with `age` before they exist on disk (43.7). **2026-10-24 (Stage 1a Prompt 40, #955):** the continuous point-in-time archive of the database is encrypted on the box (`aes-256-cbc`) before it reaches R2, its passphrase only on the box and in the owner's Keychain; the off-box dumps were already encrypted (Sync's own E2EE, Blomp through rclone crypt) — the on-box dump is still plaintext. The legal pages' backup sentences (they said 7 days; the dumps live 30) now come from code facts under test, and name the archive.
 13. Boot-state and build transparency (a 43.6 entry per deploy with the binary hash and an fTPM quote, a daily quote otherwise), canary credentials, the customer's own audit view, the sub-processor and data-location page, the incident clock (43.8).
 14. The moderation scope written down and in the AUP (F-21): known hashes on the public surface only, a human before any action, the link before the account, an appeal, counts in the report.
