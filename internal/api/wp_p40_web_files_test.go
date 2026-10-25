@@ -57,6 +57,8 @@ func TestWebFiles_ServedToAnAnonymousFetchOnAWebHost(t *testing.T) {
 							require.Equal(t, http.StatusOK, w.Code, msg)
 							assert.Equal(t, f.ctype, w.Header().Get("Content-Type"), msg)
 							assert.Equal(t, f.cache, w.Header().Get("Cache-Control"), msg)
+							assert.Equal(t, "no-store", w.Header().Get("CDN-Cache-Control"),
+								"%s: never stored at the edge — a cached copy answers a SIGNED request too (RP57-5, prod stored.cloud 2026-10-25)", msg)
 							assert.Empty(t, *hits, msg)
 							if m == http.MethodHead {
 								assert.Empty(t, w.Body.Bytes(), msg)
