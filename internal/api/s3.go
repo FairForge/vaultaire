@@ -362,9 +362,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else {
-			a := auth.NewAuth(s.db, s.logger)
-			a.MissingSignedHeader = s.missingSignedHeaderHint
-			tenantID, scope, err = a.ValidateRequest(r)
+			tenantID, scope, err = s.s3Auth().ValidateRequest(r)
 			if err != nil && r.Header.Get("Authorization") == "" && s.serveWebNotFound(w, r) {
 				return // a browser's typo on the web host: the 404 page, not AccessDenied XML
 			}
@@ -375,6 +373,10 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 				errCode := ErrAccessDenied
 				switch {
+				case errors.Is(err, auth.ErrCredentialUnavailable):
+					// A wrapped secret we could not open (plan 43.7): ours,
+					// never the caller's AccessDenied.
+					errCode = ErrInternalError
 				case errors.Is(err, auth.ErrAccessKeyRevoked):
 					// A revoked or rotated key, or an STS token of one: AWS's
 					// code for a key that no longer exists (WP-R5-14).

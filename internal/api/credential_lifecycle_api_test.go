@@ -17,6 +17,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/config"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/testutil"
@@ -51,6 +52,14 @@ type lifecycleFixture struct {
 
 func setupLifecycleFixture(t *testing.T) *lifecycleFixture {
 	t.Helper()
+	return setupLifecycleFixtureWith(t, "")
+}
+
+// setupLifecycleFixtureWith is the fixture on a server with a tenant key
+// store under masterHex ("" = no master key): the auth service wraps new
+// secrets under it and the S3 paths open them (plan 43.7).
+func setupLifecycleFixtureWith(t *testing.T, masterHex string) *lifecycleFixture {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping database test")
 	}
@@ -66,7 +75,12 @@ func setupLifecycleFixture(t *testing.T) *lifecycleFixture {
 	eng.AddDriver("local", drivers.NewLocalDriver(tempDir, logger))
 	eng.SetPrimary("local")
 
+	var keys *crypto.TenantKeys
 	svc := auth.NewAuthService(nil, db)
+	if masterHex != "" {
+		keys = testTenantKeys(t, db, masterHex)
+		svc.SetCredentialKeys(keys)
+	}
 	email := fmt.Sprintf("lifecycle-%s@test.local", auth.GenerateID()[:8])
 	user, tenant, key, err := svc.CreateUserWithTenant(context.Background(), email, "a-long-password", "Lifecycle Co")
 	require.NoError(t, err)
@@ -76,7 +90,7 @@ func setupLifecycleFixture(t *testing.T) *lifecycleFixture {
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, tenant.ID+"_"+f.bucket), 0o750))
 
 	f.srv = &Server{logger: logger, router: chi.NewRouter(), engine: eng, db: db, testMode: false, auth: svc,
-		config: &config.Config{Server: config.ServerConfig{Port: 8000}}}
+		config: &config.Config{Server: config.ServerConfig{Port: 8000}}, tenantKeys: keys}
 	f.ts = httptest.NewServer(http.HandlerFunc(f.srv.handleS3Request))
 	t.Cleanup(func() {
 		f.ts.Close()
@@ -128,7 +142,7 @@ func (f *lifecycleFixture) put(ak, sk, key string) string {
 
 func s3ErrorCode(err error) string {
 	msg := err.Error()
-	for _, code := range []string{ErrInvalidAccessKeyId, ErrSignatureDoesNotMatch, ErrAccessDenied, ErrExpiredPresignedRequest} {
+	for _, code := range []string{ErrInvalidAccessKeyId, ErrSignatureDoesNotMatch, ErrAccessDenied, ErrExpiredPresignedRequest, ErrInternalError} {
 		if strings.Contains(msg, code) {
 			return code
 		}

@@ -93,6 +93,14 @@ type KeyReencryptRunner struct {
 	// sse opens and re-seals whole SSE-S3 objects; nil = the whole-object
 	// pass is off (set by the server from its SSE service).
 	sse *crypto.SSEService
+
+	// The credential pass (plan 43.7, credential_backfill.go): credKeys nil
+	// = the chunk service's key store (tests inject a sabotaged seal);
+	// credentialBatch 0 = defaultCredentialBatch; beforeCredentialWrite is a
+	// test seam between the check and the write (the race).
+	credKeys              credentialStore
+	credentialBatch       int
+	beforeCredentialWrite func(table, keyID string)
 }
 
 // KeyReencryptResult is one run's outcome, recorded as job_runs.result.
@@ -122,6 +130,14 @@ type KeyReencryptResult struct {
 	ObjectsChanged     int            `json:"objects_changed,omitempty"`
 	ObjectsFailed      int            `json:"objects_failed,omitempty"`
 	ObjectsSkipped     map[string]int `json:"objects_skipped,omitempty"`
+
+	// S3 secrets (plan 43.7, credential_backfill.go): live rows sealed for
+	// the first time, re-sealed under the tenant's newest version, lost to
+	// another writer, and not moved (a note; they stay candidates).
+	CredentialsWrapped   int `json:"credentials_wrapped"`
+	CredentialsRewrapped int `json:"credentials_rewrapped"`
+	CredentialsRaced     int `json:"credentials_raced,omitempty"`
+	CredentialFailures   int `json:"credential_failures"`
 	// Errors are the first few per-chunk/per-object failures (the rest are
 	// in the log).
 	Errors []string `json:"errors,omitempty"`
@@ -171,12 +187,17 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 				zap.Int("retired_deleted", res.RetiredDeleted), zap.Int("retired_kept", res.RetiredKept),
 				zap.Int("retired_failed", res.RetiredFailed), zap.Int("object_candidates", res.ObjectCandidates),
 				zap.Int("objects_reencrypted", res.ObjectsReencrypted), zap.Int("objects_changed", res.ObjectsChanged),
-				zap.Int("objects_failed", res.ObjectsFailed), zap.Any("objects_skipped", res.ObjectsSkipped), zap.Error(err))
-			rep := jobReport{Rows: int64(res.Reencrypted + res.ObjectsReencrypted), Result: res}
+				zap.Int("objects_failed", res.ObjectsFailed), zap.Any("objects_skipped", res.ObjectsSkipped),
+				zap.Int("credentials_wrapped", res.CredentialsWrapped), zap.Int("credentials_rewrapped", res.CredentialsRewrapped),
+				zap.Int("credentials_raced", res.CredentialsRaced), zap.Int("credential_failures", res.CredentialFailures), zap.Error(err))
+			rep := jobReport{Rows: int64(res.Reencrypted + res.ObjectsReencrypted + res.CredentialsWrapped + res.CredentialsRewrapped), Result: res}
 			var notes []string
 			if res.Failed > 0 || res.RetiredFailed > 0 {
 				notes = append(notes, fmt.Sprintf("%d chunk(s) not re-encrypted, %d old address(es) not deleted (see the log); they stay for the next run",
 					res.Failed, res.RetiredFailed))
+			}
+			if res.CredentialFailures > 0 {
+				notes = append(notes, fmt.Sprintf("%d S3 secret(s) not wrapped (see the log); they stay for the next run", res.CredentialFailures))
 			}
 			if res.ObjectsFailed > 0 {
 				notes = append(notes, fmt.Sprintf("%d whole object(s) not re-encrypted (see the log); they stay for the next run", res.ObjectsFailed))
@@ -191,11 +212,15 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 }
 
 // RunOnce does one pass: the master re-wrap while a master re-key is in
-// progress, retired chunk blobs, the chunks' re-encryption, then whole
-// objects' (one byte budget for both).
+// progress, the S3 secrets' wrap and re-wrap (plan 43.7), retired chunk
+// blobs, the chunks' re-encryption, then whole objects' (one byte budget for
+// both).
 func (k *KeyReencryptRunner) RunOnce(ctx context.Context) (KeyReencryptResult, error) {
 	var res KeyReencryptResult
 	if err := k.rewrapMaster(ctx, &res); err != nil {
+		return res, err
+	}
+	if err := k.wrapCredentials(ctx, &res); err != nil {
 		return res, err
 	}
 	if err := k.deleteRetired(ctx, &res); err != nil {

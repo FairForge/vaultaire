@@ -114,6 +114,10 @@ type AccountExportService struct {
 	logger *zap.Logger
 	// endpoint is the public S3 base URL the presigned link is built on.
 	endpoint string
+	// signer reads the tenant's primary pair for the link — the server's
+	// Server.s3Auth, so a wrapped secret opens like on every other path
+	// (plan 43.7).
+	signer *auth.Auth
 
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName string
@@ -136,15 +140,15 @@ type AccountExportService struct {
 
 // NewAccountExportService builds the service; nil without a database or an
 // engine (the handlers then answer 503).
-func NewAccountExportService(db *sql.DB, eng engine.Engine, quota QuotaManager, gci *crypto.GlobalContentIndex, endpoint string, logger *zap.Logger) *AccountExportService {
-	if db == nil || eng == nil {
+func NewAccountExportService(db *sql.DB, eng engine.Engine, quota QuotaManager, gci *crypto.GlobalContentIndex, signer *auth.Auth, endpoint string, logger *zap.Logger) *AccountExportService {
+	if db == nil || eng == nil || signer == nil {
 		return nil
 	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &AccountExportService{
-		db: db, eng: eng, quota: quota, gci: gci, logger: logger, endpoint: strings.TrimSuffix(endpoint, "/"),
+		db: db, eng: eng, quota: quota, gci: gci, signer: signer, logger: logger, endpoint: strings.TrimSuffix(endpoint, "/"),
 		writer:     newGeneratedObjectWriter(db, eng, quota, gci, logger),
 		JobName:    exportJobName,
 		PageSize:   exportDefaultPageSize,
@@ -271,7 +275,7 @@ func (s *AccountExportService) DownloadURL(ctx context.Context, exportID, userID
 	case st.Status != "completed" || st.ObjectKey == "":
 		return "", time.Time{}, ErrExportNotReady
 	}
-	accessKey, secretKey, err := auth.PrimaryPair(ctx, s.db, st.TenantID)
+	accessKey, secretKey, err := s.signer.PrimaryPair(ctx, st.TenantID)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("read tenant credentials: %w", err)
 	}

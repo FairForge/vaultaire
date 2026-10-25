@@ -88,7 +88,7 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:   parent.ExpiresAt,
 	}
 
-	token, err := auth.GenerateSTSToken(r.Context(), s.db, tenantID, parentKeyID, parentScope, req)
+	token, err := auth.GenerateSTSToken(r.Context(), s.db, s.credentialKeys(), tenantID, parentKeyID, parentScope, req)
 	if err != nil {
 		if errors.Is(err, auth.ErrSTSScope) {
 			writeManagementError(w, ErrTypeInvalidRequest, "scope_error",

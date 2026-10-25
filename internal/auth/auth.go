@@ -84,7 +84,15 @@ type AuthService struct {
 	// feature-flag service here so the `signups` flag (env default + DB
 	// override) decides, flippable at runtime with no deploy.
 	signupsEnabledFn func() bool
+	// credKeys wraps every new secret under its tenant's key (plan 43.7,
+	// credential_secret.go); nil = no master key: the plaintext only.
+	credKeys CredentialKeys
 }
+
+// SetCredentialKeys gives the writers the tenant key store's credential seam
+// (the server's crypto.TenantKeys when a master key is loaded). Set before
+// use; never pass a typed nil.
+func (a *AuthService) SetCredentialKeys(keys CredentialKeys) { a.credKeys = keys }
 
 // ErrSignupsDisabled is returned by CreateUserWithTenant — the single chokepoint
 // for the web form (/register), the JSON API (/auth/register), AND OAuth signup
@@ -212,11 +220,14 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	// below: one malformed row (NULL text column) must not abort the whole
 	// credential load — that would leave auth empty after a restart.
 	// tenants.access_key/secret_key are the MIRROR of the live primary pair
-	// (WP-R5-14): they are loaded as the tenant's pair, but the hot index
-	// (keyIndex) is built from api_keys rows only, below.
+	// (WP-R5-14): the access key is loaded as the tenant's, the hot index
+	// (keyIndex) is built from api_keys rows only, below. No secret is
+	// loaded (plan 43.7): every credential decision reads the row per
+	// request (Auth.LookupCredential), listings blank the secret, and a
+	// process holding every tenant's secret was a dump of the table in RAM.
 	trows, err := a.sqlDB.QueryContext(ctx, `
 		SELECT id, COALESCE(name, ''), COALESCE(email, ''),
-		       COALESCE(access_key, ''), COALESCE(secret_key, ''), created_at
+		       COALESCE(access_key, ''), created_at
 		FROM tenants
 	`)
 	if err != nil {
@@ -230,7 +241,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			name  string
 			email string
 		)
-		if err := trows.Scan(&t.ID, &name, &email, &t.AccessKey, &t.SecretKey,
+		if err := trows.Scan(&t.ID, &name, &email, &t.AccessKey,
 			&t.CreatedAt); err != nil {
 			return fmt.Errorf("scan tenant: %w", err)
 		}
@@ -256,7 +267,6 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 	// never indexed.
 	akRows, err := a.sqlDB.QueryContext(ctx, `
 		SELECT id, user_id, COALESCE(tenant_id, ''), is_primary, name, key_id, secret_hash,
-		       COALESCE(secret_key, ''),
 		       COALESCE(permissions, '["*"]'::jsonb),
 		       COALESCE(bucket_scope, '{}'),
 		       COALESCE(ip_allowlist, '{}'),
@@ -279,7 +289,7 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 			revokedAt   sql.NullTime
 		)
 		if err := akRows.Scan(&k.ID, &k.UserID, &k.TenantID, &k.IsPrimary, &k.Name, &k.Key, &k.Hash,
-			&k.Secret, &permJSON, &bucketScope, &ipAllowlist,
+			&permJSON, &bucketScope, &ipAllowlist,
 			&expiresAt, &lastUsed, &k.CreatedAt, &revokedAt); err != nil {
 			return fmt.Errorf("scan api key: %w", err)
 		}
@@ -439,12 +449,16 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	// Write to in-memory maps for current-process lookups — after the
 	// commit, so a failed persist never leaves an account that authenticates
 	// until the next restart.
+	// The maps keep copies without the secret (plan 43.7): the returned
+	// pair shows it once.
+	memTenant, memKey := *tenant, *apiKey
+	memTenant.SecretKey, memKey.Secret = "", ""
 	a.cacheMu.Lock()
 	a.users[email] = user
 	a.userIndex[user.ID] = user
-	a.tenants[tenant.ID] = tenant
-	a.apiKeys[apiKey.Key] = apiKey
-	a.keyIndex[tenant.AccessKey] = tenant
+	a.tenants[tenant.ID] = &memTenant
+	a.apiKeys[apiKey.Key] = &memKey
+	a.keyIndex[tenant.AccessKey] = &memTenant
 	a.cacheMu.Unlock()
 
 	a.record(ctx, audit.Entry{UserID: user.ID, TenantID: tenant.ID, Action: "account.created",
@@ -494,11 +508,20 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 	if err != nil {
 		return fmt.Errorf("hash api key secret: %w", err)
 	}
+	// Wrapped under the tenant's key when the server has a master key
+	// (plan 43.7); the plaintext is still written until the
+	// credential_plaintext_drop flag.
+	wrapped, wrapVersion, err := sealSecret(ctx, a.credKeys, tenant.ID, apiKey.Key, apiKey.Secret)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key, created_at)
-		VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8)
+		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key,
+		                      secret_wrapped, secret_key_version, created_at)
+		VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (key_id) DO NOTHING
-	`, apiKey.ID, user.ID, tenant.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret, apiKey.CreatedAt); err != nil {
+	`, apiKey.ID, user.ID, tenant.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret,
+		nullBytes(wrapped), wrapVersion, apiKey.CreatedAt); err != nil {
 		return fmt.Errorf("persist api key: %w", err)
 	}
 

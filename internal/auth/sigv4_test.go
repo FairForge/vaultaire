@@ -46,7 +46,7 @@ const (
 // against the given secret — the seam ValidateRequest uses after key lookup.
 func verify(t *testing.T, r *http.Request, secret string) error {
 	t.Helper()
-	a := NewAuth(nil, zap.NewNop())
+	a := NewAuth(nil, zap.NewNop(), nil)
 	params, err := parseSigV4AuthHeader(r.Header.Get("Authorization"))
 	if err != nil {
 		return err
@@ -250,7 +250,7 @@ func setupSigV4Tenant(t *testing.T) (*Auth, string, string) {
 		ON CONFLICT (key_id) DO UPDATE SET secret_key = $3, revoked_at = NULL`, userID, ak, sk)
 	require.NoError(t, err)
 
-	return NewAuth(db, zap.NewNop()), ak, sk
+	return NewAuth(db, zap.NewNop(), nil), ak, sk
 }
 
 func TestValidateRequest_SigV4Enforcement(t *testing.T) {
@@ -323,7 +323,7 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 	t.Run("legacy formats are refused even without a database", func(t *testing.T) {
 		// The nil-DB "test-tenant" convenience is for unauthenticated local
 		// development; it never dresses a key-id-only request up as a tenant.
-		a := NewAuth(nil, zap.NewNop())
+		a := NewAuth(nil, zap.NewNop(), nil)
 		r := httptest.NewRequest("GET", "http://stored.ge/some-bucket", nil)
 		r.Header.Set("Authorization", "AWS VKSOMEKEY:sig")
 		_, _, err := a.ValidateRequest(r)
@@ -349,7 +349,7 @@ func TestValidateRequest_SigV4Enforcement(t *testing.T) {
 		// closed with a message telling the operator to regenerate the key.
 		db := setupTestDB(t)
 		t.Cleanup(func() { _ = db.Close() })
-		a := NewAuth(db, zap.NewNop())
+		a := NewAuth(db, zap.NewNop(), nil)
 
 		const ak = "VLT_legacy_hashonly"
 		var userID string
@@ -573,7 +573,7 @@ func TestValidateRequest_NullSecretKeyTenant(t *testing.T) {
 	now := time.Now().UTC()
 	db := setupTestDB(t)
 	t.Cleanup(func() { _ = db.Close() })
-	a := NewAuth(db, zap.NewNop())
+	a := NewAuth(db, zap.NewNop(), nil)
 
 	// api_keys.secret_key (031) is nullable: a primary row whose plaintext
 	// secret was never stored must resolve to the empty-secret fail-closed
@@ -686,7 +686,7 @@ func TestVerifySigV4_IfMatchSignedButNotSent(t *testing.T) {
 	r.Header.Del("If-Match")
 	require.ErrorIs(t, verify(t, r, testSecret), ErrSignatureMismatch, "no hint, no way to know what was signed")
 
-	a := NewAuth(nil, zap.NewNop())
+	a := NewAuth(nil, zap.NewNop(), nil)
 	a.MissingSignedHeader = func(_ *http.Request, tenantID, name string) (string, bool) {
 		if tenantID == "tenant-x" && name == "if-match" {
 			return etag, true

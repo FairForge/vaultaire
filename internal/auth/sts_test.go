@@ -13,7 +13,7 @@ func TestGenerateSTSToken(t *testing.T) {
 	ctx := context.Background()
 	parentScope := &KeyScope{Permissions: []string{"*"}}
 
-	token, err := GenerateSTSToken(ctx, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
+	token, err := GenerateSTSToken(ctx, nil, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
 		Permissions: []string{"GetObject", "PutObject"},
 		TTL:         600,
 	})
@@ -34,7 +34,7 @@ func TestSTSToken_ScopeIntersection(t *testing.T) {
 		Permissions: []string{"GetObject", "PutObject"},
 	}
 
-	token, err := GenerateSTSToken(ctx, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
+	token, err := GenerateSTSToken(ctx, nil, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
 		Permissions: []string{"PutObject", "DeleteObject"},
 	})
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestSTSToken_EmptyIntersection(t *testing.T) {
 		Permissions: []string{"GetObject"},
 	}
 
-	_, err := GenerateSTSToken(ctx, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
+	_, err := GenerateSTSToken(ctx, nil, nil, "tenant-1", "parent-key-1", parentScope, STSRequest{
 		Permissions: []string{"DeleteObject"},
 	})
 	require.Error(t, err)
@@ -59,7 +59,7 @@ func TestSTSToken_TTLClamping(t *testing.T) {
 	parentScope := &KeyScope{Permissions: []string{"*"}}
 
 	t.Run("zero defaults to 3600", func(t *testing.T) {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			TTL:         0,
 		})
@@ -68,7 +68,7 @@ func TestSTSToken_TTLClamping(t *testing.T) {
 	})
 
 	t.Run("over max clamped to 43200", func(t *testing.T) {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			TTL:         99999,
 		})
@@ -77,7 +77,7 @@ func TestSTSToken_TTLClamping(t *testing.T) {
 	})
 
 	t.Run("negative defaults to 3600", func(t *testing.T) {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			TTL:         -100,
 		})
@@ -94,7 +94,7 @@ func TestSTSToken_BucketScopeIntersection(t *testing.T) {
 			Permissions: []string{"*"},
 			BucketScope: []string{"alpha", "bravo"},
 		}
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			BucketScope: []string{"bravo", "charlie"},
 		})
@@ -106,7 +106,7 @@ func TestSTSToken_BucketScopeIntersection(t *testing.T) {
 		parentScope := &KeyScope{
 			Permissions: []string{"*"},
 		}
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			BucketScope: []string{"uploads"},
 		})
@@ -119,7 +119,7 @@ func TestSTSToken_BucketScopeIntersection(t *testing.T) {
 			Permissions: []string{"*"},
 			BucketScope: []string{"data"},
 		}
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 		})
 		require.NoError(t, err)
@@ -135,7 +135,7 @@ func TestSTSToken_IPRestrict(t *testing.T) {
 	}
 
 	t.Run("request narrows parent", func(t *testing.T) {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 			IPRestrict:  []string{"10.1.0.0/16"},
 		})
@@ -144,7 +144,7 @@ func TestSTSToken_IPRestrict(t *testing.T) {
 	})
 
 	t.Run("no request IP — inherits parent", func(t *testing.T) {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 		})
 		require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestSTSToken_WildcardParent_NoRequestPerms(t *testing.T) {
 	ctx := context.Background()
 	parentScope := &KeyScope{Permissions: []string{"*"}}
 
-	token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{})
+	token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"*"}, token.Permissions)
 }
@@ -166,7 +166,7 @@ func TestSTSToken_AccessKeyFormat(t *testing.T) {
 	parentScope := &KeyScope{Permissions: []string{"*"}}
 
 	for i := 0; i < 10; i++ {
-		token, err := GenerateSTSToken(ctx, nil, "t", "k", parentScope, STSRequest{
+		token, err := GenerateSTSToken(ctx, nil, nil, "t", "k", parentScope, STSRequest{
 			Permissions: []string{"GetObject"},
 		})
 		require.NoError(t, err)

@@ -85,7 +85,7 @@ func setupExportFixture(t *testing.T) *exportFixture {
 
 	qm := usage.NewQuotaManager(db)
 	gci := crypto.NewGlobalContentIndex(db)
-	f.svc = NewAccountExportService(db, f.eng, qm, gci, "http://s3.test.local", logger)
+	f.svc = NewAccountExportService(db, f.eng, qm, gci, auth.NewAuth(db, logger, nil), "http://s3.test.local", logger)
 	f.svc.JobName = "test_account_export_" + f.suffix
 	f.svc.PageSize = 2
 	f.svc.onlyUserID = f.userID
@@ -690,7 +690,7 @@ func TestAccountExport_SystemBucketDoesNotCountAgainstTheBucketCap(t *testing.T)
 func TestAccountExport_ErasureRemovesTheExportObjectAndRow(t *testing.T) {
 	d := setupDeletionFixture(t)
 	d.seed(time.Now().Add(-time.Hour))
-	svc := NewAccountExportService(d.db, d.eng, usage.NewQuotaManager(d.db), crypto.NewGlobalContentIndex(d.db), "http://s3.test.local", zap.NewNop())
+	svc := NewAccountExportService(d.db, d.eng, usage.NewQuotaManager(d.db), crypto.NewGlobalContentIndex(d.db), auth.NewAuth(d.db, zap.NewNop(), nil), "http://s3.test.local", zap.NewNop())
 	svc.JobName = "test_account_export_del_" + d.suffix
 	svc.onlyUserID = d.userID
 	t.Cleanup(func() { _, _ = d.db.Exec(`DELETE FROM job_runs WHERE job = $1`, svc.JobName) })

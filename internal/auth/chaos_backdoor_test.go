@@ -19,7 +19,7 @@ func TestValidateRequest_ChaosTestKeyRejected(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
-	auth := NewAuth(db, zap.NewNop())
+	auth := NewAuth(db, zap.NewNop(), nil)
 
 	for _, env := range []string{"", "test", "development", "production"} {
 		t.Run("ENV="+env, func(t *testing.T) {

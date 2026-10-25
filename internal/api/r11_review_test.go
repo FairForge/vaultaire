@@ -261,7 +261,7 @@ func TestR11_STS_PersistsUnscopedToken(t *testing.T) {
 	}
 	tenant := "tenant-sts-" + uuid.NewString()[:8]
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM sts_tokens WHERE tenant_id = $1`, tenant) })
-	tok, err := auth.GenerateSTSToken(context.Background(), db, tenant, "tenant:"+tenant,
+	tok, err := auth.GenerateSTSToken(context.Background(), db, nil, tenant, "tenant:"+tenant,
 		&auth.KeyScope{Permissions: []string{"*"}}, auth.STSRequest{})
 	require.NoError(t, err)
 	var n int
@@ -269,7 +269,7 @@ func TestR11_STS_PersistsUnscopedToken(t *testing.T) {
 	assert.Equal(t, 1, n)
 
 	// A scope error is the caller's (400, typed); it never carries SQL.
-	_, err = auth.GenerateSTSToken(context.Background(), db, tenant, "k", &auth.KeyScope{Permissions: []string{"GetObject"}},
+	_, err = auth.GenerateSTSToken(context.Background(), db, nil, tenant, "k", &auth.KeyScope{Permissions: []string{"GetObject"}},
 		auth.STSRequest{Permissions: []string{"PutObject"}})
 	assert.ErrorIs(t, err, auth.ErrSTSScope)
 }

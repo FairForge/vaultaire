@@ -18,7 +18,8 @@ ENCRYPTION_MASTER_KEY  (32 bytes; a TPM-sealed systemd credential on prod — ne
 tenant_key_versions  (one row per tenant per version; the newest encrypts)
  ├─ chunk_key_wrapped  32 random bytes ──► convergent chunk key = SHA-256(chunk_key ‖ plaintext hash)
  │                                          → AES-256-GCM per chunk (nonce from the key + the sealed bytes)
- └─ kem_seed_wrapped   ML-KEM-768 seed ──► per object: encapsulate → shared secret → HKDF → AES-256-GCM
+ ├─ kem_seed_wrapped   ML-KEM-768 seed ──► per object: encapsulate → shared secret → HKDF → AES-256-GCM
+ └─ (chunk_key) ──► HKDF-SHA256(info "stored/credential/v1") → AES-256-GCM ──► api_keys / sts_tokens.secret_wrapped (108)
 ```
 
 - **Both tenant secrets are random and stored**, not derived from the master.
@@ -83,6 +84,45 @@ tenant_key_versions  (one row per tenant per version; the newest encrypts)
   completed before 2026-10-13; SSE-C uses the customer's key and never touches
   this; unencrypted chunks are in the shared `_global` dedup scope; objects
   written before the key was set stay plaintext until overwritten.
+
+## S3 secrets wrapped under the tenant's key (plan 43.7, migration 108)
+
+SigV4 needs the secret itself, so `api_keys.secret_key` and
+`sts_tokens.secret_key` were plaintext: a dump of one table signed as every
+tenant through the front door. Since Stage 1a Prompt 42 (PR B):
+
+- **The wrap.** `crypto.TenantKeys.SealCredential` / `OpenCredential`
+  (`internal/crypto/credential_wrap.go`) — the ONE seam, which the key broker
+  (43.7, F-20) later replaces: the key is HKDF-SHA256 of the tenant version's
+  chunk key (no salt, info `stored/credential/v1`), AES-256-GCM, format
+  `[0x01][nonce 12][ciphertext+tag]`, AAD `"vaultaire-credential" ‖ 0 ‖
+  tenant ‖ 0 ‖ key id ‖ 0 ‖ version (u32 BE)` — a wrapped secret moved to
+  another row, key or tenant never opens; a name holding a NUL is refused.
+  No new key and no new `tenant_key_versions` column (contract rule 4: no
+  key outside the one hierarchy). The format is pinned by a vector computed
+  with Python's `cryptography` (`TestCredentialSeal_GoldenAndRefusals`).
+- **Writers** (registration's primary, a new key, a rotation's successor, an
+  STS mint) store `secret_wrapped` + `secret_key_version` when the server has
+  a master key — and still the plaintext until the `credential_plaintext_drop`
+  flag (PR C). A seal that fails refuses the write.
+- **Readers** (`auth.LookupCredential`, `Auth.PrimaryPair`; every `auth.Auth`
+  is built in `Server.s3Auth`): wrapped present → it is opened, and only it;
+  a failure is an Error line, `vaultaire_credential_unwrap_failures_total{table}`
+  and a **500** — never a fallback to the plaintext column. Wrapped absent →
+  the plaintext.
+- **The backfill** is a pass of the `key_reencrypt` job (every 10 min, ≤ 1,000
+  rows a run): live rows (`api_keys` not revoked, `sts_tokens` not expired)
+  holding only the plaintext are sealed, opened back and compared, then written
+  guarded on what was read (a row another process wrapped meanwhile is left).
+  Not at lookup: a write on the SigV4 path is a failure mode on the hottest
+  read, and a key nobody presents would never be wrapped. Result fields
+  `credentials_wrapped`, `credentials_rewrapped`, `credential_failures`
+  (`credentials_raced`) in `key_reencrypt.result`.
+- **No master key = nothing wrapped** (prod until F-14): the writers write the
+  plaintext only and the pass does not run. After the ceremony and one
+  restart, the first run(s) wrap every live row.
+- The process no longer loads any secret into memory at boot (and keeps none
+  for a key it creates): every credential decision reads its row per request.
 
 ## Setting the master key (the on-box ceremony)
 
@@ -283,6 +323,12 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
   blob, counted once) and therefore never reaches 0 while skipped objects
   exist — which is why `KeyReencryptBacklogStuck` watches `kind="chunk"`
   only. Metric: `vaultaire_key_reencrypt_objects_total{outcome}`.
+- **S3 secrets** (plan 43.7): the same job re-wraps every live wrapped
+  secret below N (opened under its version, sealed under N, checked, written
+  guarded on the old wrap): `vaultaire_key_rotation_pending{kind="credential"}`
+  → 0, `credentials_rewrapped` in the run's result. A wrap that does not open
+  is counted in `credential_failures` and left as it is (it already answers
+  500).
 - The old version's key row stays (retired, `retired_at` set): it is needed
   to read whatever is still sealed under it. Deleting a retired version's row
   while anything is sealed under it destroys that data.
@@ -290,6 +336,8 @@ curl -X POST -H "Authorization: Bearer <admin JWT>" -H "Idempotency-Key: $(uuidg
 ## Rotating the master key
 
 No data is re-encrypted: only the wrapping of each tenant key row changes.
+The wrapped S3 secrets (108) are untouched too: they hang off the chunk key's
+bytes, which a re-wrap keeps (`TestTenantKeys_CredentialRoundTripAndShred`).
 
 1. On the box, as in the ceremony: hand the current key over as the previous
    one, and seal a new key as the current one (then escrow the new key —
@@ -349,7 +397,9 @@ deleted and the backends swept. The `account.erased` audit row counts them as
 `keys_shredded`, and the process that ran the erasure drops its cached copies.
 
 - **Covered:** every byte sealed under those keys, wherever it still is. That
-  includes a stale copy the sweep did not reach, a chunk blob in the shared
+  includes the wrapped S3 secrets of the account (108: a dump taken before
+  the erasure holds `secret_wrapped` bytes that no key opens after it —
+  `TestCredentialWrap_ErasureShredsTheWrappedSecret`), a stale copy the sweep did not reach, a chunk blob in the shared
   `_global` container (dedup GC deletes it later), a retired chunk address, a
   backend's own versioning or backup, and a copy someone took of a blob.
   Without the key row it cannot be opened, master key or not.

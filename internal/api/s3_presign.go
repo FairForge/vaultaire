@@ -85,7 +85,7 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 
 	// One credential lookup for every path (R5's invariant): the api_keys
 	// row, revocation included, then the STS token bounded by its parent.
-	cred, err := auth.NewAuth(s.db, s.logger).LookupCredential(r.Context(), accessKey)
+	cred, err := s.s3Auth().LookupCredential(r.Context(), accessKey)
 	if err != nil {
 		return "", nil, presignAuthError(err)
 	}
@@ -162,6 +162,8 @@ func (e *presignError) Unwrap() error { return e.cause }
 // an expired STS token ExpiredToken, anything else AccessDenied.
 func presignAuthError(err error) error {
 	switch {
+	case errors.Is(err, auth.ErrCredentialUnavailable):
+		return &presignError{ErrInternalError, err}
 	case errors.Is(err, auth.ErrAccessKeyRevoked):
 		return &presignError{ErrInvalidAccessKeyId, err}
 	case strings.Contains(err.Error(), "expired STS token"):

@@ -366,6 +366,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			logger.Fatal("the tenant key store cannot start with the configured master key — refusing to serve with encryption off", zap.Error(keysErr))
 		} else {
 			s.tenantKeys = keys
+			// New S3 secrets are wrapped under the tenant's key (plan 43.7).
+			s.auth.SetCredentialKeys(keys)
 			s.sseService = crypto.NewSSEService(keys)
 			countSSEOpens(s.sseService)
 			s.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
@@ -639,7 +641,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The one GDPR export service (WP-R10-3b): the management API and the
 	// dashboard request through it, the account_export job renders, the
 	// retention job purges expired objects through it.
-	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, s.hosts.S3, logger)
+	s.accountExports = NewAccountExportService(s.db, s.engine, s.quotaManager, s.gci, s.s3Auth(), s.hosts.S3, logger)
 	if s.accountExports != nil {
 		s.accountExports.SetSSE(s.sseService)
 		if s.retention != nil {
@@ -1608,6 +1610,7 @@ func (s *Server) handlePasswordResetComplete(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) SetAuthService(authService *auth.AuthService) {
+	authService.SetCredentialKeys(s.credentialKeys())
 	s.auth = authService
 }
 

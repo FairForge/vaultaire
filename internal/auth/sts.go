@@ -50,7 +50,7 @@ const (
 // unknown permission); anything else from GenerateSTSToken is internal.
 var ErrSTSScope = errors.New("sts scope error")
 
-func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID string, parentScope *KeyScope, req STSRequest) (*STSToken, error) {
+func GenerateSTSToken(ctx context.Context, db *sql.DB, keys CredentialKeys, tenantID, parentKeyID string, parentScope *KeyScope, req STSRequest) (*STSToken, error) {
 	perms := intersectPermissions(parentScope.Permissions, req.Permissions)
 	// The GOVERNANCE bypass is never inherited: a token carries it only when
 	// the request names it AND the parent may bypass (WP-R4-1). An unscoped
@@ -128,11 +128,17 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, tenantID, parentKeyID str
 
 	if db != nil {
 		permJSON, _ := json.Marshal(token.Permissions)
+		// Wrapped under the tenant's key when the server has a master key
+		// (plan 43.7): the token's id is in the wrap's AAD.
+		wrapped, wrapVersion, err := sealSecret(ctx, keys, token.TenantID, token.AccessKey, token.SecretKey)
+		if err != nil {
+			return nil, err
+		}
 		_, err = db.ExecContext(ctx, `
-			INSERT INTO sts_tokens (access_key, secret_key, tenant_id, parent_key_id,
+			INSERT INTO sts_tokens (access_key, secret_key, secret_wrapped, secret_key_version, tenant_id, parent_key_id,
 			                        permissions, bucket_scope, ip_restrict, expires_at, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		`, token.AccessKey, token.SecretKey, token.TenantID, token.ParentKeyID,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		`, token.AccessKey, token.SecretKey, nullBytes(wrapped), wrapVersion, token.TenantID, token.ParentKeyID,
 			permJSON, pq.Array(token.BucketScope), pq.Array(token.IPRestrict),
 			token.ExpiresAt, token.CreatedAt)
 		if err != nil {

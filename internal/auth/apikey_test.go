@@ -61,7 +61,10 @@ func TestAPIKeyGeneration(t *testing.T) {
 		assert.NotEqual(t, originalKey.Key, newKey.Key)
 		assert.NotEqual(t, originalKey.Secret, newKey.Secret)
 		assert.Contains(t, newKey.Name, "rotated")
-		assert.NotNil(t, originalKey.RevokedAt)
+		// The service keeps its own copy (no secret in memory, plan 43.7;
+		// what leaves it is a copy, WP-R5-6): ask it.
+		_, err = auth.GetOwnedAPIKey(ctx, user.ID, originalKey.ID)
+		assert.ErrorIs(t, err, ErrKeyRevoked)
 	})
 
 	t.Run("revokes API key", func(t *testing.T) {

@@ -65,7 +65,7 @@ func (a *lifecycleAccount) authenticate(ak, sk string) (string, *KeyScope, error
 	a.t.Helper()
 	r := httptest.NewRequest("GET", "http://stored.ge/some-bucket?list-type=2", nil)
 	signV4(a.t, r, ak, sk, "us-east-1", sha256Hex(""), time.Now().UTC())
-	return NewAuth(a.db, zap.NewNop()).ValidateRequest(r)
+	return NewAuth(a.db, zap.NewNop(), nil).ValidateRequest(r)
 }
 
 func (a *lifecycleAccount) tenantsPair() (string, string) {
@@ -154,7 +154,7 @@ func TestPrimaryKey_RotationKillsTheOldPairEverywhere(t *testing.T) {
 	assert.Error(t, err, "after a reload the old key is not indexed")
 	tn, err = fresh.ValidateS3Request(ctx, newKey.Key)
 	require.NoError(t, err)
-	assert.Equal(t, newKey.Secret, tn.SecretKey)
+	assert.Empty(t, tn.SecretKey, "no secret is loaded into memory at boot (plan 43.7): the lookup reads the row")
 	keys, err := fresh.ListAPIKeys(ctx, a.user.ID)
 	require.NoError(t, err)
 	var primaries int
@@ -343,7 +343,7 @@ func TestPrimaryAPIKey_IsTheLiveRow(t *testing.T) {
 	assert.Equal(t, a.key.Key, p.Key)
 	assert.Empty(t, p.Secret, "the listing copy carries no secret")
 
-	ak, sk, err := PrimaryPair(ctx, a.db, a.tenant.ID)
+	ak, sk, err := NewAuth(a.db, zap.NewNop(), nil).PrimaryPair(ctx, a.tenant.ID)
 	require.NoError(t, err)
 	assert.Equal(t, a.key.Key, ak)
 	assert.Equal(t, a.key.Secret, sk)
@@ -353,7 +353,7 @@ func TestPrimaryAPIKey_IsTheLiveRow(t *testing.T) {
 	p, err = a.svc.GetPrimaryAPIKey(ctx, a.tenant.ID)
 	require.NoError(t, err)
 	assert.Equal(t, nk.Key, p.Key)
-	ak, sk, err = PrimaryPair(ctx, a.db, a.tenant.ID)
+	ak, sk, err = NewAuth(a.db, zap.NewNop(), nil).PrimaryPair(ctx, a.tenant.ID)
 	require.NoError(t, err)
 	assert.Equal(t, nk.Key, ak)
 	assert.Equal(t, nk.Secret, sk)
@@ -366,7 +366,7 @@ func TestSTS_ParentRevokedKillsItsTokens(t *testing.T) {
 	ctx := context.Background()
 	parent, err := a.svc.GenerateAPIKey(ctx, a.user.ID, "ci", &KeyCreateOptions{Permissions: []string{"GetObject", "ListObjects"}})
 	require.NoError(t, err)
-	tok, err := GenerateSTSToken(ctx, a.db, a.tenant.ID, parent.Key,
+	tok, err := GenerateSTSToken(ctx, a.db, nil, a.tenant.ID, parent.Key,
 		&KeyScope{Permissions: parent.Permissions}, STSRequest{Permissions: []string{"GetObject"}, TTL: 600})
 	require.NoError(t, err)
 	tenantID, scope, err := a.authenticate(tok.AccessKey, tok.SecretKey)
@@ -386,7 +386,7 @@ func TestSTS_ParentRevokedKillsItsTokens(t *testing.T) {
 func TestSTS_PrimaryRotatedKillsItsTokens(t *testing.T) {
 	a := newLifecycleAccount(t, "stsrot")
 	ctx := context.Background()
-	tok, err := GenerateSTSToken(ctx, a.db, a.tenant.ID, a.key.Key,
+	tok, err := GenerateSTSToken(ctx, a.db, nil, a.tenant.ID, a.key.Key,
 		&KeyScope{Permissions: []string{"*"}}, STSRequest{Permissions: []string{"GetObject"}, TTL: 600})
 	require.NoError(t, err)
 	_, _, err = a.authenticate(tok.AccessKey, tok.SecretKey)
@@ -407,7 +407,7 @@ func TestSTS_PrimaryRotatedKillsItsTokens(t *testing.T) {
 func TestSTS_TokenWithoutAParentRowIsRefused(t *testing.T) {
 	a := newLifecycleAccount(t, "stsorphan")
 	ctx := context.Background()
-	tok, err := GenerateSTSToken(ctx, a.db, a.tenant.ID, "tenant:"+a.tenant.ID,
+	tok, err := GenerateSTSToken(ctx, a.db, nil, a.tenant.ID, "tenant:"+a.tenant.ID,
 		&KeyScope{Permissions: []string{"*"}}, STSRequest{Permissions: []string{"GetObject"}, TTL: 600})
 	require.NoError(t, err)
 
@@ -454,12 +454,12 @@ func TestSTS_IPRestrictOnlyNarrows(t *testing.T) {
 
 func TestSTS_TTLClampedToTheParentExpiry(t *testing.T) {
 	soon := time.Now().Add(90 * time.Second)
-	tok, err := GenerateSTSToken(context.Background(), nil, "tenant-x", "VLT_P",
+	tok, err := GenerateSTSToken(context.Background(), nil, nil, "tenant-x", "VLT_P",
 		&KeyScope{Permissions: []string{"*"}, ExpiresAt: &soon}, STSRequest{Permissions: []string{"GetObject"}, TTL: 3600})
 	require.NoError(t, err)
 	assert.WithinDuration(t, soon, tok.ExpiresAt, time.Second, "a token never outlives its parent")
 
-	_, err = GenerateSTSToken(context.Background(), nil, "tenant-x", "VLT_P",
+	_, err = GenerateSTSToken(context.Background(), nil, nil, "tenant-x", "VLT_P",
 		&KeyScope{Permissions: []string{"*"}, ExpiresAt: ptrTime(time.Now().Add(-time.Minute))}, STSRequest{Permissions: []string{"GetObject"}})
 	require.Error(t, err, "an expired parent mints nothing")
 	assert.True(t, errors.Is(err, ErrSTSScope), "got %v", err)

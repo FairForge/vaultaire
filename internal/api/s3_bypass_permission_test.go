@@ -364,7 +364,7 @@ func TestGovernanceBypass_STSTokensOnlyNarrow(t *testing.T) {
 	mint := func(parent []string, requested ...string) *s3.Client {
 		// The parent must be a real key row: a token whose parent is gone is
 		// refused at auth time (WP-R5-5). The scope under test is passed in.
-		tok, err := auth.GenerateSTSToken(ctx, f.db, f.tenantID, f.rootAK, &auth.KeyScope{Permissions: parent}, auth.STSRequest{Permissions: requested})
+		tok, err := auth.GenerateSTSToken(ctx, f.db, nil, f.tenantID, f.rootAK, &auth.KeyScope{Permissions: parent}, auth.STSRequest{Permissions: requested})
 		require.NoError(t, err)
 		return f.client(tok.AccessKey, tok.SecretKey)
 	}

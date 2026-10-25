@@ -1,6 +1,7 @@
 package api
 
 import (
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/billing"
 	"github.com/FairForge/vaultaire/internal/dashboard"
 	"github.com/FairForge/vaultaire/internal/drivers"
@@ -86,6 +87,9 @@ func (s *Server) initMetrics() {
 		// opens, the re-encrypt job, and the rotation backlog (from the
 		// tables).
 		reg.MustRegister(tenantKeysRewrapped, tenantKeysUnwrapFailures, keyReencryptChunks, keyReencryptObjects)
+		// Wrapped S3 secrets that did not open (plan 43.7): each refused a
+		// request with a 500; both tables' series exist from boot.
+		reg.MustRegister(auth.CredentialUnwrapFailures)
 		// SSE-S3 blobs opened, by format (WP-R8-5): whether any 0x01/0x02
 		// blob is still read.
 		reg.MustRegister(sseBlobsOpened)
