@@ -43,7 +43,7 @@ func AccessKeyFromRequest(r *http.Request) string {
 // HeaderAccessKey is the access key id of the SigV4 Authorization header —
 // the one ValidateRequest looks up and verifies — or "".
 func HeaderAccessKey(r *http.Request) string {
-	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, algorithm) {
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, algorithm+" ") {
 		if p, err := parseSigV4AuthHeader(h); err == nil {
 			return p.AccessKey
 		}

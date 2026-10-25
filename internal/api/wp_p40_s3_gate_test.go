@@ -129,6 +129,9 @@ func TestS3Gate_ASignedRequestToEveryRouteIsTheS3APIs(t *testing.T) {
 					v2 := httptest.NewRequest(method, path, nil)
 					v2.Host, v2.Header = host, http.Header{"Authorization": {"AWS AKIDNOPE:c2ln"}}
 					reqs["sigv2 header"] = v2
+					v4a := httptest.NewRequest(method, path, nil)
+					v4a.Host, v4a.Header = host, http.Header{"Authorization": {sigV4AHeader}}
+					reqs["sigv4a header"] = v4a
 					if method == http.MethodGet || method == http.MethodHead {
 						q := signPresignedURL(method, path, host, "AKIDNOPE", "nope", 300, time.Now().UTC())
 						pre := httptest.NewRequest(method, path+"?"+q.Encode(), nil)

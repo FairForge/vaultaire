@@ -27,7 +27,39 @@ const (
 	timeFormat  = "20060102T150405Z"
 	dateFormat  = "20060102"
 	maxTimeSkew = 15 * time.Minute
+
+	// algorithmV4A is SigV4A, the multi-region ECDSA scheme of the AWS SDKs
+	// (RP58-1): a request that carries it carries S3 credentials — the S3
+	// API's to refuse (this verifier does not support it), never a web page's.
+	algorithmV4A = "AWS4-ECDSA-P256-SHA256"
 )
+
+// IsAWSAuthorization reports whether an Authorization header value is an
+// AWS credential scheme — SigV4, SigV4A or SigV2 — by its scheme token (what
+// precedes the first space; case-insensitive). It is the ONE predicate of
+// "this header is S3 credentials" (Architecture Decision 8): the S3
+// credential gate (internal/api signedS3Request) sends every such request
+// to the S3 API before any route, and ValidateRequest attempts to parse a
+// header only when it is one (wp_p41_predicate_agreement_test). A scheme
+// with no space after it is no AWS header to either.
+func IsAWSAuthorization(header string) bool {
+	// No trimming: net/http has already trimmed a wire header's OWS, and
+	// the verifier's HasPrefix sees the value as given — the two must read
+	// the same bytes.
+	scheme, _, ok := strings.Cut(header, " ")
+	if !ok {
+		return false
+	}
+	return strings.EqualFold(scheme, algorithm) || strings.EqualFold(scheme, algorithmV4A) || strings.EqualFold(scheme, "AWS")
+}
+
+// AttemptsAWSHeader reports whether ValidateRequest would attempt to parse
+// this Authorization header as an AWS scheme (SigV4 or SigV2) — the
+// verifier's side of the predicate-agreement invariant: every header it
+// attempts must be one IsAWSAuthorization names (tests).
+func AttemptsAWSHeader(header string) bool {
+	return strings.HasPrefix(header, algorithm+" ") || strings.HasPrefix(header, "AWS ")
+}
 
 // Auth handles S3 authentication
 type Auth struct {
@@ -84,7 +116,14 @@ func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
 		return "", nil, fmt.Errorf("%w: AWS signature version 2 is not supported", ErrSignatureMismatch)
 	}
 
-	if !strings.HasPrefix(authHeader, algorithm) {
+	// The scheme must be followed by a space (RFC 9110 § 11.4: scheme SP
+	// params — every SDK sends it). It was a bare HasPrefix, which also
+	// attempted "AWS4-HMAC-SHA256,Credential=…" and a tab after the scheme,
+	// shapes the S3 credential gate's space-Cut did not see (RP58-8 c): the
+	// two predicates must agree, so the verifier narrows to what
+	// IsAWSAuthorization names. SigV4A (AWS4-ECDSA-P256-SHA256) is such a
+	// credential too and is refused here as unsupported (RP58-1).
+	if !strings.HasPrefix(authHeader, algorithm+" ") {
 		return "", nil, fmt.Errorf("invalid authorization format")
 	}
 
