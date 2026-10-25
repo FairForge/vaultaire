@@ -1348,7 +1348,8 @@ SSE-C is the developer surface's "can't read" path until the SDK exists, so it m
   - [ ] 2FA setup + login works
   - [ ] Health endpoint returns 200: `curl https://stored.ge/health`
   - [ ] SSL certificate valid, HSTS header present
-  - [ ] Backup restore test: restore latest pg_dump to a test DB, verify data intact
+  - [x] Backup restore test: restore latest pg_dump to a test DB, verify data intact (2026-10-10, `docs/DEPLOY.md` § Backups)
+  - [x] **Point-in-time recovery (2026-10-24, Stage 1a Prompt 40, #955 — closes the plan-gaps item "DB recovery: no WAL archiving / PITR, no RPO/RTO stated"):** pgBackRest 2.58 archives the cluster continuously into the private R2 bucket `stored-pg-pitr` (`aes-256-cbc`, passphrase in the owner's Keychain `vaultaire-pgbackrest-cipher`), weekly full + daily diff, four fulls kept (≤ 28 d, held to the produce page's "up to 30 days" by a test); **RPO ≤ ~61 s, RTO 12.8 s** measured by `deploy/scripts/pg-pitr-drill.sh` on prod; five rules in `deploy/monitoring/vaultaire-pitr.yml`; the restore runbook in `docs/DEPLOY.md` § Point-in-time recovery. No F-38: the prod R2 key could create the bucket (a scoped token is RP57-10). The replica on the F-18 box stays its own item
 
 ### 5.15.5: Production Backend & Activation Gate
 *Added 2026-06-02 (prod audit). The real blockers to accepting paying customers — NOT covered by 5.15.2 (load) or 5.15.4 (pg backup/SSL/smoke). Prod must be in this state before signups reopen.*
