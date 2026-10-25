@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/FairForge/vaultaire/internal/translog/logstore"
 )
@@ -245,8 +246,9 @@ func (s *Server) s3Handler() http.HandlerFunc {
 // SigV2's AWSAccessKeyId with Signature. Any other Authorization (a Bearer
 // JWT, Basic) is never S3: it was, before RP56-1, here.
 func signedS3Request(r *http.Request) bool {
-	scheme, _, _ := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " ")
-	if strings.EqualFold(scheme, presignAlgorithm) || strings.EqualFold(scheme, "AWS") {
+	// The header half is auth's one predicate (SigV4, SigV4A, SigV2 — a
+	// superset of what the verifier attempts, RP58-1 / RP58-8 c).
+	if auth.IsAWSAuthorization(r.Header.Get("Authorization")) {
 		return true
 	}
 	q := r.URL.Query()

@@ -120,6 +120,12 @@ func TestSignedS3Request(t *testing.T) {
 		{"bearer jwt", func(r *http.Request) { r.Header.Set("Authorization", "Bearer eyJ...") }, false},
 		{"basic", func(r *http.Request) { r.Header.Set("Authorization", "Basic dTpw") }, false},
 		{"a scheme that only starts with AWS", func(r *http.Request) { r.Header.Set("Authorization", "AWSX foo") }, false},
+		{"sigv4a authorization header (RP58-1)", func(r *http.Request) {
+			r.Header.Set("Authorization", "AWS4-ECDSA-P256-SHA256 Credential=AKID/20261025/*/s3/aws4_request, SignedHeaders=host, Signature=00")
+		}, true},
+		{"a comma after the scheme is no AWS header to the verifier either (RP58-8 c)", func(r *http.Request) {
+			r.Header.Set("Authorization", "AWS4-HMAC-SHA256,Credential=...")
+		}, false},
 		{"presigned query", func(r *http.Request) { setQuery(r, "X-Amz-Algorithm", "AWS4-HMAC-SHA256") }, true},
 		{"presigned signature", func(r *http.Request) { setQuery(r, "X-Amz-Signature", "00") }, true},
 		{"presigned credential", func(r *http.Request) { setQuery(r, "X-Amz-Credential", "AKID/20261024/us-east-1/s3/aws4_request") }, true},
