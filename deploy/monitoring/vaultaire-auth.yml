@@ -51,22 +51,31 @@ groups:
           summary: "Unknown-access-key storm"
           description: "{{ $value | printf \"%.1f\" }} rejected requests/s with access keys that do not exist. Usually a scanner; check HAProxy/fail2ban if it persists."
 
-      # Dashboard sign-in (Review R12, checklist item 2). Series from
-      # internal/dashboard/metrics.go:
-      #   vaultaire_dashboard_login_failures_total{reason}  bad_password |
-      #       unknown_user | locked | bad_code | replayed_code
+      # Account sign-in (Review R12, checklist item 2; Stage 1a Prompt 41
+      # item 1, RP57-2). Series from internal/dashboard/metrics.go, every
+      # surface × reason pair at 0 from boot:
+      #   vaultaire_dashboard_login_failures_total{surface,reason}
+      #       surface: dashboard (the /login and /login/verify-2fa forms) |
+      #                api (the JSON sign-in POST /auth/login — it had no
+      #                series and no lockout until Prompt 41: a TOTP guess
+      #                from ~100 IPs at the per-IP limit was invisible)
+      #       reason:  bad_password | unknown_user | locked | code_required |
+      #                bad_code | replayed_code | store_error | user_load_failed
       #   vaultaire_dashboard_login_lockouts_total          accounts locked
-      #       after 10 failures in 15 minutes
-      # Every outcome is also an audit_logs row (event_type=auth) with the
-      # client IP, so the who/where is one query away.
+      #       after 10 failures in 15 minutes (ONE lockout per account,
+      #       shared by both surfaces: a dashboard lock refuses /auth/login)
+      # The sums below cover both surfaces on purpose: a guess is a guess
+      # whichever door it tries. Every outcome is also an audit_logs row
+      # (event_type=auth) with the client IP, so the who/where is one query
+      # away. The names keep their R12 "Dashboard" for the alert history.
       - alert: DashboardLoginFailuresElevated
         expr: sum(rate(vaultaire_dashboard_login_failures_total[10m])) > 0.5
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Elevated dashboard sign-in failures"
-          description: "More than 0.5 failed dashboard sign-ins per second for 10+ minutes. Break down by reason on /metrics; SELECT metadata->>'email', host(ip), count(*) FROM audit_logs WHERE action='auth.login_failed' AND timestamp > now()-interval '15 min' GROUP BY 1,2 ORDER BY 3 DESC."
+          summary: "Elevated sign-in failures (dashboard form or POST /auth/login)"
+          description: "More than 0.5 failed sign-ins per second for 10+ minutes across the dashboard form and the JSON sign-in. Break down by surface and reason on /metrics; SELECT metadata->>'email', metadata->>'via', host(ip), count(*) FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed') AND timestamp > now()-interval '15 min' GROUP BY 1,2,3 ORDER BY 4 DESC. A store_error / user_load_failed reason is OUR database failing, not a guess: read the app's Error lines."
 
       - alert: DashboardAccountLockouts
         expr: increase(vaultaire_dashboard_login_lockouts_total[15m]) >= 3
@@ -74,5 +83,5 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Dashboard accounts are being locked out"
-          description: "{{ $value | printf \"%.0f\" }} accounts locked in 15 minutes — a credential-stuffing run against known e-mails or a customer's broken automation. The locked addresses are the auth.login_locked rows in audit_logs."
+          summary: "Accounts are being locked out"
+          description: "{{ $value | printf \"%.0f\" }} accounts locked in 15 minutes — a credential-stuffing run against known e-mails (on the dashboard form or POST /auth/login) or a customer's broken automation. The locked addresses are the auth.login_locked rows in audit_logs (metadata->>'via' names the door: password, totp, api:password, api:totp)."

@@ -72,6 +72,12 @@ type Deps struct {
 	// of a secret that survives restarts (prod: JWT_SECRET). Nil = a random
 	// key for this process — forms opened before a restart then fail once.
 	CSRFKey []byte
+	// Lockout is the per-ACCOUNT sign-in lockout (10 failures in 15 min →
+	// locked 15 min) — ONE instance for the dashboard's forms and the JSON
+	// sign-in POST /auth/login (Stage 1a Prompt 41, RP57-2: a dashboard
+	// lockout refuses the JSON sign-in and the reverse). Nil = this router
+	// makes its own (tests, a process without the API's).
+	Lockout *middleware.AccountLockout
 }
 
 // hostSet is deps.Hosts, or the process's host set when the caller left it
@@ -144,7 +150,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	// lockout is the per-ACCOUNT complement (10 failures in 15 min → locked
 	// 15 min), so a distributed guess against one mailbox is stopped too.
 	loginRL := middleware.NewLoginRateLimiter(5, 5)
-	lockout := middleware.NewAccountLockout(10, 15*time.Minute, 15*time.Minute)
+	lockout := deps.Lockout
+	if lockout == nil {
+		lockout = middleware.NewAccountLockout(10, 15*time.Minute, 15*time.Minute)
+	}
 	// Registration: 10/min per IP (it used to be unlimited — mass account
 	// creation minted a key pair and four DB rows per request).
 	registerRL := middleware.NewLoginRateLimiter(10, 10)
@@ -602,7 +611,7 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 		// Every outcome is one audit_logs row (checklist item 2); the message
 		// to the browser stays the same for every failure (no enumeration).
 		fail := func(reason string, user *auth.User) {
-			LoginFailures.WithLabelValues(reason).Inc()
+			LoginFailures.WithLabelValues(LoginSurfaceDashboard, reason).Inc()
 			ev := handlers.LoginEvent{Action: "auth.login_failed", Email: email, Via: "password", Reason: reason}
 			if user != nil {
 				ev.UserID, ev.TenantID = user.ID, user.TenantID
@@ -638,10 +647,6 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 			}
 			return
 		}
-		if lockout != nil {
-			lockout.Reset(email)
-		}
-
 		role := handlers.ResolveRole(r.Context(), deps.DB, user.ID)
 
 		// If MFA is enabled, redirect to the 2FA verification page (the same
@@ -655,6 +660,11 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 			return
 		}
 		if handled {
+			// The counter is NOT reset here: a sign-in resets it only when
+			// it completes (the second factor's handler does, below). A
+			// password that is known plus a fresh /login before every code
+			// guess used to reset the count each time, so the second factor
+			// never locked (Stage 1a Prompt 41 item 1).
 			handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
 				UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "pending"})
 			return
@@ -674,6 +684,9 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 			return
 		}
 
+		if lockout != nil {
+			lockout.Reset(email)
+		}
 		dashauth.SetSessionCookie(w, token, sessionTTL)
 		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
 			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "none"})
@@ -867,7 +880,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 		}
 
 		fail := func(reason string) {
-			LoginFailures.WithLabelValues(reason).Inc()
+			LoginFailures.WithLabelValues(LoginSurfaceDashboard, reason).Inc()
 			handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.mfa_failed",
 				UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email, Reason: reason})
 			if lockout != nil && lockout.Fail(pending.Email) {

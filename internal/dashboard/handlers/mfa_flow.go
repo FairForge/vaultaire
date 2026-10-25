@@ -121,7 +121,7 @@ type LoginEvent struct {
 	TenantID string
 	Email    string
 	Via      string // "password" | "oauth:google" | "oauth:github" | "totp" | "backup_code"
-	Reason   string // for failures: bad_password | unknown_user | locked | bad_code | replayed_code
+	Reason   string // for failures: bad_password | unknown_user | locked | code_required | bad_code | replayed_code | store_error | user_load_failed (dashboard.LoginFailureReasons)
 	MFA      string // for auth.login_succeeded: "pending" | "none"
 }
 

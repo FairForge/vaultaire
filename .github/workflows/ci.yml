@@ -93,7 +93,13 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test -race ./...
+        # -timeout 20m: internal/api alone takes ~470 s on a fast runner and
+        # the merge-group runners were ~45 % slower on 2026-10-25 (the
+        # dashboard package 74 s → 110 s), so the package hit go test's 10 min
+        # default twice (pr-962, pr-963) with no failing test — the test that
+        # happened to be running at the alarm had used 3 s. The bound is the
+        # package's, not a test's (Stage 1a Prompt 41).
+        run: go test -race -timeout 20m ./...
         env:
           DATABASE_URL: postgres://viera@localhost:5432/vaultaire?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-production
