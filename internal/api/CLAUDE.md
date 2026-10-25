@@ -572,7 +572,18 @@ BOOLEAN (migration 042).
   while the web form had one). `/auth/password-reset/complete` revokes every dashboard session of the user
   like the web form does (R12 — a stolen session survived an API-driven reset). The password floor
   (`auth.MinPasswordLength`, 8) is enforced in `CreateUserWithTenant`, so the API can no longer accept a
-  one-character password the form refused.
+  one-character password the form refused. **`POST /auth/login` (Stage 1a Prompt 40 #956, Prompt 41 item 1–2):**
+  an MFA account must send `"code"`; the per-ACCOUNT lockout is the dashboard's own instance
+  (`Server.loginLockout` → `dashboard.Deps.Lockout`: 10 failures in 15 min, password or second factor, on
+  either surface, lock the account 15 min on both; a locked account answers the same 401 "Invalid
+  credentials"; the count is reset only by a sign-in that completes); every failure counts in
+  `vaultaire_dashboard_login_failures_total{surface="api",reason}` (rules `vaultaire-auth.yml`); a failure of
+  OUR store — the users read, the password check, the MFA state, the row load after a valid password — is
+  500 with the generic text, one Error line and reason `store_error` / `user_load_failed`, never a 401
+  audited against the caller and never an attempt against the account (it was 404 "User not found" with no
+  row, RP57-3; a DB error was `bad_password`, RP58-8 b); a second factor that passed is audited
+  `auth.mfa_succeeded` even when the token after it could not be minted (RP58-8 a). Tests
+  `wp_p41_login_lockout_test.go`.
 
 ## Tenant Context
 

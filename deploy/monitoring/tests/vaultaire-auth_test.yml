@@ -1,0 +1,65 @@
+# promtool unit test of vaultaire-auth.yml's sign-in rules (Stage 1a Prompt 41 item 1).
+# Run with the rule file beside it:
+#   d=$(mktemp -d); cp deploy/monitoring/vaultaire-auth.yml deploy/monitoring/tests/vaultaire-auth_test.yml $d/
+#   promtool test rules $d/vaultaire-auth_test.yml
+rule_files:
+  - vaultaire-auth.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A second-factor guess against POST /auth/login alone — the P2 of the WP-P40 review's
+  # second pass: ~100 IPs at the per-IP limit, 1 bad_code/s on the api surface, nothing
+  # on the dashboard — trips DashboardLoginFailuresElevated after its 10 min, and the
+  # lockouts counter crossing 3 in 15 min trips DashboardAccountLockouts at once.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_dashboard_login_failures_total{surface="api",reason="bad_code",instance="app",job="vaultaire"}'
+        values: '0+60x30'
+      - series: 'vaultaire_dashboard_login_failures_total{surface="dashboard",reason="bad_password",instance="app",job="vaultaire"}'
+        values: '0x30'
+      - series: 'vaultaire_dashboard_login_lockouts_total{instance="app",job="vaultaire"}'
+        values: '0 0 0 0 0 1 1 2 2 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DashboardLoginFailuresElevated
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: DashboardLoginFailuresElevated
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Elevated sign-in failures (dashboard form or POST /auth/login)"
+              description: "More than 0.5 failed sign-ins per second for 10+ minutes across the dashboard form and the JSON sign-in. Break down by surface and reason on /metrics; SELECT metadata->>'email', metadata->>'via', host(ip), count(*) FROM audit_logs WHERE action IN ('auth.login_failed','auth.mfa_failed') AND timestamp > now()-interval '15 min' GROUP BY 1,2,3 ORDER BY 4 DESC. A store_error / user_load_failed reason is OUR database failing, not a guess: read the app's Error lines."
+      - eval_time: 8m
+        alertname: DashboardAccountLockouts
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: DashboardAccountLockouts
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Accounts are being locked out"
+              description: "3 accounts locked in 15 minutes — a credential-stuffing run against known e-mails (on the dashboard form or POST /auth/login) or a customer's broken automation. The locked addresses are the auth.login_locked rows in audit_logs (metadata->>'via' names the door: password, totp, api:password, api:totp)."
+
+  # Background: the pre-created zero series on every pair (both surfaces) and a quiet
+  # box fire nothing — a series that exists at 0 is not a failure.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_dashboard_login_failures_total{surface="api",reason="store_error",instance="app",job="vaultaire"}'
+        values: '0x30'
+      - series: 'vaultaire_dashboard_login_failures_total{surface="api",reason="locked",instance="app",job="vaultaire"}'
+        values: '0x30'
+      - series: 'vaultaire_dashboard_login_failures_total{surface="dashboard",reason="locked",instance="app",job="vaultaire"}'
+        values: '0x30'
+      - series: 'vaultaire_dashboard_login_lockouts_total{instance="app",job="vaultaire"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: DashboardLoginFailuresElevated
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: DashboardAccountLockouts
+        exp_alerts: []

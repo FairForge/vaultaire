@@ -119,6 +119,15 @@ type Server struct {
 	githubOAuth      *oauth2.Config
 	mfaService       *auth.MFAService
 	mfaPendingStore  *dashboard.MFAPendingStore
+	// loginLockout is the ONE per-account sign-in lockout of both surfaces
+	// (Stage 1a Prompt 41 item 1, RP57-2): the dashboard's forms through
+	// dashboard.Deps.Lockout and POST /auth/login here.
+	loginLockout *dashmw.AccountLockout
+	// loginUserLoader / loginTokenMinter are handleLogin's seams for the
+	// two failures a test cannot make the real store produce alone (RP57-3,
+	// RP58-8 a); nil = s.auth.GetUserByEmail / s.auth.GenerateJWT.
+	loginUserLoader  func(context.Context, string) (*auth.User, error)
+	loginTokenMinter func(*auth.User) (string, error)
 	sseService       *crypto.SSEService
 	// allowUnsealedCleartext (BLOMP_ALLOW_UNSEALED, owner's testing decision
 	// 2026-10-21): a cleartext-transport backend (blomp) may take bytes that
@@ -337,6 +346,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// MFA service for TOTP generation and validation.
 	s.mfaService = auth.NewMFAService("Stored")
 	s.mfaPendingStore = dashboard.NewMFAPendingStore()
+	// 10 failures in 15 min lock the account 15 min, password or second
+	// factor, whichever surface — the dashboard's rule since R12, shared
+	// with the JSON sign-in since Prompt 41.
+	s.loginLockout = dashmw.NewAccountLockout(10, 15*time.Minute, 15*time.Minute)
 
 	// The master key: a systemd credential, a file or the environment
 	// (WP-R8-1 follow-up A5). A source that is set but unusable refuses the
@@ -1058,6 +1071,7 @@ func (s *Server) setupRoutes() {
 		// survives restarts: the CSRF key is derived from it under its own
 		// label, never the secret itself (WP-R12-5).
 		CSRFKey: dashboard.CSRFKeyFromSecret(os.Getenv("JWT_SECRET")),
+		Lockout: s.loginLockout,
 	})
 
 	s.logger.Info("Registering management API routes")
@@ -1336,14 +1350,27 @@ func getPublicEndpoint(port int) string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
-// handleLogin is the JSON sign-in: POST /auth/login {"email","password"[,
-// "code"]} → a 24 h JWT. An account with MFA on must send "code" — a TOTP
-// code (accepted once, RFC 6238 § 5.2) or a backup code (single use), the
-// dashboard's /login/verify-2fa rule; before Prompt 40 this route minted a
-// JWT on the password alone for such an account, the admin's included, and
-// the admin API took it. Every outcome is an auth.* audit row (the
-// dashboard's LoginEvent) with via "api:password" | "api:totp" |
-// "api:backup_code".
+// handleLogin is POST /auth/login: {"email","password"[,"code"]} → a 24 h
+// JWT. An account with MFA on must send "code" — a TOTP code (accepted once,
+// RFC 6238 § 5.2) or a backup code (single use), the dashboard's
+// /login/verify-2fa rule; before Prompt 40 this route minted a JWT on the
+// password alone for such an account, the admin's included, and the admin
+// API took it. Every outcome is an auth.* audit row (the dashboard's
+// LoginEvent) with via "api:password" | "api:totp" | "api:backup_code".
+//
+// Stage 1a Prompt 41 item 1 (RP57-2, P2): the per-ACCOUNT lockout is the
+// dashboard's own instance (s.loginLockout) — 10 failures in 15 min,
+// password OR second factor, lock the account 15 min on BOTH surfaces; a
+// locked account answers exactly as a wrong password. Every failure counts
+// in vaultaire_dashboard_login_failures_total{surface="api",reason}. The
+// counter is reset only by a sign-in that completes (a token minted): a
+// known password before every code guess must not clear the count. Item 2
+// (RP57-3, RP58-8 b): a failure of OUR store — the users read, the password
+// check, the MFA state, the row load after a valid password — is 500 with
+// the generic text, one Error line and its own reason (store_error |
+// user_load_failed), never a 401 audited against the caller and never a
+// failed attempt against the account. RP58-8 a: a second factor that passed
+// is recorded as such even when the token after it could not be minted.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email    string `json:"email"`
@@ -1355,56 +1382,119 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
+	ctx := r.Context()
+	email := strings.TrimSpace(req.Email)
 
-	valid, err := s.auth.ValidatePassword(r.Context(), req.Email, req.Password)
-	if err != nil || !valid {
-		ev := handlers.LoginEvent{Action: "auth.login_failed", Email: req.Email, Via: "api:password", Reason: "unknown_user"}
-		if u, uErr := s.auth.GetUserByEmail(r.Context(), req.Email); uErr == nil && u != nil {
-			ev.UserID, ev.TenantID, ev.Reason = u.ID, u.TenantID, "bad_password"
+	// The user is looked up first so failures can be attributed (the
+	// dashboard's order); the answer never depends on whether it exists.
+	var user *auth.User
+	if u, err := s.auth.GetUserByEmail(ctx, email); err == nil {
+		user = u
+	}
+	event := func(action, via, reason string) handlers.LoginEvent {
+		ev := handlers.LoginEvent{Action: action, Email: email, Via: via, Reason: reason}
+		if user != nil {
+			ev.UserID, ev.TenantID, ev.Email = user.ID, user.TenantID, user.Email
 		}
-		handlers.RecordLoginEvent(r.Context(), s.db, ev)
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
-		return
+		return ev
+	}
+	// fail is a failure the CALLER made: counted, audited, a failed attempt
+	// against the account (not for "locked" — the lock is already there —
+	// and not for code_required, a client that did not know a code was
+	// owed, the dashboard's empty-code rule), 401 with the one text.
+	fail := func(action, via, reason, msg string) {
+		dashboard.LoginFailures.WithLabelValues(dashboard.LoginSurfaceAPI, reason).Inc()
+		handlers.RecordLoginEvent(ctx, s.db, event(action, via, reason))
+		if reason != "locked" && reason != "code_required" && s.loginLockout != nil && s.loginLockout.Fail(email) {
+			dashboard.LoginLockouts.Inc()
+			handlers.RecordLoginEvent(ctx, s.db, event("auth.login_locked", via, ""))
+			s.logger.Warn("account locked after repeated failed sign-ins", zap.String("surface", dashboard.LoginSurfaceAPI))
+		}
+		http.Error(w, msg, http.StatusUnauthorized)
+	}
+	// ours is a failure of OUR store: 500 with the generic text, an Error
+	// line, its own reason — never an attempt against the account.
+	ours := func(reason, what string, err error) {
+		dashboard.LoginFailures.WithLabelValues(dashboard.LoginSurfaceAPI, reason).Inc()
+		handlers.RecordLoginEvent(ctx, s.db, event("auth.login_failed", "api:password", reason))
+		s.logger.Error("login: "+what, zap.String("reason", reason), zap.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 
-	user, err := s.auth.GetUserByEmail(r.Context(), req.Email)
+	if s.loginLockout != nil {
+		if locked, _ := s.loginLockout.Locked(email); locked {
+			fail("auth.login_failed", "api:password", "locked", "Invalid credentials")
+			return
+		}
+	}
+
+	valid, err := s.auth.ValidatePassword(ctx, email, req.Password)
 	if err != nil {
-		http.Error(w, "User not found", http.StatusNotFound)
+		ours("store_error", "validate password", err)
+		return
+	}
+	if !valid {
+		reason := "unknown_user"
+		if user != nil {
+			reason = "bad_password"
+		}
+		fail("auth.login_failed", "api:password", reason, "Invalid credentials")
 		return
 	}
 
-	ev := handlers.LoginEvent{UserID: user.ID, TenantID: user.TenantID, Email: user.Email}
-	mfaOn, err := s.auth.IsMFAEnabled(r.Context(), user.ID)
-	if err != nil { // fail closed: no token without knowing whether a second factor is owed
-		s.logger.Error("login: read mfa state", zap.String("user_id", user.ID), zap.Error(err))
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+	load := s.loginUserLoader
+	if load == nil {
+		load = s.auth.GetUserByEmail
+	}
+	loaded, err := load(ctx, email)
+	if err != nil || loaded == nil {
+		if err == nil {
+			err = errors.New("no row")
+		}
+		ours("user_load_failed", "load the user after a valid password", err)
 		return
 	}
+	user = loaded
+
+	mfaOn, err := s.auth.IsMFAEnabled(ctx, user.ID)
+	if err != nil { // fail closed: no token without knowing whether a second factor is owed
+		ours("store_error", "read mfa state", err)
+		return
+	}
+	ev := event("auth.login_succeeded", "api:password", "")
 	if mfaOn {
-		via, reason := s.loginSecondFactor(r.Context(), user.ID, strings.TrimSpace(req.Code))
-		ev.Via = via
+		via, reason := s.loginSecondFactor(ctx, user.ID, strings.TrimSpace(req.Code))
 		if reason != "" {
-			ev.Action, ev.Reason = "auth.mfa_failed", reason
-			handlers.RecordLoginEvent(r.Context(), s.db, ev)
 			msg := "Invalid credentials"
 			if reason == "code_required" {
 				msg = "MFA code required: send \"code\" (a TOTP code or a backup code)"
 			}
-			http.Error(w, msg, http.StatusUnauthorized)
+			fail("auth.mfa_failed", via, reason, msg)
 			return
 		}
-		ev.Action = "auth.mfa_succeeded"
-	} else {
-		ev.Action, ev.Via = "auth.login_succeeded", "api:password"
+		ev = event("auth.mfa_succeeded", via, "")
 	}
 
-	token, err := s.auth.GenerateJWT(user)
+	mint := s.loginTokenMinter
+	if mint == nil {
+		mint = s.auth.GenerateJWT
+	}
+	token, err := mint(user)
 	if err != nil {
+		// The factor that passed is recorded as it happened (a TOTP code is
+		// consumed by now); the token is the Error line's (RP58-8 a).
+		if mfaOn {
+			handlers.RecordLoginEvent(ctx, s.db, ev)
+		}
+		s.logger.Error("login: mint token", zap.String("user_id", user.ID), zap.Error(err))
 		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
+	if s.loginLockout != nil {
+		s.loginLockout.Reset(email)
+	}
 
-	handlers.RecordLoginEvent(r.Context(), s.db, ev)
+	handlers.RecordLoginEvent(ctx, s.db, ev)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{
