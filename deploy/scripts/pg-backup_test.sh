@@ -555,6 +555,19 @@ if REAL_AGE=$(command -v age) && command -v age-keygen >/dev/null; then
   else
     fail "5g: age-keygen -pq failed: the installed age ($("$REAL_AGE" --version)) has no post-quantum keys — install the pin (deploy/scripts/age-install.sh)"
   fi
+  # 5k. CronPathFindsTheInstalledAge: cron's PATH (/usr/bin:/bin) has no /usr/local/bin,
+  #     where age-install.sh puts the pin; the script must still find it.
+  if [ -x /usr/local/bin/age ]; then
+    NOAGE=$TMP/bin-noage; mkdir -p "$NOAGE"; cp "$BIN"/pg_dump "$BIN"/rclone "$BIN"/tar "$NOAGE"/
+    [ ! -e "$BIN/flock" ] || cp "$BIN/flock" "$NOAGE/"
+    age-keygen -y "$TMP/real-identity" > "$RCPT"; reset_run
+    if env PATH="$NOAGE:/usr/bin:/bin" PG_BACKUP_ROOT="$ROOT" PG_BACKUP_PROM_DIR="$PROM" PG_BACKUP_METRICS_DIR="$METRICS" bash "$SCRIPT"; then pass "5k CronPathFindsTheInstalledAge: a run with cron's PATH completes"; else fail "5k CronPathFindsTheInstalledAge: run failed: $(tail -2 "$ROOT/logs/backup.log")"; fi
+    check "5k CronPathFindsTheInstalledAge: the dump is sealed" [ "$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | wc -l | tr -d ' ')" = 1 ]
+  elif [ "${CI:-}" = true ]; then
+    fail "5k: CI installs the pin into /usr/local/bin"
+  else
+    echo "SKIPPED 5k: no age in /usr/local/bin"
+  fi
 elif [ "${CI:-}" = true ]; then
   fail "5g: the real age/age-keygen are not installed in CI (the Deploy scripts step installs the pin)"
 else

@@ -81,6 +81,9 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # The owner's offline age recipients (public keys only, root 0644; WP-P42). Absent = plaintext.
 BACKUP_AGE_RECIPIENTS=$ROOT/configs/backup-age-recipients.txt
 AGE=${PG_BACKUP_AGE_BIN:-age}
+# cron runs this with PATH=/usr/bin:/bin; deploy/scripts/age-install.sh puts the pinned age
+# in /usr/local/bin. Appended, never prepended: the system's own binaries still win.
+case ":$PATH:" in *:/usr/local/bin:*) ;; *) PATH=$PATH:/usr/local/bin ;; esac
 
 STAGE=start
 
