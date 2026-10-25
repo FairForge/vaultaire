@@ -120,6 +120,8 @@ jobs:
 
       - name: Deploy scripts
         run: |
+          # The pinned age (RP62-3): pg-backup_test.sh 5g runs the real age and fails without it.
+          sudo bash deploy/scripts/age-install.sh /usr/local/bin
           bash deploy/scripts/pg-backup_test.sh
           bash deploy/scripts/pg-pitr_test.sh
           bash deploy/scripts/vaultaire-switch_test.sh

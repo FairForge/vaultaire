@@ -448,6 +448,63 @@ skipped (one log line), any failure = one `OFFBOX2 FAILED - …` line; 30 days
 kept by the name's date like Sync (Blomp's listing lags minutes, so a file it
 does not list yet goes on a later run).
 
+**The dump is sealed with `age` before it exists on disk** (WP-P42, plan 43.7,
+`docs/surfaces/TRUST.md` item 12): with `/opt/vaultaire/configs/backup-age-recipients.txt`
+present the pipeline is `pg_dump | gzip | age -R <that file>` →
+`vaultaire_<ts>.sql.gz.age`; the size assert counts the gzip stream and the
+`CREATE TABLE` assert the SQL stream on their way to `age`, the file is written
+under `.dump-*/` and renamed only after both pass, so no plaintext byte of the
+dump is written. The same ciphertext goes to Sync and (crypt again) to Blomp.
+- **The recipients file** holds the owner's OFFLINE age public keys only — one
+  `age1…` line each (`age-keygen -y <identity>`), `#` comments and blank lines
+  allowed; `root:root 0644`. **The recipient kind is owner decision F-36;
+  recommended: two post-quantum identities** (`age-keygen -pq`, recipients
+  `age1pq1…`) — one on paper in the owner's safe, one sealed into the F-14
+  escrow. Not a YubiKey: `age-plugin-yubikey` is classic P-256, has no Ubuntu
+  package, and age ≥ 1.3 refuses a file that mixes post-quantum and classic
+  recipients (`incompatible recipients: can't mix post-quantum and classic
+  recipients`) — all lines of the file are one kind. **The identities are
+  never on the box.** A line that is not an `age1` key, an `AGE-SECRET-KEY-…`
+  line (refused and never logged — remove it and rotate that identity), an
+  `AGE-PLUGIN-…` line (an identities file, not a recipients file), a file with
+  no recipient, a dangling symlink, no `age` binary, or a file `age` itself
+  refuses (mixed kinds; `age1pq1…` under an age older than 1.3) =
+  `BACKUP FAILED - stage=encrypt`, **no dump that night** (`BackupStale`
+  pages) — never a silent plaintext.
+- **The age binary is the pinned upstream release, not apt's** (RP62-1): the
+  box's apt candidate is 1.2.1, which has no post-quantum recipients.
+  `sudo bash deploy/scripts/age-install.sh` installs `age` + `age-keygen`
+  v1.3.2 into `/usr/local/bin` after checking the tarball's sha256 against the
+  pin in the script (a mismatch installs nothing); CI installs the same pin and
+  runs the real-age checks of `pg-backup_test.sh` (5g fails, never skips, under
+  `CI=true`). Every `Backup completed` line names the age version that sealed
+  the dump. A bump changes the version and sha256 in that script together.
+- **One run at a time:** the script holds `flock` on `backups/.lock`; a second
+  run while one is going is `BACKUP FAILED - stage=lock` (its sweep of stale
+  `.dump-*` work directories would delete the first one's). A hand run still
+  belongs outside 02:30–03:30 UTC so it never costs the night's dump.
+- **No recipients file** = the plaintext `.sql.gz` of before, one
+  `WARNING - stage=encrypt: … PLAINTEXT` line per run and
+  `vaultaire_backup_dump_encrypted 0` → `BackupDumpPlaintext` (warning, 26 h,
+  also when the gauge is absent — its textfile symlink is installed like the
+  others). Prod: absent until the owner's ceremony.
+- **Retention** retires both shapes by the same clocks (7 days on the box by
+  mtime, 30 days off it by the name's date).
+- **Restore** happens where an identity is, never on the box with one left behind:
+  `age -d -i <identity> vaultaire_<ts>.sql.gz.age | gunzip | psql -d <db>` (age
+  ≥ 1.3 for an `age1pq1…` file). A plaintext
+  `.sql.gz` from before: `gunzip -c f | psql -d <db>`. Lab 2026-10-25 (WP-P42):
+  a throwaway identity, a run of the script with the real `age 1.3.2` against a
+  migrated test DB, the file decrypted and restored into a scratch DB — every
+  table's row count equal.
+- **What this does not cover:** the point-in-time archive (§ Point-in-time
+  recovery: R2 `stored-pg-pitr`, ≤ 28 days of base backups + WAL) holds the same
+  rows, encrypted `aes-256-cbc` under a passphrase that is ON THE BOX. So the
+  exact claim is: the nightly dumps are sealed to the owner's offline keys; the
+  PITR archive is encrypted under a key held on the box (RP62-7). Until
+  `credential_plaintext_drop` is ON and every S3 key rotated, both hold
+  plaintext S3 secrets.
+
 - **Alerting:** the script writes `vaultaire_backup_last_success_timestamp_seconds`
   (dump passed its asserts) and `vaultaire_backup_offbox_last_success_timestamp_seconds`
   (dump on Sync, size verified) into node_exporter's textfile directory

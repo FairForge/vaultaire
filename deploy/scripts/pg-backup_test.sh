@@ -18,7 +18,7 @@ check() { # check MESSAGE COMMAND... — pass when the command succeeds
 
 # --- 1. shellcheck-clean -------------------------------------------------------------
 if command -v shellcheck >/dev/null; then
-  if shellcheck "$SCRIPT" "$HERE/pg-backup_test.sh" "$HERE/db-password.sh"; then pass "shellcheck clean"; else fail "shellcheck"; fi
+  if shellcheck "$SCRIPT" "$HERE/pg-backup_test.sh" "$HERE/db-password.sh" "$HERE/age-install.sh"; then pass "shellcheck clean"; else fail "shellcheck"; fi
 else
   fail "shellcheck is not installed"
 fi
@@ -118,8 +118,36 @@ printf 'RCLONE_CONFIG_SYNCBK_TYPE=webdav\n' > "$ROOT/configs/sync-backup.env"
 cat > "$BIN/pg_dump" <<EOF
 #!/bin/bash
 printf '%s' "\$PGPASSWORD" > "$TMP/seen-password"
-echo "CREATE TABLE users (id int);"
+if [ -e "$TMP/pg_dump-tiny" ]; then echo "CREATE TABLE x();"; exit 0; fi
+[ -e "$TMP/pg_dump-no-ddl" ] || echo "CREATE TABLE users (id int);"
 head -c 20000 /dev/urandom | base64
+[ ! -e "$TMP/pg_dump-fails" ] || { echo "pg_dump: error: connection lost" >&2; exit 1; }
+EOF
+# Fake age (WP-P42): records its arguments; encrypts as a marker header + base64 of the
+# input (so nothing it writes is gzip or SQL), decrypts only with the fake identity. Its
+# own check of a recipients file refuses a line `age1refusedbyage`, and post-quantum
+# `age1pq1…` recipients mixed with classic ones (what age >= 1.3 refuses, RP62-1). Its
+# header is padded to the ~1.7 KB of a real age1pq stanza (RP62-2: an empty gzip seals to
+# 1,679 B with one age1pq recipient, so a size check on the sealed file would pass it).
+cat > "$BIN/age" <<EOF
+#!/bin/bash
+echo "\$*" >> "$TMP/age.log"
+[ "\$1" != --version ] || { echo v1.3.2-fake; exit 0; }
+dec=false; out=/dev/stdout; rfile=; ident=; in=/dev/stdin
+while [ \$# -gt 0 ]; do
+  case "\$1" in -d) dec=true ;; -R) rfile=\$2; shift ;; -i) ident=\$2; shift ;; -o) out=\$2; shift ;; *) in=\$1 ;; esac
+  shift
+done
+if \$dec; then
+  [ "\$(cat "\$ident" 2>/dev/null)" = FAKE-IDENTITY ] || { echo "age: no identity matched any of the recipients" >&2; exit 1; }
+  sed 1,3d "\$in" | base64 -d > "\$out"; exit
+fi
+[ -r "\$rfile" ] || { echo "age: cannot read \$rfile" >&2; exit 1; }
+! grep -q age1refusedbyage "\$rfile" || { echo "age: malformed recipient" >&2; exit 1; }
+if grep -q '^age1pq1' "\$rfile" && grep '^age1' "\$rfile" | grep -qv '^age1pq1'; then
+  echo "age: error: incompatible recipients: can't mix post-quantum and classic recipients" >&2; exit 1
+fi
+{ printf 'age-encryption.org/v1\n-> fake %s %s\n---\n' "\$(grep -c '^age1' "\$rfile")" "\$(head -c 1300 /dev/zero | base64 | tr -d '\n')"; base64 < "\$in"; } > "\$out"
 EOF
 cat > "$BIN/rclone" <<EOF
 #!/bin/bash
@@ -148,6 +176,16 @@ if [ -e "$TMP/tar-configs-fails" ] && printf '%s\n' "\$@" | grep -qx 'configs/';
 fi
 exec "$REAL_TAR" "\$@"
 EOF
+# flock is util-linux (the box, CI); a Mac has none: a shim with the same contract for
+# `flock -n FD` — perl locks the inherited descriptor, and the lock stays with the
+# caller's open file after perl exits.
+if ! command -v flock >/dev/null; then
+  cat > "$BIN/flock" <<'SHIM'
+#!/bin/bash
+fd=${*: -1}
+exec perl -e 'use Fcntl qw(:flock); open(my $fh, ">&=", $ARGV[0]) or exit 2; flock($fh, LOCK_EX|LOCK_NB) or exit 1' "$fd"
+SHIM
+fi
 chmod +x "$BIN"/*
 
 run_backup() {
@@ -155,7 +193,7 @@ run_backup() {
 }
 
 RUN_METRIC=vaultaire_backup_run_last_success_timestamp_seconds
-reset_run() { rm -f "$TMP"/rclone-*-fails "$TMP/rclone2-fails" "$TMP/rclone2-env" "$TMP/tar-configs-fails"; rm -rf "${REMOTE:?}"/* "${REMOTE2:?}"/* "${ROOT:?}/backups"/* "${METRICS:?}"/*; : > "$ROOT/logs/backup.log"; sleep 1; }
+reset_run() { rm -f "$TMP"/rclone-*-fails "$TMP/rclone2-fails" "$TMP/rclone2-env" "$TMP/tar-configs-fails" "$TMP"/pg_dump-* "$TMP/seen-password" "$TMP/age.log"; rm -rf "${REMOTE:?}"/* "${REMOTE2:?}"/* "${ROOT:?}/backups"/* "${METRICS:?}"/*; : > "$ROOT/logs/backup.log"; sleep 1; }
 
 # 3a. the config tar fails (the 2026-10-05 shape): the dump is still off-box.
 touch "$TMP/tar-configs-fails"
@@ -347,5 +385,181 @@ for m in "$UNDELETED" "$UNDELETED2"; do
   check "4g: a rule reads $m" grep -q "$m > 0" "$RULES"
 done
 rm -f "$ROOT/configs/blomp-backup.env"
+
+# --- 5. the dump is encrypted with age before it exists on disk (WP-P42, plan 43.7) -----
+# BACKUP_AGE_RECIPIENTS = configs/backup-age-recipients.txt: the owner's offline public
+# keys. Present = `pg_dump | gzip | age -R` and nothing plaintext under backups/; absent =
+# today's plaintext dump, loud and counted (vaultaire_backup_dump_encrypted 0); present but
+# unusable = the run fails at stage=encrypt, never a silent plaintext.
+RCPT=$ROOT/configs/backup-age-recipients.txt
+ENC=vaultaire_backup_dump_encrypted
+DUMP_TS=vaultaire_backup_last_success_timestamp_seconds
+printf 'RCLONE_CONFIG_BLOMPCRYPT_TYPE=crypt\n' > "$ROOT/configs/blomp-backup.env"
+good_recipients() {
+  printf '# the owner offline identities (public lines only)\n\nage1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq\nage1yubikey1qwt50d05nh5vutpdzmlg5wn80xq5negm4uj9ghv0snvdd3yysf5yw3rhl3t\n' > "$RCPT"
+}
+plaintext_sql_on_disk() { # prints every file under backups/ that reads as SQL, raw or gunzipped
+  local f
+  while IFS= read -r f; do
+    if grep -q 'CREATE TABLE' "$f" 2>/dev/null || { gzip -dc "$f" 2>/dev/null | grep -q 'CREATE TABLE'; }; then echo "$f"; fi
+  done < <(find "$ROOT/backups" -type f)
+}
+
+# 5a. NoPlaintextDumpOnDisk: recipients present → the only dump is .sql.gz.age, no file
+#     under backups/ reads as SQL, no partial or counter left, the off-box copies are the
+#     ciphertext, the gauge says 1 — and the identity gets the dump back.
+good_recipients; reset_run
+if run_backup; then pass "5a NoPlaintextDumpOnDisk: run completes"; else fail "5a NoPlaintextDumpOnDisk: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+n_age=$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | wc -l | tr -d ' '); n_gz=$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz' | wc -l | tr -d ' ')
+check "5a NoPlaintextDumpOnDisk: one .sql.gz.age, no .sql.gz on the box (age=$n_age gz=$n_gz)" [ "$n_age/$n_gz" = "1/0" ]
+leaked=$(plaintext_sql_on_disk)
+check "5a NoPlaintextDumpOnDisk: no file under backups/ reads as SQL (found: ${leaked:-none})" [ -z "$leaked" ]
+check "5a NoPlaintextDumpOnDisk: no partial or counter file left ($(find "$ROOT/backups" -name '.*' ! -name .lock | tr '\n' ' '))" [ -z "$(find "$ROOT/backups" -name '.*' ! -name .lock)" ]
+check "5a NoPlaintextDumpOnDisk: age was given the recipients file with -R" grep -q -- "-R $RCPT" "$TMP/age.log"
+n_off=$(find "$REMOTE" -name 'vaultaire_*.sql.gz.age' | wc -l | tr -d ' '); n_off2=$(find "$REMOTE2" -name 'vaultaire_*.sql.gz.age' | wc -l | tr -d ' ')
+check "5a NoPlaintextDumpOnDisk: Sync and Blomp hold the ciphertext (sync=$n_off blomp=$n_off2)" [ "$n_off/$n_off2" = "1/1" ]
+check "5a NoPlaintextDumpOnDisk: no plaintext dump went off-box" [ -z "$(find "$REMOTE" "$REMOTE2" -name 'vaultaire_*.sql.gz')" ]
+check "5a NoPlaintextDumpOnDisk: $ENC = 1 ($(grep "^$ENC " "$METRICS/$ENC.prom" 2>/dev/null))" grep -qx "$ENC 1" "$METRICS/$ENC.prom"
+check "5a NoPlaintextDumpOnDisk: $DUMP_TS written (the asserts ran on the stream)" [ -f "$METRICS/$DUMP_TS.prom" ]
+check "5a NoPlaintextDumpOnDisk: the log names the shape and the age version" grep -q 'encrypted with age to 2 recipient(s), age v1.3.2-fake' "$ROOT/logs/backup.log"
+echo FAKE-IDENTITY > "$TMP/identity"; enc_file=$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | head -1)
+restored=$(PATH="$BIN:$PATH" age -d -i "$TMP/identity" "${enc_file:-/dev/null}" 2>/dev/null | gzip -dc 2>/dev/null | grep -c 'CREATE TABLE' || true)
+check "5a NoPlaintextDumpOnDisk: the identity restores it (age -d | gunzip has the DDL: $restored)" [ "${restored:-0}" = 1 ]
+echo WRONG > "$TMP/identity"
+# shellcheck disable=SC2016 # expanded by the inner bash
+check "5a NoPlaintextDumpOnDisk: without the identity it does not decrypt" bash -c '! PATH="$1:$PATH" age -d -i "$2" "$3" >/dev/null 2>&1' _ "$BIN" "$TMP/identity" "${enc_file:-/dev/null}"
+
+# 5b. RecipientsAbsentIsLoudAndCounted: no file → today's plaintext dump, a loud line, the
+#     gauge 0 (BackupDumpPlaintext), and the run still completes.
+rm -f "$RCPT"; reset_run
+if run_backup; then pass "5b RecipientsAbsentIsLoudAndCounted: run completes"; else fail "5b RecipientsAbsentIsLoudAndCounted: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+check "5b RecipientsAbsentIsLoudAndCounted: the dump is .sql.gz" [ "$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz' | wc -l | tr -d ' ')" = 1 ]
+check "5b RecipientsAbsentIsLoudAndCounted: age never called" [ ! -e "$TMP/age.log" ]
+check "5b RecipientsAbsentIsLoudAndCounted: logged loudly" grep -q "WARNING - stage=encrypt: $RCPT not present: the dump is written in PLAINTEXT" "$ROOT/logs/backup.log"
+check "5b RecipientsAbsentIsLoudAndCounted: $ENC = 0 ($(grep "^$ENC " "$METRICS/$ENC.prom" 2>/dev/null))" grep -qx "$ENC 0" "$METRICS/$ENC.prom"
+check "5b RecipientsAbsentIsLoudAndCounted: it is a gauge with its help line" grep -q "^# TYPE $ENC gauge" "$METRICS/$ENC.prom"
+check "5b RecipientsAbsentIsLoudAndCounted: run timestamp written" [ -f "$METRICS/$RUN_METRIC.prom" ]
+
+# 5c. BrokenRecipientsFailsTheRun: present but unusable → BACKUP FAILED stage=encrypt
+#     before pg_dump runs: no dump of either shape, no dump timestamp, no gauge.
+broken_case() { # name, recipients content ('' = keep the file as is), extra env assignment
+  local name=$1 content=$2 extra=${3:-}
+  [ -z "$content" ] || printf '%b' "$content" > "$RCPT"
+  reset_run
+  if env ${extra:+"$extra"} PATH="$BIN:$PATH" PG_BACKUP_ROOT="$ROOT" PG_BACKUP_PROM_DIR="$PROM" PG_BACKUP_METRICS_DIR="$METRICS" bash "$SCRIPT" 2>/dev/null; then
+    fail "5c BrokenRecipientsFailsTheRun ($name): the run must fail"
+  else
+    pass "5c BrokenRecipientsFailsTheRun ($name): the run fails"
+  fi
+  check "5c BrokenRecipientsFailsTheRun ($name): logged at stage=encrypt ($(grep 'BACKUP FAILED' "$ROOT/logs/backup.log" | tail -1 | cut -c1-140))" grep -q 'BACKUP FAILED - stage=encrypt' "$ROOT/logs/backup.log"
+  check "5c BrokenRecipientsFailsTheRun ($name): pg_dump never ran" [ ! -e "$TMP/seen-password" ]
+  check "5c BrokenRecipientsFailsTheRun ($name): no dump of either shape" [ -z "$(find "$ROOT/backups" -name 'vaultaire_*')" ]
+  check "5c BrokenRecipientsFailsTheRun ($name): no dump timestamp" [ ! -e "$METRICS/$DUMP_TS.prom" ]
+  check "5c BrokenRecipientsFailsTheRun ($name): no gauge" [ ! -e "$METRICS/$ENC.prom" ]
+}
+broken_case "a malformed line" 'age1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq\nnot-a-recipient\n'
+broken_case "an identity on the box" 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n'
+check "5c BrokenRecipientsFailsTheRun (an identity on the box): the secret is never logged" [ -z "$(grep -F 'AGE-SECRET-KEY-1QQ' "$ROOT/logs/backup.log")" ]
+broken_case "a plugin identity line" 'AGE-PLUGIN-YUBIKEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n'
+check "5c BrokenRecipientsFailsTheRun (a plugin identity line): says it is an identities file" grep -q 'this is an identities file, not a recipients file' "$ROOT/logs/backup.log"
+broken_case "comments only" '# nobody yet\n\n'
+broken_case "age refuses the file" 'age1refusedbyage\n'
+broken_case "post-quantum and classic mixed" 'age1pq1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs\nage1qyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqs3290gq\n'
+rm -f "$RCPT"; ln -s "$TMP/no-such-recipients" "$RCPT"
+broken_case "a dangling symlink (RP62-4)" ''
+rm -f "$RCPT"
+good_recipients
+broken_case "no age binary" '' "PG_BACKUP_AGE_BIN=$TMP/no-such-age"
+chmod 0000 "$RCPT"
+if [ -r "$RCPT" ]; then echo "SKIPPED 5c (unreadable): running as root"; else broken_case "unreadable" ''; fi
+chmod 0600 "$RCPT"
+
+# 5d. RetentionRetiresBothShapes: on the box by mtime, off it by the date in the name —
+#     a 10-day-old .sql.gz AND .sql.gz.age go from the box, 40-day-old names of both from
+#     Sync and Blomp; the fresh ones stay.
+good_recipients; reset_run
+old_box=$(date -u -d '-10 days' +%Y%m%d); old=$(date -u -d '-40 days' +%Y%m%d)
+for ext in sql.gz sql.gz.age; do
+  : > "$ROOT/backups/vaultaire_${old_box}_030001.$ext"; touch -d '-10 days' "$ROOT/backups/vaultaire_${old_box}_030001.$ext"
+  mkdir -p "$REMOTE/_ops/backups/2026/01" "$REMOTE2/2026/01"
+  : > "$REMOTE/_ops/backups/2026/01/vaultaire_${old}_030001.$ext"; : > "$REMOTE2/2026/01/vaultaire_${old}_030001.$ext"
+done
+run_backup >/dev/null 2>&1 || true
+check "5d RetentionRetiresBothShapes: old .sql.gz and .sql.gz.age gone from the box ($(find "$ROOT/backups" -name "*_${old_box}_*" | tr '\n' ' '))" [ -z "$(find "$ROOT/backups" -name "*_${old_box}_*")" ]
+check "5d RetentionRetiresBothShapes: both old names gone from Sync and Blomp" [ -z "$(find "$REMOTE" "$REMOTE2" -name "*_${old}_*")" ]
+check "5d RetentionRetiresBothShapes: today's dump kept on the box" [ "$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | wc -l | tr -d ' ')" = 1 ]
+
+# 5e. the asserts run on the stream: a pg_dump that fails mid-stream, or a dump with no
+#     DDL, fails the run at stage=dump and leaves no file (pipefail; nothing to roll back).
+reset_run; touch "$TMP/pg_dump-fails"
+if run_backup 2>/dev/null; then fail "5e: a failed pg_dump must fail the run"; else pass "5e: a failed pg_dump fails the run"; fi
+check "5e: logged at stage=dump naming pg_dump ($(grep 'BACKUP FAILED' "$ROOT/logs/backup.log" | tail -1 | cut -c1-140))" grep -q 'BACKUP FAILED - stage=dump: pg_dump failed' "$ROOT/logs/backup.log"
+check "5e: no dump file and no partial left" [ -z "$(find "$ROOT/backups" -name 'vaultaire_*' -o -name '.dump*')" ]
+reset_run; touch "$TMP/pg_dump-no-ddl"
+if run_backup 2>/dev/null; then fail "5e: a dump with no DDL must fail the run"; else pass "5e: a dump with no DDL fails the run"; fi
+check "5e: logged as no CREATE TABLE" grep -q 'BACKUP FAILED - stage=dump: dump contains no CREATE TABLE statements' "$ROOT/logs/backup.log"
+check "5e: no dump file and no partial left (no DDL)" [ -z "$(find "$ROOT/backups" -name 'vaultaire_*' -o -name '.dump*')" ]
+check "5e: no dump timestamp" [ ! -e "$METRICS/$DUMP_TS.prom" ]
+
+# 5h. TooSmallDumpFailsWhenSealed (RP62-2): a near-empty dump fails the SIZE assert even
+#     though its sealed file is bigger than 1 KB (the size is counted on the gzip stream,
+#     before age); no file of either shape is left.
+good_recipients; reset_run; touch "$TMP/pg_dump-tiny"
+if run_backup 2>/dev/null; then fail "5h TooSmallDumpFailsWhenSealed: a near-empty dump must fail the run"; else pass "5h TooSmallDumpFailsWhenSealed: the run fails"; fi
+check "5h TooSmallDumpFailsWhenSealed: logged as too small ($(grep 'BACKUP FAILED' "$ROOT/logs/backup.log" | tail -1 | cut -c1-140))" grep -q 'BACKUP FAILED - stage=dump: dump too small' "$ROOT/logs/backup.log"
+check "5h TooSmallDumpFailsWhenSealed: no dump file and no partial left" [ -z "$(find "$ROOT/backups" -name 'vaultaire_*' -o -name '.dump*')" ]
+check "5h TooSmallDumpFailsWhenSealed: no dump timestamp" [ ! -e "$METRICS/$DUMP_TS.prom" ]
+
+# 5i. OneRunAtATime (RP62-5): while another run holds the lock, a run fails at stage=lock
+#     before it touches anything (its sweep of .dump-* would delete the other's work dir).
+good_recipients; reset_run; mkdir -p "$ROOT/backups/.dump-other"
+exec 8>"$ROOT/backups/.lock"; PATH="$BIN:$PATH" flock -n 8
+if run_backup 2>/dev/null; then fail "5i OneRunAtATime: a run must fail while the lock is held"; else pass "5i OneRunAtATime: the run fails"; fi
+exec 8>&-
+check "5i OneRunAtATime: logged at stage=lock" grep -q 'BACKUP FAILED - stage=lock: another pg-backup.sh run holds' "$ROOT/logs/backup.log"
+check "5i OneRunAtATime: the other run's work directory is untouched" [ -d "$ROOT/backups/.dump-other" ]
+check "5i OneRunAtATime: pg_dump never ran" [ ! -e "$TMP/seen-password" ]
+rm -rf "$ROOT/backups/.dump-other"
+if run_backup; then pass "5i OneRunAtATime: the lock released, the next run completes"; else fail "5i OneRunAtATime: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+
+# 5j. age-install.sh refuses a tarball that is not the pin and installs nothing.
+echo "not age" > "$TMP/fake-age.tar.gz"; mkdir -p "$TMP/age-dest"
+if AGE_TARBALL="$TMP/fake-age.tar.gz" bash "$HERE/age-install.sh" "$TMP/age-dest" 2>"$TMP/age-install.err"; then fail "5j: age-install.sh must refuse a tarball that is not the pin"; else pass "5j: age-install.sh refuses a wrong tarball"; fi
+check "5j: it says sha256 mismatch" grep -q 'sha256 mismatch' "$TMP/age-install.err"
+check "5j: nothing installed" [ -z "$(ls -A "$TMP/age-dest")" ]
+
+# 5f. the rule.
+check "5f: BackupDumpPlaintext rule" grep -q "alert: BackupDumpPlaintext" "$RULES"
+check "5f: it reads $ENC == 0" grep -q "$ENC == 0" "$RULES"
+
+# 5g. with the real age (when installed; CI installs the pin, RP62-3 — there a missing age
+#     is a failure, never a skip): a throwaway identity decrypts what the run wrote, an
+#     age1pq recipient works, and post-quantum mixed with classic is refused at stage=encrypt.
+if REAL_AGE=$(command -v age) && command -v age-keygen >/dev/null; then
+  age-keygen -o "$TMP/real-identity" 2>/dev/null; age-keygen -y "$TMP/real-identity" > "$RCPT"
+  reset_run
+  if env PG_BACKUP_AGE_BIN="$REAL_AGE" PATH="$BIN:$PATH" PG_BACKUP_ROOT="$ROOT" PG_BACKUP_PROM_DIR="$PROM" PG_BACKUP_METRICS_DIR="$METRICS" bash "$SCRIPT"; then pass "5g: run with the real age completes"; else fail "5g: run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+  enc_file=$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | head -1)
+  # shellcheck disable=SC2016 # expanded by the inner bash
+  check "5g: the real age file decrypts with the identity to the dump" bash -c '"$1" -d -i "$2" "$3" | gzip -dc | grep -q "CREATE TABLE"' _ "$REAL_AGE" "$TMP/real-identity" "${enc_file:-/dev/null}"
+  check "5g: no file under backups/ reads as SQL" [ -z "$(plaintext_sql_on_disk)" ]
+  check "5g: the log names the real age's version ($("$REAL_AGE" --version))" grep -qF "age $("$REAL_AGE" --version))" "$ROOT/logs/backup.log"
+  if age-keygen -pq -o "$TMP/real-pq-identity" 2>/dev/null; then
+    { age-keygen -y "$TMP/real-pq-identity"; age-keygen -y "$TMP/real-identity"; } > "$RCPT"
+    broken_case "real age: post-quantum and classic mixed" '' "PG_BACKUP_AGE_BIN=$REAL_AGE"
+    age-keygen -y "$TMP/real-pq-identity" > "$RCPT"; reset_run
+    if env PG_BACKUP_AGE_BIN="$REAL_AGE" PATH="$BIN:$PATH" PG_BACKUP_ROOT="$ROOT" PG_BACKUP_PROM_DIR="$PROM" PG_BACKUP_METRICS_DIR="$METRICS" bash "$SCRIPT"; then pass "5g: run with a real age1pq recipient completes"; else fail "5g: age1pq run failed: $(tail -3 "$ROOT/logs/backup.log")"; fi
+    enc_file=$(find "$ROOT/backups" -name 'vaultaire_*.sql.gz.age' | head -1)
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    check "5g: the age1pq file decrypts with its identity" bash -c '"$1" -d -i "$2" "$3" | gzip -dc | grep -q "CREATE TABLE"' _ "$REAL_AGE" "$TMP/real-pq-identity" "${enc_file:-/dev/null}"
+  else
+    fail "5g: age-keygen -pq failed: the installed age ($("$REAL_AGE" --version)) has no post-quantum keys — install the pin (deploy/scripts/age-install.sh)"
+  fi
+elif [ "${CI:-}" = true ]; then
+  fail "5g: the real age/age-keygen are not installed in CI (the Deploy scripts step installs the pin)"
+else
+  echo "SKIPPED 5g: the real age/age-keygen are not installed"
+fi
+rm -f "$RCPT" "$ROOT/configs/blomp-backup.env"
 
 exit $FAILED
