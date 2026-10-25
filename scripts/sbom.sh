@@ -50,7 +50,9 @@ command -v jq >/dev/null || { echo "sbom: jq is required" >&2; exit 1; }
 commit=$(git rev-parse HEAD)
 CYCLONEDX_GOMOD_VERSION=${CYCLONEDX_GOMOD_VERSION:-v1.12.0}
 work=$(mktemp -d "${TMPDIR:-/tmp}/sbom.XXXXXX")
-trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT
+# A temporary directory that will not go never fails the SBOMs it held (deploy of
+# c82a1c42, 2026-10-25: `rm: cannot remove …/src/.git: Directory not empty`).
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work" 2>/dev/null || rm -rf "$work" || echo "sbom: could not remove $work" >&2' EXIT
 GOBIN=$work/tool GOOS='' GOARCH='' GOFLAGS='' go install "github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$CYCLONEDX_GOMOD_VERSION"
 gomod() { GOFLAGS='' "$work/tool/cyclonedx-gomod" "$@"; }
 common=(-json -noserial -notimestamp -output-version 1.6 -std -licenses=false)
@@ -88,7 +90,7 @@ if want sdk-wasm; then
   src=$work/src
   mkdir -p "$src"
   git archive HEAD | tar -x -C "$src"
-  ( cd "$src" && git init -q && git add -A && git -c user.name=sbom -c user.email=sbom@invalid -c commit.gpgsign=false commit -q -m sbom \
+  ( cd "$src" && git init -q && git add -A && git -c user.name=sbom -c user.email=sbom@invalid -c commit.gpgsign=false -c gc.auto=0 -c maintenance.auto=false commit -q -m sbom \
     && GOOS=js GOARCH=wasm CGO_ENABLED=0 gomod app "${common[@]}" -main ./sdk/wasm -output "$out/sdk-wasm.cdx.json" . )
   normalize "$out/sdk-wasm.cdx.json"
 fi
