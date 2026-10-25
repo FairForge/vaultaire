@@ -75,11 +75,28 @@ jobs:
         # (translog-verify -client refuses it), never a failure (RP51-3).
         run: scripts/repro-check-clients.sh
 
+      - name: SBOMs
+        # WP-SUPPLY-1 (Stage 1a Prompt 41 Part A): CycloneDX documents for the
+        # binary this job ships (its module list and go.sum hashes as linked),
+        # sdk-wasm and sdk-js — keyless and cheap; held to go.sum at HEAD, and
+        # generated twice more: the deploy fails unless all are the same bytes.
+        # Signing (release-sign) is the owner's step, never CI's.
+        run: |
+          SBOM_SERVER_BINARY=vaultaire-linux scripts/sbom.sh bin/sbom
+          scripts/sbom-check.sh bin/sbom/vaultaire.cdx.json
+          SBOM_SERVER_BINARY=vaultaire-linux scripts/repro-check-sbom.sh bin/sbom
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: vaultaire-linux
           path: vaultaire-linux
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v6
+        with:
+          name: sbom
+          path: bin/sbom/*.cdx.json
 
   deploy-dev:
     needs: build

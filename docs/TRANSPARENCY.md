@@ -2,6 +2,11 @@
 
 Keystone K4 (Stage 1a Prompt 28; plan Phase 43.6; decision F-16; `docs/ARCHITECTURE_CONTRACT.md` rule 7: *any act that could widen our access writes to the transparency log*). This page is the operator's page and the source of what trust.stored.cloud will publish.
 
+> **Releases:** what is inside a build (the CycloneDX SBOMs) and the detached
+> signature on each released artefact are `docs/RELEASES.md` (WP-SUPPLY-1); the
+> log stays the record of WHICH builds exist, `release-sign verify -log` joins the
+> two (an artefact's sha256 must be a `server_build` / `client_build` entry).
+
 ## What it is
 
 An append-only Merkle log in the RFC 6962 / RFC 9162 shape. Every entry is a small JSON document of a known kind; the log's state is a **checkpoint** — tree size and root hash — signed as a C2SP signed note ([c2sp.org/tlog-checkpoint](https://c2sp.org/tlog-checkpoint), [c2sp.org/signed-note](https://c2sp.org/signed-note)). Anyone holding an earlier checkpoint can ask for a **consistency proof** and check that today's log extends it: a rewritten or deleted entry cannot hide. Anyone holding an entry can ask for an **inclusion proof**.

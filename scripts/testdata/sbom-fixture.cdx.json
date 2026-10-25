@@ -1,0 +1,7 @@
+{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,
+ "metadata":{"component":{"type":"application","name":"github.com/FairForge/vaultaire","version":"deadbeef"}},
+ "components":[
+  {"type":"library","name":"filippo.io/edwards25519","version":"v1.1.0","hashes":[{"alg":"SHA-256","content":"14d7f8b72c5114d4a0b38d7e94eb1d52a1a4226f9f3e55a6d3a25ac0b96a1db0"}]},
+  {"type":"library","name":"example.com/dep","version":"v2.0.0","hashes":[{"alg":"SHA-256","content":"00000000000000000000000000000000000000000000000000000000000000ff"}]},
+  {"type":"library","name":"std","version":"go1.26.10"}
+ ],"dependencies":[]}
