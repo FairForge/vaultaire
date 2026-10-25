@@ -26,6 +26,7 @@ const (
 	bucketCreateRegionUnavailable                          // known region, no driver on this deployment (WP-R7-1)
 	bucketCreateRegionDown                                 // enabled region, down by its probe or breaker (Prompt 10 Part A)
 	bucketCreateLockMismatch                               // re-create of an owned bucket without Object Lock, asking for it (RP16-4)
+	bucketCreateReservedName                               // the name is a web path's first segment (bucket_reserved.go, Prompt 41 item 5); refused for a NEW bucket only
 )
 
 // bucketCreateOptions are what a CreateBucket asks for beyond the name and
@@ -75,6 +76,12 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 			return out, fmt.Errorf("check bucket ownership %s: %w", bucket, err)
 		}
 		if !out.alreadyOwned {
+			// A web path's name is refused for a NEW bucket only: one that
+			// exists under it keeps working and re-creates idempotently.
+			if s.reservedBucketName(bucket) {
+				out.state = bucketCreateReservedName
+				return out, nil
+			}
 			count, err := countCustomerBuckets(ctx, s.db, tenantID)
 			if err != nil {
 				return out, fmt.Errorf("count buckets for %s: %w", tenantID, err)
@@ -259,6 +266,8 @@ func (s *Server) dashboardBucketCreator() handlers.BucketCreator {
 			res.State = handlers.BucketCreateRegionUnavailable
 		case bucketCreateRegionDown:
 			res.State = handlers.BucketCreateRegionDown
+		case bucketCreateReservedName:
+			res.State = handlers.BucketCreateReservedName
 		default:
 			res.State = handlers.BucketCreateOK
 		}

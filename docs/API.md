@@ -363,7 +363,31 @@ Conventions (Stripe-style):
 - every response carries `X-Request-Id` and `X-Vaultaire-Version` (a date)
 
 The management bucket create applies the same rules as S3 CreateBucket
-(idempotent re-create, free-tier cap, region validation).
+(idempotent re-create, free-tier cap, region validation, the reserved names
+below).
+
+## Reserved bucket names
+
+A deviation from AWS, which reserves nothing: a bucket may not be NAMED
+after a path of this service's web host. CreateBucket of such a name is
+400 `InvalidBucketName` with a message naming the reservation (the
+management API: 400 `invalid_bucket_name`; the dashboard form says so).
+The list is derived from the server's own routes — every first path
+segment registered ahead of the S3 catch-all — so it follows the site:
+`api`, `docs`, `legal`, `status`, `login`, `register`, `changelog`, `abuse`,
+`dashboard`, `auth`, `cdn`, `translog`, `health`, `ready`, `version`,
+`metrics`, `llms.txt`, `robots.txt`, `sitemap.xml`, `favicon.ico`,
+`og.png`, `openapi.json`, `static`, `pricing`, `signup`, `compliance`,
+`verify`, `logout`, `forgot-password`, `reset-password` as of 2026-10-25.
+It applies at CREATE only: a bucket that already exists under such a name
+keeps every operation. Why: a request carrying S3 credentials is the S3
+API's on every host (the credential gate), so a signed GetObject of bucket
+`legal` can no longer get a page — what remained was the reverse, a bucket
+whose name is a page (an edge cache keyed by extension once served
+`/favicon.ico` to a signed GET of bucket `favicon.ico`). Requests on a
+`cdn.*` host serve only `/{slug}/{bucket}/*` public bytes and never a page,
+so the names are not reserved there — nothing to shadow. The one aliasing
+left is `GET /api/v1/whoami`, which verifies its own SigV4 signature.
 
 ## Errors
 

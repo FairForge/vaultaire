@@ -229,6 +229,10 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),
 			WithMessage(regionDownMessage(region)))
 		return
+	case bucketCreateReservedName:
+		WriteS3ErrorWithContext(w, ErrInvalidBucketName, r.URL.Path, generateRequestID(),
+			WithMessage(reservedBucketNameMessage(bucket)))
+		return
 	case bucketCreateLockMismatch:
 		WriteS3ErrorWithContext(w, ErrInvalidBucketState, r.URL.Path, generateRequestID(),
 			WithMessage("You already own this bucket and it was created without Object Lock; enable it with PutObjectLockConfiguration."))
