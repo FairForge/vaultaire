@@ -110,6 +110,20 @@ reload, and the dangling symlink sets `node_textfile_scrape_error 1` (the
 collector skips a file it cannot open).
 Check: `curl -s 127.0.0.1:9100/metrics | grep -E '^vaultaire_backup|node_textfile_scrape_error'`.
 
+**Launch gates** (Stage 1a Prompt 43 Part A): `deploy/scripts/launch-readiness.sh`
+(installed by hand as `/opt/vaultaire/bin/launch-readiness.sh`, run as root, read-only)
+writes `vaultaire_launch_gate{gate,class}` — 1 = GREEN, 0 = RED or UNKNOWN — into the
+same directory, `vaultaire_launch_gate.prom`. Its symlink, once the first run has
+written the file (a dangling link is a `node_textfile_scrape_error`):
+
+```bash
+ln -sfn /opt/vaultaire/metrics/vaultaire_launch_gate.prom /var/lib/prometheus/node-exporter/vaultaire_launch_gate.prom
+```
+
+No alert rule on purpose: the gates are the owner's click-list, and a rule would page
+for weeks. The gauge is as fresh as the last run (root runs it by hand, after each
+ceremony).
+
 ## Install (already done on slc-vaultaire-01, 2026-08-03)
 
 ```bash

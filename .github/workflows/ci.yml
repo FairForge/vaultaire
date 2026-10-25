@@ -125,6 +125,7 @@ jobs:
           bash deploy/scripts/vaultaire-switch_test.sh
           bash deploy/scripts/tenant-zero-proof_test.sh
           bash scripts/sbom_test.sh
+          bash deploy/scripts/launch-readiness_test.sh
 
       - name: Smoke test
         run: |
