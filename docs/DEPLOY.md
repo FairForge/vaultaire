@@ -524,11 +524,19 @@ stays as the independent logical copy.
   Sia `indexd_zen` and the lab databases, `pitr_canary`) at every moment of those 28
   days, including the rows of accounts erased since — the produce page says so.
 - **Alerts** (`deploy/monitoring/vaultaire-pitr.yml`, installed 2026-10-24 sha256
-  `f69bf673…`): `PGArchiveFailing` / `PGArchiveStale` page, `PGPITRBackupStale`,
-  `PGPITRRetentionTooLong`, `PGPITRMetricsStale` warn — from
+  `f69bf673…`; the drill rules added by Prompt 41): `PGArchiveFailing` / `PGArchiveStale`
+  page, `PGPITRBackupStale`, `PGPITRRetentionTooLong`, `PGPITRMetricsStale` warn — from
   `/var/lib/vaultaire-pitr/vaultaire_pitr.prom`, written each minute by
   `vaultaire-pitr-metrics.timer` (as postgres) and read through the symlink
-  `/var/lib/prometheus/node-exporter/vaultaire_pitr.prom`.
+  `/var/lib/prometheus/node-exporter/vaultaire_pitr.prom`; `PGPITRDrillStale` (no
+  passing drill in 35 d, or no file) and `PGPITRDrillFailed` warn — from the drill's own
+  `vaultaire_pitr_drill.prom` beside it (its own symlink), written by every run of
+  `pg-pitr-drill.sh`, PASS, FAIL or cut.
+- **The drill runs itself** (Stage 1a Prompt 41 item 4, RP57-13):
+  `vaultaire-pitr-drill.timer` → `vaultaire-pitr-drill.service` (root — it needs
+  `runuser` and deletes the scratch cluster — `Nice=10`, `IOSchedulingClass=idle`) on the
+  **2nd of each month at 02:10 UTC**, clear of the 01:30 backups and the 03:00 dump.
+  `systemctl list-timers vaultaire-pitr-drill.timer`, `journalctl -u vaultaire-pitr-drill`.
 
 ### Install (once; again after an R2 key rotation)
 
@@ -541,14 +549,19 @@ security find-generic-password -s vaultaire-pgbackrest-cipher -w | ssh vaultaire
 sudo bash deploy/scripts/pg-pitr-install.sh /tmp/pitr-cipher
 ```
 
-It installs the package, writes the conf (S3 key from `R2_*` in `configs/.env`, the
-endpoint `<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`), copies `pg-pitr-metrics.sh` and
-`pg-pitr-drill.sh` to `/usr/local/lib/vaultaire-pitr/` (root 0755), installs and
-enables the timers, runs `stanza-create`, and sets `archive_mode = on`,
-`archive_command = 'pgbackrest --stanza=vaultaire archive-push %p'`,
+It installs the package (and `jq`, which the metrics writer needs), writes the conf (S3
+key from `R2_*` in `configs/.env`, the endpoint `<R2_ACCOUNT_ID>.r2.cloudflarestorage.com`),
+copies `pg-pitr-metrics.sh` and `pg-pitr-drill.sh` to `/usr/local/lib/vaultaire-pitr/`
+(root 0755), installs the units, runs `stanza-create`, THEN enables the four timers
+(backups, metrics, the monthly drill — after the stanza exists, so an install that
+straddles 01:30 cannot fire a backup against a missing stanza), and sets
+`archive_mode = on`, `archive_command = 'pgbackrest --stanza=vaultaire archive-push %p'`,
 `archive_timeout = '60s'` with `ALTER SYSTEM` (backing up `postgresql.auto.conf` as
-`.bak-pitr-<ts>` first, only when one changes). A passphrase that differs from the
-installed one is refused: a repository's passphrase never changes. Then, by hand:
+`.bak-pitr-<ts>` first, only when one differs from `pg_settings`' RAW value —
+`current_setting()` pretty-prints `60s` as `1min`, which is why every re-run used to
+re-ALTER and leave a new backup, RP58-5). Re-running it is a no-op when nothing changed.
+A passphrase that differs from the installed one is refused: a repository's passphrase
+never changes. Then, by hand:
 
 1. **The restart `archive_mode` needs**, at a quiet minute: `vaultaire-switch status`
    and `gh run list --workflow deploy.yml` show no deploy running, then
@@ -575,8 +588,16 @@ the promoted scratch cluster pushes nothing into the live repository (checked: n
 timeline-2 file in `archive/vaultaire/18-1` after the drill) — and checks: the first
 row present, the second absent, `object_head_cache` equal to the count at T (± 25).
 It stops and deletes the scratch cluster, pass or fail (`PITR_DRILL_KEEP=1` keeps a
-failed one). It refuses a scratch directory that exists, is the live one, or contains
-it. **2026-10-24 22:33:44 UTC: `PITR DRILL PASS target=2026-10-24 22:33:46.946318+00
+failed one) — and when cut by SIGINT/SIGTERM (an interrupted drill used to leave the
+postmaster on 5499 and its directory, and the next drill refused). The scratch overrides
+(`shared_buffers 256MB`, `max_wal_size 1GB`, `archive_mode off`, …) are APPENDED to the
+restored `postgresql.auto.conf` — prod's tuning rides in with the backup and auto.conf is
+read after `postgresql.conf`, so the scratch cluster used to start prod-sized (RP58-6);
+the safety settings also ride `pg_ctl -o`, which outranks every file. It refuses a
+scratch directory that exists, is the live one, or contains it. Every run writes
+`/var/lib/vaultaire-pitr/vaultaire_pitr_drill.prom` (`…_drill_success`,
+`…_drill_last_success_timestamp_seconds` kept across a FAIL, `…_drill_rto_seconds`).
+**2026-10-24 22:33:44 UTC: `PITR DRILL PASS target=2026-10-24 22:33:46.946318+00
 restore_s=6.910 accept_s=10.225 rto_s=12.842 ohc_restored=507 ohc_live_at_t=507`.**
 
 ### Restoring the database (the real thing)
@@ -625,8 +646,15 @@ The order matters: what writes by itself between the disaster and the restore?
    new timeline, archived into the same repository. Keep `main.broken-*` until the
    owner says otherwise.
 
-**The box lost too:** a new box with PostgreSQL 18, then `pg-pitr-install.sh` (the
-passphrase from the Keychain, the R2 key from the Cloudflare dashboard), steps 3–7.
+**The box lost too:** a new box with PostgreSQL 18, then
+`pg-pitr-install.sh --restore-box <cipher-file>` (the passphrase from the Keychain, the
+R2 key from the Cloudflare dashboard in `configs/.env`): the package, the conf and the
+helpers only — it skips `stanza-create`, which would refuse the fresh cluster's system
+identifier and, under `set -e`, used to kill the installer mid-script during the
+disaster (RP58-7); no timer is enabled and nothing is ALTERed (the restore brings the
+archive settings back). Then steps 3–7, and once the restored cluster runs,
+`pg-pitr-install.sh <cipher-file>` again without the flag (stanza-create now matches,
+the timers come back on).
 
 ## Monitoring
 

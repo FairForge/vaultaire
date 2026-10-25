@@ -7,6 +7,13 @@
 #
 # Run as root on slc-vaultaire-01 from a checkout of this repository:
 #   sudo bash deploy/scripts/pg-pitr-install.sh <cipher-file>
+#   sudo bash deploy/scripts/pg-pitr-install.sh --restore-box <cipher-file>
+# --restore-box is the "box lost too" path (docs/DEPLOY.md § Restoring the database,
+# RP58-7): the package, the conf and the helpers only — no stanza-create (the fresh
+# cluster's system identifier is not the repository's and stanza-create refuses it),
+# no timers (a restore runs with them stopped), no ALTER SYSTEM (the restore brings
+# the archive settings back in postgresql.auto.conf). After the restore, run it again
+# without the flag.
 # <cipher-file> holds the repository passphrase (the owner's Keychain item
 # `vaultaire-pgbackrest-cipher`, sent to the box on stdin into a 0600 file); it is read,
 # then deleted. The passphrase is never an argument, never logged, never in the repo. A
@@ -22,9 +29,12 @@
 #                                            root-owned symlink in its textfile directory
 #   vaultaire-pitr-backup@.service + vaultaire-pitr-full.timer / -diff.timer
 #   vaultaire-pitr-metrics.service + .timer
+#   vaultaire-pitr-drill.service + .timer    the monthly drill (root; RP57-13), its own
+#                                            textfile vaultaire_pitr_drill.prom + symlink
+#   pgbackrest stanza-create                 idempotent; the timers are enabled AFTER it
 #   ALTER SYSTEM archive_mode / archive_command / archive_timeout (postgresql.auto.conf
-#                                            backed up first, only when one of them changes)
-#   pgbackrest stanza-create                 idempotent
+#                                            backed up first, only when one of them differs
+#                                            from pg_settings' RAW value — RP58-5)
 # What it does NOT do (the operator's steps, in order, in docs/DEPLOY.md): the PostgreSQL
 # restart that makes archive_mode take effect (at a quiet minute), check, the first full.
 #
@@ -45,6 +55,10 @@ PITR_FULL_CALENDAR='Sun *-*-* 01:30:00'
 PITR_DIFF_CALENDAR='Mon..Sat *-*-* 01:30:00'
 PITR_PG_ARCHIVE_TIMEOUT=60s
 # --- end facts ---
+
+# The drill: monthly, at a quiet minute clear of the 01:30 backups and the 03:00 dump
+# (it reads the repository only, but restores a whole cluster onto the NVMe).
+PITR_DRILL_CALENDAR='*-*-02 02:10:00'
 
 PITR_PG_PATH=/var/lib/postgresql/18/main
 PITR_PG_SOCKET=/var/run/postgresql
@@ -143,8 +157,17 @@ unit() {
   chmod 0644 "$UNIT_DIR/$1"
 }
 
+# archive_timeout_seconds — PITR_PG_ARCHIVE_TIMEOUT as the integer pg_settings.setting
+# reports (seconds). The fact is written as <n>s; anything else is a script error.
+archive_timeout_seconds() {
+  [[ "$PITR_PG_ARCHIVE_TIMEOUT" =~ ^([0-9]+)s$ ]] || die "PITR_PG_ARCHIVE_TIMEOUT must be <n>s (is $PITR_PG_ARCHIVE_TIMEOUT)"
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
 main() {
-  [ $# -eq 1 ] || die "usage: $0 <cipher-file>"
+  local restore_box=0
+  if [ "${1:-}" = --restore-box ]; then restore_box=1; shift; fi
+  [ $# -eq 1 ] || die "usage: $0 [--restore-box] <cipher-file>"
   local cipher_file=$1 installed
   [ -r "$cipher_file" ] || die "cannot read the cipher file $cipher_file"
   IFS= read -r CIPHER < "$cipher_file" || true
@@ -167,6 +190,10 @@ main() {
 
   command -v pgbackrest >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q pgbackrest
   echo "pg-pitr-install: $(pgbackrest version)"
+  # pg-pitr-metrics.sh reads `pgbackrest info` with jq: a box without it writes every
+  # backup series as 0 and PGPITRBackupStale pages for the wrong reason (RP58-9 b).
+  command -v jq >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q jq
+  command -v jq >/dev/null || die "jq is required by pg-pitr-metrics.sh and could not be installed"
 
   mkdir -p "$CONF_DIR" "$UNIT_DIR" "$LIB_DIR" "$METRICS_DIR" "$TEXTFILE_DIR" "$SPOOL_DIR" "$LOG_DIR"
   local tmp
@@ -192,6 +219,9 @@ main() {
   # root-owned symlink in its one textfile directory (the backup-metrics layout).
   chmod 0755 "$METRICS_DIR"; chown "$PG_USER:$PG_USER" "$METRICS_DIR"
   ln -sfn /var/lib/vaultaire-pitr/vaultaire_pitr.prom "$TEXTFILE_DIR/vaultaire_pitr.prom"
+  # The drill's own file (written as root on every run, PASS or FAIL): the metrics
+  # writer never touches it, node_exporter reads it through its own symlink.
+  ln -sfn /var/lib/vaultaire-pitr/vaultaire_pitr_drill.prom "$TEXTFILE_DIR/vaultaire_pitr_drill.prom"
 
   unit vaultaire-pitr-backup@.service <<EOF
 [Unit]
@@ -253,15 +283,55 @@ AccuracySec=5s
 WantedBy=timers.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable --now vaultaire-pitr-metrics.timer vaultaire-pitr-full.timer vaultaire-pitr-diff.timer
+  # The drill (RP57-13): root — it needs runuser and deletes the scratch cluster — at
+  # idle priority, monthly; its result is the textfile the rules watch
+  # (PGPITRDrillStale, PGPITRDrillFailed).
+  unit vaultaire-pitr-drill.service <<EOF
+[Unit]
+Description=Point-in-time recovery drill: a restore to T into a scratch cluster (pg-pitr-drill.sh)
+After=postgresql.service
 
-  # The stanza (idempotent), then the archive settings. archive_timeout makes a segment
-  # switch every minute the cluster writes: the RPO the produce page states.
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh
+Environment=PITR_METRICS_DIR=/var/lib/vaultaire-pitr
+Nice=10
+IOSchedulingClass=idle
+EOF
+  unit vaultaire-pitr-drill.timer <<EOF
+[Unit]
+Description=Monthly point-in-time recovery drill
+
+[Timer]
+OnCalendar=$PITR_DRILL_CALENDAR
+Persistent=true
+Unit=vaultaire-pitr-drill.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+
+  if [ "$restore_box" = 1 ]; then
+    echo "pg-pitr-install: --restore-box: conf, helpers and units installed; stanza-create, the timers and the archive settings skipped — continue with docs/DEPLOY.md § Restoring the database step 3, then run this script again without --restore-box"
+    return 0
+  fi
+
+  # The stanza (idempotent) BEFORE the timers are enabled (RP58-9 c: an install that
+  # straddled 01:30 fired a backup against a missing stanza), then the archive settings.
+  # archive_timeout makes a segment switch every minute the cluster writes: the RPO the
+  # produce page states.
   runuser -u "$PG_USER" -- pgbackrest --stanza="$PITR_STANZA" stanza-create
+  systemctl enable --now vaultaire-pitr-metrics.timer vaultaire-pitr-full.timer vaultaire-pitr-diff.timer vaultaire-pitr-drill.timer
+
+  # The guard compares pg_settings' RAW values: current_setting() pretty-prints
+  # archive_timeout 60s as "1min", so a guard on it never matched and every re-run
+  # re-ran the ALTER SYSTEMs and left a new auto.conf backup (RP58-5).
   local want current auto
-  want="on|pgbackrest --stanza=$PITR_STANZA archive-push %p|$PITR_PG_ARCHIVE_TIMEOUT"
-  current=$(pg_sql "SELECT current_setting('archive_mode') || '|' || current_setting('archive_command') || '|' || current_setting('archive_timeout')")
+  want="archive_command=pgbackrest --stanza=$PITR_STANZA archive-push %p|archive_mode=on|archive_timeout=$(archive_timeout_seconds)"
+  current=$(pg_sql "SELECT string_agg(name || '=' || setting, '|' ORDER BY name) FROM pg_settings WHERE name IN ('archive_mode', 'archive_command', 'archive_timeout')")
   if [ "$current" != "$want" ]; then
     auto=$PREFIX$PITR_PG_PATH/postgresql.auto.conf
     [ ! -e "$auto" ] || cp -p "$auto" "$auto.bak-pitr-$(date -u +%Y%m%dT%H%M%S)"
@@ -273,7 +343,7 @@ EOF
   if [ "$(pg_sql "SELECT count(*) FROM pg_settings WHERE pending_restart")" != 0 ]; then
     echo "pg-pitr-install: PostgreSQL must be restarted for archive_mode (pending_restart) — at a quiet minute, docs/DEPLOY.md § Point-in-time recovery"
   fi
-  echo "pg-pitr-install: installed $CONF, units, helpers, the stanza and the archive settings; next: docs/DEPLOY.md § Point-in-time recovery (restart, check, first full)"
+  echo "pg-pitr-install: installed $CONF, units (backups, metrics, the monthly drill), helpers, the stanza and the archive settings; next: docs/DEPLOY.md § Point-in-time recovery (restart, check, first full)"
 }
 
 # Sourced by pg-pitr_test.sh for its functions; run as a script it installs.

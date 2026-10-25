@@ -184,3 +184,72 @@ tests:
             exp_annotations:
               summary: "The PITR metrics have not been written in > 10 min"
               description: "vaultaire-pitr-metrics.timer (pg-pitr-metrics.sh as postgres, every minute) has stopped writing /var/lib/vaultaire-pitr/vaultaire_pitr.prom, or node_exporter no longer reads it through /var/lib/prometheus/node-exporter/vaultaire_pitr.prom: every other PITR alert reads stale values. `systemctl status vaultaire-pitr-metrics.timer vaultaire-pitr-metrics.service`."
+
+  # The drill's series (Stage 1a Prompt 41 item 4): a PASS 10 days ago with success 1 fires
+  # nothing; a FAIL (success 0, the last PASS kept) fires PGPITRDrillFailed after 10 min; a
+  # PASS 36 days ago fires PGPITRDrillStale after its hour; no series at all fires it too.
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_pg_pitr_drill_last_success_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '1728000x730'
+      - series: 'vaultaire_pg_pitr_drill_success{instance="localhost:9100",job="node"}'
+        values: '1x730'
+    alert_rule_test:
+      - eval_time: 720h
+        alertname: PGPITRDrillStale
+        exp_alerts: []
+      - eval_time: 720h
+        alertname: PGPITRDrillFailed
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pg_pitr_drill_last_success_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x60'
+      - series: 'vaultaire_pg_pitr_drill_success{instance="localhost:9100",job="node"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PGPITRDrillFailed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PGPITRDrillFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "The last point-in-time recovery drill failed"
+              description: "The newest run of pg-pitr-drill.sh ended FAIL or was cut (vaultaire_pg_pitr_drill_success 0): the restore to T, the canary rows or the object_head_cache count did not check out, or the scratch cluster did not come up. `journalctl -u vaultaire-pitr-drill -n 60` has the reason and the scratch cluster's last log lines; a backup nobody can restore is not a backup — treat as the archive being broken until a run passes."
+  - interval: 1h
+    input_series:
+      # A PASS at t=0 stays fresh for 35 days, stale after: the hour of `for` past 35 d.
+      - series: 'vaultaire_pg_pitr_drill_last_success_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x900'
+    alert_rule_test:
+      - eval_time: 840h
+        alertname: PGPITRDrillStale
+        exp_alerts: []
+      - eval_time: 842h
+        alertname: PGPITRDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "No passing point-in-time recovery drill in 35 days"
+              description: "pg-pitr-drill.sh has not PASSED in 35 days (the timer runs it on the 2nd of each month at 02:10 UTC), or its textfile is missing (a box the installer has not run on, or the symlink gone). `systemctl list-timers vaultaire-pitr-drill.timer`, `journalctl -u vaultaire-pitr-drill`, then `sudo /usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh` by hand: the last line says PASS or why not."
+  - interval: 1h
+    input_series:
+      - series: 'vaultaire_pg_pitr_metrics_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+3600x10'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: PGPITRDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "No passing point-in-time recovery drill in 35 days"
+              description: "pg-pitr-drill.sh has not PASSED in 35 days (the timer runs it on the 2nd of each month at 02:10 UTC), or its textfile is missing (a box the installer has not run on, or the symlink gone). `systemctl list-timers vaultaire-pitr-drill.timer`, `journalctl -u vaultaire-pitr-drill`, then `sudo /usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh` by hand: the last line says PASS or why not."
