@@ -66,13 +66,26 @@ fake systemctl 'exit 0'
 fake apt-get 'exit 0'
 fake runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 fake pgbackrest 'case "$*" in version) echo "pgBackRest 2.58.0" ;; esac'
-# psql: the live settings are TMP/settings until an ALTER SYSTEM; pending_restart after one.
-fake psql 'sql=${*: -1}; case "$sql" in
-  *current_setting*) cat "'"$TMP"'/settings" ;;
-  *"ALTER SYSTEM SET archive_mode"*) echo "on|pgbackrest --stanza=vaultaire archive-push %p|60s" > "'"$TMP"'/settings"; touch "'"$TMP"'/pending" ;;
-  *pending_restart*) [ -e "'"$TMP"'/pending" ] && echo 1 || echo 0 ;;
+# psql: the live settings are TMP/settings (mode|command|timeout SECONDS, the raw
+# pg_settings.setting values) until an ALTER SYSTEM; pending_restart after one. A FAITHFUL
+# fake (RP58-5): current_setting() pretty-prints — archive_timeout 60 is "1min" — so a guard
+# comparing current_setting('archive_timeout') to "60s" never matches on a real cluster;
+# the installer must ask pg_settings for the raw values.
+cat > "$BIN/psql" <<EOF
+#!/bin/bash
+echo "psql \$*" >> "$LOG"
+sql=\${*: -1}
+IFS='|' read -r mode cmd secs < "$TMP/settings"
+pretty=\$secs; [ "\$secs" = 60 ] && pretty=1min; [ "\$secs" = 0 ] && pretty=0
+case "\$sql" in
+  *"current_setting('archive_mode')"*) echo "\$mode|\$cmd|\$pretty" ;;
+  *"FROM pg_settings WHERE name IN"*) echo "archive_command=\$cmd|archive_mode=\$mode|archive_timeout=\$secs" ;;
+  *"ALTER SYSTEM SET archive_mode"*) echo "on|pgbackrest --stanza=vaultaire archive-push %p|60" > "$TMP/settings"; touch "$TMP/pending" ;;
+  *pending_restart*) [ -e "$TMP/pending" ] && echo 1 || echo 0 ;;
   *) : ;;
-esac'
+esac
+EOF
+chmod +x "$BIN/psql"
 echo "off|(disabled)|0" > "$TMP/settings"
 AUTO=$PREFIX/var/lib/postgresql/18/main/postgresql.auto.conf
 mkdir -p "$(dirname "$AUTO")"; echo "shared_buffers = '2GB'" > "$AUTO"
@@ -103,12 +116,23 @@ check "3a: diff timer Monday..Saturday 01:30" grep -qx 'OnCalendar=Mon..Sat \*-\
 check "3a: the backup service runs pgbackrest as postgres with the timer's type" grep -qx 'ExecStart=/usr/bin/pgbackrest --stanza=vaultaire --type=%i backup' "$UNITS/vaultaire-pitr-backup@.service"
 check "3a: ... as postgres" grep -qx 'User=postgres' "$UNITS/vaultaire-pitr-backup@.service"
 check "3a: the metrics service runs the installed copy" grep -qx 'ExecStart=/usr/local/lib/vaultaire-pitr/pg-pitr-metrics.sh' "$UNITS/vaultaire-pitr-metrics.service"
+# The monthly drill (Prompt 41 item 4, RP57-13): root, idle priority, a quiet minute clear
+# of 01:30 and 03:00, its metrics directory named, its own textfile symlinked.
+check "3a: the drill service runs the installed drill as root" grep -qx 'ExecStart=/usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh' "$UNITS/vaultaire-pitr-drill.service"
+check "3a: ... as root" grep -qx 'User=root' "$UNITS/vaultaire-pitr-drill.service"
+check "3a: ... at idle priority" bash -c "grep -qx 'Nice=10' '$UNITS/vaultaire-pitr-drill.service' && grep -qx 'IOSchedulingClass=idle' '$UNITS/vaultaire-pitr-drill.service'"
+check "3a: ... writing /var/lib/vaultaire-pitr" grep -qx 'Environment=PITR_METRICS_DIR=/var/lib/vaultaire-pitr' "$UNITS/vaultaire-pitr-drill.service"
+check "3a: the drill timer is monthly, the 2nd at 02:10 (not 01:30, not 03:00)" grep -qx 'OnCalendar=\*-\*-02 02:10:00' "$UNITS/vaultaire-pitr-drill.timer"
+check "3a: ... persistent, naming the service" bash -c "grep -qx 'Persistent=true' '$UNITS/vaultaire-pitr-drill.timer' && grep -qx 'Unit=vaultaire-pitr-drill.service' '$UNITS/vaultaire-pitr-drill.timer'"
+check "3a: the drill's textfile has its own symlink" [ "$(readlink "$PREFIX/var/lib/prometheus/node-exporter/vaultaire_pitr_drill.prom")" = /var/lib/vaultaire-pitr/vaultaire_pitr_drill.prom ]
+check "3a: jq is ensured (pg-pitr-metrics.sh needs it)" grep -q 'command -v jq >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q jq' "$INSTALL"
 for s in pg-pitr-metrics.sh pg-pitr-drill.sh; do
   check "3a: $s installed 0755, the repo's bytes" cmp -s "$HERE/$s" "$PREFIX/usr/local/lib/vaultaire-pitr/$s"
 done
 check "3a: textfile symlink to the metrics file" [ "$(readlink "$PREFIX/var/lib/prometheus/node-exporter/vaultaire_pitr.prom")" = /var/lib/vaultaire-pitr/vaultaire_pitr.prom ]
 check "3a: daemon-reload" grep -qx 'systemctl daemon-reload' "$LOG"
-check "3a: the three timers enabled" grep -qx 'systemctl enable --now vaultaire-pitr-metrics.timer vaultaire-pitr-full.timer vaultaire-pitr-diff.timer' "$LOG"
+check "3a: the four timers enabled" grep -qx 'systemctl enable --now vaultaire-pitr-metrics.timer vaultaire-pitr-full.timer vaultaire-pitr-diff.timer vaultaire-pitr-drill.timer' "$LOG"
+check "3a: the timers are enabled AFTER stanza-create (RP58-9 c)" [ "$(grep -n -e 'stanza-create' -e 'systemctl enable' "$LOG" | head -1 | grep -c stanza-create)" = 1 ]
 check "3a: stanza-create as postgres" grep -qx 'runuser -u postgres -- pgbackrest --stanza=vaultaire stanza-create' "$LOG"
 check "3a: archive_mode on" grep -q "^psql .*ALTER SYSTEM SET archive_mode = 'on'" "$LOG"
 check "3a: archive_command pushes to the stanza" grep -qF "ALTER SYSTEM SET archive_command = 'pgbackrest --stanza=vaultaire archive-push %p'" "$LOG"
@@ -124,7 +148,8 @@ check "3a: the stanza exists before archiving is switched on" [ "$(grep -n -e 's
 : > "$LOG"
 if install_run "$CIPHER_VAL" >/dev/null 2>&1; then pass "3b: re-run with the same cipher"; else fail "3b: re-run failed"; fi
 check "3b: no .bak when nothing changed" [ -z "$(find "$PREFIX/etc/pgbackrest" -name '*.bak-*')" ]
-check "3b: no ALTER SYSTEM when the settings are already set" [ -z "$(grep 'ALTER SYSTEM' "$LOG")" ]
+check "3b: no ALTER SYSTEM when the settings are already set (the faithful fake: current_setting says 1min)" [ -z "$(grep 'ALTER SYSTEM' "$LOG")" ]
+check "3b: the guard asked pg_settings for the raw values" grep -q "FROM pg_settings WHERE name IN ('archive_mode', 'archive_command', 'archive_timeout')" "$LOG"
 check "3b: one auto.conf backup only" [ "$(find "$(dirname "$AUTO")" -name 'postgresql.auto.conf.bak-pitr-*' | wc -l)" = 1 ]
 
 # 3c. another cipher is refused, the conf untouched.
@@ -153,6 +178,19 @@ sleep 1; install_run "$CIPHER_VAL" >/dev/null 2>&1
 check "3f: the new key is installed" grep -qx 'repo1-s3-key=ak-2' "$CONF"
 baks=("$PREFIX"/etc/pgbackrest/pgbackrest.conf.bak-*)
 check "3f: the old conf is kept beside it" grep -qx 'repo1-s3-key=ak-1' "${baks[0]}"
+
+# 3g. --restore-box (RP58-7, the "box lost too" path): the conf, helpers and units, and
+#     NOTHING that needs the repository's cluster — no stanza-create (the fresh cluster's
+#     identifier is refused), no timers, no ALTER SYSTEM; exit 0 with the next step named.
+rm -rf "$PREFIX"; : > "$LOG"
+printf '%s\n' "$CIPHER_VAL" > "$TMP/cipher"; chmod 0600 "$TMP/cipher"
+if out=$(PATH="$BIN:$PATH" PITR_PREFIX=$PREFIX PITR_ENV_FILE=$TMP/prod.env bash "$INSTALL" --restore-box "$TMP/cipher" 2>&1); then pass "3g: --restore-box runs"; else fail "3g: --restore-box failed: $out"; fi
+check "3g: the conf is installed" grep -qx 'repo1-s3-key=ak-2' "$CONF"
+check "3g: the units are installed" [ -e "$UNITS/vaultaire-pitr-backup@.service" ]
+check "3g: no stanza-create" [ -z "$(grep 'stanza-create' "$LOG")" ]
+check "3g: no timer enabled" [ -z "$(grep 'systemctl enable' "$LOG")" ]
+check "3g: no ALTER SYSTEM, no psql at all" [ -z "$(grep -e 'ALTER SYSTEM' -e '^psql' "$LOG")" ]
+check "3g: the next step is named" grep -q 'continue with docs/DEPLOY.md § Restoring the database step 3' <<< "$out"
 
 # --- 4. pg-pitr-metrics.sh -------------------------------------------------------------
 MDIR=$TMP/metrics; mkdir -p "$MDIR"
@@ -264,16 +302,24 @@ case "\$*" in
     [ -e "$TMP/restore-fails" ] && { echo "ERROR: restore failed" >&2; exit 1; }
     d=\$(printf '%s\n' "\$@" | sed -n 's/^--pg1-path=//p')
     [ -d "\$d" ] && [ -z "\$(ls -A "\$d")" ] || { echo "ERROR: not an empty dir: \$d" >&2; exit 1; }
-    echo 18 > "\$d/PG_VERSION"; echo "archive_mode = 'on'" > "\$d/postgresql.auto.conf" ;;
+    echo 18 > "\$d/PG_VERSION"
+    printf "%s\\n" "archive_mode = 'on'" "shared_buffers = '2GB'" "max_wal_size = '8GB'" "# Recovery settings generated by pgBackRest restore" "restore_command = 'pgbackrest --stanza=vaultaire archive-get %f \"%p\"'" "recovery_target_time = 'T'" > "\$d/postgresql.auto.conf" ;;
   *check*) [ -e "$TMP/check-fails" ] && exit 1; true ;;
 esac
 EOF
 chmod +x "$BIN/pgbackrest"
-fake pg_ctl 'for a; do case "$a" in start) touch "'"$DRILLD"'/postmaster.pid" ;; stop) rm -f "'"$DRILLD"'/postmaster.pid" ;; esac; done'
+fake pg_ctl 'for a; do case "$a" in start) touch "'"$DRILLD"'/postmaster.pid"; cp "'"$DRILLD"'/postgresql.auto.conf" "'"$TMP"'/started-auto.conf" ;; stop) rm -f "'"$DRILLD"'/postmaster.pid" ;; esac; done'
 fake pg_isready 'exit 0'
 
+DMETRICS=$TMP/drill-metrics; mkdir -p "$DMETRICS"
+DOUT=$DMETRICS/vaultaire_pitr_drill.prom
+dvalue() { sed -n "s/^$1 //p" "$DOUT"; }
+drill_env() { # drill_env [DRILL_DIR] — the drill's environment, for drill_run and the background run
+  echo "PATH=$BIN:$PATH PITR_PG_BIN=$BIN PITR_LIVE_DIR=$LIVE PITR_DRILL_DIR=${1:-$DRILLD} PITR_DRILL_GAP=0 PITR_PG_USER=postgres PITR_METRICS_DIR=$DMETRICS"
+}
 drill_run() {
-  PATH="$BIN:$PATH" PITR_PG_BIN=$BIN PITR_LIVE_DIR=$LIVE PITR_DRILL_DIR=${1:-$DRILLD} PITR_DRILL_GAP=0 PITR_PG_USER=postgres bash "$DRILL"
+  # shellcheck disable=SC2046 # the env words carry no spaces
+  env $(drill_env "${1:-}") bash "$DRILL"
 }
 reset_drill() { : > "$LOG"; rm -rf "$DRILLD" "$TMP/restore-fails" "$TMP/check-fails"; echo "1|0" > "$TMP/drill-canary"; echo 5421 > "$TMP/drill-ohc"; }
 
@@ -296,6 +342,23 @@ check "5a: the scratch directory is deleted" [ ! -e "$DRILLD" ]
 check "5a: the live directory is untouched" [ "$(cat "$LIVE/PG_VERSION")" = live ]
 check "5a: two canary rows written to the live cluster, before and after T" [ "$(grep -c "^psql .*INSERT INTO canary" "$LOG")" = 2 ]
 check "5a: T read between them" [ "$(grep -E '^psql .*(INSERT INTO canary|to_char\(clock_timestamp)' "$LOG" | sed -E 's/.*(before|clock_timestamp|after).*/\1/' | tr '\n' ' ')" = "before clock_timestamp after " ]
+# RP58-6: the restored auto.conf (prod's tuning + pgbackrest's recovery lines) is kept and
+# the scratch overrides are appended, so the effective value (the LAST assignment) is the
+# drill's, and nothing pgbackrest wrote is lost.
+check "5a: the restored auto.conf keeps pgbackrest's recovery lines" grep -q '^restore_command = ' "$TMP/started-auto.conf"
+check "5a: ... and prod's tuning line is still there (appended to, never truncated)" grep -q "^shared_buffers = '2GB'" "$TMP/started-auto.conf"
+check "5a: the effective shared_buffers is the drill's (last assignment)" [ "$(grep '^shared_buffers' "$TMP/started-auto.conf" | tail -1)" = "shared_buffers = 256MB" ]
+check "5a: the effective max_wal_size is the drill's" [ "$(grep '^max_wal_size' "$TMP/started-auto.conf" | tail -1)" = "max_wal_size = 1GB" ]
+check "5a: archive_mode off wins in auto.conf too" [ "$(grep '^archive_mode' "$TMP/started-auto.conf" | tail -1)" = "archive_mode = off" ]
+# Item 4: the drill's own textfile, a PASS.
+check "5a: the metrics file is written, 0644" [ "$(stat -c%a "$DOUT" 2>/dev/null)" = 644 ]
+check "5a: success 1" [ "$(dvalue vaultaire_pg_pitr_drill_success)" = 1 ]
+check "5a: last success is now" [ $(( $(date +%s) - $(dvalue vaultaire_pg_pitr_drill_last_success_timestamp_seconds) )) -lt 5 ]
+check "5a: last run is now" [ $(( $(date +%s) - $(dvalue vaultaire_pg_pitr_drill_last_run_timestamp_seconds) )) -lt 5 ]
+check "5a: the RTO is recorded (s.mmm)" bash -c '[[ "$1" =~ ^[0-9]+\.[0-9]{3}$ ]]' _ "$(dvalue vaultaire_pg_pitr_drill_rto_seconds)"
+check "5a: every drill series has a TYPE line" [ "$(grep -c '^# TYPE vaultaire_pg_pitr_drill_' "$DOUT")" = 4 ]
+check "5a: no temp file left in the metrics directory" [ -z "$(find "$DMETRICS" -name '.*' -type f)" ]
+PASS_TS=$(dvalue vaultaire_pg_pitr_drill_last_success_timestamp_seconds); PASS_RTO=$(dvalue vaultaire_pg_pitr_drill_rto_seconds)
 
 # 5b. the row written after T is in the restore: FAIL, and the cluster is still stopped
 #     and deleted.
@@ -304,6 +367,9 @@ if out=$(drill_run 2>&1); then fail "5b: a restore past T must fail the drill"; 
 check "5b: says why" grep -q 'PITR DRILL FAIL: the row written after T is present' <<< "$out"
 check "5b: stopped" grep -q '^pg_ctl .* stop' "$LOG"
 check "5b: deleted" [ ! -e "$DRILLD" ]
+check "5b: the metrics say FAIL" [ "$(dvalue vaultaire_pg_pitr_drill_success)" = 0 ]
+check "5b: ... and keep the previous PASS's time and RTO" [ "$(dvalue vaultaire_pg_pitr_drill_last_success_timestamp_seconds)/$(dvalue vaultaire_pg_pitr_drill_rto_seconds)" = "$PASS_TS/$PASS_RTO" ]
+check "5b: last run moved" [ $(( $(date +%s) - $(dvalue vaultaire_pg_pitr_drill_last_run_timestamp_seconds) )) -lt 5 ]
 
 # 5c. the row written before T is missing: FAIL.
 reset_drill; echo "0|0" > "$TMP/drill-canary"
@@ -337,5 +403,30 @@ mkdir -p "$DRILLD"; echo keep > "$DRILLD/keep"
 if out=$(drill_run 2>&1); then fail "5g: an existing directory must be refused"; else pass "5g: refuses an existing directory"; fi
 check "5g: ... and leaves it alone" [ "$(cat "$DRILLD/keep" 2>/dev/null)" = keep ]
 check "5g: the live directory is untouched" [ "$(cat "$LIVE/PG_VERSION")" = live ]
+
+# 5h. a drill cut by SIGTERM mid-wait (RP58-9 a) stops and deletes the scratch cluster
+#     like a failed one, writes FAIL to its metrics and dies of the signal. The fake
+#     pg_isready answers "not yet" while TMP/hold exists, so the drill is in its wait loop.
+reset_drill; rm -rf "$DRILLD"; touch "$TMP/hold"
+fake pg_isready '[ -e "'"$TMP"'/hold" ] && { sleep 0.2; exit 1; }; exit 0'
+# The drill itself in the background (env … bash, no subshell in between: the signal
+# must reach the drill's own bash).
+# shellcheck disable=SC2046
+env $(drill_env) bash "$DRILL" > "$TMP/5h.out" 2>&1 &
+dpid=$!
+for _ in $(seq 1 100); do grep -q '^pg_ctl .* start' "$LOG" 2>/dev/null && break; sleep 0.1; done
+check "5h: the scratch cluster was started (the drill is waiting for it)" grep -q '^pg_ctl .* start' "$LOG"
+kill -TERM "$dpid" || true
+for _ in $(seq 1 100); do kill -0 "$dpid" 2>/dev/null || break; sleep 0.1; done
+if kill -0 "$dpid" 2>/dev/null; then fail "5h: the drill did not die of SIGTERM within 10 s"; kill -KILL "$dpid" || true; fi
+rc=0; wait "$dpid" || rc=$?   # set -e: a non-zero wait must not end the test
+rm -f "$TMP/hold"
+check "5h: the drill died of SIGTERM (143)" [ "$rc" = 143 ]
+check "5h: says it was cut" grep -q 'PITR DRILL FAIL: cut by SIGTERM' "$TMP/5h.out"
+check "5h: the scratch cluster was stopped" grep -q '^pg_ctl .* stop' "$LOG"
+check "5h: ... and deleted" [ ! -e "$DRILLD" ]
+check "5h: the metrics say FAIL" [ "$(dvalue vaultaire_pg_pitr_drill_success)" = 0 ]
+check "5h: the live directory is untouched" [ "$(cat "$LIVE/PG_VERSION")" = live ]
+fake pg_isready 'exit 0'
 
 exit $FAILED

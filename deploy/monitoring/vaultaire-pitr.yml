@@ -74,3 +74,30 @@ groups:
         annotations:
           summary: "The PITR metrics have not been written in > 10 min"
           description: "vaultaire-pitr-metrics.timer (pg-pitr-metrics.sh as postgres, every minute) has stopped writing /var/lib/vaultaire-pitr/vaultaire_pitr.prom, or node_exporter no longer reads it through /var/lib/prometheus/node-exporter/vaultaire_pitr.prom: every other PITR alert reads stale values. `systemctl status vaultaire-pitr-metrics.timer vaultaire-pitr-metrics.service`."
+
+      # The drill (Stage 1a Prompt 41 item 4, RP57-13): vaultaire-pitr-drill.timer runs
+      # pg-pitr-drill.sh monthly (the 2nd, 02:10 UTC, as root) and the drill writes its own
+      # textfile /var/lib/vaultaire-pitr/vaultaire_pitr_drill.prom on every run, PASS, FAIL or
+      # cut (read through the symlink vaultaire_pitr_drill.prom):
+      #   vaultaire_pg_pitr_drill_last_success_timestamp_seconds  the newest PASS (0 = never)
+      #   vaultaire_pg_pitr_drill_success                         1 = the last run passed
+      #   vaultaire_pg_pitr_drill_last_run_timestamp_seconds, vaultaire_pg_pitr_drill_rto_seconds
+      # A backup nobody has restored is a hope: a month without a passing drill, or a drill
+      # that failed, is a warning — a restore that does not work is found before it is needed.
+      - alert: PGPITRDrillStale
+        expr: (time() - vaultaire_pg_pitr_drill_last_success_timestamp_seconds) > 35 * 86400 or absent(vaultaire_pg_pitr_drill_last_success_timestamp_seconds)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No passing point-in-time recovery drill in 35 days"
+          description: "pg-pitr-drill.sh has not PASSED in 35 days (the timer runs it on the 2nd of each month at 02:10 UTC), or its textfile is missing (a box the installer has not run on, or the symlink gone). `systemctl list-timers vaultaire-pitr-drill.timer`, `journalctl -u vaultaire-pitr-drill`, then `sudo /usr/local/lib/vaultaire-pitr/pg-pitr-drill.sh` by hand: the last line says PASS or why not."
+
+      - alert: PGPITRDrillFailed
+        expr: vaultaire_pg_pitr_drill_success == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last point-in-time recovery drill failed"
+          description: "The newest run of pg-pitr-drill.sh ended FAIL or was cut (vaultaire_pg_pitr_drill_success 0): the restore to T, the canary rows or the object_head_cache count did not check out, or the scratch cluster did not come up. `journalctl -u vaultaire-pitr-drill -n 60` has the reason and the scratch cluster's last log lines; a backup nobody can restore is not a backup — treat as the archive being broken until a run passes."
