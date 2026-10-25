@@ -9,6 +9,15 @@
 # stays the copy the run stands or falls by; Blomp has its own timestamp and alert.
 # Every file is private (umask 077).
 #
+# The dump is ENCRYPTED BEFORE IT EXISTS ON DISK (WP-P42, plan 43.7): `pg_dump | gzip |
+# age -R $BACKUP_AGE_RECIPIENTS` → vaultaire_<ts>.sql.gz.age, its size and DDL asserts
+# counted on the stream — no plaintext byte of it is written. The recipients file holds the
+# owner's OFFLINE public keys only (one `age1…` per line, comments allowed); the identities
+# are never on the box, so a restore happens wherever one is (docs/DEPLOY.md § Backups).
+# No file = the plaintext .sql.gz of before, a WARNING line and the gauge at 0 (alert
+# BackupDumpPlaintext); a file that cannot be used = BACKUP FAILED stage=encrypt, never a
+# silent plaintext.
+#
 # Order matters: the dump is the prod database's only off-box copy, so it is uploaded
 # and size-verified right after its own asserts. The tars come after — from 2026-10-05
 # to -07 a root-only file in configs/ made `tar` fail and that aborted the upload of a
@@ -26,6 +35,9 @@
 #                                                           retention pass could not delete
 #                                                           (a gauge, written by every pass
 #                                                           that listed the leg; RP54-6)
+#   vaultaire_backup_dump_encrypted                         1 = the last dump that passed its
+#                                                           asserts was written with age, 0 =
+#                                                           in plaintext (no recipients file)
 #   vaultaire_backup_offbox{,2}_retention_last_run_timestamp_seconds
 #                                                           the pass that wrote that gauge: a
 #                                                           listing that fails writes neither, so
@@ -34,7 +46,8 @@
 # Rules: deploy/monitoring/vaultaire-backup.yml (BackupStale / BackupOffboxStale /
 # BackupRunIncomplete, > 26 h or absent; BackupSecondOffboxStale for the Blomp leg;
 # BackupOffboxRetentionStuck when either leg keeps a file past its 30 days;
-# BackupOffboxRetentionNotRunning when either leg's retention has not listed it in 26 h).
+# BackupOffboxRetentionNotRunning when either leg's retention has not listed it in 26 h;
+# BackupDumpPlaintext while the dumps are written without age).
 #
 # Every failure is ONE log line `BACKUP FAILED - stage=<stage>: <what>` — the explicit
 # fail() calls, and (ERR trap, set in main) any command in main that set -e would otherwise
@@ -65,6 +78,9 @@ OFFBOX2_ENV=$ROOT/configs/blomp-backup.env
 OFFBOX2_REMOTE=blompcrypt:
 OFFBOX2_DIR="${OFFBOX2_REMOTE}$(date -u +%Y/%m)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+# The owner's offline age recipients (public keys only, root 0644; WP-P42). Absent = plaintext.
+BACKUP_AGE_RECIPIENTS=$ROOT/configs/backup-age-recipients.txt
+AGE=${PG_BACKUP_AGE_BIN:-age}
 
 STAGE=start
 
@@ -184,6 +200,46 @@ offbox2_retention() {
   [ "$undeleted" = 0 ] || { offbox2_failed "$undeleted old file(s) could not be deleted"; return 1; }
 }
 
+# age_recipients_usable — 0 when BACKUP_AGE_RECIPIENTS can seal a dump: readable, at least
+# one recipient, every other line a comment or blank, every recipient an `age1…` public key
+# (an AGE-SECRET-KEY line means an identity is on the box: refused, never echoed), the age
+# binary present, and age itself accepts the file (a dry run over nothing). Sets
+# AGE_RECIPIENT_COUNT, or AGE_REFUSAL (why not) and returns 1.
+age_recipients_usable() {
+  local line n=0
+  AGE_REFUSAL=
+  [ -r "$BACKUP_AGE_RECIPIENTS" ] || { AGE_REFUSAL="$BACKUP_AGE_RECIPIENTS is not readable"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    case "$line" in
+      ''|'#'*) continue ;;
+      AGE-SECRET-KEY-*) AGE_REFUSAL="$BACKUP_AGE_RECIPIENTS holds an IDENTITY (a secret key): identities never live on the box — remove it and rotate it"; return 1 ;;
+      AGE-PLUGIN-*) AGE_REFUSAL="$BACKUP_AGE_RECIPIENTS holds a plugin identity line: this is an identities file, not a recipients file (put the age1… recipient there)"; return 1 ;;
+    esac
+    [[ "$line" =~ ^age1[0-9a-z]+$ ]] || { AGE_REFUSAL="$BACKUP_AGE_RECIPIENTS has a line that is not an age1 public key"; return 1; }
+    n=$((n + 1))
+  done < "$BACKUP_AGE_RECIPIENTS"
+  [ "$n" -gt 0 ] || { AGE_REFUSAL="$BACKUP_AGE_RECIPIENTS names no recipient"; return 1; }
+  command -v "$AGE" >/dev/null 2>&1 || { AGE_REFUSAL="the age binary ($AGE) is not installed (deploy/scripts/age-install.sh)"; return 1; }
+  # age itself judges the file: a recipient kind it does not know (age1pq1… under age 1.2)
+  # or post-quantum and classic recipients mixed (age ≥ 1.3 refuses them) fail here.
+  "$AGE" -R "$BACKUP_AGE_RECIPIENTS" -o /dev/null < /dev/null 2>>"$LOG" || { AGE_REFUSAL="age refuses $BACKUP_AGE_RECIPIENTS"; return 1; }
+  AGE_RECIPIENT_COUNT=$n
+  AGE_VERSION=$("$AGE" --version 2>/dev/null) || AGE_VERSION=unknown
+}
+
+# count_ddl FILE / count_bytes FILE — pass the stream through unchanged and write, when it
+# ends, the number of CREATE TABLE lines / of bytes it carried to FILE: the dump's asserts
+# read the stream, so the encrypted dump never has to be decrypted (or exist in plaintext)
+# to be checked.
+count_ddl() { { tee /dev/fd/3 | { grep -c 'CREATE TABLE' || true; } > "$1"; } 3>&1; }
+count_bytes() { { tee /dev/fd/3 | wc -c > "$1"; } 3>&1; }
+
+# seal — the pipeline's last stage: age to the recipients, or a plain copy without them.
+seal() {
+  if [ "$ENCRYPTED" = 1 ]; then "$AGE" -R "$BACKUP_AGE_RECIPIENTS"; else cat; fi
+}
+
 main() {
   trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
 
@@ -195,22 +251,53 @@ main() {
   [ -n "$PGPASSWORD" ] || fail "DB_PASSWORD empty"
   export PGPASSWORD
 
-  # Database backup — -w: never prompt; fail instead.
+  # One run at a time (RP62-5): a second run's sweep of stale .dump-* directories would
+  # delete the first one's work directory mid-dump.
+  STAGE=lock
+  command -v flock >/dev/null 2>&1 || fail "flock is not installed"
+  exec 9>"$BACKUP_DIR/.lock" || fail "cannot open $BACKUP_DIR/.lock"
+  flock -n 9 || fail "another pg-backup.sh run holds $BACKUP_DIR/.lock"
+
+  # Encryption first: the recipients decide the dump's shape before any byte is read.
+  # A dangling symlink is a file that cannot be used, never "absent" (RP62-4).
+  STAGE=encrypt
+  ENCRYPTED=0
+  if [ -e "$BACKUP_AGE_RECIPIENTS" ] || [ -L "$BACKUP_AGE_RECIPIENTS" ]; then
+    age_recipients_usable || fail "$AGE_REFUSAL: no dump written (a plaintext fallback would hide it)"
+    ENCRYPTED=1
+  else
+    echo "$(date): WARNING - stage=encrypt: $BACKUP_AGE_RECIPIENTS not present: the dump is written in PLAINTEXT (plan 43.7; alert BackupDumpPlaintext)" >> "$LOG"
+  fi
+
+  # Database backup — -w: never prompt; fail instead. pipefail: any stage that fails fails
+  # the run; the file is written under a dot-name and renamed only after the asserts.
   STAGE=dump
   DUMP="vaultaire_$TIMESTAMP.sql.gz"
-  pg_dump -w -h 127.0.0.1 -U vaultaire -d vaultaire | gzip > "$BACKUP_DIR/$DUMP" || fail "pg_dump failed"
+  [ "$ENCRYPTED" = 0 ] || DUMP="$DUMP.age"
+  rm -rf "$BACKUP_DIR"/.dump-*   # a run killed mid-dump leaves its partial and counters
+  WORK=$(mktemp -d "$BACKUP_DIR/.dump-XXXXXX") || fail "cannot create a work directory in $BACKUP_DIR"
+  pg_dump -w -h 127.0.0.1 -U vaultaire -d vaultaire | count_ddl "$WORK/ddl" | gzip | count_bytes "$WORK/size" | seal > "$WORK/partial" || {
+    st=("${PIPESTATUS[@]}"); rm -rf "$WORK"
+    fail "pg_dump failed (pipeline exit statuses pg_dump|count|gzip|count|seal = ${st[*]})"
+  }
   unset PGPASSWORD
 
-  # Size assert: a failed dump gzips to ~20 bytes; a real one is >1KB.
-  SIZE=$(stat -c%s "$BACKUP_DIR/$DUMP")
-  [ "$SIZE" -gt 1024 ] || fail "dump too small ($SIZE bytes): $DUMP"
+  # Size assert (on the gzip stream, before age): a failed dump gzips to ~20 bytes; a real
+  # one is >1KB.
+  SIZE=$(tr -d ' ' < "$WORK/size")
+  [ "${SIZE:-0}" -gt 1024 ] || { rm -rf "$WORK"; fail "dump too small ($SIZE bytes): $DUMP"; }
 
-  # Content assert: the dump must contain real DDL.
-  DDL_COUNT=$(gzip -dc "$BACKUP_DIR/$DUMP" | grep -c 'CREATE TABLE') || true
-  [ "${DDL_COUNT:-0}" -gt 0 ] || fail "dump contains no CREATE TABLE statements"
+  # Content assert (on the SQL stream): the dump must contain real DDL.
+  DDL_COUNT=$(cat "$WORK/ddl")
+  [ "${DDL_COUNT:-0}" -gt 0 ] || { rm -rf "$WORK"; fail "dump contains no CREATE TABLE statements"; }
+  mv -f "$WORK/partial" "$BACKUP_DIR/$DUMP" || { rm -rf "$WORK"; fail "cannot rename the dump to $DUMP"; }
+  rm -rf "$WORK"
+  SIZE=$(stat -c%s "$BACKUP_DIR/$DUMP")   # what goes off-box (the .age file's own size)
 
   write_metric vaultaire_backup_last_success_timestamp_seconds "unix time the last pg_dump passed its size and DDL asserts (pg-backup.sh)"
-  echo "$(date): Backup completed - vaultaire_$TIMESTAMP (${SIZE} bytes, ${DDL_COUNT} tables)" >> "$LOG"
+  write_metric vaultaire_backup_dump_encrypted "1 = the last dump that passed its asserts was encrypted with age before it reached disk, 0 = written in plaintext (no recipients file; pg-backup.sh, plan 43.7)" "$ENCRYPTED"
+  if [ "$ENCRYPTED" = 1 ]; then SHAPE="encrypted with age to $AGE_RECIPIENT_COUNT recipient(s), age $AGE_VERSION"; else SHAPE="PLAINTEXT"; fi
+  echo "$(date): Backup completed - $DUMP (${SIZE} bytes, ${DDL_COUNT} tables, $SHAPE)" >> "$LOG"
 
   # Off-box copy of the dump FIRST (Sync). A failure here is a failed backup run: the
   # local copy exists, but a disk loss would take it with the database.
@@ -247,9 +334,10 @@ main() {
   offbox_copy "prometheus_$TIMESTAMP.tar.gz"
   if [ "$OFFBOX2_OK" = true ]; then STAGE=offbox2; offbox2_copy "prometheus_$TIMESTAMP.tar.gz" || true; STAGE=rules; fi
 
-  # Keep only last 7 days on the box
+  # Keep only last 7 days on the box — both dump shapes: the plaintext .sql.gz of before
+  # WP-P42 (and of a box without recipients) and the age-encrypted .sql.gz.age.
   STAGE=retention
-  find "$BACKUP_DIR" -name "vaultaire_*.sql.gz" -mtime +7 -delete
+  find "$BACKUP_DIR" \( -name "vaultaire_*.sql.gz" -o -name "vaultaire_*.sql.gz.age" \) -mtime +7 -delete
   find "$BACKUP_DIR" -name "configs_*.tar.gz" -mtime +7 -delete
   find "$BACKUP_DIR" -name "prometheus_*.tar.gz" -mtime +7 -delete
 

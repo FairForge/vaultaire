@@ -80,12 +80,14 @@ func nilIfEmpty(s []string) []string {
 }
 
 // TestProduceBackupsAreTheBackupScripts: the backup lives the page states
-// are deploy/scripts/pg-backup.sh's (the box's find -mtime of the dumps, the
-// off-box OFFBOX_KEEP_DAYS).
+// are deploy/scripts/pg-backup.sh's (the box's find -mtime of the dumps of
+// both shapes, the off-box OFFBOX_KEEP_DAYS).
 func TestProduceBackupsAreTheBackupScripts(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(repoRoot(t), "deploy", "scripts", "pg-backup.sh"))
 	require.NoError(t, err)
-	onBox := regexp.MustCompile(`find "\$BACKUP_DIR" -name "vaultaire_\*\.sql\.gz" -mtime \+(\d+) -delete`).FindSubmatch(b)
+	// Both dump shapes (WP-P42): the plaintext .sql.gz and the age-sealed .sql.gz.age
+	// leave the box on the same day.
+	onBox := regexp.MustCompile(`find "\$BACKUP_DIR" \\\( -name "vaultaire_\*\.sql\.gz" -o -name "vaultaire_\*\.sql\.gz\.age" \\\) -mtime \+(\d+) -delete`).FindSubmatch(b)
 	offBox := regexp.MustCompile(`(?m)^OFFBOX_KEEP_DAYS=(\d+)$`).FindSubmatch(b)
 	require.NotNil(t, onBox, "the on-box retention line moved")
 	require.NotNil(t, offBox, "OFFBOX_KEEP_DAYS moved")

@@ -19,6 +19,9 @@
 #   vaultaire_backup_offbox2_retention_last_run_timestamp_seconds  pass listed its leg and tried
 #                                                           every old file — what makes the
 #                                                           count above fresh (RP55-1, Prompt 40)
+#   vaultaire_backup_dump_encrypted                         1 = the last dump was sealed with age
+#                                                           before it reached disk, 0 = plaintext
+#                                                           (no recipients file; WP-P42, plan 43.7)
 #
 # A run that fails writes nothing — the timestamps simply age. 26 h = one daily
 # run missed with two hours of slack; `or absent(...)` covers a box where the
@@ -92,3 +95,19 @@ groups:
         annotations:
           summary: "The {{ $labels.leg }} off-box leg's backup retention has not listed it in > 26 h"
           description: "pg-backup.sh's retention pass for {{ $labels.leg }} has not listed the leg for over 26 hours (or never has on this box), so nothing past its 30 days is being deleted there and BackupOffboxRetentionStuck reads an old count. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days. `grep -e 'listing' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the failure."
+
+      - alert: BackupDumpPlaintext
+        # WP-P42 (plan 43.7, TRUST.md item 12): the on-box dump is kept 7 days; without the
+        # owner's recipients file it is written in plaintext — the run still succeeds, so this
+        # is the signal. 26 h = one nightly run that wrote plaintext, with two hours of slack,
+        # so a box mid-ceremony does not page. Absent = a pg-backup.sh that predates the gauge
+        # (or no symlink in the textfile directory): it cannot claim encrypted dumps either.
+        # A recipients file that is present but unusable never writes the gauge (the run
+        # fails at stage=encrypt): BackupStale is that page.
+        expr: vaultaire_backup_dump_encrypted == 0 or absent(vaultaire_backup_dump_encrypted)
+        for: 26h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The nightly database dump is written to disk in plaintext"
+          description: "pg-backup.sh has not sealed the dump with age for over 26 hours (or never reported it): /opt/vaultaire/configs/backup-age-recipients.txt is absent, or the installed script predates WP-P42. Every dump on the box for 7 days is then a readable copy of the database. Put the owner's offline age public keys in that file (root 0644, public lines only — docs/DEPLOY.md § Backups); `grep 'stage=encrypt' /opt/vaultaire/logs/backup.log | tail` says what the last run saw."

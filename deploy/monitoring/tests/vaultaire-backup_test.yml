@@ -1,5 +1,6 @@
 # promtool unit test of vaultaire-backup.yml — BackupOffboxRetentionStuck (RP54-6,
-# Stage 1a Prompt 39 Part 0). Run on the box (promtool is there):
+# Stage 1a Prompt 39 Part 0), BackupOffboxRetentionNotRunning (RP55-1) and
+# BackupDumpPlaintext (WP-P42). Run on the box (promtool is there):
 #   scp deploy/monitoring/vaultaire-backup.yml deploy/monitoring/tests/vaultaire-backup_test.yml vaultaire-slc:/tmp/
 #   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-backup_test.yml'
 # The rule file path below is relative to this file's directory as copied.
@@ -111,3 +112,55 @@ tests:
             exp_annotations:
               summary: "The blomp off-box leg's backup retention has not listed it in > 26 h"
               description: "pg-backup.sh's retention pass for blomp has not listed the leg for over 26 hours (or never has on this box), so nothing past its 30 days is being deleted there and BackupOffboxRetentionStuck reads an old count. The privacy policy and the produce page say a deleted record stays in a backup up to 30 days. `grep -e 'listing' -e OFFBOX2 /opt/vaultaire/logs/backup.log | tail` names the failure."
+
+  # WP-P42: the dump written in plaintext (no recipients file) — pending for 26 h, then fires.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_dump_encrypted{instance="localhost:9100",job="node"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: BackupDumpPlaintext
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: BackupDumpPlaintext
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: localhost:9100
+              job: node
+            exp_annotations:
+              summary: "The nightly database dump is written to disk in plaintext"
+              description: "pg-backup.sh has not sealed the dump with age for over 26 hours (or never reported it): /opt/vaultaire/configs/backup-age-recipients.txt is absent, or the installed script predates WP-P42. Every dump on the box for 7 days is then a readable copy of the database. Put the owner's offline age public keys in that file (root 0644, public lines only — docs/DEPLOY.md § Backups); `grep 'stage=encrypt' /opt/vaultaire/logs/backup.log | tail` says what the last run saw."
+
+  # Sealed with age: never fires. And a box that switched to sealed after 20 h of plaintext
+  # resets the `for:` — no alert at 27 h. (1 m samples: an hourly series goes stale between them.)
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_dump_encrypted{instance="localhost:9100",job="a"}'
+        values: '1x1700'
+      - series: 'vaultaire_backup_dump_encrypted{instance="localhost:9100",job="b"}'
+        values: '0x1200 1x500'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: BackupDumpPlaintext
+        exp_alerts: []
+
+  # Never reported (a script that predates the gauge, or no textfile symlink): absent fires
+  # after 26 h with no labels of its own.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_backup_last_success_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x1700'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: BackupDumpPlaintext
+        exp_alerts: []
+      - eval_time: 27h
+        alertname: BackupDumpPlaintext
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The nightly database dump is written to disk in plaintext"
+              description: "pg-backup.sh has not sealed the dump with age for over 26 hours (or never reported it): /opt/vaultaire/configs/backup-age-recipients.txt is absent, or the installed script predates WP-P42. Every dump on the box for 7 days is then a readable copy of the database. Put the owner's offline age public keys in that file (root 0644, public lines only — docs/DEPLOY.md § Backups); `grep 'stage=encrypt' /opt/vaultaire/logs/backup.log | tail` says what the last run saw."
