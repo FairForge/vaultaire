@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -158,4 +159,14 @@ func TestTenantKeys_CredentialRoundTripAndShred(t *testing.T) {
 	fresh := newTestKeys(t, db, testMasterB, "")
 	_, err = fresh.OpenCredential(ctx, tenant, "VKROUND", 1, wrapped)
 	assert.ErrorIs(t, err, ErrNoTenantKey)
+}
+
+// TestCredentialWrap_TheSwitchMarkerIsTheHKDFLabel: vaultaire-switch tells a
+// build that reads wrapped secrets by this label in the binary (PR C's
+// rollback guard); renaming it here without the script would let a switch
+// start a build the guard thinks is old — or, worse, the reverse.
+func TestCredentialWrap_TheSwitchMarkerIsTheHKDFLabel(t *testing.T) {
+	script, err := os.ReadFile("../../deploy/scripts/vaultaire-switch")
+	require.NoError(t, err)
+	assert.Contains(t, string(script), "CREDENTIAL_MARKER='"+credentialInfo+"'")
 }

@@ -101,6 +101,9 @@ type KeyReencryptRunner struct {
 	credKeys              credentialStore
 	credentialBatch       int
 	beforeCredentialWrite func(table, keyID string)
+	// dropPlaintext: credential_plaintext_drop (PR C) — the pass nulls the
+	// plaintext of rows whose wrap opens back to it; nil = never.
+	dropPlaintext func() bool
 }
 
 // KeyReencryptResult is one run's outcome, recorded as job_runs.result.
@@ -138,6 +141,11 @@ type KeyReencryptResult struct {
 	CredentialsRewrapped int `json:"credentials_rewrapped"`
 	CredentialsRaced     int `json:"credentials_raced,omitempty"`
 	CredentialFailures   int `json:"credential_failures"`
+	// With credential_plaintext_drop on (PR C): plaintext secrets nulled on
+	// rows whose wrap opened back to them (and on dead rows: a revoked key,
+	// an expired token), and tenants mirrors nulled once the primary was.
+	CredentialsPlaintextDropped int `json:"credentials_plaintext_dropped,omitempty"`
+	MirrorsPlaintextDropped     int `json:"mirrors_plaintext_dropped,omitempty"`
 	// Errors are the first few per-chunk/per-object failures (the rest are
 	// in the log).
 	Errors []string `json:"errors,omitempty"`
@@ -189,7 +197,8 @@ func (k *KeyReencryptRunner) spec() jobSpec {
 				zap.Int("objects_reencrypted", res.ObjectsReencrypted), zap.Int("objects_changed", res.ObjectsChanged),
 				zap.Int("objects_failed", res.ObjectsFailed), zap.Any("objects_skipped", res.ObjectsSkipped),
 				zap.Int("credentials_wrapped", res.CredentialsWrapped), zap.Int("credentials_rewrapped", res.CredentialsRewrapped),
-				zap.Int("credentials_raced", res.CredentialsRaced), zap.Int("credential_failures", res.CredentialFailures), zap.Error(err))
+				zap.Int("credentials_raced", res.CredentialsRaced), zap.Int("credential_failures", res.CredentialFailures),
+				zap.Int("credentials_plaintext_dropped", res.CredentialsPlaintextDropped), zap.Int("mirrors_plaintext_dropped", res.MirrorsPlaintextDropped), zap.Error(err))
 			rep := jobReport{Rows: int64(res.Reencrypted + res.ObjectsReencrypted + res.CredentialsWrapped + res.CredentialsRewrapped), Result: res}
 			var notes []string
 			if res.Failed > 0 || res.RetiredFailed > 0 {

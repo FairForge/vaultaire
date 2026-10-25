@@ -491,37 +491,36 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 		return ErrUserExists
 	}
 
+	// The secret must be stored (not just the bcrypt secret_hash) — SigV4
+	// verification recomputes the request signature from the raw secret.
+	// Wrapped under the tenant's key when the server has a master key (plan
+	// 43.7); the plaintext too, until the credential_plaintext_drop flag —
+	// in api_keys and in the tenants mirror alike.
+	secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash api key secret: %w", err)
+	}
+	stored, err := sealSecret(ctx, a.credKeys, tenant.ID, apiKey.Key, apiKey.Secret)
+	if err != nil {
+		return err
+	}
+
 	// tenants.name = company name; tenants.email = owner email.
 	// Both are NOT NULL in the schema so must always be provided.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tenants (id, name, email, access_key, secret_key, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (id) DO NOTHING
-	`, tenant.ID, company, user.Email, tenant.AccessKey, tenant.SecretKey, tenant.CreatedAt); err != nil {
+	`, tenant.ID, company, user.Email, tenant.AccessKey, stored.plaintext, tenant.CreatedAt); err != nil {
 		return fmt.Errorf("persist tenant: %w", err)
-	}
-
-	// secret_key must be stored (not just the bcrypt secret_hash) — SigV4
-	// verification recomputes the request signature from the raw secret,
-	// so a hash-only row can never authenticate and must be regenerated.
-	secretHash, err := bcrypt.GenerateFromPassword([]byte(apiKey.Secret), bcrypt.DefaultCost)
-	if err != nil {
-		return fmt.Errorf("hash api key secret: %w", err)
-	}
-	// Wrapped under the tenant's key when the server has a master key
-	// (plan 43.7); the plaintext is still written until the
-	// credential_plaintext_drop flag.
-	wrapped, wrapVersion, err := sealSecret(ctx, a.credKeys, tenant.ID, apiKey.Key, apiKey.Secret)
-	if err != nil {
-		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key,
 		                      secret_wrapped, secret_key_version, created_at)
 		VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (key_id) DO NOTHING
-	`, apiKey.ID, user.ID, tenant.ID, apiKey.Name, apiKey.Key, string(secretHash), apiKey.Secret,
-		nullBytes(wrapped), wrapVersion, apiKey.CreatedAt); err != nil {
+	`, apiKey.ID, user.ID, tenant.ID, apiKey.Name, apiKey.Key, string(secretHash), stored.plaintext,
+		stored.wrapped, stored.version, apiKey.CreatedAt); err != nil {
 		return fmt.Errorf("persist api key: %w", err)
 	}
 

@@ -58,7 +58,11 @@ func setupLifecycleFixture(t *testing.T) *lifecycleFixture {
 // setupLifecycleFixtureWith is the fixture on a server with a tenant key
 // store under masterHex ("" = no master key): the auth service wraps new
 // secrets under it and the S3 paths open them (plan 43.7).
-func setupLifecycleFixtureWith(t *testing.T, masterHex string) *lifecycleFixture {
+//
+// opts run on the server BEFORE the registration (PR C: a flags service
+// with credential_plaintext_drop on), and the auth service gets the server's
+// own credentialKeys — what NewServer hands it.
+func setupLifecycleFixtureWith(t *testing.T, masterHex string, opts ...func(*Server)) *lifecycleFixture {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping database test")
@@ -79,18 +83,23 @@ func setupLifecycleFixtureWith(t *testing.T, masterHex string) *lifecycleFixture
 	svc := auth.NewAuthService(nil, db)
 	if masterHex != "" {
 		keys = testTenantKeys(t, db, masterHex)
-		svc.SetCredentialKeys(keys)
+	}
+	srv := &Server{logger: logger, router: chi.NewRouter(), engine: eng, db: db, testMode: false, auth: svc,
+		config: &config.Config{Server: config.ServerConfig{Port: 8000}}, tenantKeys: keys}
+	for _, o := range opts {
+		o(srv)
+	}
+	if keys != nil {
+		svc.SetCredentialKeys(srv.credentialKeys())
 	}
 	email := fmt.Sprintf("lifecycle-%s@test.local", auth.GenerateID()[:8])
 	user, tenant, key, err := svc.CreateUserWithTenant(context.Background(), email, "a-long-password", "Lifecycle Co")
 	require.NoError(t, err)
 
-	f := &lifecycleFixture{t: t, db: db, svc: svc, user: user, tenant: tenant, key: key, bucket: "lifecycle"}
+	f := &lifecycleFixture{t: t, db: db, svc: svc, user: user, tenant: tenant, key: key, bucket: "lifecycle", srv: srv}
 	f.exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, $2, 'private')`, tenant.ID, f.bucket)
 	require.NoError(t, os.MkdirAll(filepath.Join(tempDir, tenant.ID+"_"+f.bucket), 0o750))
 
-	f.srv = &Server{logger: logger, router: chi.NewRouter(), engine: eng, db: db, testMode: false, auth: svc,
-		config: &config.Config{Server: config.ServerConfig{Port: 8000}}, tenantKeys: keys}
 	f.ts = httptest.NewServer(http.HandlerFunc(f.srv.handleS3Request))
 	t.Cleanup(func() {
 		f.ts.Close()

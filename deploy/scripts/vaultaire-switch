@@ -254,6 +254,35 @@ activate() {
   log "active: $new_name (:$new) $(curl -s "http://127.0.0.1:$new/version" || true)"
 }
 
+# Once credential_plaintext_drop is on (plan 43.7, Stage 1a Prompt 42 PR C),
+# an S3 secret exists only wrapped under its tenant's key: a build older than
+# PR B reads only the plaintext column and would answer every S3 request
+# SignatureDoesNotMatch. Every build since PR B carries the wrap's HKDF label
+# (internal/crypto/credential_wrap.go); a build without it is refused while
+# the flag is on — or while the flag cannot be read (fail closed). Turning the
+# flag off does not bring the nulled secrets back: a build before PR B can
+# never serve again (docs/DEPLOY.md § Zero-downtime deploys, "Rollback past the wrapped S3 secrets").
+CREDENTIAL_MARKER='stored/credential/v1'
+ENV_FILE=/opt/vaultaire/configs/.env
+credential_drop_on() {
+  local db
+  db=$(sed -n 's/^DB_NAME=//p' "$ENV_FILE" 2>/dev/null | tail -1 | tr -d "\"'")
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d "${db:-vaultaire}" -tAc \
+    "SELECT COALESCE((SELECT enabled FROM feature_flags WHERE flag_key = 'credential_plaintext_drop' AND tenant_id = '*'), false)"
+}
+credential_guard() {
+  local bin=$1 on state
+  grep -aqF "$CREDENTIAL_MARKER" "$bin" && return 0
+  on=$(credential_drop_on 2>/dev/null) || on=unknown
+  case "$on" in
+    f) return 0 ;;
+    t) state=on ;;
+    *) state="unreadable ($on)" ;;
+  esac
+  echo "$bin predates the wrapped S3 secrets (no '$CREDENTIAL_MARKER') and credential_plaintext_drop is $state — it could not sign any S3 request (docs/DEPLOY.md § Zero-downtime deploys, "Rollback past the wrapped S3 secrets")"
+  return 1
+}
+
 # Start <idle> with what is now in its binary and switch to it. On any failure
 # before the switch: stop the idle slot, restore <prev> (if given) as its
 # binary, exit 1 — the active slot is never touched.
@@ -265,6 +294,8 @@ start_and_switch() {
     if [ -n "$prev" ] && [ -f "$prev" ]; then mv -f "$prev" "$BIN_DIR/vaultaire-$idle"; log "restored slot :$idle's previous build" >&2; fi
     die "$1 — the active slot :$active was not touched"
   }
+  local why
+  why=$(credential_guard "$BIN_DIR/vaultaire-$idle") || fail "$why"
   systemctl restart "vaultaire@$idle" || fail "could not start vaultaire@$idle"
   if ! wait_live "$idle"; then
     journalctl -u "vaultaire@$idle" --no-pager -n 30 || true

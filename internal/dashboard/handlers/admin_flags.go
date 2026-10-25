@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/translog/adminread"
@@ -167,7 +168,12 @@ func HandleAdminFlagClear(svc *flags.Service, logger *zap.Logger) http.HandlerFu
 // change whose log entry could not be appended — nothing was written.
 func flagRefused(w http.ResponseWriter, err error) bool {
 	w.Header().Set("Cache-Control", "no-store")
+	var drop *auth.PlaintextDropRefusal
 	switch {
+	case errors.As(err, &drop):
+		// credential_plaintext_drop's preconditions (plan 43.7): no master
+		// key, or live S3 secrets not wrapped yet — nothing was written.
+		http.Error(w, "Conflict: "+drop.Error()+".", http.StatusConflict)
 	case errors.Is(err, flags.ErrNotExemptible):
 		http.Error(w, "Conflict: this flag is on globally and cannot be turned off for one tenant (flag_not_exemptible).", http.StatusConflict)
 	case errors.Is(err, flags.ErrGlobalOnly):

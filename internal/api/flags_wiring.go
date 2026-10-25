@@ -161,6 +161,14 @@ func registerFlags(fl *flags.Service) {
 	// agent).
 	fl.Register(dashboard.FlagLegalDraftPages, false)
 	fl.GlobalOnly(dashboard.FlagLegalDraftPages)
+	// Stage 1a Prompt 42 PR C (plan 43.7): the S3 secrets' plaintext column
+	// stops being written, and the key_reencrypt job nulls it on every row
+	// whose wrapped form opens back to it. Default OFF, global only; turning
+	// it on is refused while there is no master key or a live row is
+	// unwrapped (credential_drop.go). Once on, a build older than PR B cannot
+	// sign any S3 request (vaultaire-switch refuses one).
+	fl.Register(flagCredentialPlaintextDrop, false)
+	fl.GlobalOnly(flagCredentialPlaintextDrop)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

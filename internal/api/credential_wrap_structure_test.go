@@ -122,8 +122,17 @@ func TestNewAuth_EveryCallSiteHasTheOpener(t *testing.T) {
 	}, primaryPair)
 	assert.Equal(t, []string{"internal/api/server.go:NewServer signer=s.s3Auth()"}, exportSvc)
 	assert.Equal(t, []string{"internal/api/sts_routes.go:Server.handleSTSCreateToken keys=s.credentialKeys()"}, sts)
+	var dropWired bool
+	ast.Inspect(files["internal/api/server.go"], func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 &&
+			exprString(fset, as.Lhs[0]) == "s.keyReencrypt.dropPlaintext" && exprString(fset, as.Rhs[0]) == "s.credentialPlaintextDropped" {
+			dropWired = true
+		}
+		return true
+	})
+	assert.True(t, dropWired, "NewServer hands the key_reencrypt job the credential_plaintext_drop flag (PR C)")
 	assert.Equal(t, []string{
-		"internal/api/server.go:NewServer(keys)",
+		"internal/api/server.go:NewServer(s.credentialKeys())",
 		"internal/api/server.go:Server.SetAuthService(s.credentialKeys())",
 	}, setKeys, "the auth service's writers get the key store where it is loaded")
 }
@@ -133,14 +142,17 @@ func TestNewAuth_EveryCallSiteHasTheOpener(t *testing.T) {
 // is held to plan 43.7. A new writer fails the test until it is listed here
 // (and wraps).
 var credentialWriters = map[string]string{
-	"internal/auth/auth.go:AuthService.persistNewAccount INSERT INTO api_keys":         "wraps (sealSecret, the registration's primary)",
-	"internal/auth/auth.go:AuthService.persistNewAccount INSERT INTO tenants":          "the mirror's plaintext (nulled by credential_plaintext_drop, dropped with D-12)",
-	"internal/auth/apikey.go:AuthService.persistAPIKey INSERT INTO api_keys":           "wraps (sealSecret: new keys and a rotation's successor)",
-	"internal/auth/apikey.go:AuthService.rotateRows UPDATE tenants":                    "the mirror's plaintext (as above)",
-	"internal/auth/sts.go:GenerateSTSToken INSERT INTO sts_tokens":                     "wraps (sealSecret)",
-	"internal/database/postgres.go:Postgres.CreateTenant INSERT INTO tenants":          "no product caller (its own test only)",
-	"internal/api/credential_backfill.go:KeyReencryptRunner.wrapOne UPDATE api_keys":   "the backfill: writes the wrapped form only",
-	"internal/api/credential_backfill.go:KeyReencryptRunner.wrapOne UPDATE sts_tokens": "the backfill: writes the wrapped form only",
+	"internal/auth/auth.go:AuthService.persistNewAccount INSERT INTO api_keys":                "wraps (sealSecret, the registration's primary)",
+	"internal/auth/auth.go:AuthService.persistNewAccount INSERT INTO tenants":                 "the mirror's plaintext (nulled by credential_plaintext_drop, dropped with D-12)",
+	"internal/auth/apikey.go:AuthService.persistAPIKey INSERT INTO api_keys":                  "wraps (sealSecret: new keys and a rotation's successor)",
+	"internal/auth/apikey.go:AuthService.rotateRows UPDATE tenants":                           "the mirror's plaintext (as above)",
+	"internal/auth/sts.go:GenerateSTSToken INSERT INTO sts_tokens":                            "wraps (sealSecret)",
+	"internal/database/postgres.go:Postgres.CreateTenant INSERT INTO tenants":                 "no product caller (its own test only)",
+	"internal/api/credential_backfill.go:KeyReencryptRunner.wrapOne UPDATE api_keys":          "the backfill: writes the wrapped form only",
+	"internal/api/credential_backfill.go:KeyReencryptRunner.wrapOne UPDATE sts_tokens":        "the backfill: writes the wrapped form only",
+	"internal/api/credential_backfill.go:KeyReencryptRunner.dropOne UPDATE api_keys":          "PR C: nulls the plaintext after the wrap opened back to it",
+	"internal/api/credential_backfill.go:KeyReencryptRunner.dropOne UPDATE sts_tokens":        "PR C: nulls the plaintext after the wrap opened back to it",
+	"internal/api/credential_backfill.go:KeyReencryptRunner.dropPlaintextPass UPDATE tenants": "PR C: nulls the mirror once the live primary has no plaintext",
 }
 
 func TestCredentialWriters_AllWrapWhenKeysExist(t *testing.T) {

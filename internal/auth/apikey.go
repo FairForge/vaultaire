@@ -125,7 +125,7 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	// Persist FIRST, then publish to the in-memory maps: a key whose INSERT
 	// failed must not exist anywhere (R5-05 — it used to authenticate until
 	// the next restart).
-	if err := a.persistAPIKey(ctx, a.dbExecer(), apiKey); err != nil {
+	if _, err := a.persistAPIKey(ctx, a.dbExecer(), apiKey); err != nil {
 		return nil, err
 	}
 	a.indexAPIKey(apiKey)
@@ -146,7 +146,7 @@ type execer interface {
 // (never NULL): bucket_scope and ip_allowlist are NOT NULL DEFAULT '{}', and
 // pq.Array(nil) encodes SQL NULL — the "permissions-only key" case (R5-05).
 // The row carries its tenant (WP-R5-9) and whether it is the primary pair.
-func (a *AuthService) persistAPIKey(ctx context.Context, db execer, k *APIKey) error {
+func (a *AuthService) persistAPIKey(ctx context.Context, db execer, k *APIKey) (plaintext any, err error) {
 	if k.BucketScope == nil {
 		k.BucketScope = []string{}
 	}
@@ -154,21 +154,21 @@ func (a *AuthService) persistAPIKey(ctx context.Context, db execer, k *APIKey) e
 		k.IPAllowlist = []string{}
 	}
 	if db == nil {
-		return nil
+		return k.Secret, nil
 	}
 	secretHash, err := bcrypt.GenerateFromPassword([]byte(k.Secret), bcrypt.DefaultCost)
 	if err != nil {
-		return fmt.Errorf("hash api key secret: %w", err)
+		return nil, fmt.Errorf("hash api key secret: %w", err)
 	}
 	permJSON, err := json.Marshal(k.Permissions)
 	if err != nil {
-		return fmt.Errorf("encode api key permissions: %w", err)
+		return nil, fmt.Errorf("encode api key permissions: %w", err)
 	}
 	// Wrapped under the tenant's key when the server has a master key
 	// (plan 43.7; a new key and a rotation's successor both come here).
-	wrapped, wrapVersion, err := sealSecret(ctx, a.credKeys, k.TenantID, k.Key, k.Secret)
+	stored, err := sealSecret(ctx, a.credKeys, k.TenantID, k.Key, k.Secret)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO api_keys (id, user_id, tenant_id, is_primary, name, key_id, secret_hash, secret_key,
@@ -176,14 +176,14 @@ func (a *AuthService) persistAPIKey(ctx context.Context, db execer, k *APIKey) e
 		                      permissions, bucket_scope, ip_allowlist, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (key_id) DO NOTHING
-	`, k.ID, k.UserID, k.TenantID, k.IsPrimary, k.Name, k.Key, string(secretHash), k.Secret,
-		nullBytes(wrapped), wrapVersion,
+	`, k.ID, k.UserID, k.TenantID, k.IsPrimary, k.Name, k.Key, string(secretHash), stored.plaintext,
+		stored.wrapped, stored.version,
 		permJSON, pq.Array(k.BucketScope), pq.Array(k.IPAllowlist),
 		k.ExpiresAt, k.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("persist api key: %w", err)
+		return nil, fmt.Errorf("persist api key: %w", err)
 	}
-	return nil
+	return stored.plaintext, nil
 }
 
 // dbExecer returns the service database as an execer, or a nil interface
@@ -447,7 +447,7 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 		if err := a.rotateRows(ctx, oldKey, newKey, now); err != nil {
 			return nil, err
 		}
-	} else if err := a.persistAPIKey(ctx, nil, newKey); err != nil {
+	} else if _, err := a.persistAPIKey(ctx, nil, newKey); err != nil {
 		return nil, err
 	}
 
@@ -484,13 +484,16 @@ func (a *AuthService) rotateRows(ctx context.Context, oldKey, newKey *APIKey, at
 		// Another rotation (or a revocation) got there first.
 		return ErrKeyRevoked
 	}
-	if err := a.persistAPIKey(ctx, tx, newKey); err != nil {
+	mirror, err := a.persistAPIKey(ctx, tx, newKey)
+	if err != nil {
 		return err
 	}
 	if newKey.IsPrimary {
+		// The mirror's secret is what the row got: NULL once the plaintext
+		// is dropped (plan 43.7, PR C).
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE tenants SET access_key = $1, secret_key = $2 WHERE id = $3`,
-			newKey.Key, newKey.Secret, newKey.TenantID); err != nil {
+			newKey.Key, mirror, newKey.TenantID); err != nil {
 			return fmt.Errorf("rewrite tenant pair of %s: %w", newKey.TenantID, err)
 		}
 	}

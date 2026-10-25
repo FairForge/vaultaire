@@ -79,25 +79,56 @@ func openStoredSecret(ctx context.Context, keys CredentialKeys, logger *zap.Logg
 	return string(secret), nil
 }
 
-// sealSecret wraps a secret for a writer: nil, 0 (write the plaintext only)
-// without keys; an error when keys exist and the seal fails — the write is
-// refused rather than stored unwrapped.
-func sealSecret(ctx context.Context, keys CredentialKeys, tenantID, keyID, secret string) ([]byte, sql.NullInt64, error) {
+// PlaintextDropper is implemented by a CredentialKeys whose server has the
+// credential_plaintext_drop flag (Stage 1a Prompt 42 PR C): while it says
+// true, a writer that wrapped a secret writes NO plaintext — not in api_keys,
+// sts_tokens, nor the tenants mirror. A writer that could not wrap (no keys)
+// always writes the plaintext: a secret is never stored nowhere.
+type PlaintextDropper interface {
+	DropPlaintext() bool
+}
+
+// storedSecret is what a writer puts in the secret columns: the plaintext
+// (SQL NULL once dropped), the wrapped form (NULL without keys) and its
+// version.
+type storedSecret struct {
+	plaintext any
+	wrapped   any
+	version   sql.NullInt64
+}
+
+// sealSecret is the writers' one rule: without keys, the plaintext only;
+// with keys, the wrapped form (a seal that fails refuses the write rather
+// than store the secret unwrapped) and the plaintext unless the keys say to
+// drop it.
+func sealSecret(ctx context.Context, keys CredentialKeys, tenantID, keyID, secret string) (storedSecret, error) {
 	if keys == nil {
-		return nil, sql.NullInt64{}, nil
+		return storedSecret{plaintext: secret}, nil
 	}
 	wrapped, version, err := keys.SealCredential(ctx, tenantID, keyID, []byte(secret))
 	if err != nil {
-		return nil, sql.NullInt64{}, fmt.Errorf("wrap the secret of a new key: %w", err)
+		return storedSecret{}, fmt.Errorf("wrap the secret of a new key: %w", err)
 	}
-	return wrapped, sql.NullInt64{Int64: int64(version), Valid: true}, nil
+	out := storedSecret{plaintext: secret, wrapped: wrapped, version: sql.NullInt64{Int64: int64(version), Valid: true}}
+	if d, ok := keys.(PlaintextDropper); ok && d.DropPlaintext() {
+		out.plaintext = nil
+	}
+	return out, nil
 }
 
-// nullBytes is a BYTEA argument: SQL NULL for no bytes (lib/pq writes a nil
-// []byte as an empty bytea, which is not "absent").
-func nullBytes(b []byte) any {
-	if len(b) == 0 {
-		return nil
+// PlaintextDropRefusal is why the credential_plaintext_drop flag may not be
+// turned on yet (the api's flag write guard; both admin surfaces answer 409
+// with Code): "master_key_absent" — no tenant key store, nothing could be
+// wrapped; "credentials_not_wrapped" — Unwrapped live rows still hold only
+// the plaintext (the key_reencrypt job wraps them; try again after a run).
+type PlaintextDropRefusal struct {
+	Code      string
+	Unwrapped int64
+}
+
+func (e *PlaintextDropRefusal) Error() string {
+	if e.Code == "credentials_not_wrapped" {
+		return fmt.Sprintf("credential_plaintext_drop: %d live S3 secret(s) are not wrapped yet (%s)", e.Unwrapped, e.Code)
 	}
-	return b
+	return "credential_plaintext_drop: this server has no master key, so no secret can be wrapped (" + e.Code + ")"
 }

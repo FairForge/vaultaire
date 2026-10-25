@@ -130,7 +130,7 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, keys CredentialKeys, tena
 		permJSON, _ := json.Marshal(token.Permissions)
 		// Wrapped under the tenant's key when the server has a master key
 		// (plan 43.7): the token's id is in the wrap's AAD.
-		wrapped, wrapVersion, err := sealSecret(ctx, keys, token.TenantID, token.AccessKey, token.SecretKey)
+		stored, err := sealSecret(ctx, keys, token.TenantID, token.AccessKey, token.SecretKey)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +138,7 @@ func GenerateSTSToken(ctx context.Context, db *sql.DB, keys CredentialKeys, tena
 			INSERT INTO sts_tokens (access_key, secret_key, secret_wrapped, secret_key_version, tenant_id, parent_key_id,
 			                        permissions, bucket_scope, ip_restrict, expires_at, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		`, token.AccessKey, token.SecretKey, nullBytes(wrapped), wrapVersion, token.TenantID, token.ParentKeyID,
+		`, token.AccessKey, stored.plaintext, stored.wrapped, stored.version, token.TenantID, token.ParentKeyID,
 			permJSON, pq.Array(token.BucketScope), pq.Array(token.IPRestrict),
 			token.ExpiresAt, token.CreatedAt)
 		if err != nil {

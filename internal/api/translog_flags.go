@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/flags"
 	"github.com/FairForge/vaultaire/internal/translog"
 	"github.com/FairForge/vaultaire/internal/translog/adminread"
@@ -28,8 +29,18 @@ import (
 func (s *Server) useFlags(fl *flags.Service) {
 	s.flags = fl
 	if fl != nil {
-		fl.SetWriteGuard(s.guardTranslogFlagWrite)
+		fl.SetWriteGuard(s.guardFlagWrite)
 	}
+}
+
+// guardFlagWrite is the server's one write guard (flags.Service has one
+// slot): the credential drop's preconditions first — a refusal there writes
+// nothing and appends nothing — then the translog_* log_policy entry.
+func (s *Server) guardFlagWrite(ctx context.Context, c flags.Change) error {
+	if err := s.guardCredentialPlaintextDrop(ctx, c); err != nil {
+		return err
+	}
+	return s.guardTranslogFlagWrite(ctx, c)
 }
 
 // guardTranslogFlagWrite appends the log_policy entry of a translog_* row
@@ -73,7 +84,10 @@ func isPolicyFlag(key string) bool {
 // flagWriteError answers a refused flag write with its code, true; false =
 // not one of the refusals (the caller's 500).
 func flagWriteError(w http.ResponseWriter, err error) bool {
+	var drop *auth.PlaintextDropRefusal
 	switch {
+	case errors.As(err, &drop):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": drop.Code, "unwrapped": drop.Unwrapped, "message": drop.Error()})
 	case errors.Is(err, flags.ErrNotExemptible):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "flag_not_exemptible"})
 	case errors.Is(err, flags.ErrGlobalOnly):

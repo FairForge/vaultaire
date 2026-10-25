@@ -139,8 +139,11 @@ type Server struct {
 	allowUnsealedCleartext bool
 	// allowUnsealedSia (SIA_ALLOW_UNSEALED): the SIA tier and a `sia` Vault
 	// parity leg may take bytes that are not sealed. Off by default.
-	allowUnsealedSia   bool
-	tenantKeys         *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
+	allowUnsealedSia bool
+	tenantKeys       *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
+	// credentialScope limits credential_plaintext_drop's unwrapped count to
+	// one tenant (tests: the database is shared); "" in production.
+	credentialScope    string
 	chunkEncSvc        *crypto.ChunkEncryptionService
 	gci                *crypto.GlobalContentIndex
 	cdnRateLimiter     *RateLimiter
@@ -367,7 +370,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		} else {
 			s.tenantKeys = keys
 			// New S3 secrets are wrapped under the tenant's key (plan 43.7).
-			s.auth.SetCredentialKeys(keys)
+			s.auth.SetCredentialKeys(s.credentialKeys())
 			s.sseService = crypto.NewSSEService(keys)
 			countSSEOpens(s.sseService)
 			s.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
@@ -459,6 +462,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		if s.keyReencrypt != nil {
 			// Whole SSE-S3 objects and retained versions (WP-R2-1 C2).
 			s.keyReencrypt.sse = s.sseService
+			// The S3 secrets' plaintext is nulled while the flag is on
+			// (plan 43.7, PR C).
+			s.keyReencrypt.dropPlaintext = s.credentialPlaintextDropped
 		}
 	}
 	s.chunkMover = NewChunkMover(s.db, s.engine, logger)
