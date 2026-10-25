@@ -232,6 +232,9 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Retry-After", regionRetryAfter)
 		writeManagementError(w, ErrTypeUnavailable, "region_unavailable_now", regionDownMessage(req.Region), "region")
 		return
+	case bucketCreateReservedName:
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_bucket_name", reservedBucketNameMessage(req.Name), "name")
+		return
 	}
 	if outcome.alreadyOwned {
 		writeManagementError(w, ErrTypeConflict, "bucket_exists",

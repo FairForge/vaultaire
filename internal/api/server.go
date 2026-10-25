@@ -129,6 +129,9 @@ type Server struct {
 	loginUserLoader  func(context.Context, string) (*auth.User, error)
 	loginTokenMinter func(*auth.User) (string, error)
 	sseService       *crypto.SSEService
+	// reservedNames are the web paths' first segments no NEW bucket may be
+	// named after (bucket_reserved.go), derived from the router once.
+	reservedNames reservedBucketNames
 	// allowUnsealedCleartext (BLOMP_ALLOW_UNSEALED, owner's testing decision
 	// 2026-10-21): a cleartext-transport backend (blomp) may take bytes that
 	// are not sealed — the BLOMP tier and the Vault parity leg. Off by
