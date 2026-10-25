@@ -93,3 +93,39 @@ then re-run the install script and delete the conf backups — RP58-4); RP57-15 
 pgBackRest passphrase into the F-14 2-of-3 escrow); RP57-11 (Sync.com/Blomp as
 sub-processors — counsel); RP57-19 (the legal pages' "Last updated" vs the 30-day notice
 promise); the translog signing-key ceremony chain; F-36, F-37, F-28/RP55-4; RB-3.
+
+## Second pass (2026-10-25 ~03:30 UTC, same review session — RP58-5…9)
+
+The owner asked for a second look before Prompt 41 ("make sure we got everything").
+Method: the gate predicate and its composition re-read by hand (SigV2 presigned IS
+caught; `EqualFold` covers case; the CDN host router bypasses the gate but serves only
+`/{slug}/{bucket}/*` public bytes — a scoping note, not a finding), plus two independent,
+unanchored adversarial reviews — one on #956 (gate + login), one on #954/#955 (PITR) —
+briefed with the diffs only, not the first pass's findings.
+
+**Outcome: the PITR half still holds at P2+; the Part 0 half's known lockout gap
+(RP57-2) is upgraded P3 → P2.** No new P2 was found that was not already filed.
+
+| # | Sev | Finding (second pass) |
+|---|-----|----------------------|
+| RP57-2↑ | **P2** (was P3) | The JSON `/auth/login` second factor has NO per-account lockout and NO metric — only audit rows nothing alerts on. ~100 IPs at the 5/min per-IP limit reach ~50 % TOTP-guess success in ~8 h against a leaked password (skew ±1 ≈ 3 valid codes/instant), invisible to the auth rules; the same guesses on the dashboard lock the account at 10. Undercuts the P40 MFA fix's own threat model. Prompt 41 item 1 (now with the metric requirement) |
+| RP58-5 | P3 | `pg-pitr-install.sh`'s ALTER SYSTEM idempotence guard compares `current_setting('archive_timeout')` to `60s`; Postgres normalizes to `1min`, so the guard NEVER matches on a real cluster — every re-run re-ALTERs and leaves a new `.bak-pitr-*`. Masked by the test fake echoing `60s` verbatim. Prompt 41 item 6 |
+| RP58-6 | P3 | The drill's scratch resource limits (shared_buffers 256MB…) are silently overridden by the RESTORED prod `postgresql.auto.conf` (the 2026-10-21 tuning: 2GB etc.) — auto.conf is read after postgresql.conf. Safety settings stay protected (they ride `pg_ctl -o`, which outranks all files); the resource bound the script intends does not exist. Prompt 41 item 6 |
+| RP58-7 | P3 | The "box lost too" DR path: on a fresh box `stanza-create` refuses the new cluster's system identifier and `set -e` kills the installer mid-script, during a disaster (steps 3–7 still work). Runbook line or a `--restore-box` flag. Prompt 41 item 6 |
+| RP58-8 | P4 | Login/gate nits: (a) on MFA success + `GenerateJWT` failure the TOTP is burnt and `auth.mfa_succeeded` never written; (b) a DB error from `ValidatePassword` is audited `bad_password` + 401; (c) the verifier's `HasPrefix` accepts `AWS4-HMAC-SHA256,Credential=…` (no space) which the gate's space-`Cut` misses — predicates must agree (no SDK emits it, signature can never verify). Prompt 41 items 1–3 |
+| RP58-9 | P4 | PITR nits: (a) the drill traps `EXIT` only — an untrapped SIGINT leaves the scratch postmaster on 5499 (live repo safe); (b) `jq` is a metrics dependency the installer never ensures; (c) timers are enabled before stanza-create (one failed unit if the install straddles 01:30, self-heals); (d) the cipher file is deleted before its format validation (cosmetic). Prompt 41 items 4/6 |
+
+**What the second pass verified holds** (beyond the first): the gate predicate is a
+strict superset of every credential shape our verifier accepts (header and presigned,
+SigV2 included) except RP58-1/RP58-8c; the three gate exceptions are safe in both
+directions; TOTP replay and backup-code single-use are correct across both surfaces (one
+shared `AuthService`); the realm-outcome split (RP56-6) is right; the drill cannot reach
+the live repo by any path found (refuse-before-trap, archive-off twice, `-o` outranking
+every file); the async spool acks a segment only once it is in R2 (the stated RPO is
+honest); every PITR series fails closed (`or absent(…)` everywhere probed); no secret in
+argv (pinned by test), journal secrets redacted.
+
+**Verified live on this pass:** the first SCHEDULED weekly full ran — `20261025-013001F`
+(Sun 01:30:01–:07 UTC, 480.7 MB database → 80.3 MB encrypted in R2, expire clean,
+`status=0/SUCCESS`); `pgbackrest info` shows both fulls, stanza ok, cipher aes-256-cbc.
+RP60's owed backup item narrows to the first timer DIFF (Mon 2026-10-26 01:30).
