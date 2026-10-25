@@ -286,6 +286,16 @@ type gateTenant struct {
 	host     string
 	ak, sk   string
 	tenantID string
+	db       *sql.DB
+}
+
+// ownBucket makes the tenant own a bucket of this name as if created before
+// Prompt 41 item 5 reserved the web paths' names (an existing bucket keeps
+// working; the fixture's cleanup deletes the tenant's rows).
+func (g *gateTenant) ownBucket(name string) {
+	g.t.Helper()
+	_, err := g.db.Exec(`INSERT INTO buckets (tenant_id, name, region) VALUES ($1, $2, 'us-central-1')`, g.tenantID, name)
+	require.NoError(g.t, err)
 }
 
 func newGateTenant(t *testing.T, env map[string]string, host string) *gateTenant {
@@ -312,7 +322,7 @@ func newGateTenant(t *testing.T, env map[string]string, host string) *gateTenant
 	srv := NewServer(&config.Config{Server: config.ServerConfig{Port: 0}}, zap.NewNop(), eng, nil, db)
 
 	id := uuid.New().String()
-	g := &gateTenant{t: t, host: host, tenantID: "gate-" + id[:8], ak: "VKGATE" + strings.ToUpper(id[:8]), sk: "SK" + id}
+	g := &gateTenant{t: t, host: host, tenantID: "gate-" + id[:8], ak: "VKGATE" + strings.ToUpper(id[:8]), sk: "SK" + id, db: db}
 	email := "gate-" + id[:8] + "@test.local"
 	exec := func(q string, args ...any) {
 		_, err := db.Exec(q, args...)
@@ -372,9 +382,16 @@ func TestS3Gate_ARealRoundTripOnWebPathBuckets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGateTenant(t, tc.env, tc.host)
-			// GetObject of key "privacy" in bucket "legal" returns the object.
+			// Since Prompt 41 item 5 a NEW bucket may not take a web path's
+			// name (400 InvalidBucketName); the round trip below is on buckets
+			// that EXIST under those names, which keep working.
 			resp, b := g.do(http.MethodPut, "/legal", nil)
-			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBucket legal: %s", b)
+			require.Equal(t, http.StatusBadRequest, resp.StatusCode, "CreateBucket legal is reserved now: %s", b)
+			assert.Contains(t, string(b), "<Code>InvalidBucketName</Code>")
+			for _, name := range []string{"legal", "docs", "dashboard"} {
+				g.ownBucket(name)
+			}
+			// GetObject of key "privacy" in bucket "legal" returns the object.
 			want := []byte("the customer's own bytes, not the privacy page\n")
 			resp, b = g.do(http.MethodPut, "/legal/privacy", want)
 			require.Equal(t, http.StatusOK, resp.StatusCode, "PutObject legal/privacy: %s", b)
@@ -386,8 +403,6 @@ func TestS3Gate_ARealRoundTripOnWebPathBuckets(t *testing.T) {
 			assert.Equal(t, "47", resp.Header.Get("Content-Length"), "HeadObject: the object's size")
 
 			// ListObjectsV2 / HeadBucket of bucket "docs" are the S3 API's XML.
-			resp, b = g.do(http.MethodPut, "/docs", nil)
-			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBucket docs: %s", b)
 			resp, b = g.do(http.MethodGet, "/docs?list-type=2", nil)
 			require.Equal(t, http.StatusOK, resp.StatusCode, string(b))
 			var list struct {
@@ -400,8 +415,6 @@ func TestS3Gate_ARealRoundTripOnWebPathBuckets(t *testing.T) {
 			assert.Equal(t, http.StatusOK, resp.StatusCode, "HeadBucket docs")
 
 			// Every key of bucket "dashboard" (was a 303).
-			resp, b = g.do(http.MethodPut, "/dashboard", nil)
-			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBucket dashboard: %s", b)
 			resp, b = g.do(http.MethodPut, "/dashboard/x", []byte("x"))
 			require.Equal(t, http.StatusOK, resp.StatusCode, "PutObject dashboard/x: %s", b)
 			resp, b = g.do(http.MethodGet, "/dashboard/x", nil)
@@ -433,8 +446,7 @@ func TestS3Gate_ARealRoundTripOnWebPathBuckets(t *testing.T) {
 				assert.Equal(t, http.StatusNotFound, resp.StatusCode, "%s: %s", p, b)
 				assert.Contains(t, string(b), "<Code>NoSuchBucket</Code>", p)
 			}
-			resp, b = g.do(http.MethodPut, "/version", nil)
-			require.Equal(t, http.StatusOK, resp.StatusCode, "CreateBucket version: %s", b)
+			g.ownBucket("version")
 			resp, b = g.do(http.MethodGet, "/version?list-type=2", nil)
 			require.Equal(t, http.StatusOK, resp.StatusCode)
 			assert.Contains(t, string(b), "<Name>version</Name>")
