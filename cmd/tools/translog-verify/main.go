@@ -253,7 +253,8 @@ func anchors(ctx context.Context, out io.Writer, c *translog.Client, cp translog
 // clientListed proves the artefact at path is a client build the log lists
 // (K4c-3b; plan 43.6: "clients refuse an unlisted build"): its SHA-256 must
 // be in a client_build entry the verified checkpoint commits to — matching
-// name, when one is given — with the inclusion proof checked. An artefact
+// name, when one is given — with the inclusion proof checked
+// (translog.FindBuild, shared with release-sign verify -log). An artefact
 // the log does not list fails the run: that is the refusal, operator-side
 // (the refusal inside a client loader is K4c-3c).
 func clientListed(ctx context.Context, out io.Writer, c *translog.Client, cp translog.Checkpoint, path, name string) error {
@@ -268,31 +269,23 @@ func clientListed(ctx context.Context, out io.Writer, c *translog.Client, cp tra
 		return fmt.Errorf("hash the client artefact: %w", err)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
-	for n := int64(0); n*translog.TileWidth < cp.Size; n++ {
-		_, bodies, err := c.EntryBundle(ctx, cp, n)
-		if err != nil {
-			return fmt.Errorf("entry bundle %d: %w", n, err)
+	if name == "" {
+		// Any client: try each the manifest knows.
+		var last error
+		for _, n := range []string{"sdk-wasm", "sdk-js"} {
+			found, err := translog.FindBuild(ctx, c, cp, sum, n)
+			if err == nil {
+				_, _ = fmt.Fprintf(out, "client sha256 %s: %s\n", sum, found)
+				return nil
+			}
+			last = err
 		}
-		for i, b := range bodies {
-			d, err := translog.Decode(b)
-			if err != nil {
-				continue // an entry kind this build does not know
-			}
-			cb, ok := d.Entry.(translog.ClientBuild)
-			if !ok || cb.SHA256 != sum || (name != "" && cb.Client != name) {
-				continue
-			}
-			idx := n*translog.TileWidth + int64(i)
-			if _, err := c.VerifyInclusion(ctx, cp, idx); err != nil {
-				return fmt.Errorf("inclusion of the client_build entry %d: %w", idx, err)
-			}
-			_, _ = fmt.Fprintf(out, "client %s %s: sha256 %s listed at entry %d — inclusion OK\n  source commit %s, toolchain %s, recipe %s\n",
-				cb.Client, cb.Version, sum, idx, cb.SourceCommit, cb.Toolchain, cb.Recipe)
-			return nil
-		}
+		return fmt.Errorf("client build not in the log: no client_build entry lists sha256 %s in the %d entries the checkpoint commits to — refuse this build (%w)", sum, cp.Size, last)
 	}
-	if name != "" {
-		return fmt.Errorf("client build not in the log: no %s entry lists sha256 %s in the %d entries the checkpoint commits to — refuse this build", name, sum, cp.Size)
+	found, err := translog.FindBuild(ctx, c, cp, sum, name)
+	if err != nil {
+		return err
 	}
-	return fmt.Errorf("client build not in the log: no client_build entry lists sha256 %s in the %d entries the checkpoint commits to — refuse this build", sum, cp.Size)
+	_, _ = fmt.Fprintf(out, "client sha256 %s: %s\n", sum, found)
+	return nil
 }

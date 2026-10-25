@@ -141,6 +141,21 @@ repro-check:
 version:
 	@echo "$(BUILD_SHA) $(BUILD_DATE)"
 
+# The SBOMs (WP-SUPPLY-1): CycloneDX 1.6 JSON for the server (from the release
+# binary), sdk-wasm and sdk-js into bin/sbom/, by cyclonedx-gomod pinned in
+# scripts/sbom.sh (built for the host into a temporary GOBIN, never a PATH
+# binary); `make sbom-check` holds the server SBOM to go.sum at HEAD;
+# `make repro-check-sbom` generates twice and fails unless byte-identical.
+# deploy.yml runs all three after the binary's own repro gate.
+sbom:
+	scripts/sbom.sh bin/sbom
+
+sbom-check: sbom
+	scripts/sbom-check.sh bin/sbom/vaultaire.cdx.json
+
+repro-check-sbom:
+	scripts/repro-check-sbom.sh
+
 # Remove every build output, including the tool binaries that used to pile up
 # in the repo root (WP-R0-5: ~35 gitignored files). Keeps bench-results/*.md.
 clean:
@@ -160,7 +175,7 @@ clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	go clean
 
-.PHONY: build repro-check version clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
+.PHONY: build repro-check version sbom sbom-check repro-check-sbom clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
 
 # The Private-mode key core for the browser (keystone K2): sdk/go/e2ee compiled
 # to WebAssembly, with the SAME toolchain's wasm_exec.js beside it (they must
