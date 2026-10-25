@@ -23,7 +23,12 @@ import (
 // Cache-Control: robots.txt public 1 h (it changes with the canonical origin
 // only, i.e. a deploy); sitemap.xml public 5 min (it follows the legal-page
 // flags; the flags cache ~15 s); favicon.ico public 1 day (it changes with
-// the landing's icon, i.e. a deploy).
+// the landing's icon, i.e. a deploy). CDN-Cache-Control: no-store (RFC 9213,
+// honoured by Cloudflare) on all three: an edge serves a cached copy to a
+// SIGNED request for the same URL — a ListObjects of a bucket named
+// "favicon.ico" — so the edge never stores them, whatever the zone's rules
+// (RP57-5: prod stored.cloud, whose zone has no "S3 API is never cached"
+// rule yet, answered a signed GET with the cached icon).
 
 //go:embed favicon.ico
 var faviconICO []byte
@@ -103,6 +108,7 @@ func handleFaviconICO(w http.ResponseWriter, r *http.Request) {
 func writeWebFile(w http.ResponseWriter, r *http.Request, contentType, cacheControl string, body []byte) {
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("CDN-Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.Method == http.MethodHead {
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
