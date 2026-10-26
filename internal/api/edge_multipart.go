@@ -311,7 +311,12 @@ func (s *Server) completeEdgeUpload(w http.ResponseWriter, r *http.Request, t *t
 		return
 	}
 	applyObjectLockOnPut(pctx, s.db, t.ID, bucket, object, r)
-	_ = os.RemoveAll(multipartDir(uploadID))
+	// An edge upload stages nothing, but its Create made the directory: the
+	// id is checked where the path is built (the staging path's belt,
+	// CodeQL go/path-injection), as every path built from an upload id.
+	if validUploadID(uploadID) {
+		_ = os.RemoveAll(multipartDir(uploadID))
+	}
 
 	s.logger.Info("multipart upload completed", zap.String("bucket", bucket), zap.String("key", object), zap.String("uploadID", uploadID),
 		zap.String("backend", up.Backend), zap.Int64("totalSize", totalSize), zap.Int("parts", len(parts)), zap.String("etag", etagValue),
