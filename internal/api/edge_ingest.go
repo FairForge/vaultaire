@@ -451,13 +451,28 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 	// unsealed write land in this bucket" — never the chunk threshold, an
 	// edge upload is completed whole by the backend (D-EDGE-3).
 	var storageClass, floor string
+	var uploadAttrs objectAttrs
+	sseRequested := sr.Header.Get("x-amz-server-side-encryption") == "AES256"
 	if req.Op == edgeOpPut {
 		storageClass = resolvePutStorageClass(sctx, s.db, s.engine, tierPlacementGate(s.flags), tenantID, bucket, sr.Header.Get("x-amz-storage-class"))
 	} else {
-		_, requestedClass, _, aErr := s.multipartUploadAttrs(sr, sr.URL.Query().Get("uploadId"))
+		// A part's placement is the UPLOAD's (RP64-2): the Create recorded
+		// the SSE request (089) and the SSE-C key's MD5 (096), and a part's
+		// own headers never carry them. A keyless part on an SSE-C upload
+		// is the origin's (uploadPartSeal answers its 400, or seals a keyed
+		// part); an SSE-requested upload places whole_sealed below and
+		// stays a staged one. Never admit a part the origin would refuse.
+		var requestedClass string
+		var uploadEnc uploadEncryption
+		var aErr error
+		uploadAttrs, requestedClass, uploadEnc, aErr = s.multipartUploadAttrs(sr, sr.URL.Query().Get("uploadId"))
 		if aErr != nil && !errors.Is(aErr, sql.ErrNoRows) {
 			return edgeAdmitResponse{}, http.StatusInternalServerError
 		}
+		if uploadEnc.SSECKeyMD5 != "" {
+			return passThrough("ssec")
+		}
+		sseRequested = sseRequested || uploadEnc.SSERequested
 		storageClass = resolvePutStorageClass(sctx, s.db, s.engine, tierPlacementGate(s.flags), tenantID, bucket, requestedClass)
 	}
 	floor = usage.FloorOf(storageClass)
@@ -468,7 +483,7 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 	adapter := s.writeAdapter()
 	placement := adapter.decidePlacement(sctx, placementRequest{
 		TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: placeSize,
-		SSEC: false, SSERequested: sr.Header.Get("x-amz-server-side-encryption") == "AES256",
+		SSEC: false, SSERequested: sseRequested,
 	})
 	if placement.Refusal != nil {
 		placement.Refusal.write(rec, sr)
@@ -584,10 +599,6 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 		}
 		if s.quotaManager == nil {
 			return passThrough("unbilled") // the edge part path reserves on the upload row; without a quota manager the origin stages it
-		}
-		uploadAttrs, _, _, aErr := s.multipartUploadAttrs(sr, uploadID)
-		if aErr != nil {
-			return edgeAdmitResponse{}, http.StatusInternalServerError
 		}
 		res, rErr := reserveEdgePart(sctx, s.db, tenantID, uploadID, key, partNumber, size,
 			func(cctx context.Context, storageKey string) (string, string, error) {
@@ -770,7 +781,17 @@ func (s *Server) handleEdgeCommit(w http.ResponseWriter, r *http.Request) {
 		writeEdgeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no_database"})
 		return
 	}
-	relay, status, err := s.edgeCommit(r.Context(), req)
+	// The Worker's call ending is not a cancel (RP64-1; the codebase's own
+	// rule for a chunk PUT and a long operation): the Worker aborts its
+	// commit call at 10 s, and a disconnect used to cancel the context the
+	// terminal UPDATE ran on — the head row, the version row and the bill
+	// were committed while the admit row stayed pending, and the retry
+	// re-ran the whole settle (a second version row of the same bytes).
+	// The commit runs to its end on its own clock; the Worker's retry
+	// reads the recorded result.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), edgeCommitBound)
+	defer cancel()
+	relay, status, err := s.edgeCommit(cctx, req)
 	if err != nil {
 		s.logger.Error("edge commit failed", zap.Error(err), zap.String("admit_id", req.AdmitID))
 		writeEdgeJSON(w, status, map[string]string{"error": err.Error()})
@@ -783,6 +804,13 @@ var (
 	errEdgeAdmitUnknown = errors.New("unknown admit")
 	errEdgeAdmitExpired = errors.New("admit expired")
 )
+
+// edgeCommitBound is the commit's own clock, detached from the Worker's
+// call (RP64-1): the row lock, the flip and the part settle are database
+// work; the backend delete of a refused blob runs AFTER the transaction
+// (edgeBackendCallTimeout of its own). Far beyond any of them; a commit
+// that cannot finish inside it is a database that has stopped answering.
+const edgeCommitBound = 2 * time.Minute
 
 // edgeCommit is the commit under the admit row's lock: a terminal row
 // answers its recorded result again (idempotent); a pending one is settled
@@ -821,7 +849,7 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	}
 
 	rec := newRelayRecorder()
-	state, bytes := s.settleEdgeAdmit(ctx, row, req, rec)
+	state, bytes, after := s.settleEdgeAdmit(ctx, row, req, rec)
 	relay := rec.relay()
 	result, _ := json.Marshal(relay)
 	if _, err := tx.ExecContext(ctx, `
@@ -831,6 +859,12 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, http.StatusInternalServerError, err
+	}
+	if after != nil {
+		// The backend delete of a refused blob (up to 40 s): after the row
+		// is terminal and unlocked, never inside the transaction a retry
+		// of this commit waits on (RP64-1).
+		after()
 	}
 	if state == "committed" {
 		dataPlaneBytes.WithLabelValues(edgeHost, row.Op).Add(float64(bytes))
@@ -897,7 +931,9 @@ func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitR
 }
 
 // edgeDeleteBlob removes a blob the commit refused (a digest mismatch) on
-// its backend, best effort, and queues it for the collector as well.
+// its backend, best effort, and queues it for the collector as well. Runs
+// after the admit row's transaction committed (RP64-1): up to 40 s of
+// backend call never holds the row's lock or a DB connection.
 func (s *Server) edgeDeleteBlob(ctx context.Context, row edgeAdmitRow) {
 	ctx = context.WithoutCancel(ctx)
 	if drv, ok := s.engine.GetDriver(row.Backend); ok {
@@ -912,27 +948,29 @@ func (s *Server) edgeDeleteBlob(ctx context.Context, row edgeAdmitRow) {
 }
 
 // settleEdgeAdmit decides and performs the commit of a pending admit,
-// writing the client's answer to rec; returns the row's new state and the
-// bytes committed. The Worker is not in the byte path (it reports the
-// backend's answer only), so the integrity the control plane relies on is
-// the backend's: the signed content-length and Content-MD5 it enforced, and
-// the ETag it answered — the body's MD5 on both backends (Step 0.2), the
-// row's ETag.
-func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edgeCommitRequest, rec *relayRecorder) (string, int64) {
+// writing the client's answer to rec; returns the row's new state, the
+// bytes committed and what runs AFTER the row's transaction commits (the
+// backend delete of a refused blob, nil otherwise — RP64-1). The Worker is
+// not in the byte path (it reports the backend's answer only), so the
+// integrity the control plane relies on is the backend's: the signed
+// content-length and Content-MD5 it enforced, and the ETag it answered —
+// the body's MD5 on both backends (Step 0.2), the row's ETag.
+func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edgeCommitRequest, rec *relayRecorder) (string, int64, func()) {
 	path := "/" + row.Bucket + "/" + row.Key
 	reqID := row.RequestID
 	if reqID == "" {
 		reqID = generateRequestID()
 	}
-	fail := func(code string, opts ...ErrorOption) (string, int64) {
+	fail := func(code string, opts ...ErrorOption) (string, int64, func()) {
 		s.releaseEdgeAdmit(ctx, row)
 		if row.Op == edgeOpPut {
 			retireOrphanWrite(context.WithoutCancel(ctx), s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
 		}
 		WriteS3ErrorWithContext(rec, code, path, reqID, opts...)
 		s.recordEdgeAccess(row, rec.status, 0)
-		return "failed", 0
+		return "failed", 0, nil
 	}
+	deleteAfter := func() { s.edgeDeleteBlob(ctx, row) }
 	if req.Outcome != edgeOutcomeOK {
 		switch {
 		case req.Outcome == edgeOutcomeBackendError && req.BackendStatus == http.StatusBadRequest &&
@@ -944,6 +982,11 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 			req.BackendStatus == http.StatusLengthRequired):
 			// The body ended short of the signed content-length.
 			return fail(ErrIncompleteBody)
+		case req.Outcome == edgeOutcomeBackendError && req.BackendCode == "NoSuchUpload" && row.Op == edgeOpPart:
+			// The upload was aborted between the admit and the PUT (a
+			// client racing its own Abort): the backend's verdict is the
+			// client's, at once — not a 503 it would retry (RP64-9).
+			return fail(ErrNoSuchUpload)
 		default:
 			rec.Header().Set("Retry-After", "30")
 			s.logger.Warn("edge commit: the backend did not take the body — 503",
@@ -960,24 +1003,27 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	if len(etag) != 32 || !isHex(etag) {
 		s.logger.Error("edge commit: the backend's ETag is not an MD5 — the blob is removed, 500",
 			zap.String("backend", row.Backend), zap.String("backend_etag", req.BackendETag), zap.String("admit_id", row.ID))
-		s.edgeDeleteBlob(ctx, row)
-		return fail(ErrInternalError, WithSuggestion("The backend answered no MD5 ETag for this write; nothing was stored. Retry."))
+		state, n, _ := fail(ErrInternalError, WithSuggestion("The backend answered no MD5 ETag for this write; nothing was stored. Retry."))
+		return state, n, deleteAfter
 	}
 	if row.ContentMD5 != "" {
 		// The link signed it and the backend enforced it: the ETag must be
 		// that digest (a backend that let other bytes through is refused).
 		want, _ := base64.StdEncoding.DecodeString(row.ContentMD5)
 		if hex.EncodeToString(want) != etag {
-			s.edgeDeleteBlob(ctx, row)
-			return fail(ErrBadDigest)
+			state, n, _ := fail(ErrBadDigest)
+			return state, n, deleteAfter
 		}
 	}
+	var state string
+	var n int64
 	switch row.Op {
 	case edgeOpPut:
-		return s.commitEdgePut(ctx, row, rec, etag, reqID)
+		state, n = s.commitEdgePut(ctx, row, rec, etag, reqID)
 	default:
-		return s.commitEdgePart(ctx, row, req, rec, etag, reqID)
+		state, n = s.commitEdgePart(ctx, row, req, rec, etag, reqID)
 	}
+	return state, n, nil
 }
 
 // commitEdgePut is the PUT's commit: commitBlobWrite exactly as HandlePut,

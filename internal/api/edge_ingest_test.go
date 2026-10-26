@@ -61,6 +61,11 @@ type edgeFakeDriver struct {
 	aborts      atomic.Int32
 	deletes     []string
 	failPresign atomic.Bool
+	// deleteGate, when set, holds every Delete until it is closed;
+	// deleteEntered is closed once a Delete has started (RP64-1's test).
+	deleteGate    chan struct{}
+	deleteEntered chan struct{}
+	deleteOnce    sync.Once
 }
 
 func newEdgeFakeDriver() *edgeFakeDriver {
@@ -107,6 +112,16 @@ func (d *edgeFakeDriver) Delete(ctx context.Context, container, artifact string)
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return err
+	}
+	if d.deleteEntered != nil {
+		d.deleteOnce.Do(func() { close(d.deleteEntered) })
+	}
+	if d.deleteGate != nil {
+		select {
+		case <-d.deleteGate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -922,9 +937,18 @@ func TestEdgeCommit_BucketMadePrivateMeanwhile(t *testing.T) {
 // --- multipart ---
 
 func (f *edgeFixture) createUpload(key string) string {
+	return f.createUploadWith(key, nil)
+}
+
+// createUploadWith is createUpload with the client's own headers on the
+// Create (the SSE request, an SSE-C key — RP64-2).
+func (f *edgeFixture) createUploadWith(key string, hdr map[string]string) string {
 	f.t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/"+f.bucket+"/"+key+"?uploads", nil)
 	r.Header.Set("Content-Type", "application/zip")
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
 	tn := &tenant.Tenant{ID: f.tenantID, Namespace: "tenant/" + f.tenantID + "/"}
 	r = r.WithContext(s3Ctx(r.Context(), tn))
 	w := httptest.NewRecorder()

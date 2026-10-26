@@ -122,10 +122,13 @@ func (m *MultipartReaper) RunOnce(ctx context.Context) (MultipartReapResult, err
 	return result, nil
 }
 
-// abortEdgeBackendUploads aborts the backend half of every aborted edge
-// upload whose backend abort has not been made (WP-EDGE-1 Part A): the
-// handler's abort failed, or the reaper's own abandon pass ended the row.
-// A backend that cannot be asked keeps the row for the next pass; the
+// abortEdgeBackendUploads aborts the backend half of every ended edge
+// upload whose backend call has not been stamped (WP-EDGE-1 Part A): an
+// aborted row whose handler abort failed or that the reaper's own abandon
+// pass ended, and (RP64-5) a completed row whose Complete stamp failed —
+// AbortMultipart of a completed upload answers NoSuchUpload, which the
+// driver maps to success, so the stamp follows and the purge can take the
+// row. A backend that cannot be asked keeps the row for the next pass; the
 // purge never deletes such a row (its backend upload would leak).
 func (m *MultipartReaper) abortEdgeBackendUploads(ctx context.Context) (aborted, failed int, err error) {
 	if m.engine == nil {
@@ -134,7 +137,7 @@ func (m *MultipartReaper) abortEdgeBackendUploads(ctx context.Context) (aborted,
 	rows, err := m.db.QueryContext(ctx, `
 		SELECT upload_id, tenant_id, bucket, edge_backend, backend_upload_id, storage_key
 		FROM multipart_uploads
-		WHERE status = 'aborted' AND edge AND backend_upload_id IS NOT NULL AND backend_upload_ended_at IS NULL
+		WHERE status IN ('aborted', 'completed') AND edge AND backend_upload_id IS NOT NULL AND backend_upload_ended_at IS NULL
 		LIMIT 200`)
 	if err != nil {
 		return 0, 0, fmt.Errorf("select aborted edge uploads: %w", err)
