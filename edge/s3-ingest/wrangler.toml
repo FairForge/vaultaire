@@ -1,0 +1,23 @@
+# stored-s3-edge — the mover (WP-EDGE-1 Part A). Deployed on the PRODUCTION
+# Cloudflare account to the stored.cloud zone's route s3.stored.cloud/*.
+# The file IS the script (no_bundle): sha256(src/index.js) is the
+# transparency log's client_build row for client `edge-ingest`
+# (internal/translog/clientbuilds/manifest.json) and the deployed script
+# downloads back byte-identical.
+#
+# Secrets: VAULTAIRE_EDGE_TOKEN (`wrangler secret put VAULTAIRE_EDGE_TOKEN <
+# file` — never on a command line). Vars: VAULTAIRE_ORIGIN is where admit
+# and commit go: the SLC host whose certificate is valid, NOT
+# s3.stored.cloud (that would loop into this Worker).
+name = "stored-s3-edge"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+no_bundle = true
+workers_dev = false
+routes = [{ pattern = "s3.stored.cloud/*", zone_name = "stored.cloud" }]
+
+[observability]
+enabled = true
+
+[vars]
+VAULTAIRE_ORIGIN = "https://stored.ge"

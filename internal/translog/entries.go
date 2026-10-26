@@ -134,11 +134,12 @@ func (b ServerBuild) validate() error {
 // The clients a client_build entry can name (a CLOSED list: a new client is
 // a code change here and a manifest row, never free text).
 const (
-	ClientSDKWasm = "sdk-wasm" // sdk/go/e2ee compiled to WebAssembly (sdk/wasm → e2ee.wasm)
-	ClientSDKJS   = "sdk-js"   // the JS binding that loads it (sdk/js/e2ee/index.mjs)
+	ClientSDKWasm    = "sdk-wasm"    // sdk/go/e2ee compiled to WebAssembly (sdk/wasm → e2ee.wasm)
+	ClientSDKJS      = "sdk-js"      // the JS binding that loads it (sdk/js/e2ee/index.mjs)
+	ClientEdgeIngest = "edge-ingest" // the mover: the Cloudflare Worker on s3.stored.cloud (edge/s3-ingest/src/index.js, published as the file — WP-EDGE-1 Part A)
 )
 
-var buildClients = []string{ClientSDKWasm, ClientSDKJS}
+var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest}
 
 // BuildClients lists the clients.
 func BuildClients() []string { return append([]string(nil), buildClients...) }

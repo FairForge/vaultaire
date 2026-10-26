@@ -11,8 +11,10 @@
 #   - sdk-js is published as-is: its "build" is a byte copy of the source.
 #
 # Usage: scripts/build-client.sh <client> <output>
-#   sdk-wasm  sdk/go/e2ee compiled to WebAssembly (sdk/wasm)
-#   sdk-js    the JS binding (sdk/js/e2ee/index.mjs)
+#   sdk-wasm     sdk/go/e2ee compiled to WebAssembly (sdk/wasm)
+#   sdk-js       the JS binding (sdk/js/e2ee/index.mjs)
+#   edge-ingest  the mover Worker (edge/s3-ingest/src/index.js), published as
+#                the file itself (wrangler no_bundle; WP-EDGE-1 Part A)
 set -euo pipefail
 
 client=${1:?usage: build-client.sh <client> <output>}
@@ -33,8 +35,11 @@ sdk-wasm)
 sdk-js)
 	cp sdk/js/e2ee/index.mjs "$out"
 	;;
+edge-ingest)
+	cp edge/s3-ingest/src/index.js "$out"
+	;;
 *)
-	echo "build-client: unknown client $client (sdk-wasm, sdk-js)" >&2
+	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest)" >&2
 	exit 1
 	;;
 esac
