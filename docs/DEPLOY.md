@@ -392,6 +392,22 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
   a psql row. The Worker itself needs no order: an origin without the token
   or the routes answers its admit with a 404 and the Worker passes the
   request through.
+- **The read half (WP-EDGE-1 Part B, migration 110, Stage 1a Prompt 45)
+  needs no flag order of its own.** Migration 110 only widens the op CHECK
+  (`'get'`); the previous build never writes such a row. Its reaper, though,
+  selects every expired pending row with NO op filter and treats it as a
+  lost PUT (release the reservation, queue `storage_key` as `orphan_write`)
+  — on a `get` row that address is the LIVE object's blob. During the
+  two-slot overlap that is safe for two reasons, and write them down rather
+  than "the previous build ignores get rows": the 20-minute admit TTL
+  outlasts the old slot's drain (no `get` row the new slot writes expires
+  before the old slot has stopped), and the collector's `blobNamedBy`
+  re-checks a queued address under the key's lock before any delete (the
+  head row names it, so it is kept). The Worker (0.2.0) against an origin
+  of the previous build: the admit answers `invalid_op` 400 for `get`, which
+  the Worker treats as "admit unavailable" and passes the request through —
+  deploy the origin first, then `wrangler deploy`; the other order costs
+  nothing but a pass-through.
 - **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
   and the credential cache are per process, the egress month counter is one
   per process, and the synthetic check would run twice — none of that is safe

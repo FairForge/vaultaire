@@ -525,6 +525,21 @@ own plus your `Content-MD5` when you send one (signed into the link the
 backend enforces); a hex `x-amz-content-sha256` is verified on the
 `stored.ge` path only.
 
+Reads go the same way (WP-EDGE-1 Part B): a `GetObject` — whole, or one
+`Range` — of an object of at least 4 MiB that is a whole unsealed object on
+iDrive or Lyve is streamed to you from the backend by the edge, under the
+same response headers `stored.ge` sends (ETag, Content-Type, Content-Length,
+Content-Range, `x-amz-storage-class`, `x-amz-meta-*`, the version id, the
+Object Lock headers); `aws s3 cp`'s `If-Match` + `Range: bytes=0-` download
+shape is served that way too. Everything else — HEAD, a presigned URL,
+`?versionId`, a public bucket, a sealed (SSE-S3 / SSE-C) or chunked object,
+an object on tape, a multi-range or unsatisfiable `Range`, `If-None-Match`
+and the `If-*-Since` headers, a read while your account is past its egress
+allowance with the throttle on — is answered by the origin as on
+`stored.ge`, and so is any read the backend does not answer as expected
+(the origin keeps the failover path). One stream 100–110 MB/s edge →
+backend; the egress is metered once, for the bytes the backend served.
+
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.
 
