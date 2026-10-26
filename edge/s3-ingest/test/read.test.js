@@ -33,7 +33,7 @@ test("classify: a signed GetObject is the edge's; HEAD, presigned, sub-resources
 
 test("readResponse: the backend's body under the ORIGIN's headers, never the backend's, with the expected status", async () => {
   const backend = new Response("0123456789", { status: 206, headers: { "content-type": "binary/octet-stream", etag: '"backend"', "x-amz-id-2": "vendor", "content-range": "bytes 0-9/10", "content-length": "10", "cf-cache-status": "HIT" } });
-  const admit = { expect_status: 206, response_headers: { "Content-Type": "text/plain", Etag: '"row"', "Content-Range": "bytes 0-9/4096", "Content-Length": "10", "X-Amz-Storage-Class": "STANDARD", "X-Amz-Meta-Origin": "edge-test", "Accept-Ranges": "bytes", "Last-Modified": "Sun, 26 Oct 2026 12:00:00 GMT" } };
+  const admit = { expect_status: 206, status: 206, response_headers: { "Content-Type": "text/plain", Etag: '"row"', "Content-Range": "bytes 0-9/4096", "Content-Length": "10", "X-Amz-Storage-Class": "STANDARD", "X-Amz-Meta-Origin": "edge-test", "Accept-Ranges": "bytes", "Last-Modified": "Sun, 26 Oct 2026 12:00:00 GMT" } };
   const resp = readResponse(backend, admit);
   assert.equal(resp.status, 206);
   assert.equal(resp.headers.get("content-type"), "text/plain");
@@ -44,6 +44,11 @@ test("readResponse: the backend's body under the ORIGIN's headers, never the bac
   assert.equal(resp.headers.get("x-amz-id-2"), null, "nothing of the backend's");
   assert.equal(resp.headers.get("cf-cache-status"), null);
   assert.equal(await resp.text(), "0123456789", "the body as it is");
+  // A whole read: the backend's 206 of the whole span is the client's 200.
+  const whole = readResponse(new Response("abc", { status: 206, headers: { "content-range": "bytes 0-2/3" } }), { expect_status: 206, status: 200, response_headers: { "Content-Length": "3", Etag: '"x"' } });
+  assert.equal(whole.status, 200);
+  assert.equal(whole.headers.get("content-range"), null);
+  assert.equal(whole.headers.get("content-length"), "3");
 });
 
 test("readFetchInit: exactly the signed headers, no edge cache", () => {
@@ -55,13 +60,13 @@ test("readFetchInit: exactly the signed headers, no edge cache", () => {
 });
 
 test("readSucceeded / readCommit: served at expect_status, fallback on anything else, error without an answer", () => {
-  const admit = { admit_id: "a1", expect_status: 200 };
-  const ok = new Response("x", { status: 200, headers: { "content-length": "4096" } });
+  const admit = { admit_id: "a1", expect_status: 206, status: 200 };
+  const ok = new Response("x", { status: 206, headers: { "content-length": "4096" } });
   assert.equal(readSucceeded(ok, admit), true);
   const c = readCommit(admit, ok, null, Date.now() - 5);
   assert.equal(c.admit_id, "a1");
   assert.equal(c.outcome, "served");
-  assert.equal(c.backend_status, 200);
+  assert.equal(c.backend_status, 206);
   assert.equal(c.backend_content_length, 4096, "the backend's Content-Length, read at its headers");
   assert.ok(c.duration_ms >= 5);
 
@@ -76,6 +81,7 @@ test("readSucceeded / readCommit: served at expect_status, fallback on anything 
   // A 200 where a 206 was expected (a backend that ignored the Range): the origin's.
   const whole = new Response("x", { status: 200 });
   assert.equal(readSucceeded(whole, { expect_status: 206 }), false);
+  assert.equal(readSucceeded(whole, admit), false, "even for a whole read: every link names a Range");
   // A 412 (the blob replaced under the link — impossible by address, the belt): the origin's.
   assert.equal(readSucceeded(new Response("", { status: 412 }), admit), false);
   // No answer at all.

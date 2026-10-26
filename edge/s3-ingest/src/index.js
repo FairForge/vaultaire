@@ -128,7 +128,8 @@ export function backendErrorCode(xml) {
 
 /**
  * readSucceeded says whether the backend's answer is the one the control
- * plane expected (expect_status: 200, or 206 for a range). Anything else —
+ * plane expected (expect_status: 206 — every link names the byte span the
+ * backend serves, the whole object's for a whole read). Anything else —
  * Lyve's HEAD 200 / GET 500 of 2026-10-21, a 412 under a replaced blob, a
  * 403 from a dead key — is the origin's to serve (it has the failover
  * path: the breaker, the fan-out, the parity rebuild).
@@ -140,12 +141,14 @@ export function readSucceeded(backendResponse, admit) {
 /**
  * readResponse is the client's response of an admitted read: the backend's
  * body as it is (no JavaScript touches it) under the ORIGIN's headers the
- * control plane answered — never the backend's — with the expected status.
+ * control plane answered — never the backend's — with the CLIENT's status
+ * (admit.status: 200 for a whole read the backend served as a 206 of its
+ * whole span, 206 for the client's own Range).
  */
 export function readResponse(backendResponse, admit) {
   const headers = new Headers();
   for (const [k, v] of Object.entries(admit.response_headers || {})) headers.set(k, v);
-  return new Response(backendResponse.body, { status: admit.expect_status, headers });
+  return new Response(backendResponse.body, { status: admit.status || admit.expect_status, headers });
 }
 
 /**
