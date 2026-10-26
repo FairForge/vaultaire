@@ -73,7 +73,7 @@
         <li><strong>iDrive Inc.</strong> (United States; EU regions on request), primary object storage for Standard-tier objects, in the region you choose per bucket.</li>
         <li><strong>Seagate Technology (Lyve Cloud)</strong> (United States), object storage for the resilient tier and as a failover leg.</li>
         <li><strong>Geyser Data Inc.</strong> (United States, Los Angeles), tape archive for Vault-tier objects (<code>GLACIER</code> / <code>DEEP_ARCHIVE</code>), whatever the bucket's region.</li>
-        <li><strong>Cloudflare Inc.</strong> (global edge), CDN, DDoS protection and TLS termination; the bytes of an upload to the S3 endpoint <code>s3.stored.cloud</code> pass through its edge in transit to the storage backend (never stored there); Cloudflare R2 holds the objects of public-read buckets served on <code>{{host "cdnhost"}}</code>, and the point-in-time archive of our database, encrypted on our server before it leaves it.</li>
+        <li><strong>Cloudflare Inc.</strong> (global edge), CDN, DDoS protection and TLS termination; the bytes of an upload to the S3 endpoint <code>{{host "s3host"}}</code> pass through its edge in transit to the storage backend (never stored there); Cloudflare R2 holds the objects of public-read buckets served on <code>{{host "cdnhost"}}</code>, and the point-in-time archive of our database, encrypted on our server before it leaves it.</li>
         <li><strong>Microsoft Corporation (OneDrive)</strong> (United States), internal parity copies of objects, when enabled.</li>
         <li><strong>Stripe Inc.</strong> (United States), payment processing and subscription management.</li>
         <li><strong>Resend Inc.</strong> (United States), transactional e-mail, when enabled.</li>
