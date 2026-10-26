@@ -99,8 +99,12 @@ Step 0 — probes before any code (write the answers into WP-EDGE-1A.md):
 0.4 The stored.cloud zone: SSL mode (Full vs Full strict) and whether the origin
     certificate HAProxy serves covers s3.stored.cloud (`openssl s_client
     -servername s3.stored.cloud -connect <SLC IP>:443`). DNS for s3.stored.cloud
-    does not exist yet (CLOUDFLARE.md § DNS (stored.cloud) — target state). This
-    is [YOU] item 1; you cannot create it. Build and prove on a lab origin.
+    does not exist yet (CLOUDFLARE.md § DNS (stored.cloud) — target state). YOU
+    create it (the operator items at the end): the zone-scoped user token in
+    ~/fairforge/.cloudflare-creds.env (CLOUDFLARE_ZONE_TOKEN, the zone ids, the
+    prod account id) covers DNS, Workers routes and Workers scripts on the
+    production account. Prove the code on a lab origin FIRST, then do the prod
+    items.
 0.5 Does auth.(*Auth).ValidateRequest (internal/auth/handlers.go:105) hash the
     body when x-amz-content-sha256 is a hex digest? If yes, the described-request
     verifier below must accept the digest as a CLAIM and the commit must check
@@ -475,16 +479,52 @@ Architecture notes
   one Lightroom backup zip through s3.stored.cloud with rclone
   (--s3-upload-cutoff 64M --s3-chunk-size 64M), then
   vaultaire_data_plane_bytes_total vs HAProxy's bytes for the same minute.
-- [YOU] (owner, in order): (1) DNS A/AAAA `s3.stored.cloud` → the SLC address,
-  proxied, on the stored.cloud zone, and an origin certificate HAProxy serves
-  that covers s3.stored.cloud (a Cloudflare Origin CA certificate is the
-  simplest; or add the SAN to the LE cert — docs/DEPLOY.md's cert section);
-  (2) `wrangler secret put VAULTAIRE_EDGE_TOKEN` on the production account and
-  the same value as EDGE_SERVICE_TOKEN on the box (generate with `openssl rand
-  -hex 32`, keep it in the Keychain as `vaultaire-edge-token`, never in the
-  chat); (3) after the deploy: flag `edge_ingest` ON for tenant zero from
-  /admin/flags, then the Lightroom proof above; (4) read the sub-processors
-  sentence before A3 merges.
+- Operator items — YOURS, not the owner's (the owner's standing authorization of
+  2026-10-26: "build everything now, I won't be back for a while"; plan 40.10
+  "Build everything now"). Do them AFTER the lab proof and after A1 + A2 are
+  on main and `vaultaire-switch deploy` has made the new build the active slot
+  (DEPLOY.md). In order; every secret handled so that its value never appears
+  in a command line, a log or the transcript:
+  (1) DNS: an A (and AAAA if the box has one — read HAProxy's bind) record
+      `s3.stored.cloud` → the SLC address, proxied, on the stored.cloud zone,
+      through the Cloudflare API with CLOUDFLARE_ZONE_TOKEN (source the creds
+      file with `set -a; . ~/fairforge/.cloudflare-creds.env; set +a` inside
+      one `bash -c`; never cat it). Then the certificate: on the box, `sudo
+      certbot certonly --expand` adding the SAN s3.stored.cloud to the cert
+      that holds stored.cloud (HTTP-01 — the ACME path reaches acme_backend
+      through HAProxy, DEPLOY.md:62; the deploy hook rebuilds
+      /etc/haproxy/certs/*-le.pem, DEPLOY.md:83); verify with `openssl
+      s_client -servername s3.stored.cloud`. If the zone's SSL mode is Full
+      (not strict) the SAN is still added — the probe TLS_CERT_PROBE_TARGETS
+      gains `s3.stored.cloud@127.0.0.1:443`.
+  (2) The token: on the box `umask 077; openssl rand -hex 32 > /tmp/edge.tok`
+      (never echo it); append `EDGE_SERVICE_TOKEN=$(cat /tmp/edge.tok)` to
+      /opt/vaultaire/configs/.env with `sudo sh -c` after the usual backup
+      `.env.bak-edge-token-<ts>` (the zsh pipe+heredoc rule: one `bash -c`, no
+      heredoc into ssh); `sudo vaultaire-switch restart`; the boot line says
+      `edge service token: env`. Copy the file to the Mac (scp, 0600), add it
+      to the Keychain with `security add-generic-password -a vaultaire -s
+      vaultaire-edge-token -w "$(cat …)"` inside a bash -c (the value is read
+      from the file, never typed), then `wrangler secret put
+      VAULTAIRE_EDGE_TOKEN < file` on the PRODUCTION account
+      (CLOUDFLARE_API_TOKEN = the user token, CLOUDFLARE_ACCOUNT_ID =
+      CLOUDFLARE_PROD_ACCOUNT_ID); shred both files.
+  (3) `wrangler deploy` from edge/s3-ingest/ (the route `s3.stored.cloud/*`
+      in wrangler.toml); confirm `GET https://s3.stored.cloud/health` answers
+      the origin's body (pass-through) and the translog manifest row's sha256
+      equals the deployed script's (download it with wrangler).
+  (4) Flag `edge_ingest` ON for tenant zero through the admin API (a psql row
+      skips the guard, RP62-13) — the admin JWT comes from the sign-in with the
+      bench key route of docs/reviews (never minted from JWT_SECRET); then the
+      Lightroom proof above; then the sub-processors sentence is in A3.
+  If any token lacks a scope (a 403 from the API), stop there, say exactly which
+  scope, and leave that item as the ONE [YOU] — the owner can mint a token from
+  a phone. Nothing else in this prompt is the owner's.
+- Closeout: write **Prompt 45 (WP-EDGE-1 Part B — reads)** into this file in
+  the /next format (STATUS "Now" + plan 40.10 "Build everything now" are the
+  order of record; your WP-EDGE-1A.md residuals are its Part 0), update STATUS,
+  the plan's 40.10 status line and the Stage 1a ledger memory row 44, and name
+  the post-merge review RP64 — the chain continues without the owner.
 - Commit: feat(api,drivers,edge): WP-EDGE-1 Part A — the mover … [WP-EDGE-1];
   no AI attribution lines in commits; merge with `gh pr merge --auto` (merge
   queue; no --squash, no --delete-branch, never --admin).
@@ -492,18 +532,94 @@ Architecture notes
 
 ---
 
-## Next prompts in this series (not yet written)
+## The chain (owner 2026-10-26: "build everything now") — each closeout writes the next prompt here
 
-- **WP-EDGE-1 Part B — reads:** GetObject through the Worker: admit → the
-  egress meter counts and the `egress_throttle` decision is answered as 503
-  SlowDown + Retry-After from admit (the Worker never paces) → a presigned ranged
-  GET (`Range` passed through) → stream; HEAD stays at the origin (cache-only,
-  Decision 2); the `parallel_get` flag's whole-object path at the edge later.
-- **WP-EDGE-2 — slice 2, the codec at the edge** (after the F-14 ceremony; built
-  against a lab master key first): the WASM chunker pinned to the golden
-  boundaries, the random per-chunk key wrapped to the tenant's ML-KEM-768 public
-  key (a new header version of the 0x03 format), the batched index call, F-3's
-  measurement as its first run.
-- **WP-EDGE-3 — the first data node:** this binary stateless as a data-plane
-  host, `data_plane_hosts` (host, weight, health), the control plane picking a
-  host per admit.
+Serial, one deep code lane; each prompt's Part 0 is the previous prompt's
+residuals; each post-merge review takes the next RP number. Nothing below needs
+the owner; the two switches that wait for the F-14 ceremony are named in
+Prompt 46. The scopes here are what the writer of each prompt expands with
+current line numbers (the /next conventions).
+
+- **Prompt 45 — WP-EDGE-1 Part B, reads.** GetObject (and the Range form)
+  through the Worker: admit (SigV4 via ValidateDescribed, scope, the head row —
+  a whole unsealed object on an EdgeWriter backend; chunked, sealed, SSE-C,
+  tape, parity-rebuild and `sia` rows pass through to the origin) → the egress
+  meter counts the object's bytes at admit (`internal/api/egress_meter.go`;
+  the live counter + `bandwidth_usage_daily` as the origin's GET does) → the
+  `egress_throttle` decision answered as 503 SlowDown + Retry-After FROM ADMIT
+  (the Worker never paces; the floor and MAX_STREAMS rules unchanged) → a
+  presigned ranged GET (TTL 15 min, `Range` passed through, If-Match the
+  backend ETag so a concurrent overwrite cuts the body, never splices) →
+  stream; the commit reports bytes served (metering truth) and the response
+  headers are the origin's (ETag, content-type, x-amz-* from the row, version
+  id, storage class via engine.CustomerStorageClass). HEAD stays at the origin
+  (Decision 2, cache-only). The `parallel_get` whole-object path at the edge
+  is a later part. Tests: the egress rows equal a GET through the origin;
+  the throttled tenant's 503 from admit; a Range GET's bytes; a sealed row
+  passes through; the access-log row; a lost commit still meters (the reaper
+  reads the admit's size). Live proof: the Lightroom zip back through
+  s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
+- **Prompt 46 — WP-EDGE-2, slice 2 against the LAB master key.** Built and
+  proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK
+  (flag `edge_codec`, per tenant; on prod without a master key the admit
+  answers {edge:false} and the origin refuses as placement.go does today).
+  (a) The frozen chunker (WP-R8-4, restic Rabin polynomial) compiled to WASM
+  from the Go module (one implementation; `make lint-wasm`), pinned to the
+  golden boundaries by a test the Worker runs in CI (node --test + the wasm);
+  per 64 MiB part, boundaries reset at part edges. (b) The dual key: the
+  tenant's ML-KEM-768 public key served to the Worker by admit (from
+  `tenant_key_versions`, newest version), a random key per chunk, the chunk
+  sealed in the 0x03 streaming format, the chunk key wrapped with HPKE
+  (X-Wing as in sdk/go/e2ee) to the public key — a NEW header version of the
+  format (0x04: wrap kind + KEM ciphertext + version), opened on the control
+  plane by unwrapping the chunk key under the tenant private seed; 0x03 blobs
+  still open; `internal/crypto/stream.go`'s golden vectors gain the 0x04 case.
+  (c) The batched index call: the Worker sends HMAC(tenant_index_key,
+  sha256(chunk)) for the part's chunks (the index key derived from the
+  tenant key version under its own HKDF label — ONE hierarchy, contract line
+  4), the control plane answers hits/misses, the Worker uploads misses only
+  (presigned PUT per chunk into `_global` at the one address, WP-R8-7), the
+  manifest written by the control plane on commit (`global_content_index`,
+  `tenant_chunk_refs`, the chunked head row with backend `chunked`). The
+  index stores the keyed hash only (`TestIndexHoldsNoPlainHash`). (d) The
+  F-3 measurement tool (`cmd/tools/dedup-measure`): the cross-tenant fraction
+  of the plaintext index on a lab corpus, the number the owner decides F-37
+  with. On prod the two switches that wait for F-14 are: `edge_codec` ON and
+  the `standard_sealed_default` flag of Prompt 48 — both one admin call after
+  the ceremony. Contract lines 4, 5, 6 cited.
+- **Prompt 47 — WP-EDGE-3, the data node.** The binary in node mode
+  (`VAULTAIRE_ROLE=node`: no DB, no routes but the mover's, the same admit/
+  commit protocol over the service token, the Worker's chunked decoder and
+  digests in Go) and `data_plane_hosts` (migration: host, kind
+  edge|node|slc, weight, health, last_seen) with the control plane picking a
+  host per admit by weight × health; `host=slc` is the origin's own write
+  path re-expressed as a node of the protocol (the handlers call admit/commit
+  in-process), so the metrics families carry every byte by host. Proven with
+  two processes in the lab (control plane + node on another port) and on
+  prod as `host=slc` beside the Worker at weight 0 → 1. A real unmetered node
+  is an owner purchase later (a VPS from a phone; `deploy/node/` carries the
+  unit and the one-line install).
+- **Prompt 48 — slice 3 + the dark seal-by-default flag + the catalogue
+  filter.** (a) The second-copy policy at the edge: an object under 8 MiB is
+  mirrored — admit answers two presigned PUTs (the placement's backend + the
+  mirror leg from the plan's leg order), the Worker tees one stream into two
+  fetches, commit records both addresses (a `mirror` column on the head row
+  or a `blob_copies` table — decide in the prompt, migration), the read path
+  falls back to the mirror on a miss; 8 MiB and up: k+m RS stripes with the
+  WP-VAULT-1 codec compiled to WASM (`tools/edge-ec-worker/codec`'s Rust is
+  the fallback), data shards on fast legs, parity on slow, no vendor above m,
+  a read touching data shards only; mirror first on prod (Lyve + iDrive;
+  tenant zero's backups get their second copy — the owner's single copy on
+  Lyve ends here). (b) `standard_sealed_default` (global, default OFF, 409
+  without a master key like `credential_plaintext_drop`): ON = every Standard
+  write is placed sealed (SSE-S3 at the edge via Prompt 46's codec, or at the
+  origin for the pass-through cases) — the switch that makes modes.json's
+  sentence true, built dark, flipped after F-14 and after Prompt 46 is ON.
+  (c) 10.3's public-catalogue filter: a versioned Bloom filter of the
+  public-artefact namespace's tags served from R2, the SDK and the Worker
+  check locally, references only; the namespace itself (10.3/10.6's tables)
+  seeded with one artefact set in the lab.
+- **After the ceremony (one session, owner present only for the ceremony
+  itself):** `edge_codec` ON for tenant zero → the sealed-object proofs →
+  `standard_sealed_default` ON → `credential_plaintext_drop` (Prompt 43 B3) →
+  the key-dependent residuals of Prompts 46 and 48.
