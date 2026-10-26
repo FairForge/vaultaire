@@ -12,7 +12,7 @@ prices.json wins.
 
 | | |
 |---|---|
-| S3 endpoint | `https://stored.ge` |
+| S3 endpoint | `https://stored.ge`; **`https://s3.stored.cloud`** (the same API behind the edge mover, WP-EDGE-1: an admitted upload of a tenant with the `edge_ingest` flag is streamed from Cloudflare's edge straight to its backend — the response is the same; keep every single PUT and every part under 100 MB there, the zone's request limit answers an HTML 413 above it) |
 | Addressing | **path-style**: `https://stored.ge/<bucket>/<key>` (virtual-hosted `<bucket>.stored.ge` is not served) |
 | Region | `us-east-1` in the SigV4 credential scope, whatever region the bucket was created in |
 | CDN (public-read buckets only) | `https://cdn.stored.ge/<slug>/<bucket>/<key>` |
@@ -506,6 +506,24 @@ region = us-east-1
 endpoint = https://stored.ge
 acl = private
 ```
+
+Through `s3.stored.cloud` keep parts at 64 MiB: `rclone copy … --s3-upload-cutoff
+64M --s3-chunk-size 64M` (or `upload_cutoff = 64M` / `chunk_size = 64M` in the
+remote). rclone's default cutoff is 200 MiB, so a 150 MB file would go as one
+PUT and get the zone's HTML 413 — the 100 MB request limit is Cloudflare's,
+answered before our Worker runs. aws-cli's default 8 MiB parts need nothing,
+but aws-cli v2 (2.23+) sends its body `aws-chunked` with a CRC32 trailer,
+which the edge hands to our origin unchanged: set
+`request_checksum_calculation = when_required` in the profile to have the
+edge move the bytes.
+
+What to expect through the edge: one stream 40–55 MB/s, eight parts in flight
+(`rclone --transfers 8`) about 150 MB/s per client — a 1 Gbps line is near
+its ceiling; a machine that uploads faster than that is faster through
+`stored.ge`, which stays a host. Integrity through the edge is the backend's
+own plus your `Content-MD5` when you send one (signed into the link the
+backend enforces); a hex `x-amz-content-sha256` is verified on the
+`stored.ge` path only.
 
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.

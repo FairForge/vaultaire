@@ -381,6 +381,17 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     database`) brings the plaintext back with it — that, not a rollback, is
     the way to an older build. The script is installed by hand like every
     `deploy/**` change.
+- **The `edge_ingest` flag stays OFF until the build that knows edge uploads
+  is the active slot** (WP-EDGE-1 Part A, migration 109, Stage 1a Prompt
+  44). The migration is additive, but the PREVIOUS build cannot Complete an
+  edge multipart upload (it knows no `backend_upload_id`) and answers its
+  staged-part refusal as a plain part: during a two-slot overlap a Worker
+  admitted part and an old-slot Complete would disagree. So: `vaultaire-switch
+  deploy` first, the old slot stopped, then `edge_ingest` on for tenant
+  zero through the admin API (`PUT /api/v1/admin/flags/edge_ingest`), never
+  a psql row. The Worker itself needs no order: an origin without the token
+  or the routes answers its admit with a 404 and the Worker passes the
+  request through.
 - **Why one active slot, not two**: the pending-TOTP secret of an MFA enrolment
   and the credential cache are per process, the egress month counter is one
   per process, and the synthetic check would run twice — none of that is safe
