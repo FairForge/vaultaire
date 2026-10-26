@@ -1,4 +1,4 @@
-// stored-s3-edge — the mover (WP-EDGE-1 Part A, plan 40.10 slice 1).
+// stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B, plan 40.10 slice 1).
 //
 // A Cloudflare Worker on s3.stored.cloud. Every S3 request arrives here;
 // a PutObject or UploadPart is described to the control plane (admit),
@@ -7,16 +7,20 @@
 // through JavaScript: the subrequest's body is the request's own body
 // (bench-results/EDGE-RELAY-2026-10-26.md: any JS in the byte path halves
 // a stream to ~25 MB/s; pass-through runs at 42–54 MB/s per stream and
-// ~150 MB/s at eight). Everything else, and anything the control plane
-// declines, passes through to the origin untouched (`fetch(request)`: the
-// route's origin is SLC, the Host stays, the SigV4 signature still
-// verifies there).
+// ~150 MB/s at eight). A GetObject (Part B) is admitted the same way and
+// its bytes come STRAIGHT from the backend on a presigned ranged GET: the
+// backend's body is the client's response body, under the ORIGIN's
+// headers the control plane answered. Everything else, and anything the
+// control plane declines, passes through to the origin untouched
+// (`fetch(request)`: the route's origin is SLC, the Host stays, the SigV4
+// signature still verifies there).
 //
 // What this file is NOT: a privacy feature (it moves Standard plaintext and
 // Private ciphertext alike and holds no key — contract lines 1, 4, 8), a
 // verifier (the control plane verifies every signature — Architecture
 // Decision 8), a hasher (integrity is the backend's own plus the client's
-// Content-MD5 signed into the link), a buffer.
+// Content-MD5 signed into the link), a buffer, a cache (a GET's subrequest
+// is `cache: "no-store"` — customer bytes never enter the edge cache).
 //
 // Deployed as the file itself (`no_bundle = true`): its sha256 is a
 // client_build row of the transparency log (contract line 7) and the
@@ -35,29 +39,34 @@ const HOP_BY_HOP = new Set([
 // --- classification -------------------------------------------------------
 
 /**
- * classify says what the request is to the edge: {kind: "put"|"part"|"pass",
- * reason}. Only a signed (SigV4 header) PUT of an object key with no query
- * (PutObject) or exactly partNumber+uploadId (UploadPart), with a plain
- * body, is the edge's; a copy, a sub-resource, an unsigned or presigned
- * request, a bucket PUT, an aws-chunked body (x-amz-content-sha256
- * STREAMING-*: decoding it would put JS in the byte path — the origin takes
- * it; aws-cli v2 users set request_checksum_calculation = when_required)
- * and every other method are the origin's.
+ * classify says what the request is to the edge: {kind: "put"|"part"|"get"|
+ * "pass", reason}. Only a signed (SigV4 header) PUT of an object key with
+ * no query (PutObject) or exactly partNumber+uploadId (UploadPart), with a
+ * plain body, or a signed GET of an object key with no query (GetObject —
+ * Part B; a HEAD never, Decision 2), is the edge's; a copy, a
+ * sub-resource, an unsigned or presigned request, a bucket request, an
+ * aws-chunked body (x-amz-content-sha256 STREAMING-*: decoding it would put
+ * JS in the byte path — the origin takes it; aws-cli v2 users set
+ * request_checksum_calculation = when_required) and every other method are
+ * the origin's. aws-sdk-go-v2 (rclone's library) names the operation in
+ * the query (`x-id=PutObject` / `x-id=GetObject`): not a sub-resource.
  */
 export function classify(request) {
-  if (request.method !== "PUT") return { kind: "pass", reason: "method" };
+  if (request.method !== "PUT" && request.method !== "GET") return { kind: "pass", reason: "method" };
   const url = new URL(request.url);
   const path = url.pathname;
   const slash = path.indexOf("/", 1);
   if (path.length < 4 || slash < 0 || slash === path.length - 1) return { kind: "pass", reason: "no_key" };
   const auth = request.headers.get("authorization") || "";
   if (!auth.startsWith("AWS4-HMAC-SHA256 ")) return { kind: "pass", reason: "unsigned" };
+  const keys = [...url.searchParams.keys()].filter((k) => k !== "x-id");
+  if (request.method === "GET") {
+    if (keys.length !== 0) return { kind: "pass", reason: "query" };
+    return { kind: "get" };
+  }
   if (request.headers.get("x-amz-copy-source")) return { kind: "pass", reason: "copy" };
   if (!request.headers.get("content-length")) return { kind: "pass", reason: "no_length" };
   if ((request.headers.get("x-amz-content-sha256") || "").startsWith("STREAMING-")) return { kind: "pass", reason: "aws_chunked" };
-  // aws-sdk-go-v2 (rclone's library) names the operation in the query
-  // (`x-id=PutObject` / `x-id=UploadPart`): not a sub-resource.
-  const keys = [...url.searchParams.keys()].filter((k) => k !== "x-id");
   if (keys.length === 0) return { kind: "put" };
   const set = new Set(keys);
   if (set.size === 2 && set.has("partNumber") && set.has("uploadId")) return { kind: "part" };
@@ -115,6 +124,61 @@ export function backendErrorCode(xml) {
   return m ? m[1] : "";
 }
 
+// --- a read (Part B) ----------------------------------------------------------
+
+/**
+ * readSucceeded says whether the backend's answer is the one the control
+ * plane expected (expect_status: 206 — every link names the byte span the
+ * backend serves, the whole object's for a whole read). Anything else —
+ * Lyve's HEAD 200 / GET 500 of 2026-10-21, a 412 under a replaced blob, a
+ * 403 from a dead key — is the origin's to serve (it has the failover
+ * path: the breaker, the fan-out, the parity rebuild).
+ */
+export function readSucceeded(backendResponse, admit) {
+  return !!backendResponse && backendResponse.status === admit.expect_status;
+}
+
+/**
+ * readResponse is the client's response of an admitted read: the backend's
+ * body as it is (no JavaScript touches it) under the ORIGIN's headers the
+ * control plane answered — never the backend's — with the CLIENT's status
+ * (admit.status: 200 for a whole read the backend served as a 206 of its
+ * whole span, 206 for the client's own Range).
+ */
+export function readResponse(backendResponse, admit) {
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(admit.response_headers || {})) headers.set(k, v);
+  return new Response(backendResponse.body, { status: admit.status || admit.expect_status, headers });
+}
+
+/**
+ * readFetchInit is the backend subrequest of a read: exactly the signed
+ * headers, and `cache: "no-store"` — a Worker subrequest to a third-party
+ * URL follows the default cache rules and presigned paths end in cacheable
+ * extensions; customer bytes never enter the edge cache.
+ */
+export function readFetchInit(admit) {
+  return { method: "GET", headers: admit.send_headers || {}, cache: "no-store" };
+}
+
+/**
+ * readCommit is the commit body of a read, decided AT THE BACKEND'S
+ * HEADERS: the Worker cannot see the end of a stream it does not touch, so
+ * `served` means the backend answered expect_status and its body is the
+ * client's from here; the metered bytes are the backend's Content-Length.
+ */
+export function readCommit(admit, backendResponse, error, startedAt) {
+  const r = { admit_id: admit.admit_id, outcome: "error", backend_status: 0, backend_code: "", backend_content_length: 0, duration_ms: Date.now() - startedAt };
+  if (backendResponse) {
+    r.backend_status = backendResponse.status;
+    r.backend_content_length = Number(backendResponse.headers.get("content-length") || 0) || 0;
+    r.outcome = readSucceeded(backendResponse, admit) ? "served" : "fallback";
+  } else if (error) {
+    r.backend_code = String(error && error.message ? error.message : error).slice(0, 120);
+  }
+  return r;
+}
+
 // --- the Worker ------------------------------------------------------------
 
 function slowDown(path, requestId) {
@@ -162,8 +226,54 @@ async function moveBody(request, admit) {
   return result;
 }
 
+/**
+ * commitRead reports a read's outcome; a lost answer is retried once. The
+ * client is not waiting on it (ctx.waitUntil), so no answer is relayed.
+ */
+async function commitRead(env, body, requestId) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
+    try {
+      const r = await controlPlane(env, "/api/v1/edge/commit", body, ORIGIN_TIMEOUT_MS);
+      if (r.status === 200 || r.status === 404 || r.status === 410) {
+        await r.body?.cancel();
+        return;
+      }
+      await r.body?.cancel();
+    } catch (e) {
+      console.log(JSON.stringify({ edge: "commit_failed", op: "get", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
+    }
+  }
+}
+
+/**
+ * serveRead streams an admitted read: the backend's body straight to the
+ * client under the origin's headers, the commit at the backend's headers
+ * (served), or the origin's own serve when the backend did not answer as
+ * expected (fallback / error): a GET has no request body, so
+ * `fetch(request)` is always possible.
+ */
+async function serveRead(request, env, ctx, admit, requestId) {
+  const started = Date.now();
+  let backend = null;
+  let error = null;
+  try {
+    backend = await fetch(admit.url, readFetchInit(admit));
+  } catch (e) {
+    error = e;
+  }
+  const commit = readCommit(admit, backend, error, started);
+  ctx.waitUntil(commitRead(env, commit, requestId));
+  console.log(JSON.stringify({ edge: "get", request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, bytes: commit.backend_content_length, ms: commit.duration_ms }));
+  if (commit.outcome !== "served") {
+    if (backend) await backend.body?.cancel();
+    return fetch(request);
+  }
+  return readResponse(backend, admit);
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const kind = classify(request);
     if (kind.kind === "pass") return fetch(request);
     if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return fetch(request);
@@ -186,6 +296,8 @@ export default {
     }
     if (admit.refusal) return relayResponse(admit.refusal);
     if (!admit.edge) return fetch(request);
+
+    if (kind.kind === "get") return serveRead(request, env, ctx, admit, requestId);
 
     const moved = await moveBody(request, admit);
     const commitBody = { admit_id: admit.admit_id, ...moved };

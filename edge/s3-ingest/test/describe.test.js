@@ -20,7 +20,8 @@ test("classify: a signed PutObject and an UploadPart are the edge's; the rest th
   assert.deepEqual(classify(put("https://s3.stored.cloud/b")), { kind: "pass", reason: "no_key" });
   assert.deepEqual(classify(put("https://s3.stored.cloud/b/")), { kind: "pass", reason: "no_key" });
   assert.deepEqual(classify(put("https://s3.stored.cloud/b/k", { "x-amz-copy-source": "/b/x" })), { kind: "pass", reason: "copy" });
-  assert.deepEqual(classify(new Request("https://s3.stored.cloud/b/k", { method: "GET" })), { kind: "pass", reason: "method" });
+  assert.deepEqual(classify(new Request("https://s3.stored.cloud/b/k", { method: "GET" })), { kind: "pass", reason: "unsigned" }, "an unsigned GET (Part B: a signed one is the edge's)");
+  assert.deepEqual(classify(new Request("https://s3.stored.cloud/b/k", { method: "DELETE", headers: { Authorization: sig } })), { kind: "pass", reason: "method" });
   const presigned = new Request("https://s3.stored.cloud/b/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=00", { method: "PUT", body: "x", headers: { "content-length": "1" } });
   assert.deepEqual(classify(presigned), { kind: "pass", reason: "unsigned" });
   const bearer = put("https://s3.stored.cloud/b/k", { Authorization: "Bearer x" });
