@@ -2,11 +2,14 @@ package api
 
 // The admit reaper (WP-EDGE-1 Part A): the `edge_admit_reaper` job, every
 // 5 min through the one scheduler. A pending admit past its expiry is a
-// write the Worker never reported — the part that landed but was never
-// committed (40.10): its reservation goes back, a PUT's address is queued
-// for the collector on its backend (the body may have landed; the
-// collector's blobNamedBy re-check keeps an address a late commit named —
-// and a commit never lands after the expiry: 410), the row is expired.
+// request the Worker never reported. It BRANCHES ON op (expireEdgeAdmit):
+// a write is the part that landed but was never committed (40.10) — its
+// reservation goes back, a PUT's address is queued for the collector on
+// its backend (the body may have landed; the collector's blobNamedBy
+// re-check keeps an address a late commit named — and a commit never lands
+// after the expiry: 410); a GET (Part B) is a read whose commit was lost —
+// its admitted size is metered, nothing released, NO orphan_write queued
+// (its storage_key is the live object's blob). The row is expired.
 // Terminal rows older than 7 days are deleted.
 
 import (
@@ -28,11 +31,11 @@ const (
 
 var edgeAdmitReaperTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_edge_admit_reaper_total",
-	Help: "Edge admits the reaper handled: expired (a pending admit past its expiry, reservation released), retired (a PUT's address queued for the collector), deleted (terminal rows past retention), failed.",
+	Help: "Edge admits the reaper handled: expired (a pending admit past its expiry, reservation released), retired (a PUT's address queued for the collector), metered (an expired GET admit, its admitted size metered as egress), deleted (terminal rows past retention), failed.",
 }, []string{"outcome"})
 
 func init() {
-	for _, o := range []string{"expired", "retired", "deleted", "failed"} {
+	for _, o := range []string{"expired", "retired", "metered", "deleted", "failed"} {
 		edgeAdmitReaperTotal.WithLabelValues(o)
 	}
 }
@@ -42,6 +45,8 @@ type EdgeAdmitReapResult struct {
 	Expired       int   `json:"expired"`
 	ReleasedBytes int64 `json:"released_bytes"`
 	Retired       int   `json:"retired"`
+	GetsMetered   int   `json:"gets_metered"`  // expired GET admits (Part B)
+	MeteredBytes  int64 `json:"metered_bytes"` // their admitted sizes, metered as egress
 	Deleted       int64 `json:"deleted"`
 	Failed        int   `json:"failed"`
 }
@@ -95,22 +100,29 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		released, retired, err := r.expireOne(ctx, id)
+		row, expired, err := r.expireOne(ctx, id)
 		if err != nil {
 			res.Failed++
 			edgeAdmitReaperTotal.WithLabelValues("failed").Inc()
 			r.s.log().Warn("edge admit reaper: admit not settled", zap.String("admit_id", id), zap.Error(err))
 			continue
 		}
-		if released < 0 {
+		if !expired {
 			continue // settled meanwhile
 		}
 		res.Expired++
-		res.ReleasedBytes += released
 		edgeAdmitReaperTotal.WithLabelValues("expired").Inc()
-		if retired {
+		switch row.Op {
+		case edgeOpGet:
+			res.GetsMetered++
+			res.MeteredBytes += row.ContentLength
+			edgeAdmitReaperTotal.WithLabelValues("metered").Inc()
+		case edgeOpPut:
+			res.ReleasedBytes += row.ReservedBytes
 			res.Retired++
 			edgeAdmitReaperTotal.WithLabelValues("retired").Inc()
+		default:
+			res.ReleasedBytes += row.ReservedBytes
 		}
 	}
 	del, err := r.s.db.ExecContext(ctx, `DELETE FROM edge_admits WHERE state IN ('committed', 'failed', 'expired') AND finished_at < NOW() - make_interval(secs => $1)`,
@@ -123,27 +135,27 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 	return res, nil
 }
 
-// expireOne expires one pending admit under its lock; released = -1 when
+// expireOne expires one pending admit under its lock; expired = false when
 // the row was settled meanwhile.
-func (r *EdgeAdmitReaper) expireOne(ctx context.Context, id string) (released int64, retired bool, err error) {
+func (r *EdgeAdmitReaper) expireOne(ctx context.Context, id string) (row edgeAdmitRow, expired bool, err error) {
 	tx, err := r.s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, false, err
+		return row, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	row, err := lockEdgeAdmit(ctx, tx, id)
+	row, err = lockEdgeAdmit(ctx, tx, id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return -1, false, nil
+		return row, false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return row, false, err
 	}
 	if row.State != "pending" || time.Now().Before(row.ExpiresAt) {
-		return -1, false, nil
+		return row, false, nil
 	}
 	r.s.expireEdgeAdmit(ctx, tx, row)
 	if err := tx.Commit(); err != nil {
-		return 0, false, err
+		return row, false, err
 	}
-	return row.ReservedBytes, row.Op == edgeOpPut, nil
+	return row, true, nil
 }

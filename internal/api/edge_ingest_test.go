@@ -164,6 +164,23 @@ func (d *edgeFakeDriver) PresignPut(ctx context.Context, container, artifact str
 	}
 	return d.presign(k, p, "")
 }
+func (d *edgeFakeDriver) PresignGet(ctx context.Context, container, artifact string, p engine.EdgePresign) (string, []string, error) {
+	k, err := d.key(ctx, container, artifact)
+	if err != nil {
+		return "", nil, err
+	}
+	d.presigns.Add(1)
+	if d.failPresign.Load() {
+		return "", nil, errors.New("presign refused (test)")
+	}
+	signed := []string{"host", "if-match"}
+	if p.Range != "" {
+		signed = append(signed, "range")
+	}
+	u := "https://fake.backend.invalid/vaultaire/" + k + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";")) +
+		"&x-probe-if-match=" + url.QueryEscape(p.IfMatch) + "&x-probe-range=" + url.QueryEscape(p.Range)
+	return u, signed, nil
+}
 func (d *edgeFakeDriver) CreateMultipart(ctx context.Context, container, artifact, _ string) (string, error) {
 	if _, err := d.key(ctx, container, artifact); err != nil {
 		return "", err

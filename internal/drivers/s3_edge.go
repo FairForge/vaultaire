@@ -2,8 +2,9 @@ package drivers
 
 // The edge writer of the S3-class drivers (engine.EdgeWriter, WP-EDGE-1
 // Part A): presigned PutObject / UploadPart links the Worker on
-// s3.stored.cloud streams a client's body to, and the small multipart
-// bookkeeping calls the control plane makes itself. Implemented ONCE here
+// s3.stored.cloud streams a client's body to, the small multipart
+// bookkeeping calls the control plane makes itself, and (Part B) the
+// presigned GetObject link the Worker streams an object back from. Implemented ONCE here
 // over the aws-sdk-go-v2 client and attached to the fixed-bucket driver
 // (idrive, idrive-<region>, wasabi — NewFixedBucketS3Driver) and to
 // LyveDriver; each hands in its own bucket and key rule, so a presigned
@@ -81,6 +82,44 @@ func (t s3EdgeTarget) presignPut(ctx context.Context, p engine.EdgePresign) (str
 	names, err := signedHeaderNames(out.URL)
 	if err != nil {
 		return "", nil, fmt.Errorf("%s presign put %s: %w", t.name, t.key, err)
+	}
+	return out.URL, names, nil
+}
+
+// presignGet is the read half (Part B): a GetObject link signing `range`
+// (always — the control plane names the exact byte span, the whole object
+// included, so the link is bound to it) and `if-match` when the control
+// plane knows the backend's ETag (the row's digest, so a blob replaced in
+// place — which no Vaultaire write does since WP-R2-1 Part C — answers 412
+// instead of other bytes). A link signing neither is never made.
+func (t s3EdgeTarget) presignGet(ctx context.Context, p engine.EdgePresign) (string, []string, error) {
+	if p.Range == "" && p.IfMatch == "" {
+		return "", nil, fmt.Errorf("%s presign get %s: neither a Range nor an If-Match to sign", t.name, t.key)
+	}
+	in := &s3.GetObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key)}
+	if p.IfMatch != "" {
+		in.IfMatch = aws.String(p.IfMatch)
+	}
+	if p.Range != "" {
+		in.Range = aws.String(p.Range)
+	}
+	// Response-checksum validation off for the link: the SDK's default
+	// (WhenSupported) puts X-Amz-Checksum-Mode=ENABLED into the presigned
+	// query, which Lyve signs differently — every such link answered 403
+	// SignatureDoesNotMatch (Step 0.1, docs/reviews/WP-EDGE-1B.md; iDrive
+	// accepted it). The Worker reads the body, not a checksum trailer.
+	pc := s3.NewPresignClient(t.client, func(o *s3.PresignOptions) {
+		o.ClientOptions = append(o.ClientOptions, func(co *s3.Options) {
+			co.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		})
+	})
+	out, err := pc.PresignGetObject(ctx, in, s3.WithPresignExpires(edgeTTL(p)))
+	if err != nil {
+		return "", nil, fmt.Errorf("%s presign get %s: %w", t.name, t.key, err)
+	}
+	names, err := signedHeaderNames(out.URL)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s presign get %s: %w", t.name, t.key, err)
 	}
 	return out.URL, names, nil
 }
@@ -176,6 +215,15 @@ func (d *IDriveDriver) PresignPut(ctx context.Context, container, artifact strin
 	return t.presignPut(ctx, p)
 }
 
+// PresignGet implements engine.EdgeWriter.
+func (d *IDriveDriver) PresignGet(ctx context.Context, container, artifact string, p engine.EdgePresign) (string, []string, error) {
+	t, err := d.edgeTarget(ctx, "PresignGet", container, artifact)
+	if err != nil {
+		return "", nil, err
+	}
+	return t.presignGet(ctx, p)
+}
+
 // CreateMultipart implements engine.EdgeWriter.
 func (d *IDriveDriver) CreateMultipart(ctx context.Context, container, artifact, contentType string) (string, error) {
 	t, err := d.edgeTarget(ctx, "CreateMultipart", container, artifact)
@@ -229,6 +277,15 @@ func (d *LyveDriver) PresignPut(ctx context.Context, container, artifact string,
 		return "", nil, err
 	}
 	return t.presignPut(ctx, p)
+}
+
+// PresignGet implements engine.EdgeWriter.
+func (d *LyveDriver) PresignGet(ctx context.Context, container, artifact string, p engine.EdgePresign) (string, []string, error) {
+	t, err := d.edgeTarget(ctx, "PresignGet", container, artifact)
+	if err != nil {
+		return "", nil, err
+	}
+	return t.presignGet(ctx, p)
 }
 
 // CreateMultipart implements engine.EdgeWriter.

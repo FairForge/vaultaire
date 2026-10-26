@@ -28,8 +28,14 @@ import (
 // notice, but its symbols are not individually deprecated, so this is not flagged
 // by staticcheck.
 const (
-	s3UploadPartSize    = 16 << 20 // 16 MiB per part
-	s3UploadConcurrency = 8        // parallel parts in flight
+	s3UploadPartSize = 16 << 20 // 16 MiB per part
+	// S3SinglePutMaxBytes is the largest body the S3-class drivers write as
+	// ONE PutObject (putSinglePartIfSmall; the manager does the same for a
+	// body under one part): its backend ETag is the body's MD5. A larger
+	// body is a backend multipart whose ETag is the parts' -N — unknown to
+	// the row. The edge GET's If-Match rule reads it (api/edge_get.go).
+	S3SinglePutMaxBytes = s3UploadPartSize
+	s3UploadConcurrency = 8 // parallel parts in flight
 )
 
 // s3ParallelUpload uploads body to bucket/key using the SDK's parallel multipart
