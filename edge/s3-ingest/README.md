@@ -1,20 +1,32 @@
-# stored-s3-edge — the mover (WP-EDGE-1 Part A)
+# stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B)
 
-The Cloudflare Worker on `s3.stored.cloud` (plan 40.10 slice 1, the write
-half). Every S3 request arrives here. A signed **PutObject** or
-**UploadPart** of a tenant with the `edge_ingest` flag, whose placement is a
-whole unsealed write of at least `EDGE_MIN_BYTES`, is **admitted** by the
-control plane (`POST /api/v1/edge/admit` on `VAULTAIRE_ORIGIN`: SigV4
-verified on SLC, quota reserved, a blob address minted, a presigned backend
-link that signs `content-length` and the client's `Content-MD5`) and its
-body is streamed by this Worker straight to the backend — never through
-SLC — while the Worker computes the MD5 and SHA-256 it reports at
-**commit** (`POST /api/v1/edge/commit`), where the control plane writes the
-head row, the version row and the bill exactly as a PUT through SLC would.
-Everything else — GET, HEAD, listings, deletes, Initiate / Complete /
-Abort, the management API, a tenant without the flag, a sealed, chunked,
-SSE-C, copy or sub-resource write, a small body — passes through to the
-origin untouched (`fetch(request)`: the route's origin is SLC, the Host
+The Cloudflare Worker on `s3.stored.cloud` (plan 40.10 slice 1). Every S3
+request arrives here. A signed **PutObject** or **UploadPart** of a tenant
+with the `edge_ingest` flag, whose placement is a whole unsealed write of
+at least `EDGE_MIN_BYTES`, is **admitted** by the control plane (`POST
+/api/v1/edge/admit` on `VAULTAIRE_ORIGIN`: SigV4 verified on SLC, quota
+reserved, a blob address minted, a presigned backend link that signs
+`content-length` and the client's `Content-MD5`) and its body is streamed
+by this Worker straight to the backend — never through SLC — and reported
+at **commit** (`POST /api/v1/edge/commit`: the backend's answer, nothing of
+the bytes), where the control plane writes the head row, the version row
+and the bill exactly as a PUT through SLC would. A signed **GetObject**
+(Part B: plain, or one Range) of such a tenant whose head row is a whole
+unsealed object on an edge backend of at least `EDGE_MIN_BYTES` is admitted
+the same way and streamed FROM the backend on a presigned ranged GET: the
+backend's body is the client's response body, under the ORIGIN's response
+headers the admit answered, and the commit is made at the backend's
+headers (the Worker never sees the end of a stream it does not touch) —
+`served` meters the bytes once, as the origin would have; any other
+backend answer (Lyve's HEAD 200 / GET 500 of 2026-10-21, a 412, a 403) is
+`fallback` and the origin serves the request itself (`fetch(request)` — a
+GET has no body to lose), with its failover path. Everything else — HEAD
+(cache-only on SLC), listings, deletes, Initiate / Complete / Abort, the
+management API, a tenant without the flag, a sealed, chunked, SSE-C, tape,
+public-bucket, versioned-by-id, conditional or multi-range read, a copy or
+sub-resource write, a small body or range, a tenant past its egress
+allowance with the throttle on (the origin paces it) — passes through to
+the origin untouched (`fetch(request)`: the route's origin is SLC, the Host
 stays, the signature still verifies there).
 
 What it is not: a privacy feature (it moves Standard plaintext and Private
@@ -38,9 +50,13 @@ plus the client's `Content-MD5` signed into the link.
   tests.
 - `test/*.test.js` — `node --test` (`make test-edge`; CI runs it): the
   classifier (the SDK's `x-id=` query is not a sub-resource — rclone's
-  library; an aws-chunked body is the origin's), the descriptor (every
-  header lower-cased, hop-by-hop dropped, the client's Authorization INSIDE
-  the JSON), the error relay.
+  library; an aws-chunked body is the origin's; a signed GET is the edge's,
+  a HEAD or a presigned URL never), the descriptor (every header
+  lower-cased, hop-by-hop dropped, the client's Authorization INSIDE the
+  JSON), the error relay, the read half (`readResponse`: the backend's body
+  under the origin's headers with the client's status; `readFetchInit`:
+  exactly the signed headers, `cache: "no-store"`; `readSucceeded` /
+  `readCommit`: served at `expect_status`, fallback on anything else).
 - `wrangler.toml` — name `stored-s3-edge`, route `s3.stored.cloud/*` on the
   stored.cloud zone of the PRODUCTION account, observability on, var
   `VAULTAIRE_ORIGIN`.
@@ -75,6 +91,22 @@ body}`. A lost answer is retried once after 2 s (idempotent on the admit
 id); still none → the client gets 503 SlowDown + Retry-After 30 and the
 control plane's reaper settles the admit.
 
+A read (Part B): the admit answers `{edge:true, admit_id, url, method:
+"GET", send_headers (exactly the signed headers: `range` always — the
+exact byte span, the whole object's for a whole read — and `if-match`
+where the row's digest is provably the backend's ETag), expect_status (206:
+what the backend must answer), status (the client's: 200, or 206 for its
+own Range), response_headers (the ORIGIN's set: ETag, Content-Type,
+Content-Length, Content-Range, x-amz-storage-class, x-amz-meta-*, the
+version id, the lock headers …)}`. The Worker fetches the link with
+`cache: "no-store"` and, at the backend's headers, answers the client with
+the backend's body under `response_headers` and `status`, and commits
+`{admit_id, outcome: served|fallback|error, backend_status,
+backend_content_length, duration_ms}` in the background
+(`ctx.waitUntil`; one retry). A backend status other than `expect_status`,
+or no answer, is a fallback: the client's request goes to the origin
+unchanged. A mid-body backend failure is a cut body, as at the origin.
+
 aws-chunked bodies (`x-amz-content-sha256: STREAMING-*`, what aws-cli v2
 sends over TLS) pass through to the origin: decoding them would put
 JavaScript in the byte path. `docs/API.md` tells aws-cli users to set
@@ -93,7 +125,7 @@ manifest row's `sha256` for the deployed version (the Deploy job rebuilds
 every row with `scripts/repro-check-clients.sh`; `translog-verify -client
 <downloaded index.js>` verifies a download against the log).
 
-## The lab (docs/reviews/WP-EDGE-1A.md)
+## The lab (docs/reviews/WP-EDGE-1A.md, WP-EDGE-1B.md)
 
 `wrangler dev --local --port 8787 --local-upstream 127.0.0.1:8099` against
 a local origin on `:8099`, with `.dev.vars` holding `VAULTAIRE_ORIGIN` and
