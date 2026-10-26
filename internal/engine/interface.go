@@ -128,13 +128,14 @@ type EdgePresign struct {
 	ContentMD5    string
 	ContentType   string
 	TTL           time.Duration
-	// A presigned GET (Part B): the Range the backend serves ("bytes=a-b",
-	// "" = the whole object) and the If-Match the backend enforces (the
-	// quoted ETag the row recorded — COALESCE(body_md5, etag): the
-	// backend's own ETag for a single PUT, an origin-assembled multipart
-	// and an edge-assembled one). Both are signed into the link. Since
-	// WP-R2-1 Part C no write overwrites a blob address in place, so the
-	// If-Match is a belt; the guard is the address itself.
+	// A presigned GET (Part B): the Range the backend serves ("bytes=a-b";
+	// the control plane always names one — the whole object's span for a
+	// whole read — so every link is bound to an exact byte span) and the
+	// If-Match the backend enforces when the control plane knows the
+	// backend's ETag ("" = none signed; api/edge_get.go's rule). Both are
+	// signed into the link. Since WP-R2-1 Part C no write overwrites a
+	// blob address in place, so the If-Match is a belt; the guard is the
+	// address itself.
 	Range   string
 	IfMatch string
 }
@@ -160,8 +161,8 @@ type EdgePart struct {
 type EdgeWriter interface {
 	PresignPut(ctx context.Context, container, artifact string, p EdgePresign) (url string, signedHeaders []string, err error)
 	// PresignGet is the read half (WP-EDGE-1 Part B): a link the Worker
-	// streams the object (or p.Range of it) from, signing `range` when set
-	// and `if-match` (p.IfMatch) always.
+	// streams p.Range of the object from, signing `range` and, when set,
+	// `if-match`; never a link signing neither.
 	PresignGet(ctx context.Context, container, artifact string, p EdgePresign) (url string, signedHeaders []string, err error)
 	CreateMultipart(ctx context.Context, container, artifact, contentType string) (uploadID string, err error)
 	PresignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, p EdgePresign) (url string, signedHeaders []string, err error)

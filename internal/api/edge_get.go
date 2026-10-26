@@ -32,12 +32,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
@@ -79,9 +81,14 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 			return passThrough("query")
 		}
 	}
-	// A conditional GET: no S3 client on the API path sends one; the
-	// origin evaluates it against the row (a residual, not a relay path).
-	for _, h := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
+	// A conditional GET other than If-Match is the origin's (a 304 is
+	// its answer; no S3 client on the API path sends one). If-Match is
+	// evaluated HERE against the row, below — aws-cli's `s3 cp` sends
+	// `If-Match: "<etag>"` with `Range: bytes=0-` on every download past
+	// its multipart threshold (the lab, 2026-10-26: every 64 MiB download
+	// went through the origin until it was), and a condition the row
+	// satisfies has nothing left for the origin to decide.
+	for _, h := range []string{"If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
 		if sr.Header.Get(h) != "" {
 			return passThrough("conditional")
 		}
@@ -126,6 +133,11 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	case err != nil:
 		s.logger.Error("edge admit get: head row read failed", zap.Error(err), zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key))
 		return edgeAdmitResponse{}, http.StatusInternalServerError
+	}
+	// The client's If-Match against the row, as evaluateConditionalGET
+	// does: a condition the row fails is the origin's 412.
+	if checkIfMatch(sr, row.etag) {
+		return passThrough("conditional")
 	}
 	// The kinds the edge never reads: a chunked object (the content index),
 	// a sealed one (a key on SLC), a vault-floor one (tape, its restore
@@ -208,25 +220,28 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		}
 	}
 
-	// The link: the object's own address on its recorded backend, the
-	// Range the backend serves, the If-Match it enforces — the digest
-	// every whole GET verifies against (COALESCE(body_md5, etag)), which
-	// IS the backend's ETag for every shape an EdgeWriter backend holds.
+	// The link: the object's own address on its recorded backend; the
+	// exact byte span the backend serves — ALWAYS a Range, the whole
+	// object's for a whole read, so the link is bound to it and the
+	// backend answers 206 either way (D-EDGE-11); and the If-Match the
+	// backend enforces when the row's digest IS the backend's ETag
+	// (edgeGetIfMatch, D-EDGE-10).
 	_, blob := objectBlobAddress(tenantID, bucket, key, row.storageKey)
 	container := tenantID + "_" + bucket
-	ifMatch := `"` + integrityDigest(row.bodyMD5, row.etag) + `"`
-	rangeValue := ""
+	ifMatch := edgeGetIfMatch(row.etag, row.bodyMD5, row.size)
+	start, end := int64(0), row.size-1
 	if rng != nil {
-		rangeValue = fmt.Sprintf("bytes=%d-%d", rng.start, rng.end)
+		start, end = rng.start, rng.end
 	}
+	rangeValue := fmt.Sprintf("bytes=%d-%d", start, end)
 	presigned, signed, presignErr := ew.PresignGet(sctx, container, blob, engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL})
 	if presignErr != nil {
 		s.logger.Error("edge admit get: presign failed", zap.Error(presignErr), zap.String("backend", row.backend))
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
-	wantSigned := []string{"if-match"}
-	if rangeValue != "" {
-		wantSigned = append(wantSigned, "range")
+	wantSigned := []string{"range"}
+	if ifMatch != "" {
+		wantSigned = append(wantSigned, "if-match")
 	}
 	if cErr := edgePresignSigns(presigned, wantSigned...); cErr != nil {
 		s.logger.Error("edge admit get: the presigned link does not sign what it must — refused", zap.Error(cErr), zap.String("backend", row.backend))
@@ -269,7 +284,8 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	responseHeaders := hrec.relay().Headers
 
 	// The row: nothing reserved, nothing minted — the admit remembers what
-	// the commit (or the reaper) meters and logs.
+	// the commit (or the reaper) meters and logs. The backend answers 206
+	// to every link (a Range always); the client's status is the origin's.
 	admit := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpGet, Backend: row.backend, StorageKey: blob,
 		ContentLength: length, ContentType: contentType, Floor: row.floor, ClientIP: req.ClientIP, RequestID: req.RequestID,
 		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), Status: status}}
@@ -285,7 +301,32 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		zap.String("key", key), zap.String("backend", row.backend), zap.Int64("size", length), zap.String("range", rangeValue),
 		zap.String("admit_id", admit.ID), zap.String("request_id", req.RequestID))
 	return edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
-		ExpectStatus: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+		ExpectStatus: http.StatusPartialContent, Status: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob,
+		ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+}
+
+// edgeGetIfMatch is the If-Match a read's link signs: the row's digest
+// ONLY when it is provably the backend's own ETag (D-EDGE-10) — an
+// edge-assembled multipart (a -N ETag with no body_md5: the backend's own
+// answer, recorded at Complete), or an object the origin wrote as ONE
+// backend PutObject (at most drivers.S3SinglePutMaxBytes: its ETag is the
+// body's MD5 — the row's single ETag, or the body_md5 of an
+// origin-assembled multipart). A larger origin-written object is a backend
+// multipart whose -N the row does not know: no If-Match, the immutable
+// address is the guard. (The lab, 2026-10-26: a 64 MiB origin-written
+// object's link signed body_md5 and both backends answered 412.) A digest
+// that turns out wrong is a 412 → the origin serves: never other bytes.
+func edgeGetIfMatch(etag, bodyMD5 string, size int64) string {
+	etag = strings.Trim(etag, `"`)
+	multipart := strings.Contains(etag, "-")
+	switch {
+	case multipart && bodyMD5 == "":
+		return `"` + etag + `"` // the backend's own -N (an edge-assembled upload)
+	case size <= drivers.S3SinglePutMaxBytes:
+		return `"` + integrityDigest(bodyMD5, etag) + `"` // one backend PUT: the body's MD5
+	default:
+		return ""
+	}
 }
 
 // settleEdgeGet is the GET's commit under the admit row's lock: `served`

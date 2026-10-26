@@ -135,10 +135,13 @@ type edgeAdmitResponse struct {
 	StorageKey  string            `json:"storage_key,omitempty"`
 	Expect      *edgeExpect       `json:"expect,omitempty"`
 	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
-	// A GET (Part B): the status the backend must answer (200, or 206 for
-	// a range) and the ORIGIN's response headers the Worker serves in place
-	// of the backend's (object_headers.go's set).
+	// A GET (Part B): the status the backend must answer (206 — every link
+	// names a Range, the whole object's for a whole read), the status the
+	// CLIENT gets (200, or 206 for the client's own Range) and the ORIGIN's
+	// response headers the Worker serves in place of the backend's
+	// (object_headers.go's set).
 	ExpectStatus    int               `json:"expect_status,omitempty"`
+	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 }
 
@@ -283,6 +286,10 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "pass_through_small").Inc()
 	default:
 		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "pass_through").Inc()
+		// Why the origin took it — the one trace of a pass-through (Debug:
+		// one line per declined request; the counter is the signal).
+		s.logger.Debug("edge admit: pass-through", zap.String("op", req.Op), zap.String("reason", resp.Reason),
+			zap.String("path", req.Path), zap.String("request_id", req.RequestID))
 	}
 	writeEdgeJSON(w, status, resp)
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
 
@@ -125,7 +126,8 @@ func TestEdgeAdmitGet_PassThroughMatrix(t *testing.T) {
 	resp := f.admit(f.signedGet(path, nil, nil))
 	require.True(t, resp.Edge, "%+v", resp)
 	assert.Equal(t, http.MethodGet, resp.Method)
-	assert.Equal(t, http.StatusOK, resp.ExpectStatus)
+	assert.Equal(t, http.StatusPartialContent, resp.ExpectStatus, "the backend answers the signed Range")
+	assert.Equal(t, http.StatusOK, resp.Status, "the client gets the origin's 200")
 	assert.Equal(t, "edgefake", resp.Backend)
 	assert.Equal(t, 1, f.pending())
 	f.exec(`DELETE FROM edge_admits WHERE tenant_id = $1`, f.tenantID)
@@ -149,9 +151,10 @@ func TestEdgeAdmitGet_PassThroughMatrix(t *testing.T) {
 	passes("presigned", presigned, "unsigned")
 	passes("versionId", f.signedGet(path, url.Values{"versionId": {"v1"}}, nil), "query")
 	passes("response override", f.signedGet(path, url.Values{"response-content-disposition": {"attachment"}}, nil), "query")
-	for _, h := range []string{"If-Match", "If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
+	for _, h := range []string{"If-None-Match", "If-Modified-Since", "If-Unmodified-Since"} {
 		passes(h, f.signedGet(path, nil, map[string]string{h: `"x"`}), "conditional")
 	}
+	passes("If-Match of another ETag (the origin's 412)", f.signedGet(path, nil, map[string]string{"If-Match": `"00000000000000000000000000000000"`}), "conditional")
 	passes("multi-range", f.signedGet(path, nil, map[string]string{"Range": "bytes=0-1,5-6"}), "multi_range")
 	passes("416", f.signedGet(path, nil, map[string]string{"Range": "bytes=99999-"}), "range")
 	passes("ssec headers", f.signedGet(path, nil, ssecHeaders(testBytes(32))), "ssec")
@@ -200,6 +203,15 @@ func TestEdgeAdmitGet_PassThroughMatrix(t *testing.T) {
 	resp = f.admit(f.signedGet(path, nil, nil))
 	assert.True(t, resp.Edge, "%+v", resp)
 	assert.Equal(t, "null", resp.ResponseHeaders["X-Amz-Version-Id"], "a versioned bucket's object with no version row is the null version")
+	// aws-cli's download shape: If-Match of the row's ETag + Range bytes=0-
+	// is admitted (the condition holds; nothing is left for the origin).
+	h, _ := f.head("obj.bin")
+	resp = f.admit(f.signedGet(path, nil, map[string]string{"If-Match": `"` + h.etag + `"`, "Range": "bytes=0-"}))
+	assert.True(t, resp.Edge, "%+v", resp)
+	assert.Equal(t, http.StatusPartialContent, resp.Status)
+	assert.Equal(t, "bytes=0-8191", resp.SendHeaders["range"])
+	resp = f.admit(f.signedGet(path, nil, map[string]string{"If-Match": "*"}))
+	assert.True(t, resp.Edge, "%+v", resp)
 }
 
 func TestEdgeAdmitGet_ThrottledTenantPassesThrough(t *testing.T) {
@@ -264,6 +276,7 @@ func TestEdgeAdmitGet_RangeHeaders(t *testing.T) {
 	resp := f.admit(f.signedGet(path, nil, map[string]string{"Range": "bytes=100-299"}))
 	require.True(t, resp.Edge, "%+v", resp)
 	assert.Equal(t, http.StatusPartialContent, resp.ExpectStatus)
+	assert.Equal(t, http.StatusPartialContent, resp.Status)
 	assert.Equal(t, "bytes=100-299", resp.SendHeaders["range"])
 	assert.Equal(t, `"`+h.etag+`"`, resp.SendHeaders["if-match"])
 	assert.Equal(t, "bytes 100-299/8192", resp.ResponseHeaders["Content-Range"])
@@ -285,19 +298,23 @@ func TestEdgeAdmitGet_RangeHeaders(t *testing.T) {
 	assert.Equal(t, "bytes=8000-8191", resp.SendHeaders["range"])
 	assert.Equal(t, "192", resp.ResponseHeaders["Content-Length"])
 
-	// A whole GET: no range signed, the object's length.
+	// A whole GET: the whole object's span signed (the backend answers
+	// 206 to it), the client's 200 with the origin's whole-object headers.
 	resp = f.admit(f.signedGet(path, nil, nil))
 	require.True(t, resp.Edge)
-	assert.Equal(t, http.StatusOK, resp.ExpectStatus)
-	_, hasRange := resp.SendHeaders["range"]
-	assert.False(t, hasRange)
+	assert.Equal(t, http.StatusPartialContent, resp.ExpectStatus)
+	assert.Equal(t, http.StatusOK, resp.Status)
+	assert.Equal(t, "bytes=0-8191", resp.SendHeaders["range"])
 	assert.Equal(t, "8192", resp.ResponseHeaders["Content-Length"])
 	assert.Empty(t, resp.ResponseHeaders["Content-Range"])
 }
 
-// The If-Match the link signs is COALESCE(body_md5, etag) — the digest every
-// whole GET verifies against, and the backend's own ETag for the three
-// shapes an EdgeWriter backend holds.
+// The If-Match the link signs is the row's digest ONLY where it is provably
+// the backend's own ETag (D-EDGE-10): an object the origin wrote as one
+// backend PutObject (≤ drivers.S3SinglePutMaxBytes — its MD5, or the
+// body_md5 of an origin-assembled multipart) and an edge-assembled
+// multipart (the backend's own -N). A larger origin-written object is a
+// backend multipart whose ETag the row does not know: no If-Match.
 func TestEdgeAdmitGet_IfMatchIsTheRowsDigest(t *testing.T) {
 	f := setupEdgeFixture(t)
 	f.putObject("single.bin", testBytes(5000), nil)
@@ -309,6 +326,7 @@ func TestEdgeAdmitGet_IfMatchIsTheRowsDigest(t *testing.T) {
 		u, err := url.Parse(resp.URL)
 		require.NoError(t, err)
 		assert.Equal(t, resp.SendHeaders["if-match"], u.Query().Get("x-probe-if-match"), "signed into the link")
+		assert.NotEmpty(t, resp.SendHeaders["range"], "every link signs the byte span")
 		return resp.SendHeaders["if-match"]
 	}
 	h, _ := f.head("single.bin")
@@ -320,6 +338,18 @@ func TestEdgeAdmitGet_IfMatchIsTheRowsDigest(t *testing.T) {
 	// An edge-assembled multipart: the backend's own -N ETag, no body_md5.
 	f.exec(`UPDATE object_head_cache SET etag = 'cccccccccccccccccccccccccccccccc-4', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
 	assert.Equal(t, `"cccccccccccccccccccccccccccccccc-4"`, ifMatchOf())
+	// Past the single-PUT cutoff the origin wrote a backend multipart: its
+	// -N is unknown to the row — no If-Match, whatever the row records.
+	big := int64(drivers.S3SinglePutMaxBytes + 1)
+	f.exec(`UPDATE object_head_cache SET etag = 'dddddddddddddddddddddddddddddddd', body_md5 = NULL, size_bytes = $2 WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID, big)
+	assert.Equal(t, "", ifMatchOf(), "a single MD5 ETag of a big object: the backend holds a multipart")
+	f.exec(`UPDATE object_head_cache SET etag = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-5', body_md5 = 'ffffffffffffffffffffffffffffffff' WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
+	assert.Equal(t, "", ifMatchOf(), "an origin-assembled multipart past the cutoff: the whole body went as a backend multipart")
+	f.exec(`UPDATE object_head_cache SET etag = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-5', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
+	assert.Equal(t, `"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-5"`, ifMatchOf(), "an edge-assembled one of any size: the backend's own")
+	// Exactly at the cutoff: one PUT.
+	f.exec(`UPDATE object_head_cache SET etag = 'dddddddddddddddddddddddddddddddd', body_md5 = NULL, size_bytes = $2 WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID, int64(drivers.S3SinglePutMaxBytes))
+	assert.Equal(t, `"dddddddddddddddddddddddddddddddd"`, ifMatchOf())
 }
 
 func TestEdgeAdmitGet_HeadersAreTheOrigins(t *testing.T) {
@@ -345,7 +375,8 @@ func TestEdgeAdmitGet_HeadersAreTheOrigins(t *testing.T) {
 			delete(edge, k)
 		}
 		assert.Equal(t, origin, edge, name)
-		assert.Equal(t, w.Code, resp.ExpectStatus, name)
+		assert.Equal(t, w.Code, resp.Status, name)
+		assert.Equal(t, http.StatusPartialContent, resp.ExpectStatus, name)
 	}
 	compare("whole", nil)
 	compare("range", map[string]string{"Range": "bytes=10-1009"})

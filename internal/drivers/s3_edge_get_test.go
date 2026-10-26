@@ -63,8 +63,12 @@ func TestEdgePresignGet_SignsRangeAndIfMatch(t *testing.T) {
 			assert.Equal(t, "900", pu.Query().Get("X-Amz-Expires"))
 			assert.False(t, strings.Contains(pu.RawQuery, "abc"), "the If-Match value travels as a header, never in the link")
 
-			// No If-Match: refused — a link that lets other bytes through is never handed out.
-			_, _, err = tc.ew.PresignGet(ctx, "tenant-abc_bkt", "obj.bin", engine.EdgePresign{Range: "bytes=0-1"})
+			// A Range alone (the backend's ETag unknown to the row): signed.
+			_, signed, err = tc.ew.PresignGet(ctx, "tenant-abc_bkt", "obj.bin", engine.EdgePresign{Range: "bytes=0-1"})
+			require.NoError(t, err)
+			assert.ElementsMatch(t, []string{"host", "range"}, signed)
+			// Neither: refused — a link that lets any bytes through is never handed out.
+			_, _, err = tc.ew.PresignGet(ctx, "tenant-abc_bkt", "obj.bin", engine.EdgePresign{})
 			assert.Error(t, err)
 			// No tenant on the context: refused (ErrNoTenant), never t-default.
 			_, _, err = tc.ew.PresignGet(context.Background(), "tenant-abc_bkt", "obj.bin", engine.EdgePresign{IfMatch: `"abc"`})

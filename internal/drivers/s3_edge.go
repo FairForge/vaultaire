@@ -87,14 +87,19 @@ func (t s3EdgeTarget) presignPut(ctx context.Context, p engine.EdgePresign) (str
 }
 
 // presignGet is the read half (Part B): a GetObject link signing `range`
-// (when the control plane asks for one) and `if-match` (always: the row's
-// recorded digest, so a blob replaced in place — which no Vaultaire write
-// does since WP-R2-1 Part C — answers 412 instead of other bytes).
+// (always — the control plane names the exact byte span, the whole object
+// included, so the link is bound to it) and `if-match` when the control
+// plane knows the backend's ETag (the row's digest, so a blob replaced in
+// place — which no Vaultaire write does since WP-R2-1 Part C — answers 412
+// instead of other bytes). A link signing neither is never made.
 func (t s3EdgeTarget) presignGet(ctx context.Context, p engine.EdgePresign) (string, []string, error) {
-	if p.IfMatch == "" {
-		return "", nil, fmt.Errorf("%s presign get %s: no If-Match to sign", t.name, t.key)
+	if p.Range == "" && p.IfMatch == "" {
+		return "", nil, fmt.Errorf("%s presign get %s: neither a Range nor an If-Match to sign", t.name, t.key)
 	}
-	in := &s3.GetObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key), IfMatch: aws.String(p.IfMatch)}
+	in := &s3.GetObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key)}
+	if p.IfMatch != "" {
+		in.IfMatch = aws.String(p.IfMatch)
+	}
 	if p.Range != "" {
 		in.Range = aws.String(p.Range)
 	}
