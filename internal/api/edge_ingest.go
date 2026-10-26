@@ -72,9 +72,10 @@ const (
 	edgeAdmitBodyMax = 1 << 20
 	// edgeHost is the metrics label of this data-plane host.
 	edgeHost = "edge"
-	// edgeOpPut / edgeOpPart are the admit's op values.
+	// edgeOpPut / edgeOpPart / edgeOpGet are the admit's op values.
 	edgeOpPut  = "put"
 	edgeOpPart = "part"
+	edgeOpGet  = "get"
 	// edgeReasonSmall is the pass-through of a body under EDGE_MIN_BYTES.
 	edgeReasonSmall = "small"
 )
@@ -84,7 +85,7 @@ const (
 var (
 	dataPlaneAdmits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_admits_total",
-		Help: "Edge admit decisions by host, op (put, part) and outcome: admitted, pass_through (the origin takes the request), refused (an S3 error relayed to the client), error (the control plane could not decide).",
+		Help: "Edge admit decisions by host, op (put, part, get) and outcome: admitted, pass_through (the origin takes the request), refused (an S3 error relayed to the client), error (the control plane could not decide).",
 	}, []string{"host", "op", "outcome"})
 	dataPlaneBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_bytes_total",
@@ -93,12 +94,15 @@ var (
 )
 
 func init() {
-	for _, op := range []string{edgeOpPut, edgeOpPart} {
+	for _, op := range []string{edgeOpPut, edgeOpPart, edgeOpGet} {
 		for _, outcome := range []string{"admitted", "pass_through", "pass_through_small", "refused", "error"} {
 			dataPlaneAdmits.WithLabelValues(edgeHost, op, outcome)
 		}
 		dataPlaneBytes.WithLabelValues(edgeHost, op)
 	}
+	// An edge GET of a tenant past its allowance with the flag off is
+	// counted where the origin counts it (Part B).
+	egressWouldThrottle.WithLabelValues(edgeHost)
 }
 
 // edgeAdmitRequest is what the Worker describes.
@@ -131,17 +135,26 @@ type edgeAdmitResponse struct {
 	StorageKey  string            `json:"storage_key,omitempty"`
 	Expect      *edgeExpect       `json:"expect,omitempty"`
 	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
+	// A GET (Part B): the status the backend must answer (200, or 206 for
+	// a range) and the ORIGIN's response headers the Worker serves in place
+	// of the backend's (object_headers.go's set).
+	ExpectStatus    int               `json:"expect_status,omitempty"`
+	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 }
 
 // edgeCommitRequest is what the Worker reports: the backend's answer. No
 // digest and no byte count — the Worker is not in the byte path.
 type edgeCommitRequest struct {
 	AdmitID       string `json:"admit_id"`
-	Outcome       string `json:"outcome"` // ok | backend_error | edge_error
+	Outcome       string `json:"outcome"` // a write: ok | backend_error | edge_error; a GET: served | fallback | error
 	BackendStatus int    `json:"backend_status"`
 	BackendCode   string `json:"backend_code"` // the backend's XML <Code>, when it answered an error; the subrequest's error otherwise
 	BackendETag   string `json:"backend_etag"`
 	DurationMS    int64  `json:"duration_ms"`
+	// A GET: the Content-Length the backend answered at its headers — what
+	// is metered (the Worker cannot see the end of a stream it does not
+	// touch; edge_get.go).
+	BackendContentLength int64 `json:"backend_content_length,omitempty"`
 }
 
 // edgeAdmitAttrs is what the row keeps of the client's request for the
@@ -150,6 +163,11 @@ type edgeAdmitAttrs struct {
 	Attrs     objectAttrs `json:"attrs"`
 	LockMode  string      `json:"lock_mode,omitempty"`
 	LockUntil string      `json:"lock_until,omitempty"`
+	// UserAgent is the client's (RP64-11): the access-log row carries it.
+	UserAgent string `json:"user_agent,omitempty"`
+	// Status is what a GET answers the client (200, 206) — the access-log
+	// row's status when the Worker served it.
+	Status int `json:"status,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -244,7 +262,7 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
 	}
-	if req.Op != edgeOpPut && req.Op != edgeOpPart {
+	if req.Op != edgeOpPut && req.Op != edgeOpPart && req.Op != edgeOpGet {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_op"})
 		return
 	}
@@ -279,15 +297,54 @@ func refusalOf(rec *relayRecorder) (edgeAdmitResponse, int) {
 	return edgeAdmitResponse{Edge: false, Refusal: rec.relay()}, http.StatusOK
 }
 
+// edgePrelude is what every admit decides first (edgeAdmitPrelude): the
+// caller, the names, the synthetic request the origin's own checks read.
+type edgePrelude struct {
+	d        auth.RequestDescriptor
+	sr       *http.Request // on sctx
+	sctx     context.Context
+	rec      *relayRecorder
+	tenantID string
+	scope    *auth.KeyScope
+	bucket   string
+	key      string
+}
+
 // edgeAdmit is the decision. status is the HTTP status of the admit call
 // itself (200 for every decision; 5xx when the control plane failed).
 func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmitResponse, int) {
+	p, resp, status, decided := s.edgeAdmitPrelude(ctx, req)
+	if decided {
+		return resp, status
+	}
+	if req.Op == edgeOpGet {
+		return s.edgeAdmitGet(req, p)
+	}
+	return s.edgeAdmitWrite(req, p)
+}
+
+// edgeAdmitPrelude is the part of the decision every op shares, in the
+// order handleS3Request makes it: the descriptor, the method, SigV4 (the
+// one verifier's edge entrance), the reserved tenant, the key's expiry, the
+// suspension, the names, the operation and bucket scope, the system bucket,
+// the bucket name, the key's length. decided = the answer is resp/status.
+func (s *Server) edgeAdmitPrelude(ctx context.Context, req edgeAdmitRequest) (p edgePrelude, resp edgeAdmitResponse, status int, decided bool) {
+	decide := func(r edgeAdmitResponse, st int) (edgePrelude, edgeAdmitResponse, int, bool) {
+		return edgePrelude{}, r, st, true
+	}
 	d, sr, err := edgeDescriptor(req)
 	if err != nil {
-		return passThrough("bad_descriptor")
+		return decide(passThrough("bad_descriptor"))
 	}
-	if req.Method != http.MethodPut {
-		return passThrough("not_put")
+	wantMethod, op := http.MethodPut, auth.OpPutObject
+	switch req.Op {
+	case edgeOpPart:
+		op = auth.OpUploadPart
+	case edgeOpGet:
+		wantMethod, op = http.MethodGet, auth.OpGetObject
+	}
+	if req.Method != wantMethod {
+		return decide(passThrough("not_" + strings.ToLower(wantMethod)))
 	}
 	sr = sr.WithContext(ctx)
 	rec := newRelayRecorder()
@@ -297,14 +354,14 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 	tenantID, scope, err := s.s3Auth().ValidateDescribed(ctx, d, req.ClientIP)
 	if err != nil {
 		if d.Headers.Get("Authorization") == "" {
-			return passThrough("unsigned") // the origin answers it (AccessDenied or a web page)
+			return decide(passThrough("unsigned")) // the origin answers it (AccessDenied or a web page)
 		}
 		s.logger.Info("edge admit: authentication failed", zap.Error(err), zap.String("path", req.Path))
 		reqID := generateRequestID()
 		if errors.Is(err, auth.ErrIPDenied) {
 			WriteS3ErrorWithContext(rec, ErrAccessDenied, sr.URL.Path, reqID, WithSuggestion("This key is restricted by IP address."))
 			recordAuthFailure(sr, "ip_denied", true)
-			return refusalOf(rec)
+			return decide(refusalOf(rec))
 		}
 		errCode := ErrAccessDenied
 		switch {
@@ -328,61 +385,67 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 		}
 		reason, known := authFailureReason(err)
 		recordAuthFailure(sr, reason, known)
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	if tenantID == "" || engine.IsReservedTenantID(tenantID) {
 		WriteS3Error(rec, ErrAccessDenied, sr.URL.Path, generateRequestID())
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	if scope != nil && auth.IsKeyExpired(scope.ExpiresAt) {
 		WriteS3ErrorWithContext(rec, ErrExpiredPresignedRequest, sr.URL.Path, generateRequestID(),
 			WithSuggestion("This access key expired at "+scope.ExpiresAt.UTC().Format(time.RFC3339)+". Create or rotate a key in the dashboard."))
 		recordAuthFailure(sr, "expired", true)
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	if isTenantSuspended(ctx, s.db, tenantID) {
 		WriteS3Error(rec, ErrAccountSuspended, sr.URL.Path, generateRequestID())
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 
 	// The names, as the parser reads them (decoded path: bucket, key).
 	path := strings.TrimPrefix(sr.URL.Path, "/")
 	bucket, key, _ := strings.Cut(path, "/")
 	if bucket == "" || key == "" {
-		return passThrough("no_key")
-	}
-	op := auth.OpPutObject
-	if req.Op == edgeOpPart {
-		op = auth.OpUploadPart
+		return decide(passThrough("no_key"))
 	}
 	if scope != nil {
 		if !auth.OperationAllowed(scope.Permissions, op) {
 			WriteS3ErrorWithContext(rec, ErrAccessDenied, sr.URL.Path, generateRequestID(),
 				WithSuggestion(fmt.Sprintf("This key does not have %s access.", op)))
-			return refusalOf(rec)
+			return decide(refusalOf(rec))
 		}
 		if !auth.CheckBucketScope(scope.BucketScope, bucket) {
 			WriteS3ErrorWithContext(rec, ErrAccessDenied, sr.URL.Path, generateRequestID(),
 				WithSuggestion(fmt.Sprintf("This key is restricted to buckets: %s", strings.Join(scope.BucketScope, ", "))))
-			return refusalOf(rec)
+			return decide(refusalOf(rec))
 		}
 	}
 	if tenant.IsSystemBucket(bucket) {
 		WriteS3Error(rec, ErrNoSuchBucket, sr.URL.Path, generateRequestID())
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	if !validateBucketName(bucket) {
 		WriteS3Error(rec, ErrInvalidBucketName, sr.URL.Path, generateRequestID())
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	if len(key) > maxS3KeyBytes {
 		WriteS3Error(rec, ErrKeyTooLong, sr.URL.Path, generateRequestID())
-		return refusalOf(rec)
+		return decide(refusalOf(rec))
 	}
 	// What the origin's own handlers would read of this request.
 	tn := &tenant.Tenant{ID: tenantID, Namespace: fmt.Sprintf("tenant/%s/", tenantID), Plan: "starter", Status: "active"}
 	sctx := tenant.WithTenant(common.WithTenantID(auth.WithKeyScope(ctx, scope), tenantID), tn)
 	sr = sr.WithContext(sctx)
+	return edgePrelude{d: d, sr: sr, sctx: sctx, rec: rec, tenantID: tenantID, scope: scope, bucket: bucket, key: key}, edgeAdmitResponse{}, 0, false
+}
+
+// edgeAdmitWrite is the PUT / UploadPart decision after the prelude: the
+// shapes the edge never takes, the body, the flag, the bucket's own checks,
+// the ONE placement decision, the backend, Object Lock, the reservation,
+// the address and the link.
+func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitResponse, int) {
+	d, sr, sctx, rec, tenantID, bucket, key := p.d, p.sr, p.sctx, p.rec, p.tenantID, p.bucket, p.key
+	var err error
 
 	// The shapes the edge never takes: a copy, a sub-resource, a customer
 	// key (sealed at the origin), a trailer the Worker cannot verify.
@@ -538,7 +601,7 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 	row := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: req.Op, Backend: backend,
 		ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
-			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date")},
+			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent")},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	container := tenantID + "_" + bucket
 	var presigned string
@@ -919,13 +982,25 @@ func (s *Server) releaseEdgeAdmit(ctx context.Context, row edgeAdmitRow) {
 }
 
 // expireEdgeAdmit is the reaper's rule for a pending row past its expiry,
-// inside the caller's transaction on the locked row: the reservation back,
-// a PUT's address queued for the collector (the body may have landed with
-// no commit), state expired.
+// inside the caller's transaction on the locked row. It BRANCHES ON op: a
+// write's reservation goes back and a PUT's address is queued for the
+// collector (the body may have landed with no commit); an expired GET
+// (Part B) is a read whose commit was lost — its ADMITTED size is metered
+// (the upper bound; the trade in docs/reviews/WP-EDGE-1B.md) and nothing is
+// released or queued: its storage_key is the LIVE object's blob. Then
+// state expired.
 func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitRow) {
-	s.releaseEdgeAdmit(ctx, row)
-	if row.Op == edgeOpPut {
-		retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+	switch row.Op {
+	case edgeOpGet:
+		s.recordEdgeEgress(ctx, row.TenantID, row.Backend, row.ContentLength)
+		s.logger.Info("edge get admit expired without a commit — the admitted size is metered",
+			zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket), zap.String("key", row.Key),
+			zap.Int64("bytes", row.ContentLength), zap.String("admit_id", row.ID))
+	default:
+		s.releaseEdgeAdmit(ctx, row)
+		if row.Op == edgeOpPut {
+			retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+		}
 	}
 	_, _ = tx.ExecContext(ctx, `UPDATE edge_admits SET state = 'expired', finished_at = NOW() WHERE id = $1`, row.ID)
 }
@@ -967,8 +1042,12 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 			retireOrphanWrite(context.WithoutCancel(ctx), s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
 		}
 		WriteS3ErrorWithContext(rec, code, path, reqID, opts...)
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0, nil
+	}
+	if row.Op == edgeOpGet {
+		state, n := s.settleEdgeGet(ctx, row, req, rec)
+		return state, n, nil
 	}
 	deleteAfter := func() { s.edgeDeleteBlob(ctx, row) }
 	if req.Outcome != edgeOutcomeOK {
@@ -1059,7 +1138,7 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 				zap.String("bucket", row.Bucket), zap.String("key", row.Key))
 			WriteS3Error(rec, ErrInternalError, sr.URL.Path, reqID)
 		}
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	}
 	// The bucket's default retention and the request's lock headers,
@@ -1078,7 +1157,7 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 		rec.Header().Set("x-amz-version-id", flip.VersionID)
 	}
 	rec.WriteHeader(http.StatusOK)
-	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength)
+	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength, 0)
 	s.logger.Info("artifact stored", zap.String("tenant_id", row.TenantID), zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 		zap.String("backend", row.Backend), zap.String("etag", etag), zap.String("version_id", flip.VersionID),
 		zap.Int64("size", row.ContentLength), zap.String("host", edgeHost))
@@ -1103,47 +1182,56 @@ func (s *Server) commitEdgePart(ctx context.Context, row edgeAdmitRow, req edgeC
 		// Ended meanwhile: its end released this part's reservation; the
 		// backend upload is gone or going with it.
 		WriteS3Error(rec, ErrNoSuchUpload, path, reqID)
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	case errors.Is(sErr, errUploadStaged):
 		// Not an edge upload any more (cannot happen: edge is set once);
 		// settleUploadPartWith gave the reservation back.
 		WriteS3ErrorWithContext(rec, ErrInvalidRequest, path, reqID, WithSuggestion(edgeUploadRefusal))
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	case errors.Is(sErr, errPartOverQuota):
 		WriteS3ErrorWithContext(rec, ErrQuotaExceeded, path, reqID, WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+"."))
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	default:
 		s.releaseEdgeAdmit(ctx, row)
 		s.logger.Error("edge commit: failed to record part", zap.Error(sErr), zap.String("upload_id", row.UploadID))
 		WriteS3Error(rec, ErrInternalError, path, reqID)
-		s.recordEdgeAccess(row, rec.status, 0)
+		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	}
 	rec.Header().Set("ETag", etag)
 	rec.Header().Set("x-amz-request-id", reqID)
 	rec.WriteHeader(http.StatusOK)
-	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength)
+	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength, 0)
 	return "committed", row.ContentLength
 }
 
 // recordEdgeAccess writes the access-log row the origin would have written
-// for the client's request: the op, the client's IP, the bytes, the status.
-func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytes int64) {
+// for the client's request: the op, the client's IP and user agent (from
+// the admit's description, RP64-11), the bytes in (a write) or out (a
+// GET), the status.
+func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOut int64) {
 	if s.accessLogTracker == nil {
 		return
 	}
 	op := auth.OpPutObject
-	if row.Op == edgeOpPart {
+	switch row.Op {
+	case edgeOpPart:
 		op = auth.OpUploadPart
+	case edgeOpGet:
+		op = auth.OpGetObject
 	}
 	if status == 0 {
 		status = http.StatusOK
 	}
+	ua := row.Attrs.UserAgent
+	if ua == "" {
+		ua = "edge"
+	}
 	s.accessLogTracker.Record(context.Background(), s3AccessEvent{
 		tenantID: row.TenantID, bucket: row.Bucket, objectKey: row.Key, operation: op, statusCode: status,
-		bytesReceived: bytes, sourceIP: row.ClientIP, userAgent: "edge", requestID: row.RequestID, loggedAt: time.Now(),
+		bytesSent: bytesOut, bytesReceived: bytesIn, sourceIP: row.ClientIP, userAgent: ua, requestID: row.RequestID, loggedAt: time.Now(),
 	})
 }
