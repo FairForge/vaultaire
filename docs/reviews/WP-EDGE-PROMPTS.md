@@ -534,6 +534,154 @@ Architecture notes
 
 ---
 
+## Stage 1a Prompt 45: WP-EDGE-1 Part B — reads (GetObject through the Worker on `s3.stored.cloud`)
+
+```
+Stage 1a Prompt 45: WP-EDGE-1 Part B — reads: GetObject leaves SLC
+
+Continue from WP-EDGE-1 Part A (Stage 1a Prompt 44, 2026-10-26: #980 the
+Worker, #981 the control plane + migration 109, #982 the docs; deployed;
+the Worker live on s3.stored.cloud; flag `edge_ingest` ON for tenant zero;
+note docs/reviews/WP-EDGE-1A.md — read its § Decisions D-EDGE-1…9 and
+§ Residuals RE-1…: they are this prompt's Part 0) and from the baseline
+bench-results/EDGE-RELAY-2026-10-26.md (reads through a Worker ran at the
+backend's single-stream rate, 111 MB/s from SLC, with a better first byte
+than direct: a presigned GET streamed back — `return fetch(url)` — is the
+whole data path; no JavaScript touches the bytes, as on the write path).
+Most recent merged PR: `gh pr list --state merged --limit 5`. Open PRs
+that matter: re-check `gh pr list --state open`; the dependabot bumps do
+not collide. Next migration: 110 (109 was Part A's) — claim it only if
+Part B needs a column; it should not (the admit row is Part A's table with
+op = 'get').
+
+Read first:
+- docs/IMPLEMENTATION_PLAN.md § 40.10 "Slice 1 — the mover" (the GET
+  sentence), "What the move changes elsewhere" (egress is metered from
+  admit/commit; the egress_throttle decision becomes a 503 SlowDown from
+  admit — the Worker never paces), "The invariant and the order" (reads
+  leave SLC too).
+- docs/ARCHITECTURE_CONTRACT.md lines 1, 4, 7, 11 (cite them in the PR
+  body); line 8 (the Worker is not a privacy feature).
+- internal/api/edge_ingest.go (the admit/commit shape, the relay, the
+  token auth, the metrics families), edge_multipart.go, edge_reaper.go;
+  edge/s3-ingest/src/index.js (classify/describe/relay; moveBody);
+  internal/api/egress_meter.go + egress_writer.go (the ONE egress counter,
+  the allowance, the stream guard, the `egress_throttle` flag, decision
+  D-25); internal/api/s3_engine_adapter.go HandleGet + serveGetObject (what
+  a GET does: the head row, objectBlobAddress, WithRecordedBackend, the
+  conditionals, Range, the integrity reader, the headers — object_headers.go
+  — the access log, the egress span, `object.downloaded`); s3_large_get.go
+  (parallel_get: a LATER part); internal/drivers/idrive.go GetRangeInfo /
+  lyve.go (VersionedRangeGetter — the ranged read the presign must match).
+- CLAUDE.md Architecture Decisions 2 (HEAD stays at the origin, cache-only
+  — never through the Worker), 7 (client IP), 8 (the edge calls carry the
+  client's Authorization inside the JSON).
+
+Lane: Engine. Two PRs: (B1) the control plane — the GET admit/commit
+(`op = 'get'` on edge_admits), the presigning drivers' PresignGet, the
+egress metering from admit/commit, the throttle decision as 503 from admit;
+(B2) the Worker — GET classification, the presigned GET streamed back, the
+commit of bytes served (the Worker learns the byte count from the backend's
+Content-Length / the Range's length, never from reading the body), docs.
+One docs PR after the live proof (plan 40.10 status, STATUS, CLAUDE.md
+rows, API.md, WP-EDGE-1B.md with Step 0 answers, decisions, residuals).
+
+Scope: GetObject (plain and Range) of a tenant with the `edge_ingest` flag,
+whose head row is a WHOLE UNSEALED object on an EdgeWriter backend (idrive,
+idrive-<region>, wasabi, lyve), of at least EDGE_MIN_BYTES, is admitted —
+SigV4 verified on SLC (ValidateDescribed), the key's scope (GetObject, the
+bucket), the head row read (size, ETag, backend, storage_key, content type,
+the attributes, the version), the conditionals (If-Match / If-None-Match /
+If-Modified-Since → the origin's 304 / 412 relayed from admit), the Range
+parsed as range.go does (a multi-range is the origin's; a 416 relayed), the
+egress allowance checked: a tenant past its allowance with `egress_throttle`
+ON answers 503 SlowDown + Retry-After FROM ADMIT (never paced by the
+Worker; the stream guard's MAX_STREAMS rule applies to the origin's own
+paced responses only — document); the object's bytes are metered on the
+tenant's month counter AT ADMIT (`egressMeter`: the live counter + the
+bandwidth_usage_daily row as the origin's GET does — the commit corrects
+to what the backend served when it differs: a cut body); a presigned
+ranged GET (TTL 15 min, `Range` passed through, `If-Match: <backend
+ETag>` signed so a concurrent overwrite cuts the body — never splices;
+the backend ETag is the row's ETag for a single PUT, the `-N` for a
+multipart assembled by the backend) is handed to the Worker with the
+response headers the origin would send (object_headers.go's set: ETag,
+Last-Modified, Content-Type, Accept-Ranges, x-amz-storage-class via
+engine.CustomerStorageClass, x-amz-version-id, x-amz-meta-*, the
+disposition/encoding/language/cache headers, Content-Range + 206 for a
+range). The Worker streams the backend's body back with THOSE headers (not
+the backend's), then commits {admit_id, outcome, backend_status,
+backend_content_length, duration_ms}; the commit writes the access-log row
+(GetObject, the client's IP, bytes_sent), fires `object.downloaded` and
+counts `vaultaire_data_plane_bytes_total{host="edge",op="get"}`. Pass
+through to the origin: HEAD (Decision 2), a chunked / sealed (SSE-S3, SSE-C)
+/ tape / `sia` / parity-rebuilt row, a `?versionId` of a non-current
+version (its own row — a later part), a public bucket's object (R2 /cdn),
+an object under EDGE_MIN_BYTES, a presigned GET URL (the origin verifies
+presigned queries), a request with a flag-off tenant. HEAD stays at the
+origin (cache-only, non-negotiable 2). The `parallel_get` whole-object
+path at the edge is a later part (one presigned ranged GET per part would
+be the shape).
+
+Step 0 — probes (write the answers into WP-EDGE-1B.md):
+0.1 PresignGetObject with Range and IfMatch in the input: are `range` and
+    `if-match` in X-Amz-SignedHeaders (the Worker must send exactly the
+    signed headers)? If the SDK does not sign them, build the presign as
+    the write path does and check; both backends must honour a signed
+    If-Match (412 on a mismatch — probe on the lab pairs with a 10 MiB
+    object overwritten between presign and GET).
+0.2 A Worker `return fetch(presignedURL, {headers: send_headers})` with the
+    response's headers REPLACED by the origin's set (a new Response around
+    the backend's body): does it stream (no buffering), and does
+    `Content-Length` survive a `new Response(resp.body, {headers})`
+    (wrangler dev, a 64 MiB object)? Does a client Range through the Worker
+    get the backend's 206 bytes exactly?
+0.3 The egress meter: how a GET through the origin lands on
+    `bandwidth_usage_daily` and the live counter today (`egressSpan`,
+    `recordResponse`) — what the admit must write so the month counter,
+    the alerts ladder and the throttle see the same number; and what
+    `EgressStatus` reads.
+0.4 The lab topology of Part A (D-EDGE-7: wrangler dev --local-upstream +
+    the HTTP-proxy trick) holds for GET; verify a GET through it returns
+    the backend's bytes once.
+
+Tests (red first; the Part A fixture `setupEdgeFixture` + `edgeFakeDriver`
+gain PresignGet and a served-body record): TestEdgeAdmitGet_ChunkedSealed
+TapePublicPassThrough, TestEdgeAdmitGet_MetersEgressAtAdmit (the egress
+rows equal a GET through the origin), TestEdgeAdmitGet_ThrottledTenantIs
+503FromAdmit (flag on; a tenant row with the flag off is the exemption),
+TestEdgeAdmitGet_RangeAndConditionals (206 headers, 416, 304, 412 relayed
+from admit), TestEdgeAdmitGet_HeadersAreTheOrigins (the header set equals
+HEAD's from object_headers.go), TestEdgeCommitGet_AccessLogAndEvent,
+TestEdgeCommitGet_LostCommitStillMeters (the reaper reads the admit's size:
+metered at admit, nothing to undo), TestEdgePresignGet_SignsRangeAndIfMatch
+on both drivers against a fake endpoint; Worker: classify (GET with/without
+Range, HEAD never, presigned query never), the header replacement, the relay.
+
+Live proof, lab: the Lightroom zip of Part A's prod proof shape in the lab
+(a 192 MiB object): a GET through the Worker MD5-equal, a Range GET's
+bytes, a GET of a throttled tenant 503 from admit, the origin's access log
+bytes_out 0 for the admitted reads; bandwidth_usage_daily equal to a GET
+through the origin. Prod: the Lightroom zip of Part A back through
+s3.stored.cloud with rclone, MD5 equal, `vaultaire_data_plane_bytes_total
+{op="get"}` vs the origin's egress for the same minute (the origin's
+request log carries no bytes: use the metric and HAProxy's log).
+
+Operator items (yours): none new — the Worker redeploys (`wrangler deploy`
++ the manifest row for the new file), the flag is already ON for tenant
+zero. The Worker's new hash is a new client_build row (version 0.2.0).
+
+Closeout: write Prompt 46 (WP-EDGE-2, slice 2 against the lab master key —
+the chain list below) into this file in the /next format; update STATUS,
+the plan's 40.10 status line and the Stage 1a ledger memory row 45; name
+the post-merge review RP66.
+Commit: feat(api,drivers,edge): WP-EDGE-1 Part B — reads … [WP-EDGE-1];
+no AI attribution lines; merge with `gh pr merge --auto` (merge queue; no
+--squash, no --delete-branch, never --admin).
+```
+
+---
+
 ## The chain (owner 2026-10-26: "build everything now") — each closeout writes the next prompt here
 
 Serial, one deep code lane; each prompt's Part 0 is the previous prompt's
@@ -542,7 +690,7 @@ the owner; the two switches that wait for the F-14 ceremony are named in
 Prompt 46. The scopes here are what the writer of each prompt expands with
 current line numbers (the /next conventions).
 
-- **Prompt 45 — WP-EDGE-1 Part B, reads.** GetObject (and the Range form)
+- **Prompt 45 — WP-EDGE-1 Part B, reads** (written in full above by Prompt 44's closeout, 2026-10-26). GetObject (and the Range form)
   through the Worker: admit (SigV4 via ValidateDescribed, scope, the head row —
   a whole unsealed object on an EdgeWriter backend; chunked, sealed, SSE-C,
   tape, parity-rebuild and `sia` rows pass through to the origin) → the egress
