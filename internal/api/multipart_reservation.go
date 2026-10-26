@@ -49,27 +49,27 @@ var errPartOverQuota = errors.New("part over quota")
 // snapshot taken before it waited, so two attempts at one part number each
 // missed the part the other had just installed and the upload kept both
 // reservations (Stage 1a Prompt 7, Part 0).
-func lockActiveUpload(ctx context.Context, tx *sql.Tx, tenantID, uploadID string, partNumber int) (floor string, partBytes int64, err error) {
+func lockActiveUpload(ctx context.Context, tx *sql.Tx, tenantID, uploadID string, partNumber int) (floor string, partBytes int64, edge bool, err error) {
 	var status string
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, `+uploadHoldingFloorSQL+`
+		SELECT status, edge, `+uploadHoldingFloorSQL+`
 		FROM multipart_uploads u
 		WHERE u.upload_id = $1 AND u.tenant_id = $2
-		FOR UPDATE`, uploadID, tenantID).Scan(&status, &floor)
+		FOR UPDATE`, uploadID, tenantID).Scan(&status, &edge, &floor)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return "", 0, errUploadEnded
+		return "", 0, false, errUploadEnded
 	case err != nil:
-		return "", 0, fmt.Errorf("lock upload %s: %w", uploadID, err)
+		return "", 0, false, fmt.Errorf("lock upload %s: %w", uploadID, err)
 	case status != "active":
-		return "", 0, errUploadEnded
+		return "", 0, false, errUploadEnded
 	}
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE((SELECT size_bytes FROM multipart_parts WHERE upload_id = $1 AND part_number = $2), 0)`,
 		uploadID, partNumber).Scan(&partBytes); err != nil {
-		return "", 0, fmt.Errorf("read part %d of upload %s: %w", partNumber, uploadID, err)
+		return "", 0, false, fmt.Errorf("read part %d of upload %s: %w", partNumber, uploadID, err)
 	}
-	return floor, partBytes, nil
+	return floor, partBytes, edge, nil
 }
 
 // uploadHoldingFloorSQL is the floor an upload's holding is on, over the
@@ -87,9 +87,12 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 		return 0, fmt.Errorf("begin part reservation: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	floor, held, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
+	floor, held, edge, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
 	if err != nil {
 		return 0, err
+	}
+	if edge {
+		return 0, errUploadEdge // a staged part on an edge upload (WP-EDGE-1): one upload is one path
 	}
 	up := declared - held
 	if up <= 0 {
@@ -119,14 +122,26 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 // refused: errPartOverQuota, its reservation given back, nothing installed.
 func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string, partNumber int,
 	reserved, measured int64, etag, sealedMD5 string, install func() error) error {
+	return settleUploadPartWith(ctx, db, tenantID, uploadID, partNumber, reserved, measured, etag, sealedMD5, "", install, false)
+}
+
+// settleUploadPartWith is settleUploadPart for both kinds of part: a staged
+// one (backendETag "", viaEdge false — refused on an edge upload) and an
+// edge one (backendETag the backend's, viaEdge true — refused on an upload
+// that is not edge; WP-EDGE-1 Part A).
+func settleUploadPartWith(ctx context.Context, db *sql.DB, tenantID, uploadID string, partNumber int,
+	reserved, measured int64, etag, sealedMD5, backendETag string, install func() error, viaEdge bool) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin part install: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	floor, held, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
+	floor, held, edge, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
 	if err != nil {
 		return err // ended: Abort/the reaper released everything, this part's reservation too
+	}
+	if edge != viaEdge {
+		return releaseMismatchedPart(ctx, tx, tenantID, uploadID, floor, reserved, edge)
 	}
 	delta := measured - held - reserved
 	if delta > 0 {
@@ -156,13 +171,14 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes, sealed_md5)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO multipart_parts (upload_id, part_number, etag, size_bytes, sealed_md5, backend_etag)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''))
 		ON CONFLICT (upload_id, part_number) DO UPDATE SET
-			etag       = EXCLUDED.etag,
-			size_bytes = EXCLUDED.size_bytes,
-			sealed_md5 = EXCLUDED.sealed_md5,
-			created_at = NOW()`, uploadID, partNumber, etag, measured, sealedMD5); err != nil {
+			etag         = EXCLUDED.etag,
+			size_bytes   = EXCLUDED.size_bytes,
+			sealed_md5   = EXCLUDED.sealed_md5,
+			backend_etag = EXCLUDED.backend_etag,
+			created_at   = NOW()`, uploadID, partNumber, etag, measured, sealedMD5, backendETag); err != nil {
 		return fmt.Errorf("record part metadata: %w", err)
 	}
 	// What the part holds less than it reserved goes back last: the quota
@@ -173,6 +189,23 @@ func settleUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID string
 		}
 	}
 	return tx.Commit()
+}
+
+// releaseMismatchedPart gives a part's reservation back when the part
+// arrived on the wrong path — staged on an edge upload (errUploadEdge), or
+// at the edge on an upload that holds staged parts (errUploadStaged) — and
+// commits the release: the ledger is the transaction's last statement.
+func releaseMismatchedPart(ctx context.Context, tx *sql.Tx, tenantID, uploadID, floor string, reserved int64, edge bool) error {
+	if err := giveBackPart(ctx, tx, tenantID, uploadID, floor, reserved); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit the part's release: %w", err)
+	}
+	if edge {
+		return errUploadEdge
+	}
+	return errUploadStaged
 }
 
 // releaseUploadPart gives back a part's reservation when the part was not
@@ -187,7 +220,7 @@ func releaseUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 		return fmt.Errorf("begin part release: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	floor, _, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
+	floor, _, _, err := lockActiveUpload(ctx, tx, tenantID, uploadID, partNumber)
 	if errors.Is(err, errUploadEnded) {
 		return nil
 	}

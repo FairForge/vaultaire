@@ -98,6 +98,9 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(generatedObjectRefused)
 		// Multipart staging free-space guard (WP-R10-8 Part C).
 		reg.MustRegister(multipartStagingRefusals, multipartStagingFree)
+		// The edge mover (WP-EDGE-1 Part A): admits by outcome, bytes by
+		// data-plane host, the admit reaper.
+		reg.MustRegister(dataPlaneAdmits, dataPlaneBytes, edgeAdmitReaperTotal)
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))

@@ -391,7 +391,8 @@ var quotaLastAllowed = map[string]string{
 	// install (the rename replaces the part number's previous file): the
 	// quota row is held through the rename and the part row's insert. Every
 	// other locker of the upload row takes it before the quota row.
-	"settleUploadPart": "a part measured past its reservation (R108-8) is refused before the install",
+	"settleUploadPart":     "a part measured past its reservation (R108-8) is refused before the install",
+	"settleUploadPartWith": "the same install, for a staged and an edge part (WP-EDGE-1)",
 }
 
 // TestLedger_QuotaStatementIsLast (Stage 1a Prompt 7, Part 0): the ledger is

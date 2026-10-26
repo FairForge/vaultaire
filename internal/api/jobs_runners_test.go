@@ -311,9 +311,11 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"session_cleanup":     "every 1h0m0s",
 		"bandwidth_alerts":    "every 1h0m0s",
 		"access_log_delivery": "every 5m0s",
-		"account_export":      "every 1m0s",
-		"retired_blobs":       "every 10m0s",
-		"renewal_stops":       "every 10m0s",
+		// WP-EDGE-1 Part A: expired edge admits released and retired.
+		"edge_admit_reaper": "every 5m0s",
+		"account_export":    "every 1m0s",
+		"retired_blobs":     "every 10m0s",
+		"renewal_stops":     "every 10m0s",
 		// K4: signs a transparency-log checkpoint when the tree grew.
 		"translog_checkpoint": "every 10m0s",
 		// K4c-3a: anchors the signed checkpoints in OpenTimestamps.

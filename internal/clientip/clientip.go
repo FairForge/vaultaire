@@ -138,3 +138,13 @@ func Country(r *http.Request) string {
 	}
 	return c
 }
+
+// PeerIsCloudflare reports whether the trusted peer of r — the address
+// HAProxy accepted the connection from — is inside Cloudflare's published
+// edge ranges: the request came through the proxied edge. The edge ingest
+// routes (WP-EDGE-1 Part A) admit a Worker's call only from such a peer
+// (with its service token); a direct connection to the origin carrying the
+// token is refused, whatever headers it sends.
+func PeerIsCloudflare(r *http.Request) bool {
+	return IsCloudflare(net.ParseIP(trustedPeer(r)))
+}

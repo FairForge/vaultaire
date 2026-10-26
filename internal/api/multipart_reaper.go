@@ -9,6 +9,8 @@ import (
 
 	"github.com/lib/pq"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // MultipartReaper closes the multipart disk-fill DoS (WP-10-minimal, H-1).
@@ -34,6 +36,9 @@ type MultipartReaper struct {
 	logger            *zap.Logger
 	AbandonAge        time.Duration
 	TerminalRetention time.Duration
+	// engine aborts the backend half of an edge upload (WP-EDGE-1 Part A);
+	// nil = such uploads are left for a process that has one.
+	engine *engine.CoreEngine
 }
 
 // MultipartReapResult holds the outcome of a single reap cycle.
@@ -43,6 +48,11 @@ type MultipartReapResult struct {
 	// OrphanDirs: staging directories removed because no row names their
 	// upload (sweepOrphanStaging).
 	OrphanDirs int `json:"orphan_dirs"`
+	// BackendAborted: backend multipart uploads of aborted edge uploads
+	// the reaper aborted (an Abort the handler could not make, an
+	// abandoned edge upload); BackendAbortFailed: left for the next pass.
+	BackendAborted     int `json:"backend_aborted"`
+	BackendAbortFailed int `json:"backend_abort_failed"`
 }
 
 // orphanStagingGrace is how old a staging directory with no upload row must
@@ -103,7 +113,57 @@ func (m *MultipartReaper) RunOnce(ctx context.Context) (MultipartReapResult, err
 	}
 	result.OrphanDirs = orphans
 
+	aborted, failed, err := m.abortEdgeBackendUploads(ctx)
+	if err != nil {
+		return result, fmt.Errorf("abort edge backend uploads: %w", err)
+	}
+	result.BackendAborted, result.BackendAbortFailed = aborted, failed
+
 	return result, nil
+}
+
+// abortEdgeBackendUploads aborts the backend half of every aborted edge
+// upload whose backend abort has not been made (WP-EDGE-1 Part A): the
+// handler's abort failed, or the reaper's own abandon pass ended the row.
+// A backend that cannot be asked keeps the row for the next pass; the
+// purge never deletes such a row (its backend upload would leak).
+func (m *MultipartReaper) abortEdgeBackendUploads(ctx context.Context) (aborted, failed int, err error) {
+	if m.engine == nil {
+		return 0, 0, nil
+	}
+	rows, err := m.db.QueryContext(ctx, `
+		SELECT upload_id, tenant_id, bucket, edge_backend, backend_upload_id, storage_key
+		FROM multipart_uploads
+		WHERE status = 'aborted' AND edge AND backend_upload_id IS NOT NULL AND backend_upload_ended_at IS NULL
+		LIMIT 200`)
+	if err != nil {
+		return 0, 0, fmt.Errorf("select aborted edge uploads: %w", err)
+	}
+	type row struct{ id, tenant, bucket, backend, buid, sk string }
+	var due []row
+	for rows.Next() {
+		var r row
+		var backend, sk sql.NullString
+		if err := rows.Scan(&r.id, &r.tenant, &r.bucket, &backend, &r.buid, &sk); err != nil {
+			_ = rows.Close()
+			return 0, 0, fmt.Errorf("scan aborted edge upload: %w", err)
+		}
+		r.backend, r.sk = backend.String, sk.String
+		due = append(due, r)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("iterate aborted edge uploads: %w", err)
+	}
+	for _, r := range due {
+		up := edgeUpload{Edge: true, Backend: r.backend, BackendUploadID: r.buid, StorageKey: r.sk}
+		if aErr := abortEdgeUploadOn(ctx, m.db, m.engine, m.logger, r.tenant, r.bucket, r.id, up); aErr != nil {
+			failed++
+			continue
+		}
+		aborted++
+	}
+	return aborted, failed, nil
 }
 
 // sweepOrphanStaging removes the staging directories whose upload has no
@@ -227,6 +287,7 @@ func (m *MultipartReaper) purgeTerminal(ctx context.Context) (int, error) {
 		SELECT upload_id FROM multipart_uploads
 		WHERE status IN ('completed', 'aborted')
 		  AND created_at < NOW() - make_interval(secs => $1)
+		  AND NOT (edge AND backend_upload_id IS NOT NULL AND backend_upload_ended_at IS NULL)
 	`, retentionSecs)
 	if err != nil {
 		return 0, fmt.Errorf("select terminal: %w", err)

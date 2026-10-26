@@ -94,6 +94,17 @@ const (
 	// after it goes off. Checked in decidePlacement.
 	flagVersionedChunking = "versioned_chunking"
 
+	// flagEdgeIngest lets a tenant's PutObject and UploadPart leave SLC
+	// (WP-EDGE-1 Part A, plan 40.10 slice 1): the Worker on s3.stored.cloud
+	// asks the control plane to admit a whole unsealed write and streams
+	// the body straight to the backend on a presigned link; the control
+	// plane commits it as a PUT through SLC would. Off = every request
+	// passes through to the origin. Default OFF, per tenant first (tenant
+	// zero); it does nothing on a process without EDGE_SERVICE_TOKEN. Keep
+	// it OFF until the build that knows edge uploads is the active slot
+	// (docs/DEPLOY.md).
+	flagEdgeIngest = "edge_ingest"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -124,6 +135,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagBlompBackend, false)
 	fl.Register(flagSiaBackend, false)
 	fl.Register(flagVersionedChunking, false)
+	fl.Register(flagEdgeIngest, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")

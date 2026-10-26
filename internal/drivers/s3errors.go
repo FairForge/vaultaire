@@ -52,3 +52,10 @@ func s3IsForbidden(err error) bool {
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && (apiErr.ErrorCode() == "AccessDenied" || apiErr.ErrorCode() == "Forbidden")
 }
+
+// s3IsNoSuchUpload reports an S3 NoSuchUpload (the multipart upload is
+// gone: completed, aborted, or never there) — by type, never by text.
+func s3IsNoSuchUpload(err error) bool {
+	var apiErr smithy.APIError
+	return err != nil && errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload"
+}

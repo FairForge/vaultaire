@@ -103,74 +103,23 @@ func NewAuth(db *sql.DB, logger *zap.Logger, keys CredentialKeys) *Auth {
 // Without a database (local development, unit tests) every request is the
 // "test-tenant" with full access.
 func (a *Auth) ValidateRequest(r *http.Request) (string, *KeyScope, error) {
-	fullAccess := &KeyScope{Permissions: []string{"*"}}
-
-	authHeader := r.Header.Get("Authorization")
-
-	if authHeader == "" {
-		if r.URL.Query().Get("AWSAccessKeyId") != "" {
-			return "", nil, fmt.Errorf("%w: unsigned AWSAccessKeyId query authentication is not supported", ErrSignatureMismatch)
-		}
-		if a.db == nil {
-			return "test-tenant", fullAccess, nil
-		}
-		return "", nil, fmt.Errorf("missing authorization")
-	}
-
-	// SigV2-era clients: key-existence only, refused.
-	if strings.HasPrefix(authHeader, "AWS ") {
-		return "", nil, fmt.Errorf("%w: AWS signature version 2 is not supported", ErrSignatureMismatch)
-	}
-
-	// The scheme must be followed by a space (RFC 9110 § 11.4: scheme SP
-	// params — every SDK sends it). It was a bare HasPrefix, which also
-	// attempted "AWS4-HMAC-SHA256,Credential=…" and a tab after the scheme,
-	// shapes the S3 credential gate's space-Cut did not see (RP58-8 c): the
-	// two predicates must agree, so the verifier narrows to what
-	// IsAWSAuthorization names. SigV4A (AWS4-ECDSA-P256-SHA256) is such a
-	// credential too and is refused here as unsupported (RP58-1).
-	if !strings.HasPrefix(authHeader, algorithm+" ") {
-		return "", nil, fmt.Errorf("invalid authorization format")
-	}
-
-	params, err := parseSigV4AuthHeader(authHeader)
+	// The live entrance of the one verifier (described.go, WP-EDGE-1 Part
+	// A): the request itself is what verifySigV4 canonicalises — a
+	// descriptor built from it would be the same bytes — and its body is
+	// then bound to the hash the signature covered.
+	tenantID, scope, err := a.validateDescribed(r, clientIPOf(r))
 	if err != nil {
-		// The error names parts of the header; the header is the credential
-		// (CodeQL go/clear-text-logging) — the caller gets it, the log does not.
-		a.logger.Debug("failed to parse SigV4 authorization header")
 		return "", nil, err
 	}
 	if a.db == nil {
-		a.logger.Warn("no database connection, using test-tenant")
-		return "test-tenant", fullAccess, nil
-	}
-	cred, err := a.LookupCredential(r.Context(), params.AccessKey)
-	if err != nil {
-		return "", nil, err
-	}
-	// A key whose plaintext secret was never stored (legacy rows with only
-	// a bcrypt secret_hash) can never verify: fail closed, but leave an
-	// actionable trail — the key must be regenerated.
-	if cred.SecretKey == "" {
-		// The DB-derived tenant, never the request-derived key id (CodeQL
-		// go/clear-text-logging on the Authorization header); the metric
-		// carries the per-key signal.
-		a.logger.Warn("access key has no stored secret — cannot verify SigV4 signature; regenerate this API key",
-			zap.String("tenant_id", cred.TenantID))
-		return "", nil, fmt.Errorf("%w: key has no stored secret for signature verification; regenerate this API key", ErrSignatureMismatch)
-	}
-	if err := a.verifySigV4(r, params, cred.SecretKey, cred.TenantID); err != nil {
-		a.logger.Debug("signature verification failed",
-			zap.String("tenant_id", cred.TenantID),
-			zap.Bool("time_skewed", errors.Is(err, ErrRequestTimeSkewed)))
-		return "", nil, err
+		return tenantID, scope, nil
 	}
 	// The signature proves the DECLARED payload hash is authentic; wrapping
 	// the body makes the received bytes live up to it.
 	if err := wrapPayloadVerification(r); err != nil {
 		return "", nil, err
 	}
-	return cred.TenantID, cred.Scope, nil
+	return tenantID, scope, nil
 }
 
 // Credential is the result of an access-key lookup: the owning tenant, the

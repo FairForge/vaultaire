@@ -104,6 +104,9 @@ func (s *Server) registerJobs() {
 	if s.multipartReaper != nil {
 		s.jobs.Register(s.multipartReaper.spec())
 	}
+	if s.edgeReaper != nil {
+		s.jobs.Register(s.edgeReaper.spec())
+	}
 	if s.cdnAnalytics != nil && s.cdnAnalytics.db != nil {
 		s.jobs.Register(jobSpec{Name: "cdn_rollup", Every: time.Hour, BootDelay: 20 * time.Second, MaxRunTime: 5 * time.Minute,
 			Run: func(ctx context.Context) (jobReport, error) {
