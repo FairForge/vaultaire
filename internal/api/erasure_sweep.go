@@ -164,6 +164,7 @@ var sweepBucketSources = []struct{ table, query string }{
 var sweepBucketTablesExcluded = map[string]string{
 	"s3_access_log":        "a log of what requests named — any string, existing or not",
 	"s3_long_op_incidents": "a long operation a stopping slot cut (082): a bucket that holds bytes also has its buckets row or head rows",
+	"edge_admits":          "transient admission rows (109, WP-EDGE-1): an admitted write names a bucket that has its buckets row (requireWriteBucket), and a landed blob sits under the tenant's prefix on an EdgeWriter backend, which the walk covers whole",
 	"cdn_access_log":       "a log, purged after 2 days",
 	"cdn_stats_daily":      "a rollup of the log",
 	"abuse_reports":        "the reporter's claim, not the tenant's bucket list",

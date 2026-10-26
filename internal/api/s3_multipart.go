@@ -445,6 +445,16 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 	var err error
 	declared := body.declared
 
+	// An edge upload takes no staged part (WP-EDGE-1 Part A): its parts are
+	// the backend's, and Complete asks the backend to assemble them. The
+	// reservation re-checks this under the upload's lock (errUploadEdge).
+	if s.db != nil {
+		if up, rErr := readEdgeUpload(r.Context(), s.db, tenantID, uploadID); rErr == nil && up.Edge {
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
+			return "", 0, false
+		}
+	}
+
 	// Per-upload in-flight byte cap (WP-10-minimal, H-1): part data sits
 	// unbilled on local disk until complete, so without a cap one upload can
 	// fill the production disk at zero quota cost. Checked twice: against the
@@ -494,6 +504,9 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 		switch {
 		case errors.Is(err, errUploadEnded):
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
+			return "", 0, false
+		case errors.Is(err, errUploadEdge):
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
 			return "", 0, false
 		case errors.Is(err, errPartOverQuota):
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
@@ -617,6 +630,11 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 			_ = os.Remove(tmp)
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
 			return "", 0, false
+		case errors.Is(sErr, errUploadEdge):
+			installed = true // became an edge upload meanwhile: settleUploadPartWith gave the reservation back
+			_ = os.Remove(tmp)
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
+			return "", 0, false
 		case errors.Is(sErr, errPartOverQuota):
 			installed = true // settleUploadPart gave the reservation back
 			_ = os.Remove(tmp)
@@ -667,6 +685,10 @@ type partRecord struct {
 	// SealedMD5 is the MD5 of a sealed part's staged bytes ("" = a
 	// plaintext part): what Complete checks the file against (WP-SSEC-1).
 	SealedMD5 string
+	// BackendETag is set on an edge part (WP-EDGE-1 Part A): the ETag the
+	// backend answered the Worker, what the backend's Complete is given. No
+	// staged file exists for such a part.
+	BackendETag string
 }
 
 // stagedSize is the number of bytes the part's staging file holds: the
@@ -814,11 +836,23 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// An edge upload (WP-EDGE-1 Part A): its parts are the backend's, and
+	// the backend assembles them (completeEdgeUpload below).
+	var edgeUp edgeUpload
+	if s.db != nil {
+		var eErr error
+		if edgeUp, eErr = readEdgeUpload(r.Context(), s.db, t.ID, uploadID); eErr != nil {
+			s.logger.Error("complete multipart: upload row unreadable", zap.Error(eErr))
+			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			return
+		}
+	}
+
 	// Load all uploaded parts, ordered by part number
 	var parts []partRecord
 	if s.db != nil {
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT part_number, etag, size_bytes, sealed_md5 FROM multipart_parts
+			SELECT part_number, etag, size_bytes, sealed_md5, COALESCE(backend_etag, '') FROM multipart_parts
 			WHERE upload_id = $1
 			ORDER BY part_number ASC
 		`, uploadID)
@@ -830,7 +864,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var p partRecord
-			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5); err != nil {
+			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5, &p.BackendETag); err != nil {
 				s.logger.Error("failed to scan part row", zap.Error(err))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
@@ -895,6 +929,16 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	// and the assembly pipe would otherwise deliver a clean, SHORT stream
 	// that a length-lax backend commits under the declared size (R7-12).
 	for _, p := range parts {
+		if edgeUp.Edge {
+			if p.BackendETag == "" {
+				// A staged part on an edge upload cannot exist (UploadPart
+				// refuses it): asserted, never assembled.
+				s.logger.Error("complete multipart: an edge upload holds a part without a backend ETag", zap.String("upload_id", uploadID), zap.Int("part", p.PartNumber))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			continue
+		}
 		st, statErr := os.Stat(partFilePath(uploadID, p.PartNumber))
 		if statErr != nil || st.Size() != p.stagedSize() {
 			s.logger.Warn("complete multipart: part data missing or short on disk",
@@ -961,6 +1005,23 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	})
 	if placement.Refusal != nil {
 		placement.Refusal.write(w, r)
+		return
+	}
+	if edgeUp.Edge {
+		// The backend holds the parts plaintext and assembles them whole
+		// (WP-EDGE-1 Part A, D-EDGE-3): a Complete that would now have to
+		// seal them is refused; the upload stays active for Abort.
+		if placement.Kind == placeWholeSealed {
+			markClientRefusal(r.Context())
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+				WithSuggestion("This bucket now requires encryption at rest and this upload's parts went to the backend unsealed: abort it and upload again."))
+			return
+		}
+		var bill *writeBill
+		if s.quotaManager != nil {
+			bill = &writeBill{Floor: floor, Held: uploadHeld(uploadID)}
+		}
+		s.completeEdgeUpload(w, r, t, bucket, object, uploadID, edgeUp, parts, attrs, floor, bill, finalETag)
 		return
 	}
 	if placement.Kind == placeWholeSealed {
@@ -1347,6 +1408,9 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	}
 
 	if s.db != nil {
+		// The backend half of an edge upload (WP-EDGE-1 Part A), read before
+		// the row ends; aborted after, best effort (the reaper retries).
+		edgeUp, _ := readEdgeUpload(r.Context(), s.db, t.ID, uploadID)
 		// The abort and the release of what the upload holds: one
 		// transaction (WP-R10-8 Part C).
 		ended, err := endUploadReleasing(r.Context(), s.db, uploadID, t.ID, bucket, object)
@@ -1359,6 +1423,7 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 			WriteS3Error(w, ErrNoSuchUpload, r.URL.Path, generateRequestID())
 			return
 		}
+		_ = s.abortEdgeUpload(context.WithoutCancel(r.Context()), t.ID, bucket, uploadID, edgeUp)
 	} else {
 		memUploadsMu.Lock()
 		mu, ok := memUploads[uploadID]

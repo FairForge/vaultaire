@@ -192,6 +192,11 @@ type Server struct {
 	// recovery mints the recovery-vault realm tokens (K5,
 	// recovery_tokens.go); nil when not configured.
 	recovery *recoveryVault
+	// edge is the edge ingest's service token and lab switch (WP-EDGE-1
+	// Part A, edge_token.go); a zero token = the routes are not mounted.
+	edge edgeConfig
+	// edgeReaper is the edge_admit_reaper job (edge_reaper.go).
+	edgeReaper *EdgeAdmitReaper
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
 	// signed request to it (translog_read.go); nil = handleS3Request.
 	s3Fallback http.HandlerFunc
@@ -390,6 +395,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The recovery vault's token minter (K5): the same rules; nothing set =
 	// not configured.
 	s.recovery = recoveryVaultOrFatal(logger, os.Getenv, os.ReadFile)
+	// The edge ingest's service token (WP-EDGE-1 Part A): the same rules;
+	// not set = the edge routes are not mounted.
+	s.edge = edgeConfigOrFatal(logger, os.Getenv, os.ReadFile)
+	s.edgeReaper = newEdgeAdmitReaper(s)
 	if s.db != nil {
 		s.translog = logstore.New(s.db, translogSigner).WithHighwater(translogHighwaterFile(logger, os.Getenv))
 		s.translogCheckpoint = newTranslogCheckpointer(s.translog, logger)
@@ -662,6 +671,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.multipartReaper = NewMultipartReaper(s.db, logger)
 	if s.multipartReaper != nil {
+		s.multipartReaper.engine = s.engine // the backend half of an edge upload (WP-EDGE-1)
 		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				s.multipartReaper.AbandonAge = time.Duration(n) * time.Hour
@@ -1087,6 +1097,10 @@ func (s *Server) setupRoutes() {
 
 	s.logger.Info("Registering management API routes")
 	s.registerManagementRoutes()
+
+	// POST /api/v1/edge/admit + /commit — the Worker's calls (WP-EDGE-1
+	// Part A, edge_ingest.go); mounted only with EDGE_SERVICE_TOKEN.
+	s.registerEdgeRoutes()
 
 	s.logger.Info("Registering STS routes")
 	s.registerSTSRoutes()

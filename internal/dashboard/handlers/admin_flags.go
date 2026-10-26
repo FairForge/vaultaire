@@ -44,6 +44,7 @@ var flagInfos = map[string]flagInfo{
 	"parallel_get":      {2, "Large whole-object downloads (64 MiB and up) on iDrive/Wasabi are read as 8 parallel 16 MiB ranges with hedging behind the one client stream (2–4× a single backend connection). Off = one backend GET per client GET. Per tenant first, then global."},
 	"legal_draft_pages": {1, "Serves /legal/refunds and /legal/dmca on the web host (Stage 1a Prompt 39). Global only. Every commitment on them is a marked DRAFT until the owner's words land (F-28 refunds, F-37 the DMCA agent): open it only then."},
 	"legal_le_pages":    {1, "Serves /legal/law-enforcement and /legal/what-we-can-produce (plan 43.4) on the canonical origin and the trust host. Global only. The policy's procedure is a marked DRAFT until counsel writes it (F-36): open it only then."},
+	"edge_ingest":       {2, "PutObject and UploadPart of this tenant leave SLC (plan 40.10 slice 1): the Worker on s3.stored.cloud streams a whole unsealed write straight to its backend on a presigned link and the control plane commits it. Off = every request passes through to the origin. Does nothing without EDGE_SERVICE_TOKEN. Turn it on only once the build that knows edge uploads is the active slot."},
 	"egress_throttle":   {2, "The egress allowance as a rate cap: a tenant past its monthly allowance has GetObject and /cdn bodies paced (never billed). Off = nothing is slowed, the decision is only counted (vaultaire_egress_would_throttle_total). With the global row on, a tenant row with the flag off exempts that tenant."},
 }
 

@@ -112,6 +112,13 @@ func (s *Server) handleWhoami(w http.ResponseWriter, r *http.Request) {
 		keyID = auth.PresignedAccessKey(r)
 	default:
 		tenantID, scope, err = s.s3Auth().ValidateRequest(r)
+		if errors.Is(err, auth.ErrIPDenied) {
+			// The key's allow-list, applied inside the one verifier
+			// (WP-EDGE-1 Part A): the same refusal as the check below.
+			recordAuthFailure(r, "ip_denied", true)
+			writeManagementError(w, ErrTypePermission, "ip_denied", "this key is restricted by IP address", "")
+			return
+		}
 		if err != nil {
 			reason, known := authFailureReason(err)
 			recordAuthFailure(r, reason, known)

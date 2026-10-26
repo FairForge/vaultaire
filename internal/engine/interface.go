@@ -115,6 +115,47 @@ type PageLister interface {
 	ListPage(ctx context.Context, container, prefix, startAfter string, limit int) (objs []ListedObject, more bool, err error)
 }
 
+// EdgePresign is what an edge-admitted write's presigned link signs
+// (WP-EDGE-1 Part A, plan 40.10 slice 1): the body's exact length, the
+// client's own Content-MD5 when it sent one (base64, "" = none), the
+// Content-Type when sent, and how long the link lives. Both backends that
+// implement EdgeWriter enforce what the link signs (the 2026-10-25 probe,
+// re-checked 2026-10-26 in docs/reviews/WP-EDGE-1A.md § Step 0): other
+// bytes of the same length answer 400, a longer body 403 — so a link that
+// signs the size and a checksum admits exactly one body.
+type EdgePresign struct {
+	ContentLength int64
+	ContentMD5    string
+	ContentType   string
+	TTL           time.Duration
+}
+
+// EdgePart is one part of an edge multipart upload as the backend reported
+// it: the number the Worker sent it under and the ETag the backend answered
+// (quoted, as given).
+type EdgePart struct {
+	Number int
+	ETag   string
+}
+
+// EdgeWriter is an optional interface for a backend the control plane can
+// hand a presigned write to (WP-EDGE-1 Part A): the fixed-bucket S3 driver
+// (idrive, idrive-<region>, wasabi) and lyve. The Worker on s3.stored.cloud
+// PUTs the client's body to the URL with exactly the signed headers; the
+// control plane creates, completes and aborts a backend multipart upload
+// itself (small calls). Keys go through the driver's own tenant-prefix rule
+// (t-<tenant>/<container>/<artifact>, the tenant from the context —
+// drivers.ErrNoTenant when it names none). Never R2 (DirectUploader keeps
+// the public-bucket path), never a tape, fleet, bridge, Swift or Sia
+// backend: placement never offers them to the edge.
+type EdgeWriter interface {
+	PresignPut(ctx context.Context, container, artifact string, p EdgePresign) (url string, signedHeaders []string, err error)
+	CreateMultipart(ctx context.Context, container, artifact, contentType string) (uploadID string, err error)
+	PresignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, p EdgePresign) (url string, signedHeaders []string, err error)
+	CompleteMultipart(ctx context.Context, container, artifact, uploadID string, parts []EdgePart) (etag string, err error)
+	AbortMultipart(ctx context.Context, container, artifact, uploadID string) error
+}
+
 // VendorUsage is what a backend itself reports about its account: the
 // bytes it holds and the most it will take before it refuses a write
 // (LimitBytes 0 = it reports none).

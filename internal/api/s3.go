@@ -366,6 +366,15 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			if err != nil && r.Header.Get("Authorization") == "" && s.serveWebNotFound(w, r) {
 				return // a browser's typo on the web host: the 404 page, not AccessDenied XML
 			}
+			if errors.Is(err, auth.ErrIPDenied) {
+				// The key's allow-list, applied inside the one verifier
+				// (WP-EDGE-1 Part A): the same refusal as before.
+				s.applyS3CORSPreAuth(w, r)
+				WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+					WithSuggestion("This key is restricted by IP address."))
+				recordAuthFailure(r, "ip_denied", true)
+				return
+			}
 			if err != nil {
 				s.logger.Info("authentication failed", // the client's outcome (E4.2)
 					zap.Error(err),

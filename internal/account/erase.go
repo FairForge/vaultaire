@@ -107,6 +107,10 @@ var Deleted = []Rule{
 	// tenant's prefix on the primary — the sweep removes them.
 	{"sia_promotions", `DELETE FROM sia_promotions WHERE tenant_id = $1`, ByTenant},
 	{"multipart_uploads", `DELETE FROM multipart_uploads WHERE tenant_id = $1`, ByTenant}, // parts cascade
+	// Edge admissions (109, WP-EDGE-1): transient rows between an edge
+	// write's admit and its commit; a pending one's address is already the
+	// sweep's (under the tenant's prefix on its backend).
+	{"edge_admits", `DELETE FROM edge_admits WHERE tenant_id = $1`, ByTenant},
 	{"artifacts", `DELETE FROM artifacts WHERE tenant_id = $1`, ByTenant},
 	{"bucket_notifications", `DELETE FROM bucket_notifications WHERE tenant_id = $1`, ByTenant},
 	{"buckets", `DELETE FROM buckets WHERE tenant_id = $1`, ByTenant},
