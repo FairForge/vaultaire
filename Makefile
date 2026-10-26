@@ -52,7 +52,12 @@ test-db:
 	done
 	@echo "$(TEST_DB): migrations applied"
 
-.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db
+# The mover Worker's tests (edge/s3-ingest, WP-EDGE-1 Part A): node's own
+# runner, no dependencies to install.
+test-edge:
+	cd edge/s3-ingest && node --test
+
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge
 
 # Code formatting
 fmt:

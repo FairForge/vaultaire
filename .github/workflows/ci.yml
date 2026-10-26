@@ -118,6 +118,11 @@ jobs:
       - name: Lint (sdk/wasm, js/wasm)
         run: make lint-wasm
 
+      # The mover Worker (edge/s3-ingest, WP-EDGE-1 Part A): node's own
+      # test runner over the pure parts of the one-file script.
+      - name: Edge Worker tests
+        run: make test-edge
+
       - name: Deploy scripts
         run: |
           # The pinned age (RP62-3): pg-backup_test.sh 5g runs the real age and fails without it.
