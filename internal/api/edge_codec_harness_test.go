@@ -893,3 +893,56 @@ func TestEdgeMultipart_SmallLastPartOfAnEdgeUploadStaysOnTheEdge(t *testing.T) {
 	wc := f.s3(http.MethodPost, "/"+f.bucket+"/whole-tail.zip?uploadId="+id, []byte(completeXML), nil)
 	require.Equal(t, http.StatusOK, wc.Code, wc.Body.String())
 }
+
+// The lab's finding (Prompt 46b step 12 d): aws-cli sends every part of an
+// upload at once, so the small TAIL (under EDGE_MIN_BYTES: the origin's,
+// D-EDGE-5) may reach the origin's stager before any part marked the upload.
+// Its reservation is on the upload row before its row exists: the first
+// codec part must see it and pass through (staged_parts) — the upload stays
+// ONE staged path, never codec parts beside a staged one.
+func TestEdgeCodecMultipart_StagedTailInFlightKeepsTheUploadStaged(t *testing.T) {
+	f := setupCodecFixture(t)
+	f.srv.chunkingThreshold = 64 << 20
+	f.srv.edge.minBytes = 4 << 20
+	uploadID := f.createUpload("tail-first.zip")
+	// The tail's staged reservation, taken (its body still arriving).
+	reserved, err := reserveUploadPart(context.Background(), f.db, f.tenantID, uploadID, 2, 2<<20)
+	require.NoError(t, err)
+	require.Positive(t, reserved)
+	head := crypto.GoldenBody(1352, 8<<20)
+	q := url.Values{"uploadId": {uploadID}, "partNumber": {"1"}}
+	pr := f.admit(f.signed("/"+f.bucket+"/tail-first.zip", q, head, nil, ""))
+	assert.False(t, pr.Edge, "a staged part is in flight: the upload is the stager's: %+v", pr)
+	assert.Equal(t, "staged_parts", pr.Reason)
+	var codec bool
+	require.NoError(t, f.db.QueryRow(`SELECT codec FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(&codec))
+	assert.False(t, codec, "never marked codec")
+}
+
+// One upload is one path, under the lock: a staged part that passed
+// stageUploadPart's pre-check before the upload became codec is refused by
+// its reservation (and, defensively, by its install) — never a staged part
+// beside chunk lists.
+func TestStagedPart_RefusedUnderTheLockOnceTheUploadIsCodec(t *testing.T) {
+	f := setupCodecFixture(t)
+	uploadID := f.createUpload("mixed.zip")
+	body := crypto.GoldenBody(1361, 1<<20+5)
+	q := url.Values{"uploadId": {uploadID}, "partNumber": {"1"}}
+	pr := f.admit(f.signed("/"+f.bucket+"/mixed.zip", q, body, nil, ""))
+	require.NotNil(t, pr.Codec, "%+v", pr)
+	usedBefore := f.used()
+
+	_, err := reserveUploadPart(context.Background(), f.db, f.tenantID, uploadID, 2, 4096)
+	assert.ErrorIs(t, err, errUploadCodec, "the reservation is refused under the lock")
+	installed := false
+	err = settleUploadPart(context.Background(), f.db, f.tenantID, uploadID, 2, 0, 4096, `"`+strings.Repeat("0", 32)+`"`, "",
+		func() error { installed = true; return nil })
+	assert.ErrorIs(t, err, errUploadCodec, "and so is an install")
+	assert.False(t, installed)
+	assert.Equal(t, usedBefore, f.used(), "nothing reserved, nothing held")
+
+	// Through the S3 API: 400 with the codec sentence.
+	w := f.s3(http.MethodPut, "/"+f.bucket+"/mixed.zip?uploadId="+uploadID+"&partNumber=3", testBytes(4096), nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "edge codec")
+}

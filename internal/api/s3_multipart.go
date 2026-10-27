@@ -514,6 +514,9 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 		case errors.Is(err, errUploadEdge):
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
 			return "", 0, false
+		case errors.Is(err, errUploadCodec):
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(codecUploadRefusal))
+			return "", 0, false
 		case errors.Is(err, errPartOverQuota):
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
@@ -640,6 +643,11 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 			installed = true // became an edge upload meanwhile: settleUploadPartWith gave the reservation back
 			_ = os.Remove(tmp)
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
+			return "", 0, false
+		case errors.Is(sErr, errUploadCodec):
+			installed = true // became a codec upload meanwhile: settleUploadPartWith gave the reservation back
+			_ = os.Remove(tmp)
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(codecUploadRefusal))
 			return "", 0, false
 		case errors.Is(sErr, errPartOverQuota):
 			installed = true // settleUploadPart gave the reservation back
