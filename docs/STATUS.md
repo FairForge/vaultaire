@@ -1,6 +1,6 @@
 # Status — the live pointer
 
-Updated: 2026-10-27 21:45 UTC (**The Worker 0.4.0 is DEPLOYED** (21:32:50 UTC, version `0eddafac`; rows 95–98; every module byte-identical on download).
+Updated: 2026-10-27 23:30 UTC (**RP72 — the review of WP-EDGE-2 Part C (#1010/#1012/#1013/#1011/#1014/#1015; `docs/reviews/WP-EDGE-2C-REVIEW.md`): HOLDS at P3, no P2** — RP72-1 every edge read of a 16–32 MiB object written before the uploader change is a 412 and the origin's for ever (the If-Match cutoff by the row's write date now; `backend_etag` on the row in migration 112), RP72-2 a mover aws-chunked write's decoded length is unmeasured on Lyve (probe + HEAD at commit), RP72-3 a control plane's 401/403 at commit reaches the client as a 400, RP72-4…7; the open questions answered (an iDrive-bound aws-chunked PutObject stays at the origin; Lyve-bound writes stay admitted and counted). **Prompt 47 is next** (both editions carry Part 0 = RP72-1…6).) — previous: 2026-10-27 21:45 UTC (**The Worker 0.4.0 is DEPLOYED** (21:32:50 UTC, version `0eddafac`; rows 95–98; every module byte-identical on download).
 - **RB-9 fixed**: the signed pass-through probe 2 s after the content deploy was NoSuchKey, not 403, and the capture shows `range` and `if-none-match` reaching the origin.
 - **Prod proof** (tenant zero, aws-cli DEFAULTS):
   - the Lightroom zip's 29 aws-chunked parts were all header-signed at the edge (`admitted_unverified`: a Lyve bucket), with 0 PUTs on the origin;
