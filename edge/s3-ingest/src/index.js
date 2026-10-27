@@ -39,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { runCodec, s3ErrorXML } from "./codec.js";
+import { Semaphore, runCodec, s3ErrorXML } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -415,6 +415,25 @@ function fixedLength(n) {
   return typeof globalThis.FixedLengthStream === "function" ? new globalThis.FixedLengthStream(n) : new TransformStream();
 }
 
+/**
+ * WINDOW_ISOLATE_BYTES bounds the range buffers ALL windowed reads of one
+ * isolate hold at once: one full window (6 × 16 MiB). An isolate serves
+ * concurrent requests, and 6 × 16 MiB per read would be 192 MiB for two —
+ * past the isolate's 128 MB; concurrent reads share the budget (FIFO, a
+ * range admitted alone when nothing is held — never a deadlock).
+ */
+export const WINDOW_ISOLATE_BYTES = 6 * (16 << 20);
+let windowBudget = new Semaphore(WINDOW_ISOLATE_BYTES);
+
+/** setWindowBudget replaces the isolate's window budget (the tests); returns the restore. */
+export function setWindowBudget(bytes) {
+  const prev = windowBudget;
+  windowBudget = new Semaphore(bytes);
+  return () => {
+    windowBudget = prev;
+  };
+}
+
 /** windowRange is range i of a windowed read: [first byte, last byte]. */
 export function windowRange(admit, i) {
   const w = admit.window;
@@ -449,8 +468,10 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     const [a, b] = windowRange(admit, i);
     return fetch(admit.url, { method: "GET", headers: { ...(admit.send_headers || {}), range: `bytes=${a}-${b}` }, cache: "no-store" });
   };
+  const budget = windowBudget;
   let first = null;
   let error = null;
+  await budget.acquire(lengthOf(0));
   try {
     first = await get(0);
   } catch (e) {
@@ -458,6 +479,7 @@ async function serveWindow(request, env, ctx, admit, requestId) {
   }
   const firstLength = first ? first.headers.get("content-length") : null;
   if (!first || first.status !== 206 || (firstLength !== null && Number(firstLength) !== lengthOf(0))) {
+    budget.release(lengthOf(0));
     const commit = readCommit(admit, first, error, started);
     if (commit.outcome === "served") commit.outcome = "fallback"; // a 206 of another length
     ctx.waitUntil(commitRead(env, commit, requestId));
@@ -473,7 +495,16 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     let sent = 0;
     let failure = null;
     const pending = new Map();
+    const held = new Set(); // ranges whose bytes this read holds of the isolate's budget
     const fetchRange = async (i) => {
+      if (i > 0) {
+        await budget.acquire(lengthOf(i));
+        if (failure) {
+          budget.release(lengthOf(i));
+          throw failure;
+        }
+      }
+      held.add(i);
       const r = i === 0 ? first : await get(i);
       const len = r.headers.get("content-length");
       if (r.status !== 206 || (len !== null && Number(len) !== lengthOf(i)) || (etag && r.headers.get("etag") !== etag)) {
@@ -499,12 +530,19 @@ async function serveWindow(request, env, ctx, admit, requestId) {
         launch();
         await writer.write(buf);
         sent += buf.length;
+        held.delete(i);
+        budget.release(lengthOf(i));
       }
       await writer.close();
     } catch (e) {
       failure = e;
+      // Give this read's ranges back FIRST: a pending range may be waiting
+      // on exactly that budget (it then sees the failure, gives back what
+      // it took and ends).
+      for (const i of held) budget.release(lengthOf(i));
+      held.clear();
       await writer.abort(e).catch(() => {});
-      for (const p of pending.values()) p.then((b) => void b, () => {});
+      await Promise.allSettled(pending.values());
     }
     const commit = { admit_id: admit.admit_id, outcome: failure ? "error" : "served", backend_status: failure ? failure.status || 0 : 206,
       backend_code: failure ? String(failure.code || failure.message || failure).slice(0, 120) : "", backend_content_length: sent, bytes_sent: sent,

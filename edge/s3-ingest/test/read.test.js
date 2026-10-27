@@ -113,7 +113,7 @@ test("a backend Content-Length that is not the admitted span is a fallback (RP66
 
 // --- 0.4.0: the windowed reader (D-EDGE-32) ---
 
-import worker from "../src/index.js";
+import worker, { setWindowBudget, WINDOW_ISOLATE_BYTES } from "../src/index.js";
 import { createHash } from "node:crypto";
 
 const env = { VAULTAIRE_ORIGIN: "https://origin.test", VAULTAIRE_EDGE_TOKEN: "tok" };
@@ -252,5 +252,51 @@ test("a first range the backend does not serve is the origin's (fallback), nothi
     assert.ok(!f.st.commits[0].bytes_sent);
   } finally {
     f.restore();
+  }
+});
+
+test("an isolate's windowed reads share ONE byte budget: two concurrent large GETs never hold more than the budget's ranges", async () => {
+  // A Workers isolate serves concurrent requests: 6 × 16 MiB per read would
+  // be 192 MiB for two — past the isolate's 128 MB. The budget is one full
+  // window (6 ranges); here 6 × 1 MiB, the test's range size.
+  assert.equal(WINDOW_ISOLATE_BYTES, 6 * (16 << 20));
+  const restoreBudget = setWindowBudget(6 * (1 << 20));
+  const object = new Uint8Array(24 * (1 << 20)).map((_, i) => (i * 3 + 1) & 255);
+  const f = windowFakes({ object, admit: windowAdmit(object.length), delayMs: 15 });
+  try {
+    const [a, b] = await Promise.all([runWindow(f), runWindow(f)]);
+    const [ga, gb] = await Promise.all([a.resp.arrayBuffer(), b.resp.arrayBuffer()]);
+    await Promise.all([a.settle(), b.settle()]);
+    assert.equal(createHash("md5").update(new Uint8Array(ga)).digest("hex"), createHash("md5").update(object).digest("hex"));
+    assert.equal(createHash("md5").update(new Uint8Array(gb)).digest("hex"), createHash("md5").update(object).digest("hex"));
+    assert.ok(f.st.peak <= 6, `both reads together held ${f.st.peak} ranges in flight`);
+    assert.equal(f.st.commits.filter((c) => c.outcome === "served").length, 2);
+  } finally {
+    f.restore();
+    restoreBudget();
+  }
+});
+
+test("a cut under a tight budget never hangs: the read gives its ranges back before it waits for its pending ones", async () => {
+  const restoreBudget = setWindowBudget(2 * (1 << 20));
+  const object = new Uint8Array(12 * (1 << 20));
+  const f = windowFakes({ object, admit: windowAdmit(object.length), failAt: 3, delayMs: 5 });
+  try {
+    const { resp, settle } = await runWindow(f);
+    await assert.rejects(resp.arrayBuffer());
+    const done = await Promise.race([settle().then(() => "settled"), new Promise((r) => setTimeout(() => r("hung"), 3000))]);
+    assert.equal(done, "settled");
+    assert.equal(f.st.commits[0].outcome, "error");
+    assert.equal(f.st.commits[0].bytes_sent, 3 * (1 << 20));
+    // The budget is whole again: a full read goes through.
+    f.restore();
+    const g = windowFakes({ object, admit: windowAdmit(object.length) });
+    const ok = await runWindow(g);
+    assert.equal((await ok.resp.arrayBuffer()).byteLength, object.length);
+    await ok.settle();
+    g.restore();
+  } finally {
+    f.restore();
+    restoreBudget();
   }
 });
