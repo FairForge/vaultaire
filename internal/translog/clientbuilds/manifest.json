@@ -95,6 +95,38 @@
       "sha256": "0c949f4996f9a89698e4b5c586de32249c3b69b7baadb64d220073cc04acba14",
       "toolchain": "go1.26.10",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-ingest",
+      "version": "0.4.0",
+      "source_commit": "7c3c1a2a13fddeb8cda132361e9f6ca7c06deadb",
+      "sha256": "d7489599754887eb508607a5c7579dd11929437f84d782bd8a0e03706a3757df",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-codec",
+      "version": "0.4.0",
+      "source_commit": "7c3c1a2a13fddeb8cda132361e9f6ca7c06deadb",
+      "sha256": "a0262b077f0768662323f3c490784127be635a4c4cd018261bb82306763924d2",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-seal",
+      "version": "0.4.0",
+      "source_commit": "7c3c1a2a13fddeb8cda132361e9f6ca7c06deadb",
+      "sha256": "b211fcd470e2b5a01ec7ff609dc00de95dfca78a45133ce6f969636188e0285f",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-awschunked",
+      "version": "0.4.0",
+      "source_commit": "7c3c1a2a13fddeb8cda132361e9f6ca7c06deadb",
+      "sha256": "2ff68eb53300e4d9643e36905f59b411ecc49dd462927fb973fb8e300096c2e0",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }

@@ -539,8 +539,11 @@ an object on tape, a multi-range or unsatisfiable `Range`, `If-None-Match`
 and the `If-*-Since` headers, a read while your account is past its egress
 allowance with the throttle on — is answered by the origin as on
 `stored.ge`, and so is any read the backend does not answer as expected
-(the origin keeps the failover path). One stream 50–110 MB/s edge →
-backend; the egress is metered once, for the bytes the backend served.
+(the origin keeps the failover path). A read of 64 MiB or more is read
+by the edge as 16 MiB ranges, six at a time, and written to you in order
+(about twice one stream in the 2026-10-27 bench); a range that fails after
+bytes have reached you cuts the response, which your client retries. The
+egress is metered once, for the bytes you received.
 
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.
@@ -554,7 +557,7 @@ its own limit long before these numbers are.
 | | One stream | One client, many parts in flight |
 |---|---|---|
 | Upload through the edge | 35–50 MB/s | ~370 MB/s at 8 parts, ~640 at 16, 840–980 at 32 |
-| Download through the edge | 50–110 MB/s | — (one GET is one stream; run several ranged GETs for more) |
+| Download through the edge | 50–110 MB/s; a GET of 64 MiB or more ~2× that (the edge reads it as 16 MiB ranges, 6 in flight) | run several ranged GETs for more |
 
 Speed comes from parts in flight, not from the part size or the
 protocol. HTTP/3 was slower than HTTP/1.1 and HTTP/2 in the same test, so
