@@ -203,6 +203,22 @@ Zone rules: `stored.ge` has the login/register/waitlist rate limit and the cache
 
 Cleaned up 2026-10-22: bench user token `Cloudflare Agent (auto-generated)` (last used 2026-03-25); the Ente buckets `ente-meta` / `ente-photos` (~2.4 GB, kept since Ente stopped on 2026-10-11) emptied and deleted; `BENCH_KV`, `bench-snapshelter`. Production tokens `Agent Lee (auto-generated)` (never used) and account token `misty-meadow-ed8a` (last used 2026-07-31) are for deletion once the production login is open again.
 
+## Findings 2026-10-27: the SPEED bench (bench account, everything deleted after)
+
+The whole page is `bench-results/SPEED-2026-10-27.md`. The Cloudflare facts from it:
+
+- **Uploads:** a pass-through Worker (`body: request.body`) holds 35–50 MB/s per stream. A client's aggregate rises with parts in flight: 375 MB/s at 8, 636 at 16, 838–978 at 32 to Lyve from SLC.
+- **Colo placement:** a stream's speed through the Worker is set by the Worker leg, not by the backend's distance. Tokyo is as fast as Dallas from the SLC colo.
+- **Smart Placement:** stayed `local-SLC` on every request after 15 minutes of warm-up. No gain.
+- **Six connections per invocation is the read and parity limit.**
+  - In-order `pipeTo` of N ranges into one `IdentityTransformStream` costs 2 ms of CPU per 2 GiB. It doubles a backend that streams fast per connection (Lyve); it stalls one that does not (iDrive, 0.9× at 8 ranges).
+  - A window of 16 MiB `arrayBuffer()` ranges, 6 in flight, doubles both at ~1 s of CPU per GiB.
+  - k+m shard PUTs per 8 MiB stripe queue six at a time.
+- **JavaScript on every byte:** about 0.75 s of CPU per 64 MiB and under 30 MB/s per stream, whatever the WASM codec. Rust-SIMD Reed-Solomon encodes 200–324 MB/s per CPU-second in workerd, Go/klauspost on js/wasm 120–220, RaptorQ 39–49.
+- **HTTP/3** from a home line was slower than HTTP/1.1 (14 against 25 MB/s).
+- **R2's S3 endpoint** takes a 1 GiB single PUT; the 100 MB cap is the Workers body limit only. R2 takes 33 MB/s per stream, 220 MB/s at 8, 502 at 32 from SLC. A Worker moving R2 → Lyve by binding ran 286 MB/s at 8.
+- **A Worker reaches Geyser's Vail (LA2)** at 12–16 MB/s per stream and ~25 MB/s in total at 8 streams. Direct from SLC: 25–33 per stream, 177 at 8.
+
 ## Open
 
 2FA on both logins and rotation of everything pasted on 2026-10-04; an **Email Sending: Edit** token + stored.ge onboarded for Email Sending (item 7 above); the R2 Data Access Logs loss-rate count (dashboard toggle, item 6); the `/admin` Access gate; R2 event notifications → Queue → `direct-uploads/complete` so direct uploads register themselves; Workflows around Vault restores; a load balancer once a second origin exists; Workers for Platforms when a customer Worker must run; the stale NS records.

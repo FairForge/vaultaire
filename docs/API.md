@@ -512,15 +512,15 @@ Through `s3.stored.cloud` keep parts at 64 MiB: `rclone copy … --s3-upload-cut
 remote). rclone's default cutoff is 200 MiB, so a 150 MB file would go as one
 PUT and get the zone's HTML 413 — the 100 MB request limit is Cloudflare's,
 answered before our Worker runs. aws-cli's default 8 MiB parts need nothing,
-but aws-cli v2 (2.23+) sends its body `aws-chunked` with a CRC32 trailer,
+but aws-cli v2 (2.23+) sends its body `aws-chunked` with a checksum trailer
+(CRC64NVME in 2.28 and 2.35),
 which the edge hands to our origin unchanged: set
 `request_checksum_calculation = when_required` in the profile to have the
 edge move the bytes.
 
-What to expect through the edge: one stream 40–55 MB/s, eight parts in flight
-(`rclone --transfers 8`) about 150 MB/s per client — a 1 Gbps line is near
-its ceiling; a machine that uploads faster than that is faster through
-`stored.ge`, which stays a host. Integrity through the edge is the backend's
+What to expect through the edge: one stream 35–50 MB/s; the client's number of
+parts in flight sets the rest (see "Fast uploads and downloads" below).
+Integrity through the edge is the backend's
 own plus your `Content-MD5` when you send one (signed into the link the
 backend enforces); a hex `x-amz-content-sha256` is verified on the
 `stored.ge` path only.
@@ -537,11 +537,48 @@ an object on tape, a multi-range or unsatisfiable `Range`, `If-None-Match`
 and the `If-*-Since` headers, a read while your account is past its egress
 allowance with the throttle on — is answered by the origin as on
 `stored.ge`, and so is any read the backend does not answer as expected
-(the origin keeps the failover path). One stream 100–110 MB/s edge →
+(the origin keeps the failover path). One stream 50–110 MB/s edge →
 backend; the egress is metered once, for the bytes the backend served.
 
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.
+
+## Fast uploads and downloads
+
+Measured 2026-10-27 (`bench-results/SPEED-2026-10-27.md`), from a 10 Gbps
+host in Salt Lake City through `s3.stored.cloud`. A home or office line is
+its own limit long before these numbers are.
+
+| | One stream | One client, many parts in flight |
+|---|---|---|
+| Upload through the edge | 35–50 MB/s | ~370 MB/s at 8 parts, ~640 at 16, 840–980 at 32 |
+| Download through the edge | 50–110 MB/s | — (one GET is one stream; run several ranged GETs for more) |
+
+Speed comes from parts in flight, not from the part size or the
+protocol. HTTP/3 was slower than HTTP/1.1 and HTTP/2 in the same test, so
+keep your client's default. Parts must stay under 100 MB each: the
+Cloudflare request limit answers a larger single request with an HTML
+413 before it reaches us.
+
+**aws-cli** (`~/.aws/config`, the profile you use with Stored):
+
+```ini
+[profile stored]
+request_checksum_calculation = when_required
+s3 =
+  multipart_threshold = 64MB
+  multipart_chunksize = 64MB
+  max_concurrent_requests = 16
+```
+
+**rclone**: `--s3-upload-cutoff 64M --s3-chunk-size 64M
+--s3-upload-concurrency 16`, plus `--transfers 4` to `8` when you copy many
+files. Never set an upload cutoff above 95M (see the 413 above).
+
+**Large downloads**: `aws s3 cp` already reads big objects as parallel
+ranged GETs (`max_concurrent_requests` applies); rclone splits a large
+download to a local disk into `--multi-thread-streams` ranges (default 4),
+and 8 helps for single large files.
 
 ## Other public routes
 
