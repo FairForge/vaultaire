@@ -232,6 +232,45 @@ func abortEdgeUploadOn(ctx context.Context, db *sql.DB, eng *engine.CoreEngine, 
 	return nil
 }
 
+// edgeUploadSizeWrong says whether an edge upload assembled by a backend
+// that does not enforce x-amz-decoded-content-length holds another size
+// than its parts recorded (RP72-2). Asked only when one of its parts was an
+// aws-chunked write there (the part admit's check_length; a presigned part
+// signs its content-length, which every backend enforces); a HEAD that
+// cannot be made is logged and the commit goes on (the backend's upload is
+// already assembled — refusing it would lose the client's bytes for a
+// check that only failed to run).
+func (s *Server) edgeUploadSizeWrong(ctx context.Context, ew engine.EdgeWriter, tenantID, bucket, container, blob, uploadID string, want int64) bool {
+	if ew.EdgeStreaming().EnforcesDecodedLength {
+		return false
+	}
+	var unchecked bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM edge_admits
+		WHERE upload_id = $1 AND op = 'part' AND state = 'committed' AND COALESCE((attrs->>'check_length')::boolean, FALSE))`,
+		uploadID).Scan(&unchecked); err != nil {
+		s.logger.Warn("complete multipart: could not read whether a part's length is unchecked", zap.Error(err), zap.String("upload_id", uploadID))
+		return false
+	}
+	if !unchecked {
+		return false
+	}
+	h, ok := ew.(engine.ObjectHeader)
+	if !ok {
+		return false
+	}
+	info, err := h.HeadObject(common.WithTenantID(ctx, tenantID), container, blob)
+	if err != nil {
+		s.logger.Warn("complete multipart: the assembled object's size could not be checked", zap.Error(err), zap.String("upload_id", uploadID))
+		return false
+	}
+	if info.Size != want {
+		s.logger.Warn("complete multipart: the assembled object is not the parts' recorded size — refused",
+			zap.Int64("stored", info.Size), zap.Int64("recorded", want), zap.String("upload_id", uploadID))
+		return true
+	}
+	return false
+}
+
 // completeEdgeUpload is CompleteMultipartUpload of an edge upload: the
 // backend assembles its own parts (one small call from SLC), then the
 // commit of a whole object exactly as the staged path's — the head row,
@@ -282,6 +321,20 @@ func (s *Server) completeEdgeUpload(w http.ResponseWriter, r *http.Request, t *t
 	}
 	if _, err := s.db.ExecContext(context.WithoutCancel(r.Context()), `UPDATE multipart_uploads SET backend_upload_ended_at = NOW() WHERE upload_id = $1 AND backend_upload_ended_at IS NULL`, uploadID); err != nil {
 		s.logger.Warn("complete multipart: backend complete not stamped", zap.Error(err), zap.String("upload_id", uploadID))
+	}
+	if s.edgeUploadSizeWrong(cctx, ew, t.ID, bucket, containerName, blob, uploadID, totalSize) {
+		// An aws-chunked part decoded to another length than it signed, on a
+		// backend that does not enforce it (RP72-2): the assembled object is
+		// not the parts' recorded sum. The backend's upload is gone (it is
+		// assembled): the upload ends with its holding released, the blob
+		// is retired, the client's 400 — retrying this upload cannot work.
+		retireOrphanWrite(context.WithoutCancel(r.Context()), s.db, s.logger, t.ID, bucket, blob, up.Backend)
+		if _, err := endUploadReleasing(context.WithoutCancel(r.Context()), s.db, uploadID, t.ID, bucket, object); err != nil {
+			s.logger.Error("complete multipart: the refused upload could not be ended — the reaper releases it", zap.Error(err), zap.String("upload_id", uploadID))
+		}
+		WriteS3ErrorWithContext(w, ErrIncompleteBody, r.URL.Path, generateRequestID(),
+			WithSuggestion("A part's body was not the length its request signed (x-amz-decoded-content-length). Upload the object again."))
+		return
 	}
 
 	// The backend holds the assembled bytes: everything from here runs to

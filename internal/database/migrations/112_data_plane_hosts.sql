@@ -52,6 +52,11 @@ ON CONFLICT DO NOTHING;
 -- NULL on every row written before = the Worker.
 ALTER TABLE edge_admits ADD COLUMN IF NOT EXISTS host TEXT;
 
+-- An edge upload's Complete on a backend that does not enforce
+-- x-amz-decoded-content-length (RP72-2, Lyve) asks whether any of the
+-- upload's parts was an aws-chunked write (attrs.check_length): by upload.
+CREATE INDEX IF NOT EXISTS idx_edge_admits_upload ON edge_admits (upload_id) WHERE upload_id IS NOT NULL;
+
 -- object_head_cache.backend_etag (RP72-1, RB-2 of WP-EDGE-1 Part B): the
 -- ETag the BACKEND answered for this row's blob, recorded at the write — a
 -- mover commit (the Worker's report, the backend's Complete answer) and an

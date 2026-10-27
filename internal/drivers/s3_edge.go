@@ -379,12 +379,13 @@ func (d *IDriveDriver) SignUploadPart(ctx context.Context, container, artifact, 
 }
 
 // EdgeStreaming implements engine.EdgeWriter: iDrive (every region) stores
-// the decoded body and VERIFIES the trailer, and enforces NO clock window
-// on x-amz-date (Step 0.3: a 7-day-old signature accepted). A fixed-bucket
-// backend no probe has measured (wasabi) offers none.
+// the decoded body, VERIFIES the trailer and the decoded length (RP72-2:
+// one byte more is 400 IncompleteBody, one less 503), and enforces NO
+// clock window on x-amz-date (Step 0.3: a 7-day-old signature accepted). A
+// fixed-bucket backend no probe has measured (wasabi) offers none.
 func (d *IDriveDriver) EdgeStreaming() engine.EdgeStreamingProps {
 	if d.name == "idrive" || strings.HasPrefix(d.name, "idrive-") {
-		return engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true}
+		return engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true, EnforcesDecodedLength: true}
 	}
 	return engine.EdgeStreamingProps{}
 }
@@ -482,9 +483,11 @@ func (d *LyveDriver) SignUploadPart(ctx context.Context, container, artifact, up
 
 // EdgeStreaming implements engine.EdgeWriter: Lyve stores the decoded body
 // but does NOT verify the trailer (the bench: a wrong CRC is a 200), and
-// enforces ±15 minutes on x-amz-date (Step 0.3).
+// enforces ±15 minutes on x-amz-date (Step 0.3). Nor does it enforce the
+// decoded length (RP72-2: one byte more or less declared, 200 and the bytes
+// sent stored, PutObject and UploadPart) — the commit checks the size.
 func (d *LyveDriver) EdgeStreaming() engine.EdgeStreamingProps {
-	return engine.EdgeStreamingProps{Supported: true, SignatureMaxAge: 15 * time.Minute}
+	return engine.EdgeStreamingProps{Supported: true, SignatureMaxAge: 15 * time.Minute, EnforcesDecodedLength: false}
 }
 
 // HeadObject implements engine.ObjectHeader.
