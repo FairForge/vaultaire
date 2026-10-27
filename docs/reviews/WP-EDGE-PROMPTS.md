@@ -1831,11 +1831,26 @@ at its report); internal/api/edge_codec_harness_test.go (the Go pipeline
 that becomes the node's); internal/clientip (`PeerIsCloudflare`);
 cmd/vaultaire/main.go (the boot); deploy/ (the unit files' shape).
 
-Lane: Engine. Migration 112 `data_plane_hosts`. PRs: (0) RP72's fixes; (A)
+Lane: Engine. Migration 112 `data_plane_hosts` + `object_head_cache.backend_etag` (RP72-1). PRs: (0) RP72's fixes; (A)
 `internal/dataplane` — the pipeline as a package + the node role + the
 registry + per-host tokens; (B) `host=slc` + the registry-driven admit +
 the steering flag; (C) docs (WP-EDGE-3.md, DEPLOY.md § data nodes,
 deploy/node/, STATUS, plan 40.10, CLAUDE.md rows, Prompt 48 refreshed here).
+
+**Part 0 (RP72, `docs/reviews/WP-EDGE-2C-REVIEW.md` — HOLDS at P3, no P2), in
+this order, before PR A:** RP72-1 every edge read of a 16–32 MiB object
+written before #1011 is a 412 and the origin's for ever — the If-Match rule
+takes the cutoff in force when the row was written (one dated constant)
+now, and migration 112 adds `object_head_cache.backend_etag` (RB-2) written
+by every mover commit and origin write from here on, If-Match signed from it
+where set; RP72-2 probe both backends with an aws-chunked body whose decoded
+length is off by one, `EdgeStreamingProps.EnforcesDecodedLength`, and where
+false the mover's commit HEADs the object and refuses a size that is not the
+admitted one; RP72-3 a control plane's 401/403 at commit is the Worker's 503,
+not the client's 400; RP72-4 the backend's `EntityTooSmall` at an edge
+Complete relayed as the client's 400; RP72-5 the windowed reader stops
+launching ranges when `request.signal` fires; RP72-6 one isolate-wide byte
+budget for the codec's 48 MiB and the window's 96 MiB (dark with the flag).
 
 What to build
 1. `internal/dataplane`: the Worker's logic in Go, lifted from the harness —
@@ -1959,7 +1974,22 @@ cmd/vaultaire/main.go; internal/api/server.go (`NewServer`, the route
 registration order, `s3CredentialGate`); internal/api/admin_flags.go (the
 shape of an audited admin route); docs/DEPLOY.md; deploy/*.service.
 
-PR 0 — RP72's fixes, each as its fix column says, red test first. Branch
+PR 0 — RP72's fixes ( `docs/reviews/WP-EDGE-2C-REVIEW.md` : HOLDS at P3, no P2), in this
+order, each with its red test first; the review's fix column is the
+specification: RP72-1 every edge read of a 16–32 MiB object
+written before #1011 is a 412 and the origin's for ever — the If-Match rule
+takes the cutoff in force when the row was written (one dated constant)
+now, and migration 112 adds `object_head_cache.backend_etag` (RB-2) written
+by every mover commit and origin write from here on, If-Match signed from it
+where set; RP72-2 probe both backends with an aws-chunked body whose decoded
+length is off by one, `EdgeStreamingProps.EnforcesDecodedLength`, and where
+false the mover's commit HEADs the object and refuses a size that is not the
+admitted one; RP72-3 a control plane's 401/403 at commit is the Worker's 503,
+not the client's 400; RP72-4 the backend's `EntityTooSmall` at an edge
+Complete relayed as the client's 400; RP72-5 the windowed reader stops
+launching ranges when `request.signal` fires; RP72-6 one isolate-wide byte
+budget for the codec's 48 MiB and the window's 96 MiB (dark with the flag).
+Branch
 `stage1a-p47-part0`. Merge before PR A.
 
 PR A — the package, the role, the registry. Branch `stage1a-p47-node`.
@@ -2444,7 +2474,7 @@ current line numbers (the /next conventions).
   s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
 - **Prompt 46 — WP-EDGE-2 Part A — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2A.md`; #994 Part 0 + the Worker 0.2.1 deployed with RB-9 reproduced and narrowed, #995 the codec, #997 the control plane + migration 111; the post-merge review is RP68). As rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
 - **Prompt 46b — WP-EDGE-2 Part B — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2B.md`; #1002 Part 0 = RP68-1…6 + a part of an upload already on the edge is never `small`; #1003 one upload is one path under the lock (the lab's finding: aws-cli's small tail staged beside codec parts); #1005 the Worker 0.3.0 — `src/codec.js` + `src/seal.js` + three wasm modules, each a client_build row (new clients `edge-codec`, `edge-seal`, `edge-wasm-exec`), ≤ 4 chunks between hash and PUT, edge_error + 503 after the body is read; #1004 `cmd/tools/dedup-measure`; the lab proof (a)–(h) in the note; Step 0.5 `encodeBody: "manual"` not run (RB3-8). Deployed 14:23:57 UTC (`7c1cd872`, `edge_codec` OFF); RB-9 captured — the first pass-through after a content deploy lost the signed `range` + `if-none-match` (RB3-9: `cache: "no-store"` on the pass-through, Prompt 47 Part 0 with RP70). Two open questions for the owner: D-EDGE-5 for parts (RB3-2) and the commit's sample by GET + open (RB3-1 — a wrong-key host passes the HEAD sample). The post-merge review is RP70. **Reviewed 2026-10-27, RP70 (`docs/reviews/WP-EDGE-2B-REVIEW.md`): HOLDS at P2** — RP70-1 the in-flight bound counts chunks not bytes (max-size chunks = the isolate), RP70-2 the small-tail race hits every ≤ 10-part upload (D-EDGE-29), RP70-3 a wrong-key host passes the HEAD sample (open the first segment at commit), RP70-4…8; all into Prompt 46c Part 0.)
-- **Prompt 46c — WP-EDGE-2 Part C — the Worker 0.4.0 + the origin's tuning — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2C.md`; issued by RP70 in two editions above).
+- **Prompt 46c — WP-EDGE-2 Part C — the Worker 0.4.0 + the origin's tuning — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2C.md`; issued by RP70 in two editions above) **Reviewed 2026-10-27, RP72 (`docs/reviews/WP-EDGE-2C-REVIEW.md`): HOLDS at P3, no P2** — RP72-1 pre-#1011 16–32 MiB objects read through SLC for ever (a dated If-Match cutoff, then `backend_etag` on the row), RP72-2 the decoded length unmeasured on Lyve (probe + HEAD at commit), RP72-3 a control plane's 401/403 is the client's 400, RP72-4…7; into Prompt 47 Part 0.)
   - #1010 Part 0 = RP70-1…7:
     - D-EDGE-29;
     - the first stored chunk opened at commit (+1 look-ahead byte for a multi-segment chunk);
