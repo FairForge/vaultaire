@@ -168,6 +168,34 @@ type EdgeWriter interface {
 	PresignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, p EdgePresign) (url string, signedHeaders []string, err error)
 	CompleteMultipart(ctx context.Context, container, artifact, uploadID string, parts []EdgePart) (etag string, err error)
 	AbortMultipart(ctx context.Context, container, artifact, uploadID string) error
+	// SignPut / SignUploadPart mint a HEADER-signed request for an
+	// aws-chunked write the Worker forwards untouched (WP-EDGE-2 Part C,
+	// the SPEED bench § 1: iDrive refuses aws-chunked on any presigned
+	// link): SigV4 over the four aws-chunked headers (content-encoding,
+	// x-amz-content-sha256 STREAMING-UNSIGNED-PAYLOAD-TRAILER,
+	// x-amz-decoded-content-length, x-amz-trailer), x-amz-date and the
+	// host — never content-length, which the client's framing decides.
+	// headers are lower-cased (authorization included); url is the plain
+	// object URL. The backend's secret never leaves the control plane.
+	SignPut(ctx context.Context, container, artifact string, decoded int64, trailer string) (headers map[string]string, url string, err error)
+	SignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, decoded int64, trailer string) (headers map[string]string, url string, err error)
+	// EdgeStreaming is what the backend does with such a request (measured,
+	// docs/reviews/WP-EDGE-2C.md Step 0.3).
+	EdgeStreaming() EdgeStreamingProps
+}
+
+// EdgeStreamingProps is what a backend does with a header-signed
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER write (WP-EDGE-2 Part C): Supported —
+// probed, it stores the DECODED body (ETag = its MD5); VerifiesTrailer —
+// it refuses a trailer checksum that is not the body's (iDrive: 400
+// XAmzContentChecksumMismatch; Lyve stores the bytes unchecked);
+// SignatureMaxAge — the clock window it enforces on x-amz-date (Lyve ±15
+// min; 0 = none: iDrive accepts a 7-day-old header signature, so one is a
+// bearer for that key until the key rotates — D-EDGE-33).
+type EdgeStreamingProps struct {
+	Supported       bool
+	VerifiesTrailer bool
+	SignatureMaxAge time.Duration
 }
 
 // VendorUsage is what a backend itself reports about its account: the

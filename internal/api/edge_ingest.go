@@ -85,7 +85,7 @@ const (
 var (
 	dataPlaneAdmits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_admits_total",
-		Help: "Edge admit decisions by host, op (put, part, get) and outcome: admitted, pass_through (the origin takes the request), refused (an S3 error relayed to the client), error (the control plane could not decide).",
+		Help: "Edge admit decisions by host, op (put, part, get) and outcome: admitted, admitted_unverified (an aws-chunked write to a backend that does not verify its trailer, with no Content-MD5 — D-EDGE-30), pass_through (the origin takes the request), pass_through_small, refused (an S3 error relayed to the client), error (the control plane could not decide).",
 	}, []string{"host", "op", "outcome"})
 	dataPlaneBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_bytes_total",
@@ -95,7 +95,7 @@ var (
 
 func init() {
 	for _, op := range []string{edgeOpPut, edgeOpPart, edgeOpGet} {
-		for _, outcome := range []string{"admitted", "pass_through", "pass_through_small", "refused", "error"} {
+		for _, outcome := range []string{"admitted", "admitted_unverified", "pass_through", "pass_through_small", "refused", "error"} {
 			dataPlaneAdmits.WithLabelValues(edgeHost, op, outcome)
 		}
 		dataPlaneBytes.WithLabelValues(edgeHost, op)
@@ -146,6 +146,19 @@ type edgeAdmitResponse struct {
 	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	ContentLength   int64             `json:"content_length,omitempty"`
+	// An aws-chunked write (WP-EDGE-2 Part C): StreamingTrailer is the
+	// trailer the body's framing ends in (the codec decodes the framing and
+	// VERIFIES it — D-EDGE-31), ContentLength the DECODED length. The mover
+	// gets Headers instead of a presigned link: a HEADER-signed backend
+	// request (lower-cased, authorization included) to send to URL with the
+	// client's body untouched (D-EDGE-30, D-EDGE-33).
+	StreamingTrailer string            `json:"streaming_trailer,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	// unverified: an admitted write whose bytes nothing checks — an
+	// aws-chunked write to a backend that does not verify the trailer, with
+	// no Content-MD5 the commit could compare (the metric's
+	// admitted_unverified; never on the wire).
+	unverified bool
 	// Codec (WP-EDGE-2): the write is the HOST's to chunk, hash and seal —
 	// no presigned PUT for the body; the host asks /api/v1/edge/index per
 	// batch of chunk hashes, uploads the misses as 0x06 blobs and commits
@@ -330,6 +343,8 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "error").Inc()
 	case resp.Refusal != nil:
 		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "refused").Inc()
+	case resp.Edge && resp.unverified:
+		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "admitted_unverified").Inc()
 	case resp.Edge:
 		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "admitted").Inc()
 	case resp.Reason == edgeReasonSmall:
@@ -512,15 +527,19 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	if crypto.HasSSECHeaders(sr) {
 		return passThrough("ssec")
 	}
-	// An aws-chunked body (aws-cli v2's CRC32 trailer over TLS) is the
-	// origin's: decoding it would put JavaScript in the byte path
-	// (bench-results/EDGE-RELAY-2026-10-26.md); the Worker classifies it
-	// so, and the control plane says the same for a Worker that did not.
-	if isAWSChunked(sr) {
-		return passThrough("aws_chunked")
+	// An aws-chunked body (aws-cli ≥ 2.23's default) is admitted on its
+	// DECODED length when it is the unsigned-payload trailer shape with a
+	// trailer the edge verifies (WP-EDGE-2 Part C): the mover forwards it
+	// untouched under a header-signed backend request, the codec decodes
+	// it. Any other streaming shape is the origin's.
+	stream, why := edgeStreamingOf(sr)
+	if why != "" {
+		return passThrough(why)
 	}
 	size := d.ContentLength
-	if size < 0 {
+	if stream != nil {
+		size = stream.Decoded
+	} else if size < 0 {
 		WriteS3Error(rec, ErrMissingContentLength, sr.URL.Path, generateRequestID())
 		return refusalOf(rec)
 	}
@@ -637,7 +656,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		resp, st, verdict := s.edgeAdmitCodecPut(req, p, size, attrs, storageClass, floor)
 		switch {
 		case verdict == edgeCodecTaken:
-			return resp, st
+			return stream.annotate(resp, size), st
 		case placement.Kind == placeWhole:
 			// The origin would store it whole: Part A's whole PUT below.
 		case verdict == edgeCodecWhole && placement.Kind == placeChunked:
@@ -648,7 +667,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	} else if req.Op == edgeOpPart {
 		resp, st, verdict := s.edgeAdmitCodecPart(req, p, size, uploadAttrs, storageClass, floor)
 		if verdict == edgeCodecTaken {
-			return resp, st
+			return stream.annotate(resp, size), st
 		}
 		if placement.Kind != placeWhole {
 			return passThrough("placement_" + placement.Kind.String())
@@ -680,6 +699,22 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	if err != nil {
 		return passThrough("backend:" + backend)
 	}
+	// The mover forwards an aws-chunked body only where the backend's
+	// behaviour with a header-signed request is measured (Step 0.3 + the
+	// bench § 1), and a PutObject only where the backend bounds the
+	// signature's life: iDrive checks no x-amz-date, so a minted signature
+	// would be a bearer for the object's address until the key rotates — a
+	// part's dies with its upload (D-EDGE-33).
+	var streamProps engine.EdgeStreamingProps
+	if stream != nil {
+		streamProps = ew.EdgeStreaming()
+		switch {
+		case !streamProps.Supported:
+			return passThrough("aws_chunked_backend")
+		case req.Op == edgeOpPut && streamProps.SignatureMaxAge <= 0:
+			return passThrough("aws_chunked_unbounded")
+		}
+	}
 
 	// Object Lock (R2-01): a retained key refuses the overwrite before
 	// anything is reserved.
@@ -707,6 +742,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	container := tenantID + "_" + bucket
 	var presigned string
 	var signed []string
+	var streamHeaders map[string]string
 	var presignErr error
 	settled := false
 	switch req.Op {
@@ -731,8 +767,12 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		if row.StorageKey, err = newBlobAddress(key); err != nil {
 			return edgeAdmitResponse{}, http.StatusInternalServerError
 		}
-		presigned, signed, presignErr = ew.PresignPut(sctx, container, row.StorageKey,
-			engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType, TTL: edgeAdmitTTL})
+		if stream != nil {
+			streamHeaders, presigned, presignErr = ew.SignPut(sctx, container, row.StorageKey, size, stream.Trailer)
+		} else {
+			presigned, signed, presignErr = ew.PresignPut(sctx, container, row.StorageKey,
+				engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType, TTL: edgeAdmitTTL})
+		}
 	case edgeOpPart:
 		uploadID := sr.URL.Query().Get("uploadId")
 		partNumber, pErr := strconv.Atoi(sr.URL.Query().Get("partNumber"))
@@ -808,12 +848,27 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 				}
 			}
 		}()
-		presigned, signed, presignErr = ew.PresignUploadPart(sctx, container, row.StorageKey, res.Upload.BackendUploadID, partNumber,
-			engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, TTL: edgeAdmitTTL})
+		if stream != nil {
+			streamHeaders, presigned, presignErr = ew.SignUploadPart(sctx, container, row.StorageKey, res.Upload.BackendUploadID, partNumber, size, stream.Trailer)
+		} else {
+			presigned, signed, presignErr = ew.PresignUploadPart(sctx, container, row.StorageKey, res.Upload.BackendUploadID, partNumber,
+				engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, TTL: edgeAdmitTTL})
+		}
 	}
 	if presignErr != nil {
 		s.logger.Error("edge admit: presign failed", zap.Error(presignErr), zap.String("backend", backend))
 		return edgeAdmitResponse{}, http.StatusInternalServerError
+	}
+	if stream != nil {
+		// A header-signed request must sign exactly the aws-chunked shape and
+		// never a length (the client's framing decides it).
+		if cErr := edgeHeaderSigns(streamHeaders); cErr != nil {
+			s.logger.Error("edge admit: the header-signed request does not sign what it must — refused", zap.Error(cErr), zap.String("backend", backend))
+			return edgeAdmitResponse{}, http.StatusInternalServerError
+		}
+		return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
+			Headers: streamHeaders, StreamingTrailer: stream.Trailer, ContentLength: size, Backend: backend,
+			Expect: &edgeExpect{MD5: contentMD5 != ""}, unverified: !streamProps.VerifiesTrailer && contentMD5 == ""})
 	}
 	// The owner's 2026-10-25 finding can never regress: a link that does
 	// not sign the size (and the checksum, when the client sent one) is
@@ -842,22 +897,111 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		}
 	}
 
-	row.ID, err = newEdgeAdmitID()
-	if err != nil {
+	return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
+		SendHeaders: sendHeaders, Backend: backend, Expect: &edgeExpect{MD5: contentMD5 != ""}})
+}
+
+// recordEdgeWriteAdmit writes the admit row of a write admitted for the
+// mover and completes its answer (the id, the address, the expiry);
+// settled = the reservation is the row's from here.
+func (s *Server) recordEdgeWriteAdmit(ctx context.Context, req edgeAdmitRequest, row *edgeAdmitRow, settled *bool, resp edgeAdmitResponse) (edgeAdmitResponse, int) {
+	var err error
+	if row.ID, err = newEdgeAdmitID(); err != nil {
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
 	row.ExpiresAt = time.Now().UTC().Add(edgeAdmitExpiry)
-	if err := insertEdgeAdmit(sctx, s.db, row); err != nil {
+	if err := insertEdgeAdmit(ctx, s.db, *row); err != nil {
 		s.logger.Error("edge admit: row not written", zap.Error(err))
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
-	settled = true
-	s.logger.Info("edge admit", zap.String("op", req.Op), zap.String("tenant_id", tenantID), zap.String("bucket", bucket),
-		zap.String("key", key), zap.String("backend", backend), zap.Int64("size", size), zap.String("admit_id", row.ID),
-		zap.String("request_id", req.RequestID))
-	return edgeAdmitResponse{Edge: true, AdmitID: row.ID, URL: presigned, Method: http.MethodPut, SendHeaders: sendHeaders,
-		Backend: backend, StorageKey: row.StorageKey, Expect: &edgeExpect{MD5: contentMD5 != ""},
-		ExpiresAt: &row.ExpiresAt}, http.StatusOK
+	*settled = true
+	s.logger.Info("edge admit", zap.String("op", req.Op), zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket),
+		zap.String("key", row.Key), zap.String("backend", row.Backend), zap.Int64("size", row.ContentLength), zap.String("admit_id", row.ID),
+		zap.Bool("aws_chunked", resp.StreamingTrailer != ""), zap.String("request_id", req.RequestID))
+	resp.AdmitID, resp.StorageKey, resp.ExpiresAt = row.ID, row.StorageKey, &row.ExpiresAt
+	return resp, http.StatusOK
+}
+
+// edgeVerifiedTrailers are the trailers an aws-chunked write may carry to
+// be admitted at the edge: the ones the codec verifies (src/awschunked.js:
+// aws-cli's default CRC64NVME and the CRC32 of older clients), the mover
+// the same set (one rule; iDrive verifies these too).
+var edgeVerifiedTrailers = map[string]bool{"x-amz-checksum-crc64nvme": true, "x-amz-checksum-crc32": true}
+
+// edgeStreaming is an aws-chunked write the edge may take: its trailer and
+// its decoded length.
+type edgeStreaming struct {
+	Trailer string
+	Decoded int64
+}
+
+// edgeStreamingOf reads the aws-chunked shape of a write: nil and "" for a
+// plain body; nil and a pass-through reason for a streaming shape the edge
+// never takes (signed chunks — the client's key in every chunk signature —
+// a trailer the edge does not verify, no decoded length); the shape
+// otherwise.
+func edgeStreamingOf(r *http.Request) (*edgeStreaming, string) {
+	if !isAWSChunked(r) {
+		return nil, ""
+	}
+	chunked := false
+	for _, tok := range strings.Split(r.Header.Get("Content-Encoding"), ",") {
+		if strings.EqualFold(strings.TrimSpace(tok), "aws-chunked") {
+			chunked = true
+		}
+	}
+	if r.Header.Get("x-amz-content-sha256") != "STREAMING-UNSIGNED-PAYLOAD-TRAILER" || !chunked {
+		return nil, "aws_chunked"
+	}
+	trailer := strings.ToLower(strings.TrimSpace(r.Header.Get("x-amz-trailer")))
+	if !edgeVerifiedTrailers[trailer] {
+		return nil, "aws_chunked_trailer"
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(r.Header.Get("x-amz-decoded-content-length")), 10, 64)
+	if err != nil || n < 0 {
+		return nil, "aws_chunked"
+	}
+	return &edgeStreaming{Trailer: trailer, Decoded: n}, ""
+}
+
+// annotate marks a codec admit of an aws-chunked write: the trailer the
+// host decodes and verifies, the decoded length (D-EDGE-31).
+func (e *edgeStreaming) annotate(resp edgeAdmitResponse, decoded int64) edgeAdmitResponse {
+	if e != nil && resp.Edge {
+		resp.StreamingTrailer, resp.ContentLength = e.Trailer, decoded
+	}
+	return resp
+}
+
+// edgeHeaderSigns is the checker every header-signed request passes: its
+// SignedHeaders name the aws-chunked shape, x-amz-date and the host — and
+// never content-length.
+func edgeHeaderSigns(headers map[string]string) error {
+	auth := headers["authorization"]
+	i := strings.Index(auth, "SignedHeaders=")
+	if !strings.HasPrefix(auth, "AWS4-HMAC-SHA256 ") || i < 0 {
+		return errors.New("header-signed request: not a SigV4 authorization")
+	}
+	list := auth[i+len("SignedHeaders="):]
+	if j := strings.IndexByte(list, ','); j >= 0 {
+		list = list[:j]
+	}
+	have := map[string]bool{}
+	for _, n := range strings.Split(list, ";") {
+		have[strings.TrimSpace(n)] = true
+	}
+	for _, n := range []string{"content-encoding", "host", "x-amz-content-sha256", "x-amz-date", "x-amz-decoded-content-length", "x-amz-trailer"} {
+		if !have[n] {
+			return fmt.Errorf("header-signed request does not sign %s (signed: %s)", n, list)
+		}
+	}
+	if have["content-length"] {
+		return errors.New("header-signed request signs content-length: the client's framing decides it")
+	}
+	if headers["x-amz-content-sha256"] != "STREAMING-UNSIGNED-PAYLOAD-TRAILER" {
+		return errors.New("header-signed request: not the streaming-trailer payload")
+	}
+	return nil
 }
 
 func isHex(s string) bool {
@@ -929,6 +1073,9 @@ const (
 	edgeOutcomeOK           = "ok"
 	edgeOutcomeBackendError = "backend_error"
 	edgeOutcomeEdgeError    = "edge_error"
+	// edgeOutcomeChecksumMismatch: the codec host decoded an aws-chunked
+	// body whose trailer is not the body's (D-EDGE-31) — the client's 400.
+	edgeOutcomeChecksumMismatch = "checksum_mismatch"
 )
 
 // handleEdgeCommit is POST /api/v1/edge/commit.
@@ -1175,10 +1322,14 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	if req.Outcome != edgeOutcomeOK {
 		switch {
 		case req.Outcome == edgeOutcomeBackendError && req.BackendStatus == http.StatusBadRequest &&
-			(req.BackendCode == "BadDigest" || req.BackendCode == "XAmzContentChecksumMismatch" || req.BackendCode == "InvalidDigest"):
+			(req.BackendCode == "BadDigest" || req.BackendCode == "InvalidDigest"):
 			// The client's own Content-MD5 did not match its body: the
 			// backend refused the write (nothing stored on either backend).
 			return fail(ErrBadDigest)
+		case req.Outcome == edgeOutcomeBackendError && req.BackendStatus == http.StatusBadRequest && req.BackendCode == ErrXAmzContentChecksumMismatch:
+			// An aws-chunked body whose trailer is not its own: iDrive
+			// verified it and refused the write (WP-EDGE-2 Part C).
+			return fail(ErrXAmzContentChecksumMismatch)
 		case req.Outcome == edgeOutcomeBackendError && (req.BackendCode == "IncompleteBody" || req.BackendStatus == http.StatusRequestTimeout ||
 			req.BackendStatus == http.StatusLengthRequired):
 			// The body ended short of the signed content-length.

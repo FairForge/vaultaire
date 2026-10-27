@@ -1100,3 +1100,39 @@ func TestEdgeIndex_OneTransactionPerCall(t *testing.T) {
 	r, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
 	assert.Equal(t, http.StatusOK, r.Status, r.Body)
 }
+
+// D-EDGE-31: the codec host decodes an aws-chunked body and verifies its
+// trailer; a trailer that is not the body's is committed as
+// checksum_mismatch — the client's 400 XAmzContentChecksumMismatch, the
+// reservation given back and every claim dropped (a PUT and a part).
+func TestEdgeCodecCommit_ChecksumMismatchIsTheClients400(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(2931, 2<<20+5)
+	chunks := f.chunksOf(body)
+
+	a := f.admit(f.signedStreaming("/"+f.bucket+"/crc.bin", nil, int64(len(body)), "x-amz-checksum-crc64nvme", ""))
+	require.True(t, a.Edge && a.Codec != nil, "%+v", a)
+	assert.Equal(t, "x-amz-checksum-crc64nvme", a.StreamingTrailer, "the host decodes and verifies this trailer")
+	assert.Equal(t, int64(len(body)), a.ContentLength, "the decoded length")
+	assert.Empty(t, a.Headers, "the codec stores through presigned chunk links: no header signature")
+	_ = f.index(a.AdmitID, chunks)
+	require.Equal(t, int64(len(body)), f.used())
+	relay, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeChecksumMismatch})
+	assert.Equal(t, http.StatusBadRequest, relay.Status)
+	assert.Contains(t, relay.Body, "XAmzContentChecksumMismatch")
+	assert.Zero(t, f.used(), "the reservation given back")
+	var left int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = $1`, f.tenantID).Scan(&left))
+	assert.Zero(t, left, "every claim dropped")
+
+	uploadID := f.createUpload("crc.zip")
+	q := url.Values{"uploadId": {uploadID}, "partNumber": {"1"}}
+	p := f.admit(f.signedStreaming("/"+f.bucket+"/crc.zip", q, int64(len(body)), "x-amz-checksum-crc32", ""))
+	require.True(t, p.Edge && p.Codec != nil, "%+v", p)
+	assert.Equal(t, "x-amz-checksum-crc32", p.StreamingTrailer)
+	_ = f.index(p.AdmitID, chunks)
+	pr, _ := f.commit(edgeCommitRequest{AdmitID: p.AdmitID, Outcome: edgeOutcomeChecksumMismatch})
+	assert.Equal(t, http.StatusBadRequest, pr.Status)
+	assert.Contains(t, pr.Body, "XAmzContentChecksumMismatch")
+	assert.Zero(t, f.used())
+}

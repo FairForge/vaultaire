@@ -21,11 +21,14 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -122,6 +125,78 @@ func (t s3EdgeTarget) presignGet(ctx context.Context, p engine.EdgePresign) (str
 		return "", nil, fmt.Errorf("%s presign get %s: %w", t.name, t.key, err)
 	}
 	return out.URL, names, nil
+}
+
+// streamingPayload is the payload hash of an aws-chunked body whose chunks
+// are unsigned and whose checksum rides in the trailer.
+const streamingPayload = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+
+// signStreaming mints the header-signed request of an aws-chunked write
+// (engine.EdgeWriter.SignPut, WP-EDGE-2 Part C): the object's address is
+// the presign client's own (the driver's addressing style and escaping,
+// the upload id and part number for a part), its X-Amz-* query dropped;
+// then aws-sdk-go-v2's signer over the aws-chunked headers with the
+// streaming payload hash, at now. ContentLength stays 0 so no
+// content-length is signed: the client's framing decides the encoded
+// length (aws-cli sends Transfer-Encoding: chunked).
+func (t s3EdgeTarget) signStreaming(ctx context.Context, uploadID string, partNumber int, decoded int64, trailer string) (map[string]string, string, error) {
+	if decoded < 0 {
+		return nil, "", fmt.Errorf("%s sign put %s: decoded length %d", t.name, t.key, decoded)
+	}
+	pc := s3.NewPresignClient(t.client)
+	var presigned string
+	if uploadID == "" {
+		out, err := pc.PresignPutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key)})
+		if err != nil {
+			return nil, "", fmt.Errorf("%s sign put %s: %w", t.name, t.key, err)
+		}
+		presigned = out.URL
+	} else {
+		if partNumber < 1 || partNumber > 10000 {
+			return nil, "", fmt.Errorf("%s sign part %s: part number %d out of range", t.name, t.key, partNumber)
+		}
+		out, err := pc.PresignUploadPart(ctx, &s3.UploadPartInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key),
+			UploadId: aws.String(uploadID), PartNumber: aws.Int32(int32(partNumber))}) // #nosec G115 — bounded above
+		if err != nil {
+			return nil, "", fmt.Errorf("%s sign part %s: %w", t.name, t.key, err)
+		}
+		presigned = out.URL
+	}
+	u, err := url.Parse(presigned)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s sign put %s: %w", t.name, t.key, err)
+	}
+	q := u.Query()
+	for name := range q {
+		if strings.HasPrefix(strings.ToLower(name), "x-amz-") || name == "x-id" {
+			q.Del(name)
+		}
+	}
+	u.RawQuery = q.Encode()
+	opts := t.client.Options()
+	if opts.Credentials == nil {
+		return nil, "", fmt.Errorf("%s sign put %s: no credentials", t.name, t.key)
+	}
+	creds, err := opts.Credentials.Retrieve(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s sign put %s: credentials: %w", t.name, t.key, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s sign put %s: %w", t.name, t.key, err)
+	}
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("X-Amz-Content-Sha256", streamingPayload)
+	req.Header.Set("X-Amz-Decoded-Content-Length", strconv.FormatInt(decoded, 10))
+	req.Header.Set("X-Amz-Trailer", trailer)
+	if err := v4.NewSigner().SignHTTP(ctx, creds, req, streamingPayload, "s3", opts.Region, time.Now().UTC()); err != nil {
+		return nil, "", fmt.Errorf("%s sign put %s: %w", t.name, t.key, err)
+	}
+	headers := map[string]string{"host": req.URL.Host}
+	for name, v := range req.Header {
+		headers[strings.ToLower(name)] = strings.Join(v, ", ")
+	}
+	return headers, req.URL.String(), nil
 }
 
 func (t s3EdgeTarget) createMultipart(ctx context.Context, contentType string) (string, error) {
@@ -277,6 +352,35 @@ func (d *IDriveDriver) AbortMultipart(ctx context.Context, container, artifact, 
 	return t.abortMultipart(ctx, uploadID)
 }
 
+// SignPut implements engine.EdgeWriter.
+func (d *IDriveDriver) SignPut(ctx context.Context, container, artifact string, decoded int64, trailer string) (map[string]string, string, error) {
+	t, err := d.edgeTarget(ctx, "SignPut", container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return t.signStreaming(ctx, "", 0, decoded, trailer)
+}
+
+// SignUploadPart implements engine.EdgeWriter.
+func (d *IDriveDriver) SignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, decoded int64, trailer string) (map[string]string, string, error) {
+	t, err := d.edgeTarget(ctx, "SignUploadPart", container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return t.signStreaming(ctx, uploadID, partNumber, decoded, trailer)
+}
+
+// EdgeStreaming implements engine.EdgeWriter: iDrive (every region) stores
+// the decoded body and VERIFIES the trailer, and enforces NO clock window
+// on x-amz-date (Step 0.3: a 7-day-old signature accepted). A fixed-bucket
+// backend no probe has measured (wasabi) offers none.
+func (d *IDriveDriver) EdgeStreaming() engine.EdgeStreamingProps {
+	if d.name == "idrive" || strings.HasPrefix(d.name, "idrive-") {
+		return engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true}
+	}
+	return engine.EdgeStreamingProps{}
+}
+
 // HeadObject implements engine.ObjectHeader.
 func (d *IDriveDriver) HeadObject(ctx context.Context, container, artifact string) (engine.RangeInfo, error) {
 	t, err := d.edgeTarget(ctx, "HeadObject", container, artifact)
@@ -348,6 +452,31 @@ func (d *LyveDriver) AbortMultipart(ctx context.Context, container, artifact, up
 		return err
 	}
 	return t.abortMultipart(ctx, uploadID)
+}
+
+// SignPut implements engine.EdgeWriter.
+func (d *LyveDriver) SignPut(ctx context.Context, container, artifact string, decoded int64, trailer string) (map[string]string, string, error) {
+	t, err := d.edgeTarget(ctx, "SignPut", container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return t.signStreaming(ctx, "", 0, decoded, trailer)
+}
+
+// SignUploadPart implements engine.EdgeWriter.
+func (d *LyveDriver) SignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, decoded int64, trailer string) (map[string]string, string, error) {
+	t, err := d.edgeTarget(ctx, "SignUploadPart", container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return t.signStreaming(ctx, uploadID, partNumber, decoded, trailer)
+}
+
+// EdgeStreaming implements engine.EdgeWriter: Lyve stores the decoded body
+// but does NOT verify the trailer (the bench: a wrong CRC is a 200), and
+// enforces ±15 minutes on x-amz-date (Step 0.3).
+func (d *LyveDriver) EdgeStreaming() engine.EdgeStreamingProps {
+	return engine.EdgeStreamingProps{Supported: true, SignatureMaxAge: 15 * time.Minute}
 }
 
 // HeadObject implements engine.ObjectHeader.

@@ -57,9 +57,11 @@ type edgeFakeDriver struct {
 	objects     map[string][]byte // t-<tenant>/<container>/<artifact> → bytes
 	uploads     map[string]map[int]string
 	presigns    atomic.Int32
-	heads       atomic.Int32 // HeadObject calls (RP68-3's sample)
-	ranges      atomic.Int32 // GetRangeInfo calls (RP70-3's first-segment open)
-	rangeLens   []int64      // the length each GetRangeInfo asked for
+	heads       atomic.Int32              // HeadObject calls (RP68-3's sample)
+	ranges      atomic.Int32              // GetRangeInfo calls (RP70-3's first-segment open)
+	streaming   engine.EdgeStreamingProps // what the fake does with a header-signed aws-chunked write
+	signs       atomic.Int32              // SignPut / SignUploadPart calls
+	rangeLens   []int64                   // the length each GetRangeInfo asked for
 	creates     atomic.Int32
 	aborts      atomic.Int32
 	deletes     []string
@@ -191,6 +193,43 @@ func (d *edgeFakeDriver) GetRangeInfo(ctx context.Context, container, artifact s
 	sum := md5.Sum(b) // #nosec G401
 	return io.NopCloser(bytes.NewReader(bytes.Clone(b[offset:end]))), engine.RangeInfo{ETag: hex.EncodeToString(sum[:]), Size: int64(len(b))}, nil
 }
+
+// signStreaming is the fake's header-signed aws-chunked request: the plain
+// URL and the headers a real signer would answer (engine.EdgeWriter.SignPut).
+func (d *edgeFakeDriver) signStreaming(key, query string, decoded int64, trailer string) (map[string]string, string, error) {
+	d.signs.Add(1)
+	if d.failPresign.Load() {
+		return nil, "", errors.New("sign refused (test)")
+	}
+	u := "https://fake.backend.invalid/vaultaire/" + key
+	if query != "" {
+		u += "?" + query
+	}
+	return map[string]string{
+		"authorization":                "AWS4-HMAC-SHA256 Credential=FAKE/20261027/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-trailer, Signature=deadbeef",
+		"x-amz-date":                   time.Now().UTC().Format("20060102T150405Z"),
+		"x-amz-content-sha256":         "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+		"content-encoding":             "aws-chunked",
+		"x-amz-decoded-content-length": fmt.Sprint(decoded),
+		"x-amz-trailer":                trailer,
+		"host":                         "fake.backend.invalid",
+	}, u, nil
+}
+func (d *edgeFakeDriver) SignPut(ctx context.Context, container, artifact string, decoded int64, trailer string) (map[string]string, string, error) {
+	k, err := d.key(ctx, container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.signStreaming(k, "", decoded, trailer)
+}
+func (d *edgeFakeDriver) SignUploadPart(ctx context.Context, container, artifact, uploadID string, partNumber int, decoded int64, trailer string) (map[string]string, string, error) {
+	k, err := d.key(ctx, container, artifact)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.signStreaming(k, fmt.Sprintf("partNumber=%d&uploadId=%s", partNumber, uploadID), decoded, trailer)
+}
+func (d *edgeFakeDriver) EdgeStreaming() engine.EdgeStreamingProps { return d.streaming }
 
 func (d *edgeFakeDriver) presign(key string, p engine.EdgePresign, query string) (string, []string, error) {
 	d.presigns.Add(1)
@@ -429,6 +468,40 @@ func (f *edgeFixture) signed(path string, query url.Values, body []byte, hdr map
 		sum := sha256.Sum256(body)
 		payloadHash = hex.EncodeToString(sum[:])
 	}
+	r.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	require.NoError(f.t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: f.ak, SecretAccessKey: f.sk},
+		r, payloadHash, "s3", "us-east-1", time.Now()))
+	headers := map[string]string{"host": f.host}
+	for k, v := range r.Header {
+		headers[strings.ToLower(k)] = strings.Join(v, ", ")
+	}
+	op := edgeOpPut
+	if query.Get("uploadId") != "" {
+		op = edgeOpPart
+	}
+	return edgeAdmitRequest{Op: op, Method: http.MethodPut, Host: f.host, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery,
+		Headers: headers, ClientIP: "203.0.113.9", RequestID: "req-" + uuid.New().String()[:8]}
+}
+
+// signedStreaming is the Worker's description of aws-cli's DEFAULT upload
+// (≥ 2.23): an aws-chunked body with an unsigned payload and a checksum
+// trailer, Transfer-Encoding: chunked — no Content-Length — signed with
+// the client's key.
+func (f *edgeFixture) signedStreaming(path string, query url.Values, decoded int64, trailer, payloadHash string) edgeAdmitRequest {
+	f.t.Helper()
+	u := "https://" + f.host + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	r, err := http.NewRequest(http.MethodPut, u, nil)
+	require.NoError(f.t, err)
+	if payloadHash == "" {
+		payloadHash = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	}
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	r.Header.Set("X-Amz-Decoded-Content-Length", fmt.Sprint(decoded))
+	r.Header.Set("X-Amz-Trailer", trailer)
+	r.Header.Set("X-Amz-Sdk-Checksum-Algorithm", "CRC64NVME")
 	r.Header.Set("X-Amz-Content-Sha256", payloadHash)
 	require.NoError(f.t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: f.ak, SecretAccessKey: f.sk},
 		r, payloadHash, "s3", "us-east-1", time.Now()))
@@ -1248,4 +1321,125 @@ func TestEdgePresignSigns_HostOnlyFails(t *testing.T) {
 	hostOnly := "https://b.invalid/x?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=ab&X-Amz-SignedHeaders=host"
 	assert.Error(t, edgePresignSigns(hostOnly, "content-length"))
 	assert.Error(t, edgePresignSigns("https://b.invalid/x", "content-length"), "not presigned at all")
+}
+
+// --- Prompt 46c PR A: aws-chunked at the edge ---
+
+// aws-cli's DEFAULT upload (STREAMING-UNSIGNED-PAYLOAD-TRAILER, no
+// Content-Length) is admitted on its DECODED length and answered a
+// HEADER-signed backend request (the plain URL + the signed headers) the
+// Worker forwards the body under untouched. Where the backend does not
+// verify the trailer (Lyve) and the client sent no Content-MD5, the admit
+// counts admitted_unverified (D-EDGE-30).
+func TestEdgeAdmit_AWSChunkedIsHeaderSigned(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.drv.streaming = engine.EdgeStreamingProps{Supported: true, SignatureMaxAge: 15 * time.Minute} // Lyve's
+	const n = 5 << 20
+	body := testBytes(n)
+	unverified := promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPut, "admitted_unverified"))
+	resp := f.admit(f.signedStreaming("/"+f.bucket+"/chunked.bin", nil, n, "x-amz-checksum-crc64nvme", ""))
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Equal(t, "x-amz-checksum-crc64nvme", resp.StreamingTrailer)
+	assert.Equal(t, int64(n), resp.ContentLength, "the decoded length")
+	assert.NotContains(t, resp.URL, "X-Amz-Signature", "the plain URL: the signature is in the headers")
+	assert.Contains(t, resp.URL, "/t-"+f.tenantID+"/"+f.container()+"/chunked.bin@")
+	for _, h := range []string{"authorization", "x-amz-date", "x-amz-content-sha256", "content-encoding", "x-amz-decoded-content-length", "x-amz-trailer", "host"} {
+		assert.NotEmpty(t, resp.Headers[h], h)
+	}
+	assert.Empty(t, resp.SendHeaders, "never a presigned link's headers")
+	assert.Equal(t, int64(n), f.used(), "reserved on the decoded length")
+	assert.Equal(t, unverified+1, promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPut, "admitted_unverified")),
+		"Lyve does not verify the trailer: the gap is counted (D-EDGE-30)")
+
+	// The commit is a PUT's: the backend stores the DECODED body.
+	etag := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ := f.commit(okCommit(resp.AdmitID, body, etag))
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	h, ok := f.head("chunked.bin")
+	require.True(t, ok)
+	assert.Equal(t, int64(n), h.size)
+
+	// With a Content-MD5 the COMMIT verifies the backend's ETag (the decoded
+	// body's MD5) against it: the write counts verified wherever it goes,
+	// and other bytes are BadDigest, removed.
+	verified := promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPut, "admitted"))
+	sum := md5.Sum(body) // #nosec G401
+	r2 := f.admit(f.signedStreamingMD5("/"+f.bucket+"/chunked-md5.bin", n, base64.StdEncoding.EncodeToString(sum[:])))
+	require.True(t, r2.Edge, "%+v", r2)
+	assert.Equal(t, verified+1, promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPut, "admitted")))
+	other := testBytes(n)
+	other[0] ^= 1
+	bad := f.drv.workerPut(f.tenantID, f.container(), r2.StorageKey, other)
+	relay2, _ := f.commit(okCommit(r2.AdmitID, other, bad))
+	assert.Equal(t, http.StatusBadRequest, relay2.Status)
+	assert.Contains(t, relay2.Body, "BadDigest")
+}
+
+// signedStreamingMD5 is signedStreaming with the client's Content-MD5.
+func (f *edgeFixture) signedStreamingMD5(path string, decoded int64, contentMD5 string) edgeAdmitRequest {
+	f.t.Helper()
+	u := "https://" + f.host + path
+	r, err := http.NewRequest(http.MethodPut, u, nil)
+	require.NoError(f.t, err)
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	r.Header.Set("X-Amz-Decoded-Content-Length", fmt.Sprint(decoded))
+	r.Header.Set("X-Amz-Trailer", "x-amz-checksum-crc32")
+	r.Header.Set("Content-MD5", contentMD5)
+	r.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	require.NoError(f.t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: f.ak, SecretAccessKey: f.sk},
+		r, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "s3", "us-east-1", time.Now()))
+	headers := map[string]string{"host": f.host}
+	for k, v := range r.Header {
+		headers[strings.ToLower(k)] = strings.Join(v, ", ")
+	}
+	return edgeAdmitRequest{Op: edgeOpPut, Method: http.MethodPut, Host: f.host, Path: r.URL.EscapedPath(),
+		Headers: headers, ClientIP: "203.0.113.9", RequestID: "req-" + uuid.New().String()[:8]}
+}
+
+// D-EDGE-33: iDrive enforces no clock window on a header signature (Step
+// 0.3) — a minted one would be a bearer for the key until the key rotates.
+// An aws-chunked UploadPart is admitted there (a replay dies with the
+// upload: Complete names every part by the ETag its commit recorded, and
+// after Complete or Abort the upload id is gone) and counts admitted (iDrive
+// verifies the trailer); an aws-chunked PutObject bound for it stays the
+// origin's. The shapes the edge never takes stay the origin's too.
+func TestEdgeAdmit_AWSChunkedOnAnUnboundedBackend(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.drv.streaming = engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true} // iDrive's
+	const n = 5 << 20
+	put := f.admit(f.signedStreaming("/"+f.bucket+"/put.bin", nil, n, "x-amz-checksum-crc64nvme", ""))
+	assert.False(t, put.Edge)
+	assert.Equal(t, "aws_chunked_unbounded", put.Reason)
+	assert.Zero(t, f.used(), "nothing reserved")
+
+	id := f.createUpload("parts.zip")
+	admitted := promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPart, "admitted"))
+	q := url.Values{"uploadId": {id}, "partNumber": {"1"}}
+	part := f.admit(f.signedStreaming("/"+f.bucket+"/parts.zip", q, n, "x-amz-checksum-crc64nvme", ""))
+	require.True(t, part.Edge, "%+v", part)
+	assert.Equal(t, admitted+1, promtestutil.ToFloat64(dataPlaneAdmits.WithLabelValues(edgeHost, edgeOpPart, "admitted")), "iDrive verifies the trailer")
+	pu, err := url.Parse(part.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "1", pu.Query().Get("partNumber"))
+	var buid string
+	require.NoError(t, f.db.QueryRow(`SELECT backend_upload_id FROM multipart_uploads WHERE upload_id = $1`, id).Scan(&buid))
+	assert.Equal(t, buid, pu.Query().Get("uploadId"), "signed for the backend's own upload")
+	body := testBytes(n)
+	etag := f.drv.workerPutPart(f.tenantID, f.container(), part.StorageKey, buid, 1, body)
+	relay, _ := f.commit(okCommit(part.AdmitID, body, etag))
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+
+	// The shapes the edge never forwards: a trailer it does not verify,
+	// signed chunks (the client's key in every chunk signature), a backend
+	// with no measured streaming behaviour.
+	pass := func(why string, req edgeAdmitRequest, reason string) {
+		t.Helper()
+		r := f.admit(req)
+		assert.False(t, r.Edge, why)
+		assert.Equal(t, reason, r.Reason, why)
+	}
+	pass("a sha256 trailer", f.signedStreaming("/"+f.bucket+"/sha.bin", url.Values{"uploadId": {id}, "partNumber": {"2"}}, n, "x-amz-checksum-sha256", ""), "aws_chunked_trailer")
+	pass("signed chunks", f.signedStreaming("/"+f.bucket+"/sig.bin", url.Values{"uploadId": {id}, "partNumber": {"3"}}, n, "x-amz-checksum-crc32", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"), "aws_chunked")
+	f.drv.streaming = engine.EdgeStreamingProps{}
+	pass("an unmeasured backend", f.signedStreaming("/"+f.bucket+"/parts.zip", url.Values{"uploadId": {id}, "partNumber": {"4"}}, n, "x-amz-checksum-crc32", ""), "aws_chunked_backend")
 }

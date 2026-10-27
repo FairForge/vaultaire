@@ -889,6 +889,11 @@ func (s *Server) commitEdgeCodecPut(ctx context.Context, row edgeAdmitRow, req e
 		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	}
+	if req.Outcome == edgeOutcomeChecksumMismatch {
+		// The host decoded the aws-chunked body and its trailer is not the
+		// body's (D-EDGE-31): the client's error, everything given back.
+		return fail(ErrXAmzContentChecksumMismatch)
+	}
 	if req.Outcome != edgeOutcomeOK {
 		rec.Header().Set("Retry-After", "30")
 		return fail(ErrServiceUnavailable)

@@ -96,8 +96,11 @@ const (
 	ErrInvalidPart             = "InvalidPart"
 	ErrInvalidPartOrder        = "InvalidPartOrder"
 	ErrEntityTooSmall          = "EntityTooSmall"
-	ErrInvalidPartNumber       = "InvalidPartNumber"
-	ErrNoSuchVersion           = "NoSuchVersion"
+	// ErrXAmzContentChecksumMismatch: an aws-chunked body whose trailer
+	// checksum is not the body's (the edge codec verifies it, D-EDGE-31).
+	ErrXAmzContentChecksumMismatch = "XAmzContentChecksumMismatch"
+	ErrInvalidPartNumber           = "InvalidPartNumber"
+	ErrNoSuchVersion               = "NoSuchVersion"
 	// A1 conformance (2026-09-18): the former "ObjectLocked" code was not an
 	// AWS error code — lock-protected operations answer AccessDenied on the
 	// wire, with the lock detail appended to the message via WithSuggestion.
@@ -151,6 +154,7 @@ var errorMessages = map[string]string{
 	ErrInvalidPart:                       "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not match the part's entity tag.",
 	ErrInvalidPartOrder:                  "The list of parts was not in ascending order. The parts list must be specified in order by part number.",
 	ErrEntityTooSmall:                    "Your proposed upload is smaller than the minimum allowed object size. Each part must be at least 5 MB in size, except the last part.",
+	ErrXAmzContentChecksumMismatch:       "The provided 'x-amz-checksum' header does not match what was computed.",
 	ErrInvalidPartNumber:                 "Part number must be an integer between 1 and 10000, inclusive.",
 	ErrNoSuchVersion:                     "The version ID specified in the request does not match an existing version.",
 	ErrAccessControlListNotSupported:     "The bucket does not allow ACLs.",
@@ -203,6 +207,7 @@ var errorStatusCodes = map[string]int{
 	ErrInvalidPart:                       http.StatusBadRequest,
 	ErrInvalidPartOrder:                  http.StatusBadRequest,
 	ErrEntityTooSmall:                    http.StatusBadRequest,
+	ErrXAmzContentChecksumMismatch:       http.StatusBadRequest,
 	ErrInvalidPartNumber:                 http.StatusBadRequest,
 	ErrNoSuchVersion:                     http.StatusNotFound,
 	ErrAccessControlListNotSupported:     http.StatusBadRequest,
