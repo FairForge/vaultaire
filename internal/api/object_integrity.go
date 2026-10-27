@@ -40,7 +40,7 @@ var (
 	}, []string{"path", "reason"})
 	objectIntegrityUnverified = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_object_integrity_unverified_total",
-		Help: "Whole-object responses served without a body check, once per response: range (a 206) | multipart (a -N ETag) | etag (the recorded ETag is not an MD5). Chunked objects verify every chunk and are not counted.",
+		Help: "Whole-object responses served without a body check, once per response: range (a 206) | multipart (a -N ETag) | etag (the recorded ETag is not an MD5) | unverified (path edge: a read the Worker served — only its length was checked). Chunked objects verify every chunk and are not counted.",
 	}, []string{"path", "reason"})
 )
 
@@ -51,6 +51,11 @@ const (
 	integrityPathSealed   = "sealed"
 	integrityPathParity   = "parity"
 	integrityPathCDN      = "cdn"
+	// integrityPathEdge: a read the Worker served from the backend's
+	// presigned GET (WP-EDGE-2 Part 0, RP66-2). Beyond the Worker's length
+	// check nothing verifies those bytes, so every served edge read counts
+	// here with reason "unverified" — the one reason of this path.
+	integrityPathEdge = "edge"
 )
 
 // Every series exists at 0 from boot. Prometheus's increase() and rate()
@@ -68,6 +73,7 @@ func init() {
 			objectIntegrityUnverified.WithLabelValues(p, r)
 		}
 	}
+	objectIntegrityUnverified.WithLabelValues(integrityPathEdge, "unverified")
 }
 
 var (
