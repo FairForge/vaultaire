@@ -29,6 +29,7 @@
 // drops the claims) and a 503 SlowDown + Retry-After 30 to the client.
 
 import { SEGMENT_SIZE, sealChunkStream } from "./seal.js";
+import { awsChunkedDecoder } from "./awschunked.js";
 
 /** s3ErrorXML renders the S3 error document the origin's writer would. */
 export function s3ErrorXML(code, message, path, requestId) {
@@ -303,7 +304,11 @@ export async function runCodec(request, admit, env, ctx, deps) {
   const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT_BYTES);
   const tamper = deps.tamper || "";
   const started = Date.now();
-  const declared = Number(request.headers.get("content-length"));
+  // An aws-chunked body (0.4.0, D-EDGE-31): the admit names its trailer and
+  // its DECODED length; the framing is decoded and the trailer verified on
+  // the way to the cutter, so the chunker and the MD5 see decoded bytes.
+  const trailer = admit.streaming_trailer || "";
+  const declared = trailer ? Number(admit.content_length) : Number(request.headers.get("content-length"));
   let pub = base64Bytes(admit.codec.kem_public_key);
   if (tamper === "key") pub = val(e2ee.publicKey(crypto.getRandomValues(new Uint8Array(32))), "publicKey"); // TEST ONLY (seal under another key)
   const version = admit.codec.version;
@@ -417,7 +422,8 @@ export async function runCodec(request, admit, env, ctx, deps) {
     // than emit admits chunks under the bound.
     // An empty body (an empty last part, D-EDGE-29) has no stream: the
     // chunker's finish cuts nothing and the commit names no chunk.
-    const source = request.body || new ReadableStream({ start: (c) => c.close() });
+    let source = request.body || new ReadableStream({ start: (c) => c.close() });
+    if (trailer) source = source.pipeThrough(awsChunkedDecoder({ decodedLength: declared, trailer }).stream);
     await source.pipeThrough(cutter.stream).pipeTo(new WritableStream({ write: (chunk) => emit(chunk) }));
     flush();
     await Promise.all(work);
@@ -425,6 +431,14 @@ export async function runCodec(request, admit, env, ctx, deps) {
     if (Number.isFinite(declared) && stats.plaintext !== declared) throw new Error(`edge codec: the body is ${stats.plaintext} bytes, content-length ${declared}`);
   } catch (e) {
     await Promise.allSettled(work);
+    if (e && e.code === "checksum_mismatch") {
+      // The client's body is not what its trailer says: the client's 400
+      // (XAmzContentChecksumMismatch), relayed from the control plane, which
+      // gives everything back. Never a 503 — a retry of these bytes fails
+      // the same way.
+      log({ edge: "codec_checksum_mismatch", request_id: deps.requestId, error: String(e.message).slice(0, 200) });
+      return commitOK(cp, { admit_id: admit.admit_id, outcome: "checksum_mismatch" }, log, deps.requestId, requestPath(request));
+    }
     await commitEdgeError(cp, admit, log, deps.requestId);
     throw e;
   } finally {

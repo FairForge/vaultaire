@@ -51,18 +51,25 @@ const HOP_BY_HOP = new Set([
 
 // --- classification -------------------------------------------------------
 
+/** STREAMING_TRAILER is aws-cli ≥ 2.23's default payload: an aws-chunked
+ * body with unsigned chunks and a checksum trailer (0.4.0). */
+const STREAMING_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+
 /**
  * classify says what the request is to the edge: {kind: "put"|"part"|"get"|
  * "pass", reason}. Only a signed (SigV4 header) PUT of an object key with
  * no query (PutObject) or exactly partNumber+uploadId (UploadPart), with a
- * plain body, or a signed GET of an object key with no query (GetObject —
- * Part B; a HEAD never, Decision 2), is the edge's; a copy, a
- * sub-resource, an unsigned or presigned request, a bucket request, an
- * aws-chunked body (x-amz-content-sha256 STREAMING-*: decoding it would put
- * JS in the byte path — the origin takes it; aws-cli v2 users set
- * request_checksum_calculation = when_required) and every other method are
- * the origin's. aws-sdk-go-v2 (rclone's library) names the operation in
- * the query (`x-id=PutObject` / `x-id=GetObject`): not a sub-resource.
+ * plain body of a known Content-Length or aws-cli's default aws-chunked
+ * body (x-amz-content-sha256 STREAMING-UNSIGNED-PAYLOAD-TRAILER with its
+ * x-amz-decoded-content-length — 0.4.0: the mover forwards it untouched
+ * under the header-signed request the admit mints, the codec decodes it),
+ * or a signed GET of an object key with no query (GetObject — Part B; a
+ * HEAD never, Decision 2), is the edge's; a copy, a sub-resource, an
+ * unsigned or presigned request, a bucket request, signed chunks
+ * (STREAMING-AWS4-HMAC-SHA256-PAYLOAD: every chunk signature is the client's
+ * key's) and every other method are the origin's. aws-sdk-go-v2 (rclone's
+ * library) names the operation in the query (`x-id=PutObject` /
+ * `x-id=GetObject`): not a sub-resource.
  */
 export function classify(request) {
   if (request.method !== "PUT" && request.method !== "GET") return { kind: "pass", reason: "method" };
@@ -78,8 +85,10 @@ export function classify(request) {
     return { kind: "get" };
   }
   if (request.headers.get("x-amz-copy-source")) return { kind: "pass", reason: "copy" };
-  if (!request.headers.get("content-length")) return { kind: "pass", reason: "no_length" };
-  if ((request.headers.get("x-amz-content-sha256") || "").startsWith("STREAMING-")) return { kind: "pass", reason: "aws_chunked" };
+  const payload = request.headers.get("x-amz-content-sha256") || "";
+  const streaming = payload.startsWith("STREAMING-");
+  if (streaming && payload !== STREAMING_TRAILER) return { kind: "pass", reason: "aws_chunked" };
+  if (!request.headers.get(streaming ? "x-amz-decoded-content-length" : "content-length")) return { kind: "pass", reason: "no_length" };
   if (keys.length === 0) return { kind: "put" };
   const set = new Set(keys);
   if (set.size === 2 && set.has("partNumber") && set.has("uploadId")) return { kind: "part" };
@@ -305,6 +314,21 @@ async function controlPlane(env, path, body, timeoutMs) {
 }
 
 /**
+ * moveInit is the backend subrequest of an admitted write: the client's
+ * body as it is, under the presigned link's signed headers — or, for an
+ * aws-chunked body (0.4.0), under the HEADER-signed request the admit
+ * minted (its headers, the host being the URL's), the framing untouched and
+ * sent chunked when the client sent no Content-Length.
+ */
+export function moveInit(request, admit) {
+  if (!admit.headers) return { method: admit.method || "PUT", headers: admit.send_headers, body: request.body };
+  const headers = {};
+  for (const [k, v] of Object.entries(admit.headers)) if (k !== "host") headers[k] = v;
+  if (!request.headers.get("content-length")) headers["transfer-encoding"] = "chunked";
+  return { method: admit.method || "PUT", headers, body: request.body, duplex: "half" };
+}
+
+/**
  * moveBody hands the client's body to the backend as it is — no stream
  * touches it in JavaScript — and reports what the backend answered.
  */
@@ -312,7 +336,7 @@ async function moveBody(request, admit) {
   const started = Date.now();
   const result = { outcome: "edge_error", backend_status: 0, backend_code: "", backend_etag: "" };
   try {
-    const resp = await fetch(admit.url, { method: admit.method || "PUT", headers: admit.send_headers, body: request.body });
+    const resp = await fetch(admit.url, moveInit(request, admit));
     result.backend_status = resp.status;
     result.backend_etag = resp.headers.get("etag") || "";
     if (resp.ok) {

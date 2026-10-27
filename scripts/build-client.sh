@@ -22,6 +22,9 @@
 #                 published as the file (WP-EDGE-2 Part B)
 #   edge-seal     the Worker's 0x06 sealer (edge/s3-ingest/src/seal.js),
 #                 published as the file (WP-EDGE-2 Part B)
+#   edge-awschunked  the Worker's aws-chunked decoder and CRC tables
+#                 (edge/s3-ingest/src/awschunked.js), published as the
+#                 file (WP-EDGE-2 Part C)
 #   edge-wasm-exec  the toolchain's wasm_exec.js, the Go runtime's JS half
 #                 the Worker loads beside chunker.wasm and e2ee.wasm (go.mod's
 #                 toolchain's GOROOT/lib/wasm; WP-EDGE-2 Part B)
@@ -63,6 +66,9 @@ edge-codec)
 edge-seal)
 	cp edge/s3-ingest/src/seal.js "$out"
 	;;
+edge-awschunked)
+	cp edge/s3-ingest/src/awschunked.js "$out"
+	;;
 edge-wasm-exec)
 	toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
 	if [ -z "$toolchain" ]; then
@@ -73,7 +79,7 @@ edge-wasm-exec)
 	install -m 0644 "$goroot/lib/wasm/wasm_exec.js" "$out"
 	;;
 *)
-	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker, edge-codec, edge-seal, edge-wasm-exec)" >&2
+	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker, edge-codec, edge-seal, edge-wasm-exec, edge-awschunked)" >&2
 	exit 1
 	;;
 esac

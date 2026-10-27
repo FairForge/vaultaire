@@ -26,10 +26,12 @@ test("classify: a signed PutObject and an UploadPart are the edge's; the rest th
   assert.deepEqual(classify(presigned), { kind: "pass", reason: "unsigned" });
   const bearer = put("https://s3.stored.cloud/b/k", { Authorization: "Bearer x" });
   assert.deepEqual(classify(bearer), { kind: "pass", reason: "unsigned" });
-  // An aws-chunked body (aws-cli v2's CRC32 trailer over TLS) is the origin's:
-  // decoding it would put JavaScript in the byte path.
-  const chunked = put("https://s3.stored.cloud/b/k", { "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "content-encoding": "aws-chunked" });
-  assert.deepEqual(classify(chunked), { kind: "pass", reason: "aws_chunked" });
+  // aws-cli's default aws-chunked body (unsigned payload, a trailer) is the
+  // edge's since 0.4.0 (test/awschunked.test.js); signed chunks are not.
+  const chunked = put("https://s3.stored.cloud/b/k", { "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "content-encoding": "aws-chunked", "x-amz-decoded-content-length": "5" });
+  assert.equal(classify(chunked).kind, "put");
+  const signedChunks = put("https://s3.stored.cloud/b/k", { "x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", "content-encoding": "aws-chunked" });
+  assert.deepEqual(classify(signedChunks), { kind: "pass", reason: "aws_chunked" });
   const plain = put("https://s3.stored.cloud/b/k", { "x-amz-content-sha256": "UNSIGNED-PAYLOAD" });
   assert.equal(classify(plain).kind, "put");
 });

@@ -511,12 +511,14 @@ Through `s3.stored.cloud` keep parts at 64 MiB: `rclone copy … --s3-upload-cut
 64M --s3-chunk-size 64M` (or `upload_cutoff = 64M` / `chunk_size = 64M` in the
 remote). rclone's default cutoff is 200 MiB, so a 150 MB file would go as one
 PUT and get the zone's HTML 413 — the 100 MB request limit is Cloudflare's,
-answered before our Worker runs. aws-cli's default 8 MiB parts need nothing,
-but aws-cli v2 (2.23+) sends its body `aws-chunked` with a checksum trailer
-(CRC64NVME in 2.28 and 2.35),
-which the edge hands to our origin unchanged: set
-`request_checksum_calculation = when_required` in the profile to have the
-edge move the bytes.
+answered before our Worker runs. aws-cli's defaults need nothing: aws-cli v2
+(2.23+) sends its body `aws-chunked` with a checksum trailer (CRC64NVME in
+2.28 and 2.35, or CRC32), and the edge moves it as it is. iDrive verifies the
+trailer; a multipart part goes through the edge on every backend, and a
+single `PutObject` sent `aws-chunked` to an iDrive bucket is moved by our
+origin. On Lyve the trailer checksum is not verified by the backend; send
+Content-MD5 or use iDrive for a verified write until the codec path carries
+it.
 
 What to expect through the edge: one stream 35–50 MB/s; the client's number of
 parts in flight sets the rest (see "Fast uploads and downloads" below).
@@ -564,7 +566,6 @@ Cloudflare request limit answers a larger single request with an HTML
 
 ```ini
 [profile stored]
-request_checksum_calculation = when_required
 s3 =
   multipart_threshold = 64MB
   multipart_chunksize = 64MB

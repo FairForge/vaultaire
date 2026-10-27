@@ -145,9 +145,12 @@ const (
 	ClientEdgeCodec    = "edge-codec"     // edge/s3-ingest/src/codec.js
 	ClientEdgeSeal     = "edge-seal"      // edge/s3-ingest/src/seal.js
 	ClientEdgeWasmExec = "edge-wasm-exec" // GOROOT/lib/wasm/wasm_exec.js of go.mod's toolchain
+	// The Worker 0.4.0's aws-chunked decoder and its CRC tables (WP-EDGE-2
+	// Part C), published as its file.
+	ClientEdgeAWSChunked = "edge-awschunked" // edge/s3-ingest/src/awschunked.js
 )
 
-var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker, ClientEdgeCodec, ClientEdgeSeal, ClientEdgeWasmExec}
+var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker, ClientEdgeCodec, ClientEdgeSeal, ClientEdgeWasmExec, ClientEdgeAWSChunked}
 
 // BuildClients lists the clients.
 func BuildClients() []string { return append([]string(nil), buildClients...) }
