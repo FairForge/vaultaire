@@ -552,6 +552,14 @@ func TestEdgeRoutes_NeverCapturedByTheS3Gate(t *testing.T) {
 	assert.NotEqual(t, http.StatusTeapot, w.Code)
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String()) // a decision (a refusal relayed), not the S3 API
 
+	// The index route (WP-EDGE-2): the token gate's, never the S3 API's.
+	ri := httptest.NewRequest(http.MethodPost, "/api/v1/edge/index", strings.NewReader(`{"admit_id":"x","chunks":[{"hash":"00","size":1}]}`))
+	ri.Host = "stored.test"
+	ri.Header.Set(edgeTokenHeader, edgeTestToken)
+	wi := serve(srv.httpServer.Handler, ri)
+	assert.Empty(t, *hits, "the index call never reaches the S3 API")
+	assert.NotEqual(t, http.StatusTeapot, wi.Code)
+
 	// An AWS4 header ON the call: the gate's (Decision 8).
 	r2 := sigV4Signed(t, http.MethodPost, "stored.test", "/api/v1/edge/admit")
 	r2.Header.Set(edgeTokenHeader, edgeTestToken)

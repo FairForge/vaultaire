@@ -1108,6 +1108,7 @@ func (s *Server) readAdapter() *S3ToEngine {
 	a.sseService = s.sseService
 	a.chunkEncSvc = s.chunkEncSvc
 	a.gci = s.gci
+	a.tenantKeys = s.tenantKeys
 	a.smartPromoter = s.smartPromoter
 	a.siaPromoter = s.siaPromoter
 	a.vaultParity = s.vaultParity
@@ -1131,6 +1132,7 @@ func (s *Server) writeAdapter() *S3ToEngine {
 	a.allowUnsealedCleartext = s.allowUnsealedCleartext
 	a.allowUnsealedSia = s.allowUnsealedSia
 	a.chunkEncSvc = s.chunkEncSvc
+	a.tenantKeys = s.tenantKeys
 	a.gci = s.gci
 	a.flags = s.flags
 	if s.chunkPutConcurrency > 0 {

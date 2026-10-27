@@ -146,10 +146,29 @@ type edgeAdmitResponse struct {
 	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	ContentLength   int64             `json:"content_length,omitempty"`
+	// Codec (WP-EDGE-2): the write is the HOST's to chunk, hash and seal —
+	// no presigned PUT for the body; the host asks /api/v1/edge/index per
+	// batch of chunk hashes, uploads the misses as 0x06 blobs and commits
+	// the chunk list.
+	Codec *edgeCodecGrant `json:"codec,omitempty"`
+}
+
+// edgeCodecGrant is what a codec admit hands the data-plane host: the
+// tenant's codec PUBLIC key (X-Wing, base64 in JSON) and its key version,
+// and the two numbers the pipeline needs. Nothing here is a secret
+// (contract line 4: nothing of the hierarchy travels but a public key).
+type edgeCodecGrant struct {
+	Version        int    `json:"version"`
+	KEMPublicKey   []byte `json:"kem_public_key"`
+	ChunkThreshold int64  `json:"chunk_threshold"`
+	SegmentSize    int    `json:"segment_size"`
 }
 
 // edgeCommitRequest is what the Worker reports: the backend's answer. No
-// digest and no byte count — the Worker is not in the byte path.
+// digest and no byte count for a moved write — the Worker is not in the
+// byte path there. A CODEC write reverses that on purpose (WP-EDGE-2): the
+// host read every byte to chunk it, so it reports the chunk list and the
+// whole body's MD5 (the digest is free once the bytes were read).
 type edgeCommitRequest struct {
 	AdmitID       string `json:"admit_id"`
 	Outcome       string `json:"outcome"` // a write: ok | backend_error | edge_error; a GET: served | fallback | error
@@ -161,6 +180,23 @@ type edgeCommitRequest struct {
 	// is metered (the Worker cannot see the end of a stream it does not
 	// touch; edge_get.go).
 	BackendContentLength int64 `json:"backend_content_length,omitempty"`
+	// A codec write (WP-EDGE-2): the ordered chunk list and the body's MD5
+	// (hex) — a PUT's ETag, a part's part digest.
+	Chunks  []edgeCommitChunk `json:"chunks,omitempty"`
+	BodyMD5 string            `json:"body_md5,omitempty"`
+}
+
+// edgeCommitChunk is one chunk of a codec commit, in body order: the PLAIN
+// sha256 (hex; over the service-token channel for the duration of the call,
+// never stored or logged — D-EDGE-16), its plaintext and sealed sizes, the
+// backend's MD5 ETag of the sealed bytes for a chunk this host stored, and
+// whether it was stored or a dedup hit.
+type edgeCommitChunk struct {
+	Hash        string `json:"hash"`
+	Size        int64  `json:"size"`
+	SealedSize  int64  `json:"sealed_size,omitempty"`
+	BackendETag string `json:"backend_etag,omitempty"`
+	Status      string `json:"status"` // stored | hit
 }
 
 // edgeAdmitAttrs is what the row keeps of the client's request for the
@@ -174,6 +210,13 @@ type edgeAdmitAttrs struct {
 	// Status is what a GET answers the client (200, 206) — the access-log
 	// row's status when the Worker served it.
 	Status int `json:"status,omitempty"`
+	// CodecVersion is the tenant key version a codec admit answered (the
+	// index key and the public key are that version's — WP-EDGE-2).
+	CodecVersion int `json:"codec_version,omitempty"`
+	// CodecClaims are the chunk claims this admit's index calls took:
+	// keyed hash → the claim's pending_since. The commit flips them ready;
+	// an expiry or a failed commit drops them (the reaper's rule).
+	CodecClaims map[string]time.Time `json:"codec_claims,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -202,6 +245,9 @@ type edgeAdmitRow struct {
 	State         string
 	Result        json.RawMessage
 	ExpiresAt     time.Time
+	// Codec: the admit answered the codec shape (WP-EDGE-2) — no presigned
+	// body PUT; the commit carries the chunk list.
+	Codec bool
 }
 
 // registerEdgeRoutes mounts the two calls when the token is loaded.
@@ -211,7 +257,8 @@ func (s *Server) registerEdgeRoutes() {
 	}
 	s.router.Post("/api/v1/edge/admit", s.handleEdgeAdmit)
 	s.router.Post("/api/v1/edge/commit", s.handleEdgeCommit)
-	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit")
+	s.router.Post("/api/v1/edge/index", s.handleEdgeIndex)
+	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index")
 }
 
 // edgeNotFound answers a call that is not the Worker's: the route does not
@@ -562,7 +609,30 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		placement.Refusal.write(rec, sr)
 		return refusalOf(rec)
 	}
-	if placement.Kind != placeWhole {
+	// A chunked placement may be the codec's (WP-EDGE-2): with the
+	// edge_codec flag and a tenant key version the HOST chunks, hashes and
+	// seals; with the flag and no key version the whole PUT is admitted
+	// (no_key — never a refusal, never a plaintext chunked write at the
+	// edge); without the flag the origin takes it, as Part A.
+	if req.Op == edgeOpPut && placement.Kind == placeChunked {
+		resp, st, verdict := s.edgeAdmitCodecPut(req, p, size, attrs, storageClass, floor)
+		switch verdict {
+		case edgeCodecTaken:
+			return resp, st
+		case edgeCodecWhole:
+			// Part A's whole PUT admits it below.
+		default:
+			return passThrough("placement_" + placement.Kind.String())
+		}
+	} else if req.Op == edgeOpPart {
+		resp, st, verdict := s.edgeAdmitCodecPart(req, p, size, uploadAttrs, storageClass, floor)
+		if verdict == edgeCodecTaken {
+			return resp, st
+		}
+		if placement.Kind != placeWhole {
+			return passThrough("placement_" + placement.Kind.String())
+		}
+	} else if placement.Kind != placeWhole {
 		return passThrough("placement_" + placement.Kind.String())
 	}
 
@@ -683,6 +753,11 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		switch {
 		case errors.Is(rErr, errUploadStaged):
 			return passThrough("staged_parts")
+		case errors.Is(rErr, errUploadCodec):
+			// One upload is one path (D-EDGE-3): an edge-whole part on a
+			// codec upload is the client's 400.
+			WriteS3ErrorWithContext(rec, ErrInvalidRequest, sr.URL.Path, generateRequestID(), WithSuggestion(codecUploadRefusal))
+			return refusalOf(rec)
 		case errors.Is(rErr, errUploadEnded):
 			WriteS3Error(rec, ErrNoSuchUpload, sr.URL.Path, generateRequestID())
 			return refusalOf(rec)
@@ -817,12 +892,12 @@ func insertEdgeAdmit(ctx context.Context, db *sql.DB, row edgeAdmitRow) error {
 		INSERT INTO edge_admits
 			(id, tenant_id, bucket, object_key, op, upload_id, part_number, backend, storage_key, content_length,
 			 content_md5, content_type, attrs, storage_class, floor, reserved_bytes, reserved_floor,
-			 floor_reserved, credited, client_ip, request_id, state, expires_at)
+			 floor_reserved, credited, client_ip, request_id, state, expires_at, codec)
 		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0), $8, $9, $10, NULLIF($11, ''), $12, $13, $14, $15,
-		        $16, NULLIF($17, ''), $18, $19, $20, $21, 'pending', $22)`,
+		        $16, NULLIF($17, ''), $18, $19, $20, $21, 'pending', $22, $23)`,
 		row.ID, row.TenantID, row.Bucket, row.Key, row.Op, row.UploadID, row.PartNumber, row.Backend, row.StorageKey, row.ContentLength,
 		row.ContentMD5, row.ContentType, attrs, row.StorageClass, row.Floor, row.ReservedBytes, row.ReservedFloor,
-		row.FloorReserved, row.Credited, row.ClientIP, row.RequestID, row.ExpiresAt)
+		row.FloorReserved, row.Credited, row.ClientIP, row.RequestID, row.ExpiresAt, row.Codec)
 	return err
 }
 
@@ -959,11 +1034,11 @@ func lockEdgeAdmit(ctx context.Context, tx *sql.Tx, id string) (edgeAdmitRow, er
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, bucket, object_key, op, upload_id, part_number, backend, storage_key, content_length,
 		       content_md5, content_type, attrs, storage_class, floor, reserved_bytes, reserved_floor,
-		       floor_reserved, credited, client_ip, request_id, state, result, expires_at
+		       floor_reserved, credited, client_ip, request_id, state, result, expires_at, codec
 		FROM edge_admits WHERE id = $1 FOR UPDATE`, id).Scan(
 		&row.ID, &row.TenantID, &row.Bucket, &row.Key, &row.Op, &uploadID, &partNumber, &row.Backend, &row.StorageKey, &row.ContentLength,
 		&md5, &row.ContentType, &attrs, &row.StorageClass, &row.Floor, &row.ReservedBytes, &reservedFloor,
-		&row.FloorReserved, &row.Credited, &row.ClientIP, &row.RequestID, &row.State, &result, &row.ExpiresAt)
+		&row.FloorReserved, &row.Credited, &row.ClientIP, &row.RequestID, &row.State, &result, &row.ExpiresAt, &row.Codec)
 	if err != nil {
 		return row, err
 	}
@@ -1008,7 +1083,13 @@ func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitR
 			zap.Int64("bytes", row.ContentLength), zap.String("admit_id", row.ID))
 	default:
 		s.releaseEdgeAdmit(ctx, row)
-		if row.Op == edgeOpPut {
+		switch {
+		case row.Codec:
+			// A codec admit holds no whole blob — its pending chunk claims
+			// are dropped (blobs the host reported landed and never
+			// committed are the chunk orphan sweep's, WP-EDGE-2).
+			s.dropEdgeCodecClaims(context.WithoutCancel(ctx), row)
+		case row.Op == edgeOpPut:
 			retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
 		}
 	}
@@ -1057,6 +1138,16 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	}
 	if row.Op == edgeOpGet {
 		state, n := s.settleEdgeGet(ctx, row, req, rec)
+		return state, n, nil
+	}
+	if row.Codec {
+		// The codec commit (WP-EDGE-2): the chunk list settled, the manifest
+		// installed — or everything given back.
+		if row.Op == edgeOpPut {
+			state, n := s.commitEdgeCodecPut(ctx, row, req, rec)
+			return state, n, nil
+		}
+		state, n := s.commitEdgeCodecPart(ctx, row, req, rec)
 		return state, n, nil
 	}
 	deleteAfter := func() { s.edgeDeleteBlob(ctx, row) }

@@ -671,6 +671,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.multipartReaper = NewMultipartReaper(s.db, logger)
 	if s.multipartReaper != nil {
+		s.multipartReaper.gci = s.gci
+	}
+	if s.multipartReaper != nil {
 		s.multipartReaper.engine = s.engine // the backend half of an edge upload (WP-EDGE-1)
 		if v := os.Getenv("MULTIPART_ABANDON_HOURS"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {

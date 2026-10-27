@@ -79,7 +79,7 @@ func TestChunkBlobCalls_GoThroughTheChunkStore(t *testing.T) {
 func TestChunkedWrites_GoThroughTheChunkedCore(t *testing.T) {
 	allowed := map[string][]string{
 		"newChunkStorePool(":       {"chunked_write.go"},
-		"ReplaceObjectManifestTx(": {"chunked_write.go", "s3_copy.go"},
+		"ReplaceObjectManifestTx(": {"chunked_write.go", "s3_copy.go", "edge_codec_control.go", "edge_codec_multipart.go"}, // the codec commits install a manifest whose chunks the HOST stored (WP-EDGE-2): no stream exists to run through storeChunkedObject; the harness compares their rows to its
 	}
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)

@@ -55,8 +55,11 @@ type S3ToEngine struct {
 	// allowUnsealedCleartext: see Server.allowUnsealedCleartext.
 	allowUnsealedCleartext bool
 	// allowUnsealedSia: see Server.allowUnsealedSia.
-	allowUnsealedSia  bool
-	chunkEncSvc       *crypto.ChunkEncryptionService
+	allowUnsealedSia bool
+	chunkEncSvc      *crypto.ChunkEncryptionService
+	// tenantKeys opens an edge-codec (AES256-EW, 0x06) chunk on the read
+	// path (WP-EDGE-2); nil = no master key, such a chunk cannot be served.
+	tenantKeys        *crypto.TenantKeys
 	gci               *crypto.GlobalContentIndex
 	chunkingThreshold int64 // minimum object size for chunking (default 64 MB)
 
@@ -1618,7 +1621,8 @@ type chunkDesc struct {
 	size           int64  // chunk size in bytes (plaintext)
 	compressed     bool   // true if chunk is stored compressed (needs decompression on read)
 	encrypted      bool   // true if chunk is stored encrypted (needs decryption on read)
-	ciphertextHash string // SHA-256 of encrypted blob for integrity verification
+	encAlgo        string // the row's encryption_algo: AES256-CE (convergent) or AES256-EW (edge codec, 0x06 — WP-EDGE-2)
+	ciphertextHash string // the stored blob's digest: SHA-256 (convergent), the backend's MD5 ETag (AES256-EW)
 	keyVersion     int    // tenant key version the blob is sealed under (the row's, else the ref's)
 }
 
@@ -1674,6 +1678,15 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 	}
 	data := buf.Bytes()
 
+	// An edge-codec chunk (AES256-EW, a 0x06 blob — WP-EDGE-2): the stored
+	// bytes checked against the backend's MD5 ETag the commit recorded, the
+	// wrapped chunk key opened under the tenant's codec seed of the
+	// RECORDED version, and the plaintext bound to the row by its KEYED
+	// hash — the row's identity holds no plain hash to compare.
+	if d.encrypted && d.encAlgo == crypto.EdgeChunkEncryptionAlgo {
+		return a.openEdgeCodecChunk(ctx, d, tenantID, data)
+	}
+
 	if d.encrypted && a.chunkEncSvc != nil {
 		data, err = a.chunkEncSvc.DecryptChunkData(ctx, tenantID, d.keyVersion, d.plaintextHash, data, d.ciphertextHash)
 		if err != nil {
@@ -1693,6 +1706,49 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 		return nil, fmt.Errorf("%w: chunk %s (%d bytes)", errChunkIntegrity, d.plaintextHash[:16], len(data))
 	}
 	return data, nil
+}
+
+// openEdgeCodecChunk verifies and opens one AES256-EW chunk blob (WP-EDGE-2):
+// ciphertext MD5 → the 0x06 open under the recorded version's codec seed →
+// the keyed-hash check against the row (what binds the content, as the plain
+// sha256 binds a convergent chunk).
+func (a *S3ToEngine) openEdgeCodecChunk(ctx context.Context, d chunkDesc, tenantID string, blob []byte) ([]byte, error) {
+	if a.tenantKeys == nil {
+		return nil, fmt.Errorf("%w: chunk %s: no tenant keys on this process (ENCRYPTION_MASTER_KEY)", errChunkDecrypt, shortHash(d.plaintextHash))
+	}
+	if d.ciphertextHash != "" {
+		sum := md5.Sum(blob) // #nosec G401 -- the backends' ETag, an integrity check
+		if hex.EncodeToString(sum[:]) != strings.ToLower(d.ciphertextHash) {
+			return nil, fmt.Errorf("%w: chunk %s: stored bytes do not hash to the recorded ciphertext MD5", errChunkIntegrity, shortHash(d.plaintextHash))
+		}
+	}
+	priv, err := a.tenantKeys.EdgeCodecPrivateKey(ctx, tenantID, d.keyVersion)
+	if err != nil {
+		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
+	}
+	defer clear(priv)
+	o, _, err := crypto.OpenWrappedChunk(priv, bytes.NewReader(blob))
+	if err != nil {
+		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
+	}
+	pt, err := io.ReadAll(o)
+	if err != nil {
+		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
+	}
+	indexKey, _, err := a.tenantKeys.IndexKey(ctx, tenantID, d.keyVersion)
+	if err != nil {
+		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
+	}
+	defer clear(indexKey)
+	sum := sha256.Sum256(pt)
+	keyed, err := crypto.KeyedChunkHash(indexKey, sum[:])
+	if err != nil {
+		return nil, err
+	}
+	if keyed != d.plaintextHash {
+		return nil, fmt.Errorf("%w: chunk %s (%d bytes): the plaintext is not the chunk the keyed index names", errChunkIntegrity, shortHash(d.plaintextHash), len(pt))
+	}
+	return pt, nil
 }
 
 // rereadChunk reads the chunk's index row past the GCI cache and returns the
@@ -1725,6 +1781,9 @@ func (a *S3ToEngine) rereadChunk(ctx context.Context, d chunkDesc) (chunkDesc, b
 		n.keyVersion = *e.EncryptionKeyVersion
 	}
 	n.encrypted = e.Encrypted
+	if e.EncryptionAlgo != nil {
+		n.encAlgo = *e.EncryptionAlgo
+	}
 	n.compressed = e.CompressionAlgo != nil
 	n.size = e.SizeBytes
 	changed := n.storageKey != d.storageKey || n.backendID != d.backendID ||

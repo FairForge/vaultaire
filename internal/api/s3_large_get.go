@@ -284,6 +284,10 @@ func (a *S3ToEngine) resolveChunkDescs(ctx context.Context, refs []crypto.Tenant
 		if lookup.Entry.EncryptionKeyVersion != nil {
 			keyVersion = *lookup.Entry.EncryptionKeyVersion
 		}
+		encAlgo := ""
+		if lookup.Entry.EncryptionAlgo != nil {
+			encAlgo = *lookup.Entry.EncryptionAlgo
+		}
 		descs[i] = chunkDesc{
 			scope:          scopeOf[i],
 			storageKey:     storageKey,
@@ -293,6 +297,7 @@ func (a *S3ToEngine) resolveChunkDescs(ctx context.Context, refs []crypto.Tenant
 			size:           lookup.Entry.SizeBytes,
 			compressed:     lookup.Entry.CompressionAlgo != nil,
 			encrypted:      lookup.Entry.Encrypted,
+			encAlgo:        encAlgo,
 			ciphertextHash: ctHash,
 			keyVersion:     keyVersion,
 		}

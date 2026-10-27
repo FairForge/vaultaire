@@ -366,6 +366,11 @@ func (k *KeyReencryptRunner) candidates(ctx context.Context) ([]reencryptCandida
 		SELECT g.dedup_scope, g.plaintext_hash, g.size_bytes
 		  FROM global_content_index g JOIN cur ON cur.tenant_id = g.dedup_scope
 		 WHERE g.encrypted AND g.state = 'ready' AND g.encryption_key_version < cur.v AND ($2 = '' OR g.dedup_scope = $2)
+		   -- An edge-codec chunk (WP-EDGE-2) is keyed-hash addressed: its
+		   -- re-home onto a new version changes its index identity, a pass of
+		   -- its own (a residual of WP-EDGE-2 Part A). It stays readable
+		   -- under its recorded version meanwhile.
+		   AND COALESCE(g.encryption_algo, '') <> 'AES256-EW'
 		 ORDER BY g.first_seen_at, g.dedup_scope, g.plaintext_hash
 		 LIMIT $1`, keyReencryptScanLimit, k.onlyScope)
 	if err != nil {

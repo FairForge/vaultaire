@@ -46,7 +46,11 @@ const edgeUploadRefusal = "This upload is fed through the edge; send every part 
 
 // edgeUpload is what the upload row says about its edge state.
 type edgeUpload struct {
-	Edge            bool
+	Edge bool
+	// Codec: the upload is fed through the edge codec (WP-EDGE-2) — its
+	// parts carry chunk lists, no backend upload exists, and Complete
+	// concatenates the lists into one manifest at StorageKey.
+	Codec           bool
 	Backend         string
 	BackendUploadID string
 	StorageKey      string
@@ -61,9 +65,9 @@ func readEdgeUpload(ctx context.Context, q interface {
 	var backend, buid, sk sql.NullString
 	var ended sql.NullTime
 	err := q.QueryRowContext(ctx, `
-		SELECT edge, edge_backend, backend_upload_id, storage_key, backend_upload_ended_at
+		SELECT edge, codec, edge_backend, backend_upload_id, storage_key, backend_upload_ended_at
 		FROM multipart_uploads WHERE upload_id = $1 AND tenant_id = $2`, uploadID, tenantID).
-		Scan(&u.Edge, &backend, &buid, &sk, &ended)
+		Scan(&u.Edge, &u.Codec, &backend, &buid, &sk, &ended)
 	if err != nil {
 		return edgeUpload{}, err
 	}
@@ -99,6 +103,11 @@ func reserveEdgePart(ctx context.Context, db *sql.DB, tenantID, uploadID, object
 	up, err := readEdgeUpload(ctx, tx, tenantID, uploadID)
 	if err != nil {
 		return edgePartReservation{}, fmt.Errorf("read upload %s: %w", uploadID, err)
+	}
+	if up.Codec {
+		// One upload is one path (D-EDGE-3): a codec upload takes only codec
+		// parts.
+		return edgePartReservation{}, errUploadCodec
 	}
 	if !up.Edge {
 		var staged int
