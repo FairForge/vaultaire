@@ -1,4 +1,4 @@
-# stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B) and the codec host (WP-EDGE-2 Part B)
+# stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B) and the codec host (WP-EDGE-2 Part B + Part C)
 
 The Cloudflare Worker on `s3.stored.cloud` (plan 40.10 slice 1). Every S3
 request arrives here. A signed **PutObject** or **UploadPart** of a tenant
@@ -72,13 +72,54 @@ commit answer — is a commit `{admit_id, outcome: "edge_error"}` (the control
 plane gives back the reservation and drops the claims) and a **503 SlowDown +
 Retry-After 30**; the request is never passed on (its body is gone).
 
-**The memory bound.** At most `CODEC_IN_FLIGHT` = 4 chunks are held between
-their hash and their PUT (a counting semaphore the reader awaits — the body
-is read no faster than chunks leave); a miss's plaintext is dropped once it
-is sealed. Measured: peak held 4 in node with every PUT delayed 50 ms
+**The memory bound (0.4.0).** At most `CODEC_IN_FLIGHT_BYTES` = 48 MiB of
+chunk plaintext is held between a chunk's cut and its last segment's seal: a
+FIFO byte semaphore the reader awaits, so the body is read no faster than
+chunks leave. A chunk larger than the bound is admitted alone. A chunk is
+held as its 1 MiB segments, each its own buffer, hashed with
+`crypto.DigestStream`. `sealChunkStream` seals a segment when the PUT reads
+it, drops its plaintext and releases its bytes; the PUT body goes through a
+`FixedLengthStream` of the sealed length, so no sealed copy exists whole. A
+hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured: peak held 4 in node with every PUT delayed 50 ms
 (`test/codec.test.js`); the workerd process 32–66 MB RSS for a 1 GiB upload
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
+
+## 0.4.0 — aws-chunked, the windowed reader, the RP70 fixes (WP-EDGE-2 Part C)
+
+- **aws-cli's default upload is the edge's.** That is `x-amz-content-sha256:
+  STREAMING-UNSIGNED-PAYLOAD-TRAILER`, an aws-chunked body with a CRC64NVME
+  or CRC32 trailer and `Transfer-Encoding: chunked`. The admit answers
+  `headers` + the plain `url`: a HEADER-signed backend request the control
+  plane mints (the backend's secret never leaves SLC). The mover forwards
+  the body untouched under those headers (`moveInit`, chunked when the
+  client sent no length). iDrive verifies the trailer; Lyve does not
+  (`admitted_unverified`, D-EDGE-30). An iDrive-bound PutObject stays the
+  origin's: iDrive checks no `x-amz-date`, so a header signature never
+  expires there (D-EDGE-33).
+- **The codec decodes the framing.** `src/awschunked.js` (client
+  `edge-awschunked`) carries slicing-by-8 CRC64NVME and CRC32. The codec
+  decodes the framing in its byte path, VERIFIES the trailer, and commits a
+  mismatch as `checksum_mismatch`, which the client gets as a 400
+  `XAmzContentChecksumMismatch` (D-EDGE-31). Signed chunks
+  (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) stay the origin's.
+- **The windowed reader** (`serveWindow`). A GET of ≥ 64 MiB is answered
+  `window {range_bytes, in_flight, start}` and a link that signs if-match
+  (when provable) and no range — only to a Worker whose description says
+  `features: ["window"]`.
+  - Each 16 MiB range is fetched (≤ 6 at once) and written in order to a
+    `FixedLengthStream`.
+  - The first range decides served vs fallback.
+  - A later failure CUTS the body.
+  - One commit when the stream ends carries `bytes_sent`.
+  - All windowed reads of an isolate share one budget of 6 × 16 MiB
+    (`WINDOW_ISOLATE_BYTES`).
+  - D-EDGE-32.
+- **Every pass-through is `fetch(request, {cache: "no-store"})`**
+  (`passThrough`, RP70-5): RB-9's cause.
+- **A control plane's own 4xx at commit** is the client's 400, never a 503.
+- **The admit**: every UploadPart of an edge tenant is the edge's, whatever
+  its size, an empty last part included (D-EDGE-29).
 
 **The modules and their manifest rows.** Each file is published as itself
 (`find_additional_modules`, `base_dir = "src"`) and each is a `client_build`
@@ -91,6 +132,7 @@ row (`internal/translog/clientbuilds/manifest.json`, built by
 | `src/index.js` | `edge-ingest` | the file |
 | `src/codec.js` | `edge-codec` | the file |
 | `src/seal.js` | `edge-seal` | the file |
+| `src/awschunked.js` | `edge-awschunked` | the file (0.4.0) |
 | `src/wasm/chunker.wasm` | `edge-chunker` | `sdk/chunkerwasm`, go.mod's toolchain |
 | `src/wasm/e2ee.wasm` | `sdk-wasm` (its existing row) | `sdk/wasm`, go.mod's toolchain |
 | `src/wasm/wasm_exec.js` | `edge-wasm-exec` | the toolchain's `lib/wasm/wasm_exec.js` |
@@ -183,10 +225,10 @@ check; the origin's integrity reader then decides), or no answer, is a
 fallback: the client's request goes to the origin unchanged. A mid-body
 backend failure is a cut body, as at the origin.
 
-aws-chunked bodies (`x-amz-content-sha256: STREAMING-*`, what aws-cli v2
-sends over TLS) pass through to the origin: decoding them would put
-JavaScript in the byte path. `docs/API.md` tells aws-cli users to set
-`request_checksum_calculation = when_required`.
+aws-chunked bodies (`x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER`,
+aws-cli's default over TLS) are the edge's since 0.4.0: the mover forwards
+them under the admit's `headers`, and the codec decodes them (above). Signed
+chunks pass through to the origin.
 
 ## Deploy
 
