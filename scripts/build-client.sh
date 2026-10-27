@@ -18,6 +18,13 @@
 #   edge-chunker  the frozen chunker compiled to WebAssembly for the edge
 #                 codec's data-plane host (sdk/chunkerwasm → chunker.wasm;
 #                 WP-EDGE-2 Part A)
+#   edge-codec    the Worker's codec pipeline (edge/s3-ingest/src/codec.js),
+#                 published as the file (WP-EDGE-2 Part B)
+#   edge-seal     the Worker's 0x06 sealer (edge/s3-ingest/src/seal.js),
+#                 published as the file (WP-EDGE-2 Part B)
+#   edge-wasm-exec  the toolchain's wasm_exec.js, the Go runtime's JS half
+#                 the Worker loads beside chunker.wasm and e2ee.wasm (go.mod's
+#                 toolchain's GOROOT/lib/wasm; WP-EDGE-2 Part B)
 set -euo pipefail
 
 client=${1:?usage: build-client.sh <client> <output>}
@@ -50,8 +57,23 @@ edge-chunker)
 	GOTOOLCHAIN=$toolchain CGO_ENABLED=0 GOFLAGS= GOOS=js GOARCH=wasm \
 		go build -trimpath -buildvcs=false -ldflags=-s -o "$out" ./sdk/chunkerwasm
 	;;
+edge-codec)
+	cp edge/s3-ingest/src/codec.js "$out"
+	;;
+edge-seal)
+	cp edge/s3-ingest/src/seal.js "$out"
+	;;
+edge-wasm-exec)
+	toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+	if [ -z "$toolchain" ]; then
+		echo "build-client: go.mod has no toolchain line" >&2
+		exit 1
+	fi
+	goroot=$(GOTOOLCHAIN=$toolchain GOFLAGS= go env GOROOT)
+	install -m 0644 "$goroot/lib/wasm/wasm_exec.js" "$out"
+	;;
 *)
-	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker)" >&2
+	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker, edge-codec, edge-seal, edge-wasm-exec)" >&2
 	exit 1
 	;;
 esac

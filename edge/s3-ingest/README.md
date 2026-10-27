@@ -1,4 +1,4 @@
-# stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B)
+# stored-s3-edge — the mover (WP-EDGE-1 Part A + Part B) and the codec host (WP-EDGE-2 Part B)
 
 The Cloudflare Worker on `s3.stored.cloud` (plan 40.10 slice 1). Every S3
 request arrives here. A signed **PutObject** or **UploadPart** of a tenant
@@ -38,9 +38,77 @@ in the byte path halves a stream to ~25 MB/s; pass-through runs at 42–54
 MB/s per stream and ~150 MB/s at eight). Integrity is the backend's own
 plus the client's `Content-MD5` signed into the link.
 
+## 0.3.0 — the codec pipeline (WP-EDGE-2 Part B)
+
+An admit that answers `codec` (and no `url`) is a write of a tenant with the
+`edge_codec` flag: at the edge every PutObject of at least `EDGE_MIN_BYTES`
+and every part of a multipart upload, wherever the bucket allows chunking
+(RP68-1). The Worker is then the data-plane host Part A's Go harness played
+(`internal/api/edge_codec_harness_test.go` is the oracle):
+
+1. **cut** — the body goes through a `TransformStream` whose transform feeds
+   `storedChunker.push` (`src/wasm/chunker.wasm`, the frozen Go chunker:
+   boundaries byte-identical to the origin's, pinned by the golden vectors in
+   node and Go); every completed chunk is cut from the bytes held. The body's
+   MD5 (a pure-JS MD5 in `src/codec.js`) is taken on the way.
+2. **hash** — `crypto.subtle.digest("SHA-256", chunk)`.
+3. **ask** — `POST /api/v1/edge/index` with ≤ 64 `{hash, size}` per call; the
+   control plane keys each hash in memory and answers hits and misses (a
+   presigned PUT per miss at the chunk's one address, signing the sealed
+   length). A batch goes out at 64 chunks, at the end, or when the reader is
+   about to wait on the bound (D-EDGE-22).
+4. **seal** — each miss as one 0x06 blob (`src/seal.js`: a random chunk key
+   wrapped with `storedE2EE.sealTo` from `src/wasm/e2ee.wasm`, 1 MiB AES-256-GCM
+   segments over WebCrypto; the Go opener opens what it seals —
+   `TestEdgeCodec_NodeSealedChunkOpens`) and PUT it on its link.
+5. **commit** — `{admit_id, outcome: "ok", chunks: [{hash, size, sealed_size,
+   backend_etag, status: stored|hit}] in body order, body_md5}`; the answer is
+   the client's, relayed as every commit's.
+
+**The 503 rule.** Before the body is read (the modules do not load), the
+admit is committed `edge_error` and the request passes to the origin. Once it
+is read, any failure — an index call, a chunk PUT, a short body, a refused
+commit answer — is a commit `{admit_id, outcome: "edge_error"}` (the control
+plane gives back the reservation and drops the claims) and a **503 SlowDown +
+Retry-After 30**; the request is never passed on (its body is gone).
+
+**The memory bound.** At most `CODEC_IN_FLIGHT` = 4 chunks are held between
+their hash and their PUT (a counting semaphore the reader awaits — the body
+is read no faster than chunks leave); a miss's plaintext is dropped once it
+is sealed. Measured: peak held 4 in node with every PUT delayed 50 ms
+(`test/codec.test.js`); the workerd process 32–66 MB RSS for a 1 GiB upload
+in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
+chunker costs ≈ 11 s of CPU per GiB.
+
+**The modules and their manifest rows.** Each file is published as itself
+(`find_additional_modules`, `base_dir = "src"`) and each is a `client_build`
+row (`internal/translog/clientbuilds/manifest.json`, built by
+`scripts/build-client.sh`, rebuilt by the Deploy job's
+`scripts/repro-check-clients.sh`):
+
+| module | client | built by |
+|---|---|---|
+| `src/index.js` | `edge-ingest` | the file |
+| `src/codec.js` | `edge-codec` | the file |
+| `src/seal.js` | `edge-seal` | the file |
+| `src/wasm/chunker.wasm` | `edge-chunker` | `sdk/chunkerwasm`, go.mod's toolchain |
+| `src/wasm/e2ee.wasm` | `sdk-wasm` (its existing row) | `sdk/wasm`, go.mod's toolchain |
+| `src/wasm/wasm_exec.js` | `edge-wasm-exec` | the toolchain's `lib/wasm/wasm_exec.js` |
+
+`make edge-wasm` builds the three wasm-side files into `src/wasm/`
+(gitignored) with the recipe — never `make sdk-wasm`, whose bytes differ.
+The wasm is loaded with dynamic `import()` at the first codec request, so
+`node --test` still imports `src/index.js` and every other request costs
+nothing new.
+
+**`CODEC_TAMPER`** (`etag` | `key`) is the lab's tampered-host switch
+(`lab/codec-proof.sh` case g); the Worker refuses it outright when
+`ENVIRONMENT = "production"` (wrangler.toml) and passes every request to the
+origin.
+
 ## Files
 
-- `src/index.js` — the whole Worker, one file, published as-is
+- `src/index.js` — the Worker's entry module, published as-is
   (`no_bundle = true`): `sha256(src/index.js)` is the transparency log's
   `client_build` row for client `edge-ingest`
   (`internal/translog/clientbuilds/manifest.json`), and the deployed script
@@ -58,9 +126,13 @@ plus the client's `Content-MD5` signed into the link.
   exactly the signed headers, `cache: "no-store"`; `readSucceeded` /
   `readCommit`: served at `expect_status` with the backend's Content-Length
   equal to the admitted span (0.2.1, RP66-2), fallback on anything else).
+- `src/codec.js`, `src/seal.js`, `src/wasm/` — 0.3.0's codec (above).
+- `lab/codec-proof.sh` — the codec's lab proof (`up` / `run <case>` / `down`);
+  `lab/goldenbody.go` writes `crypto.GoldenBody` bodies for it.
 - `wrangler.toml` — name `stored-s3-edge`, route `s3.stored.cloud/*` on the
-  stored.cloud zone of the PRODUCTION account, observability on, var
-  `VAULTAIRE_ORIGIN`.
+  stored.cloud zone of the PRODUCTION account, observability on, vars
+  `VAULTAIRE_ORIGIN` and `ENVIRONMENT = "production"`, the module rules and
+  `limits.cpu_ms`.
 
 ## Configuration
 
@@ -120,6 +192,7 @@ JavaScript in the byte path. `docs/API.md` tells aws-cli users to set
 
 ```
 cd edge/s3-ingest
+make -C ../.. edge-wasm                  # the wasm modules, by the client_build recipe (0.3.0)
 npx -y wrangler@4.151.3 deploy          # CLOUDFLARE_API_TOKEN = the user token, CLOUDFLARE_ACCOUNT_ID = the production account
 npx -y wrangler@4.151.3 secret put VAULTAIRE_EDGE_TOKEN < /path/to/token   # once, and after a rotation
 ```

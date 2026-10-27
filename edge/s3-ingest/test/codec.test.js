@@ -1,0 +1,255 @@
+// WP-EDGE-2 Part B: the Worker 0.3.0's codec pipeline against a FAKE control
+// plane (an HTTP server answering index and commit in the shapes of Part A's
+// harness, internal/api/edge_codec_harness_test.go) and a FAKE backend (an
+// HTTP server storing PUT bodies, answering an MD5 ETag). The pipeline is
+// the Worker's own function (runCodec) with the real chunker.wasm and
+// e2ee.wasm; only the network is fake.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { loadGo, noWasm } from "./wasm-loader.js";
+import { MD5, Semaphore, chunkStream, runCodec, CODEC_IN_FLIGHT } from "../src/codec.js";
+import { sealedLength } from "../src/seal.js";
+import { codecTamper } from "../src/index.js";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const vectors = JSON.parse(readFileSync(join(here, "..", "..", "..", "internal", "crypto", "testdata", "chunker_golden.json"), "utf8"));
+
+function listen(handler) {
+  return new Promise((res) => {
+    const s = createServer(handler);
+    s.listen(0, "127.0.0.1", () => res({ s, url: `http://127.0.0.1:${s.address().port}` }));
+  });
+}
+
+function readAll(req) {
+  return new Promise((res, rej) => {
+    const parts = [];
+    req.on("data", (d) => parts.push(d));
+    req.on("end", () => res(Buffer.concat(parts)));
+    req.on("error", rej);
+  });
+}
+
+/** fakes starts the backend and the control plane; known = hashes the index holds as ready. */
+async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set() } = {}) {
+  const st = { puts: [], indexCalls: [], commits: [], stored: new Map(), inFlightPuts: 0, peakPuts: 0 };
+  const backend = await listen(async (req, res) => {
+    const body = await readAll(req);
+    st.inFlightPuts++;
+    st.peakPuts = Math.max(st.peakPuts, st.inFlightPuts);
+    if (putDelayMs) await new Promise((r) => setTimeout(r, putDelayMs));
+    st.inFlightPuts--;
+    const etag = createHash("md5").update(body).digest("hex");
+    st.puts.push({ path: req.url, contentLength: Number(req.headers["content-length"]), length: body.length, etag });
+    st.stored.set(req.url, { etag, length: body.length, body });
+    res.writeHead(putStatus, { ETag: `"${etag}"` });
+    res.end();
+  });
+  const control = await listen(async (req, res) => {
+    const body = JSON.parse((await readAll(req)).toString("utf8"));
+    if (req.headers["x-vaultaire-edge-token"] !== "tok") {
+      res.writeHead(404);
+      return res.end();
+    }
+    if (req.url === "/api/v1/edge/index") {
+      st.indexCalls.push(body.chunks.length);
+      const hits = [];
+      const misses = [];
+      for (const c of body.chunks) {
+        if (known.has(c.hash)) hits.push(c.hash);
+        else misses.push({ hash: c.hash, url: `${backend.url}/vaultaire/t-_global/_global/_chunks/t/${c.hash}.k1`, send_headers: { "content-length": String(sealedLength(c.size)) }, sealed_length: sealedLength(c.size) });
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ hits, misses }));
+    }
+    st.commits.push(body);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: body.outcome === "ok" ? 200 : 503, headers: { ETag: `"${body.body_md5 || ""}"` }, body: "" }));
+  });
+  const cp = (path, b) => fetch(`${control.url}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-vaultaire-edge-token": "tok" }, body: JSON.stringify(b) });
+  return { st, backend, control, cp, close: () => { backend.s.close(); control.s.close(); } };
+}
+
+function bodyRequest(bytes, piece = 1 << 20) {
+  let off = 0;
+  const stream = new ReadableStream({
+    pull(ctl) {
+      if (off >= bytes.length) return ctl.close();
+      const n = Math.min(piece, bytes.length - off);
+      ctl.enqueue(bytes.slice(off, off + n));
+      off += n;
+    },
+  });
+  return { headers: new Headers({ "content-length": String(bytes.length) }), body: stream };
+}
+
+async function codecDeps() {
+  return { chunker: await loadGo("chunker.wasm", "storedChunker"), e2ee: await loadGo("e2ee.wasm", "storedE2EE") };
+}
+
+function admitFor(e2ee) {
+  const pub = e2ee.publicKey(new Uint8Array(32).fill(7)).value;
+  return { edge: true, admit_id: "admit-1", codec: { version: 1, kem_public_key: Buffer.from(pub).toString("base64"), chunk_threshold: 4 << 20, segment_size: 1 << 20 } };
+}
+
+test("md5: the pure-JS MD5 equals node's, fed in uneven pieces", () => {
+  for (const n of [0, 1, 55, 56, 63, 64, 65, 1000, 123457]) {
+    const b = new Uint8Array(n).map((_, i) => (i * 7 + n) & 255);
+    const m = new MD5();
+    for (let o = 0; o < n; o += 37) m.update(b.subarray(o, Math.min(n, o + 37)));
+    assert.equal(m.hex(), createHash("md5").update(b).digest("hex"), `n=${n}`);
+  }
+});
+
+test("the golden body's boundaries through the cutter TransformStream are Go's", { skip: noWasm }, async () => {
+  const { chunker } = await codecDeps();
+  const body = chunker.goldenBody(vectors.seed, vectors.size).value;
+  const cutter = chunkStream(chunker);
+  const lengths = [];
+  const started = Date.now();
+  await bodyRequest(body, 3 << 19).body.pipeThrough(cutter.stream).pipeTo(new WritableStream({ write: (c) => { lengths.push(c.length); } }));
+  const ms = Date.now() - started;
+  assert.deepEqual(lengths, vectors.chunk_lengths, "byte-identical boundaries");
+  console.log(`cutter: ${vectors.size >> 20} MiB in ${ms} ms (${Math.round(vectors.size / 1048576 / (ms / 1000))} MB/s in node)`);
+});
+
+test("runCodec: a 20 MiB body — index calls of ≤ 64 chunks, one PUT per miss at its sealed length, the commit names the backend's ETags", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes();
+  try {
+    const body = deps.chunker.goldenBody(4620, 20 << 20).value;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    assert.equal(relay.status, 200);
+    assert.ok(f.st.indexCalls.length >= 1 && f.st.indexCalls.every((n) => n >= 1 && n <= 64), `index batches ${f.st.indexCalls}`);
+    assert.equal(f.st.commits.length, 1);
+    const commit = f.st.commits[0];
+    assert.equal(commit.outcome, "ok");
+    assert.equal(commit.admit_id, "admit-1");
+    assert.equal(commit.body_md5, createHash("md5").update(body).digest("hex"));
+    assert.equal(commit.chunks.reduce((a, c) => a + c.size, 0), body.length, "the chunk list covers the body");
+    const stored = commit.chunks.filter((c) => c.status === "stored");
+    assert.equal(f.st.puts.length, stored.length, "one PUT per miss");
+    for (const p of f.st.puts) assert.equal(p.contentLength, p.length, "content-length is the body's");
+    for (const c of stored) {
+      const blob = [...f.st.stored.values()].find((s) => s.etag === c.backend_etag.replace(/"/g, ""));
+      assert.ok(blob, `the commit's ETag ${c.backend_etag} is one the backend answered`);
+      assert.equal(c.sealed_size, sealedLength(c.size));
+      assert.equal(blob.length, c.sealed_size);
+      assert.equal(blob.body[0], 0x06, "a 0x06 blob");
+    }
+    // Same boundaries as the chunker over the whole body.
+    const { chunker } = deps;
+    const id = chunker.create().value;
+    const want = [...chunker.push(id, body).value, ...chunker.finish(id).value];
+    chunker.free(id);
+    assert.deepEqual(commit.chunks.map((c) => c.size), want);
+    for (const c of commit.chunks) assert.match(c.hash, /^[0-9a-f]{64}$/);
+  } finally {
+    f.close();
+  }
+});
+
+test("runCodec: chunks the index holds are hits — no PUT, the commit says hit", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const body = deps.chunker.goldenBody(4621, 6 << 20).value;
+  const first = await fakes();
+  let hashes;
+  try {
+    await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: first.cp });
+    hashes = new Set(first.st.commits[0].chunks.map((c) => c.hash));
+  } finally {
+    first.close();
+  }
+  const again = await fakes({ known: hashes });
+  try {
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: again.cp });
+    assert.equal(relay.status, 200);
+    assert.equal(again.st.puts.length, 0, "0 PUTs");
+    assert.ok(again.st.commits[0].chunks.every((c) => c.status === "hit"));
+  } finally {
+    again.close();
+  }
+});
+
+test("runCodec: a repeated chunk is asked once and committed as a hit after its first occurrence", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const block = deps.chunker.goldenBody(4622, 12 << 20).value;
+  // The same 12 MiB block twice: the chunker cuts the same chunks again
+  // after the first boundary inside the second copy.
+  const body = new Uint8Array(block.length * 2);
+  body.set(block, 0);
+  body.set(block, block.length);
+  const f = await fakes();
+  try {
+    await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    const chunks = f.st.commits[0].chunks;
+    const asked = f.st.indexCalls.reduce((a, b) => a + b, 0);
+    assert.equal(asked, new Set(chunks.map((c) => c.hash)).size, "one ask per distinct hash");
+    const firstSeen = new Map();
+    chunks.forEach((c, i) => { if (!firstSeen.has(c.hash)) firstSeen.set(c.hash, i); });
+    chunks.forEach((c, i) => { if (firstSeen.get(c.hash) !== i) assert.equal(c.status, "hit", `chunk ${i} repeats chunk ${firstSeen.get(c.hash)}`); });
+    assert.ok(firstSeen.size < chunks.length, "the second copy repeats chunks of the first (precondition)");
+    assert.equal(f.st.puts.length, firstSeen.size);
+  } finally {
+    f.close();
+  }
+});
+
+test("back-pressure: a 200 MiB body with every PUT delayed 50 ms holds at most CODEC_IN_FLIGHT chunks", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ putDelayMs: 50 });
+  try {
+    const body = deps.chunker.goldenBody(4623, 200 << 20).value;
+    const sem = new Semaphore(CODEC_IN_FLIGHT);
+    const started = Date.now();
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp, sem });
+    assert.equal(relay.status, 200);
+    assert.ok(sem.peak <= CODEC_IN_FLIGHT, `peak ${sem.peak}`);
+    assert.equal(sem.peak, CODEC_IN_FLIGHT, "the bound is reached (the PUTs are the slow side)");
+    assert.ok(f.st.peakPuts <= CODEC_IN_FLIGHT, `peak PUTs ${f.st.peakPuts}`);
+    const ms = Date.now() - started;
+    console.log(`back-pressure: 200 MiB, PUTs +50 ms: ${ms} ms, peak held ${sem.peak}, index calls ${f.st.indexCalls.length} (batches ${f.st.indexCalls.slice(0, 8)}…), rss ${Math.round(process.memoryUsage().rss / 1048576)} MiB`);
+  } finally {
+    f.close();
+  }
+});
+
+test("a failure commits edge_error and throws (the caller answers 503) — a backend PUT 500", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ putStatus: 500 });
+  try {
+    const body = deps.chunker.goldenBody(4624, 3 << 20).value;
+    await assert.rejects(runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp }), /chunk PUT answered 500/);
+    assert.equal(f.st.commits.length, 1);
+    assert.deepEqual(f.st.commits[0], { admit_id: "admit-1", outcome: "edge_error" });
+  } finally {
+    f.close();
+  }
+});
+
+test("a body shorter than its content-length is an edge_error, never a commit", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes();
+  try {
+    const body = deps.chunker.goldenBody(4625, 2 << 20).value;
+    const req = bodyRequest(body);
+    req.headers.set("content-length", String(body.length + 5));
+    await assert.rejects(runCodec(req, admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp }), /content-length/);
+    assert.equal(f.st.commits[0].outcome, "edge_error");
+  } finally {
+    f.close();
+  }
+});
+
+test("CODEC_TAMPER is a lab switch: refused when ENVIRONMENT is production", () => {
+  assert.equal(codecTamper({}), "");
+  assert.equal(codecTamper({ CODEC_TAMPER: "etag" }), "etag");
+  assert.equal(codecTamper({ CODEC_TAMPER: "key", ENVIRONMENT: "lab" }), "key");
+  assert.throws(() => codecTamper({ CODEC_TAMPER: "etag", ENVIRONMENT: "production" }), /production/);
+  assert.throws(() => codecTamper({ CODEC_TAMPER: "other" }), /CODEC_TAMPER/);
+});

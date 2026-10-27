@@ -27,6 +27,18 @@
 // deployed script downloads back byte-identical (Step 0.6).
 //
 // The pure parts are exported for `node --test` (test/*.test.js).
+//
+// 0.3.0 (WP-EDGE-2 Part B): an admit that answers `codec` (a codec tenant's
+// write, the edge's rule — no url) is the codec's: the body is chunked,
+// hashed, indexed, sealed and stored by src/codec.js and committed as a
+// chunk list. That is the ONE place JavaScript touches the bytes, on purpose
+// (the host must read them to chunk them). The modules it needs —
+// src/codec.js, src/seal.js, src/wasm/{chunker.wasm, e2ee.wasm,
+// wasm_exec.js} — are each published as the file and each is a client_build
+// row; the wasm is loaded at the first codec request (dynamic import), so
+// every other request costs nothing new.
+
+import { runCodec } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -186,6 +198,82 @@ export function readCommit(admit, backendResponse, error, startedAt) {
   return r;
 }
 
+// --- the codec (0.3.0) --------------------------------------------------------
+
+/**
+ * codecTamper reads CODEC_TAMPER, the LAB switch of the tampered-host proofs
+ * (WP-EDGE-2 Part B (g): "etag" reports a wrong backend ETag, "key" seals
+ * under another public key). It is refused outright when ENVIRONMENT is
+ * production — the deployed Worker can never run a tampered build.
+ */
+export function codecTamper(env) {
+  const t = (env && env.CODEC_TAMPER) || "";
+  if (!t) return "";
+  if (env.ENVIRONMENT === "production") throw new Error("CODEC_TAMPER is set on the production Worker: refused");
+  if (t !== "etag" && t !== "key") throw new Error(`CODEC_TAMPER=${t}: only etag or key`);
+  return t;
+}
+
+let codecModules = null;
+
+/** bootGo runs one Go WebAssembly module and returns the API it registers. */
+async function bootGo(module, name) {
+  const go = new globalThis.Go();
+  const instance = await WebAssembly.instantiate(module, go.importObject);
+  go.run(instance); // never resolves: the module serves
+  for (let i = 0; i < 100 && !globalThis[name]; i++) await new Promise((r) => setTimeout(r, 1));
+  if (!globalThis[name]) throw new Error(`${name} did not register`);
+  return globalThis[name];
+}
+
+/** loadCodec loads the codec's WebAssembly once per isolate. */
+function loadCodec() {
+  if (!codecModules) {
+    codecModules = (async () => {
+      await import("./wasm/wasm_exec.js");
+      const [c, e] = await Promise.all([import("./wasm/chunker.wasm"), import("./wasm/e2ee.wasm")]);
+      return { chunker: await bootGo(c.default, "storedChunker"), e2ee: await bootGo(e.default, "storedE2EE") };
+    })();
+    codecModules.catch(() => {
+      codecModules = null;
+    });
+  }
+  return codecModules;
+}
+
+/**
+ * serveCodec runs the codec over an admitted write. Before the body is read
+ * (the modules would not load), the admit is committed edge_error and the
+ * request passes to the origin; once it is read, any failure is a 503
+ * SlowDown — the body is gone, the request can never be passed on.
+ */
+async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
+  const log = (o) => console.log(JSON.stringify(o));
+  const cp = (path, body) => controlPlane(env, path, body, ORIGIN_TIMEOUT_MS);
+  let mods;
+  try {
+    mods = await loadCodec();
+  } catch (e) {
+    log({ edge: "codec_unavailable", error: String(e && e.message ? e.message : e), request_id: requestId });
+    try {
+      const r = await cp("/api/v1/edge/commit", { admit_id: admit.admit_id, outcome: "edge_error" });
+      await r.body?.cancel();
+    } catch {
+      // the reaper settles the admit at its expiry
+    }
+    return fetch(request);
+  }
+  let commit;
+  try {
+    commit = await runCodec(request, admit, env, ctx, { ...mods, controlPlane: cp, log, requestId, tamper });
+  } catch (e) {
+    log({ edge: "codec_failed", error: String(e && e.message ? e.message : e), request_id: requestId });
+    return slowDown(url.pathname, requestId);
+  }
+  if (!commit) return slowDown(url.pathname, requestId);
+  return relayResponse(commit);
+}
+
 // --- the Worker ------------------------------------------------------------
 
 function slowDown(path, requestId) {
@@ -284,6 +372,13 @@ export default {
     const kind = classify(request);
     if (kind.kind === "pass") return fetch(request);
     if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return fetch(request);
+    let tamper;
+    try {
+      tamper = codecTamper(env);
+    } catch (e) {
+      console.log(JSON.stringify({ edge: "refused", error: e.message }));
+      return fetch(request);
+    }
 
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
@@ -302,9 +397,13 @@ export default {
       return fetch(request);
     }
     if (admit.refusal) return relayResponse(admit.refusal);
-    if (!admit.edge) return fetch(request);
+    if (!admit.edge) {
+      console.log(JSON.stringify({ edge: "pass", op: kind.kind, reason: admit.reason || "", request_id: requestId }));
+      return fetch(request);
+    }
 
     if (kind.kind === "get") return serveRead(request, env, ctx, admit, requestId);
+    if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
 
     const moved = await moveBody(request, admit);
     const commitBody = { admit_id: admit.admit_id, ...moved };

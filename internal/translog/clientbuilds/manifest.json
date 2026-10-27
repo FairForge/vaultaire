@@ -63,6 +63,38 @@
       "sha256": "c5b1467a9baf911fe4adaa096e153488a76ccf66ec6d0de17144936c588cd031",
       "toolchain": "go1.26.10",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-ingest",
+      "version": "0.3.0",
+      "source_commit": "192383b0e56a47403c6a2e395d82f6893f7c876e",
+      "sha256": "f40f2779be78d6b47d4306e5ee0a270c14f8d63a36a991c430b3e13a336c438c",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-codec",
+      "version": "0.3.0",
+      "source_commit": "192383b0e56a47403c6a2e395d82f6893f7c876e",
+      "sha256": "a6f44eddb144c82341ae54b8b6729c60ba5c3cedb67de777f09b7120731b3860",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-seal",
+      "version": "0.3.0",
+      "source_commit": "192383b0e56a47403c6a2e395d82f6893f7c876e",
+      "sha256": "e7d660227fff17da65eab14f8d463d451e28e979e5f4cc2735ac3709aa6ad59c",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-wasm-exec",
+      "version": "0.3.0",
+      "source_commit": "192383b0e56a47403c6a2e395d82f6893f7c876e",
+      "sha256": "0c949f4996f9a89698e4b5c586de32249c3b69b7baadb64d220073cc04acba14",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }
