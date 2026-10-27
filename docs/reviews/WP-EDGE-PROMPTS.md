@@ -945,15 +945,21 @@ Architecture notes
 ultrathink
 ```
 
-## Stage 1a Prompt 46b: WP-EDGE-2 Part B — the Worker 0.3.0 pipeline, the lab proof, dedup-measure (Part 0: RP68's findings)
+## Stage 1a Prompt 46b: WP-EDGE-2 Part B — the Worker 0.3.0 pipeline, the lab proof, dedup-measure (Part 0: RP68-1…6)
+
+*Refreshed 2026-10-27 by the RP68 review (`docs/reviews/WP-EDGE-2A-REVIEW.md`):
+Part 0 is RP68's list, and RP68-1 changes WHAT the pipeline admits — every
+edge-eligible write of a codec tenant, not only the origin's chunked
+placements. Two editions follow: this one (the chain's), and an Opus edition
+below with the same scope as numbered steps. Paste ONE of them.*
 
 Continue from WP-EDGE-2 Part A (2026-10-27: #994 Part 0 + the Worker 0.2.1,
 #995 the codec, #997 the control plane + migration 111; note
 docs/reviews/WP-EDGE-2A.md — read § Decisions D-EDGE-16…21 and § Residuals
 RB2-1…5 + RB-9) and from its post-merge review RP68
-(docs/reviews/WP-EDGE-2A-REVIEW.md once written — its findings are THIS
-prompt's Part 0; if RP68 has not run yet, run it first as its own session).
-Most recent merged PR and open PRs: `git log origin/main`, `gh pr list`.
+(docs/reviews/WP-EDGE-2A-REVIEW.md — its findings are THIS prompt's Part 0,
+in the order its last section gives). Most recent merged PR and open PRs:
+`git log origin/main`, `gh pr list`.
 
 Read first: docs/reviews/WP-EDGE-2A.md (the harness
 internal/api/edge_codec_harness_test.go is THE ORACLE: the Worker must
@@ -964,55 +970,74 @@ Go reference of what the Worker must produce byte-compatibly: the 0x06
 header, HKDF(chunk key, "stored/edge-codec/stream-v1" ‖ header) → AES-256-GCM
 1 MiB segments with the 0x04 nonce/last-flag layout, the chunk key wrapped
 with sdk/wasm's sealTo under info "stored/edge-codec/chunk-key/v1");
-sdk/chunkerwasm (the chunker's WASM API: create/push/finish/free);
-edge/s3-ingest/src/index.js and README; bench-results/EDGE-RELAY-2026-10-26.md
-(JS in the byte path halves a stream — slice 2 puts WASM in it ON PURPOSE;
-this prompt measures what it costs); contract lines 4, 5, 6 (cite in the PR
-body).
+internal/crypto/stream.go (`streamAEAD`, `streamAAD`, `newStreamSealer` —
+the exact nonce and AAD rules; never guess them); sdk/chunkerwasm (the
+chunker's WASM API: create/push/finish/free); edge/s3-ingest/src/index.js
+and README; bench-results/EDGE-RELAY-2026-10-26.md (JS in the byte path
+halves a stream — slice 2 puts WASM in it ON PURPOSE; this prompt measures
+what it costs); contract lines 4, 5, 6 (cite in the PR body).
 
-Lane: Engine. No migration expected (next: 112 — claim it only if RP68
-forces one). PRs: (0) RP68's fixes; (A) the Worker 0.3.0 + its node tests;
+Lane: Engine. No migration expected (next: 112 — claim it only if Part 0
+forces one). PRs: (0) RP68's fixes — the control plane first, the Worker is
+written against the corrected admit; (A) the Worker 0.3.0 + its node tests;
 (B) cmd/tools/dedup-measure; (C) the docs PR (WP-EDGE-2B.md, STATUS, plan
-40.10, CLAUDE.md rows, Prompt 47's text refreshed in this file).
+40.10 + the three § 40.5 sentences RP68 C-3/C-4/C-5, CLAUDE.md rows, Prompt
+47's text refreshed in this file).
 
 What to build
-1. PART 0: RP68's findings, each exactly as its fix column says.
-2. THE WORKER 0.3.0 (edge/s3-ingest): a codec admit (admit.codec set) runs
+0. PART 0, in RP68's order: **RP68-1** the edge eligibility rule — a codec
+   tenant's whole PUT ≥ EDGE_MIN_BYTES and EVERY part of a multipart upload
+   is codec when the bucket allows chunking (`!versioned`, `!byTier`,
+   `!byRegion`, not SSE-C, the `chunking` flag) — `placementRequest.EdgeCodec`
+   makes `decidePlacement` treat the size as over the threshold so every
+   other rule stays the one decision; the grant's `chunk_threshold` =
+   EDGE_MIN_BYTES; the harness gains a 12 MiB whole PUT and an 8 MiB-part
+   upload (chunked rows at the edge where the origin stores whole — the note
+   says so). **RP68-2** the commit waits on a young claim (chunk_claim.go's
+   backoff, ≤ 60 s on the commit's clock) before `errEdgeChunkVanished`;
+   **RP68-6** the hit's `size_bytes` check; **RP68-3** the HEAD sample at
+   commit (the first stored chunk + 1 in 32; a mismatch refuses the commit,
+   `head_mismatch`), `routing_truth`'s chunked sample reads codec chunks
+   through `openEdgeCodecChunk`; **RP68-5** `chunk_move` verifies AES256-EW
+   by MD5; **RP68-4** the metric names. Each with its red test.
+1. THE WORKER 0.3.0 (edge/s3-ingest): a codec admit (admit.codec set) runs
    the pipeline instead of moveBody — the request body through a
    TransformStream into the WASM chunker (chunker.wasm + wasm_exec.js
    shipped as additional modules beside index.js; `no_bundle` keeps them
-   separate files — probe in Step 0 how a multi-module Worker's
-   client_build row is computed: the manifest row should cover index.js AND
-   chunker.wasm, likely as two rows or a combined digest — decide and say
-   so), sha256 per chunk (WebCrypto digest), the index call per 64 chunks
-   (one /index call per batch; the LAST batch may be smaller), per miss:
-   seal (WebCrypto AES-GCM per 1 MiB segment under a random key from
+   separate files — Step 0.2 decides how a multi-module Worker's
+   client_build rows are computed: one row per module file is the default
+   answer), sha256 per chunk (WebCrypto digest), the index call per 64
+   chunks (one /index call per batch; the LAST batch may be smaller), per
+   miss: seal (WebCrypto AES-GCM per 1 MiB segment under a random key from
    crypto.getRandomValues; HKDF via WebCrypto deriveBits with the info =
    "stored/edge-codec/stream-v1" ‖ header; the nonce layout stream.go's;
    the wrap via sdk/wasm's sealTo — load e2ee.wasm too, or extract the
-   HPKE seal into a smaller module — measure both, Step 0) and PUT to the
+   HPKE seal into a smaller module — measure both, Step 0.3) and PUT to the
    link with Content-Length = sealed_length; back-pressure: at most N
    chunks buffered (the Workers memory limit is 128 MB — N ≤ 4 of 16 MiB
    worst-case, measure), the body read paced by the PUTs; then the commit
    with the ordered chunk list + body_md5 (MD5 in WASM or JS — the ETag;
-   measure its cost). A pipeline failure ANYWHERE falls back: the admit is
-   failed via commit (outcome edge_error) and the ORIGIN takes the request
-   — but the body is partially consumed: a codec admit CANNOT fall back to
-   fetch(request) once a byte is read; answer the client 503 SlowDown +
-   Retry-After (the client retries; the commit releases everything) — say
-   so in the README and the note.
-3. THE LAB PROOF through wrangler dev (the D-EDGE-7 topology: aws-cli →
+   measure its cost). A pipeline failure ANYWHERE: the admit is failed via
+   commit (outcome edge_error) and the client answered 503 SlowDown +
+   Retry-After — a codec admit CANNOT fall back to fetch(request) once a
+   byte is read (the body is consumed); say so in the README and the note.
+2. THE LAB PROOF through wrangler dev (the D-EDGE-7 topology: aws-cli →
    wrangler dev as HTTP proxy → the lab origin with
-   ENCRYPTION_MASTER_KEY_FILE): a 100 MiB `aws s3 cp` admitted codec,
-   chunked by the WASM chunker at the GOLDEN boundaries, sealed, stored,
-   committed; the origin reads it back MD5-equal; a re-upload = 100 % hits
-   and 0 chunk PUTs; the rows equal the HARNESS's for the same body (the
-   oracle — compare manifests row by row in SQL); a multipart upload with
-   ≥ 64 MiB parts; a mid-body cut (kill aws-cli) → the claims dropped by
-   the commit/reaper; the per-stream RATE measured against Part A's
-   pass-through baseline (the whole point of the bench caveat) and the
-   isolate's memory watched (`wrangler dev` reports it).
-4. CMD/TOOLS/DEDUP-MEASURE (F-3): the number the owner decides F-37 with.
+   ENCRYPTION_MASTER_KEY_FILE and EDGE_TRUST_ANY_PEER): a 100 MiB `aws s3
+   cp` admitted codec, chunked by the WASM chunker at the GOLDEN
+   boundaries, sealed, stored, committed; the origin reads it back
+   MD5-equal; a re-upload = 100 % hits and 0 chunk PUTs; the rows equal the
+   HARNESS's for the same body (the oracle — compare manifests row by row
+   in SQL); an aws-cli multipart upload with DEFAULT 8 MiB parts (RP68-1)
+   AND one with ≥ 64 MiB parts; a body with a repeated 4 MiB region across
+   parts (RP68-2: parallel parts sharing chunks, no 503); a mid-body cut
+   (kill aws-cli) → the claims dropped by the commit/reaper; a TAMPERED
+   host (a test build that reports a wrong ETag; one that seals under the
+   wrong key) → the commit refused (RP68-3); the per-stream RATE measured
+   against Part A's pass-through baseline and the isolate's memory watched
+   (`wrangler dev` reports it); the index call's latency per 64-chunk batch
+   (RP68-7's number).
+3. CMD/TOOLS/DEDUP-MEASURE (F-3): the number the owner decides F-37 with.
    A read-only tool against a lab corpus (a directory tree, or a bucket via
    the S3 API with a provided key): chunk every file with the frozen
    chunker, hash, and report the dedup fraction WITHIN one tenant and
@@ -1021,7 +1046,7 @@ What to build
    fraction (what a global index would save beyond per-tenant dedup — the
    number contract line 5's refusal is weighed against). Table in
    cmd/tools/README.md. Never writes; never touches prod.
-5. Worker 0.3.0's client_build row(s) + wrangler deploy on the production
+4. Worker 0.3.0's client_build row(s) + wrangler deploy on the production
    account — WITH RB-9's capture armed FIRST (Step 0.1): this is the next
    CONTENT-changing deploy, the one that reproduces the first-request 403.
 
@@ -1032,11 +1057,11 @@ pass-through probe (the Part A recipe: If-None-Match + Range, the bench
 key, a nonexistent bucket) within 15 s, diff the failing request's headers
 against a succeeding one in the pcap; the probe writes nothing. 0.2 the
 multi-module no_bundle deploy: does `wrangler deploy` with extra modules
-keep each file byte-identical and downloadable (`…/content/v2` parts)? How
-does the manifest row cover them — decide. 0.3 WebCrypto AES-GCM segment
-rate in workerd (`wrangler dev`) and the e2ee.wasm load cost per isolate;
-0.4 the chunker's rate in workerd (node was 123 MB/s); 0.5
-`encodeBody: "manual"` + an un-decoded subrequest for RP66-1's residual
+keep each file byte-identical and downloadable (`…/content/v2` parts)? One
+manifest row per module file unless the probe forbids it. 0.3 WebCrypto
+AES-GCM segment rate in workerd (`wrangler dev`) and the e2ee.wasm load
+cost per isolate; 0.4 the chunker's rate in workerd (node was 123 MB/s);
+0.5 `encodeBody: "manual"` + an un-decoded subrequest for RP66-1's residual
 (both backends): would stored-Content-Encoding objects be servable at the
 edge? Probe only; the fix is a later part.
 
@@ -1047,8 +1072,8 @@ the Worker OPENS with crypto.OpenWrappedChunk (export a test vector from
 the node test, open it in a Go test — the cross-implementation pin, as
 TestE2EE_WASMMatchesNative does); the 503 on a mid-pipeline failure (never
 a silent fallback with a consumed body); the batch split at 64 chunks; the
-back-pressure bound. Structural: the client manifest rows; `make
-test-edge` carries everything.
+back-pressure bound; Part 0's six. Structural: the client manifest rows;
+`make test-edge` carries everything.
 
 Architecture notes
 - Contract lines 4, 5, 6 cited in every PR body. The Worker holds the
@@ -1058,13 +1083,888 @@ Architecture notes
   the admit answers the whole PUT anyway). The flag stays OFF; the owner's
   post-F-14 session flips it (the chain's last bullet).
 - Closeout: write Prompt 47's text refreshed (WP-EDGE-3, the data node —
-  the chain's summary + current line numbers) into this file; WP-EDGE-2B.md
+  the drafts below + current line numbers) into this file; WP-EDGE-2B.md
   with Step 0 / decisions / residuals; STATUS; plan 40.10; the ledger row.
   The post-merge review is RP70.
 - Commit: feat(edge,tools): WP-EDGE-2 Part B — … [WP-EDGE-2]; merge with
   `gh pr merge --auto` (merge queue; never --admin).
 
 ultrathink
+
+## About the Opus editions (read once)
+
+The same scope as the chain's prompt above it, written for a session that
+runs on Claude Opus rather than Fable: every decision is made in the text
+(nothing to "decide — say so"), the work is numbered steps each ending in a
+command that proves it, the files and functions are named, and the session
+is told what to do when a step does not go as written. Rules for an Opus
+session, in every edition:
+
+- No `ultrathink` line. Read every file the prompt names BEFORE the first
+  edit; read `CLAUDE.md`, `internal/api/CLAUDE.md`, `internal/crypto/CLAUDE.md`
+  and `docs/reviews/WP-EDGE-PROMPTS.md`'s chain section first.
+- TDD: every step's test is written and seen RED before the code. A step
+  that cannot be made red-then-green as written is a STOP: write what you
+  found into the closeout note's "open questions" and go on to the next
+  independent step; never improvise a design.
+- Never change a format byte, a derivation label, a chunker constant, a
+  migration already on main, or a decision D-EDGE-n. Never run the
+  vaultaire binary to "check it" (it boots on :8000). Never `pkill` by
+  pattern on SLC. Secrets never printed.
+- Every PR body cites contract lines 4, 5, 6; commits end with the
+  reminder's attribution lines; merge with `gh pr merge --auto`, never
+  `--admin`; the shared checkout is never `git checkout`-ed when another
+  session may be on it — work in `git worktree add ../<name> origin/main`.
+- The closeout note has the same sections as the chain's prompt says (Step
+  0 answers, decisions, residuals, open questions), and the ledger row in
+  memory is updated, never a new line added.
+
+## Stage 1a Prompt 46b — Opus edition
+
+You are building WP-EDGE-2 Part B in the Vaultaire repository
+(`/Users/viera/fairforge/vaultaire`). Part A (merged: #994, #995, #997;
+note `docs/reviews/WP-EDGE-2A.md`) built the codec in Go and the control
+plane; the data-plane host in Part A is a Go test harness. Part B makes
+the Cloudflare Worker `stored-s3-edge` (edge/s3-ingest, 0.2.1 today) that
+host, version 0.3.0. Its post-merge review `docs/reviews/WP-EDGE-2A-REVIEW.md`
+(RP68) lists fixes that come FIRST. Work in a worktree from `origin/main`.
+
+Read before editing (in this order): docs/reviews/WP-EDGE-2A.md;
+docs/reviews/WP-EDGE-2A-REVIEW.md; internal/api/edge_codec_harness_test.go
+(the oracle: `uploadCodec`, `index`, `storeMisses`, `commit` show every
+request and answer shape); internal/api/edge_codec_control.go;
+internal/api/edge_codec_multipart.go; internal/api/edge_ingest.go (the
+admit/commit types at lines 120–300, `edgeAdmitWrite` ~503, `settleEdgeAdmit`
+~1124); internal/api/placement.go (`decidePlacement` ~159); internal/crypto/
+edge_codec.go and stream.go (`streamAEAD`, `streamAAD`, `newStreamSealer`,
+`StreamHeaderWrapped`, `StreamWrapLen`); sdk/chunkerwasm/main.go;
+sdk/wasm/main.go (`sealTo`); edge/s3-ingest/src/index.js, README.md,
+test/*.test.js, wrangler.toml; Makefile targets `test-edge`,
+`edge-chunker-wasm`, `sdk-wasm`; scripts/build-client.sh;
+internal/translog/clientbuilds/manifest.json.
+
+The wire shapes (from the harness; do not invent fields):
+- admit → `{edge:true, admit_id, codec:{version, kem_public_key (base64,
+  1216 bytes), chunk_threshold, segment_size}, expires_at}` and NO `url`.
+- index: `POST /api/v1/edge/index` `{admit_id, chunks:[{hash: sha256 hex,
+  size}]}` → `{hits:[hash…], misses:[{hash, url, send_headers, sealed_length}]}`.
+- commit: `POST /api/v1/edge/commit` `{admit_id, outcome:"ok", chunks:
+  [{hash, size, sealed_size, backend_etag, status:"stored"|"hit"} in body
+  order], body_md5: hex}` → the relayed S3 answer. A failure: `{admit_id,
+  outcome:"edge_error"}`.
+- Every call carries `X-Vaultaire-Edge-Token` as today.
+
+PR 0 — the RP68 fixes (control plane, Go). Branch `stage1a-p46b-part0`.
+1. RP68-1. Test first in edge_codec_harness_test.go: (a) a 12 MiB whole PUT
+   of a codec tenant is admitted codec (`resp.Codec != nil`, no `url`);
+   (b) a multipart upload whose first part is 8 MiB is admitted codec and
+   its Complete reads back; (c) a 2 MiB PUT (under EDGE_MIN_BYTES) is
+   `pass_through_small` as before. Run `go test ./internal/api/ -run
+   TestEdgeCodec -v` — red. Then: add `EdgeCodec bool` to
+   `placementRequest` (placement.go); in `decidePlacement` compute
+   `overThreshold := req.Size > chunkThreshold || req.EdgeCodec` and use it
+   where `req.Size > chunkThreshold` is used today (two places); in
+   `edgeAdmitWrite` (edge_ingest.go ~612) call the codec gate for a PUT
+   when the tenant has the `edge_codec` flag by re-deciding placement with
+   `EdgeCodec: true` (one extra call only when the flag is on); in
+   `edgeAdmitCodecPart` (edge_codec_multipart.go ~66) replace the first
+   part's "own size places chunked" with the same `EdgeCodec: true`
+   decision. The grant's `ChunkThreshold` (edge_codec_control.go ~112) =
+   the server's EDGE_MIN_BYTES value. Green. Add one sentence to
+   docs/ENCRYPTION.md § the edge codec: "at the edge every write ≥ 4 MiB of
+   a codec tenant is a chunked row; the origin would store 4–64 MiB whole".
+2. RP68-2. Test: two part admits (parts 1 and 2 of one upload) whose bodies
+   share one chunk; part 2's index answers the shared chunk as a hit; part
+   2 commits FIRST in a goroutine while part 1 has not committed; assert
+   part 2's commit returns 200 after part 1's commit lands (use a channel
+   to release part 1 after 200 ms), never 503. Red. Then in
+   `referenceEdgeChunk` (edge_codec_control.go ~616): when the UPDATE hits
+   0 rows, SELECT the row's `state, pending_since`; if `pending` and
+   younger than `edgeCodecTakeover`, sleep with chunk_claim.go's backoff
+   (25 ms doubling to 1 s) and retry the UPDATE until 60 s have passed on
+   a `context.WithTimeout` of the commit's context, then return
+   `errEdgeChunkVanished`; if the row is gone, return `errEdgeChunkVanished`
+   at once. Green.
+3. RP68-6. Test: a commit whose hit entry carries a size different from the
+   row's `size_bytes` is refused (400 `InvalidRequest`). Red. Then
+   `referenceEdgeChunk` RETURNING `size_bytes` too; `settleEdgeCodecChunks`
+   compares it to `c.Size` and fails. Green.
+4. RP68-3. Test: the fake backend of the fixture gains a `HeadObject`
+   counter; a commit of 40 stored chunks makes exactly 2 HEADs (the first
+   and the 33rd); a commit whose first stored chunk's reported ETag differs
+   from what the fake backend holds is refused and gives everything back
+   (refs, claims, reservation; `edgeCodecChunks{outcome="head_mismatch"}`
+   = 1). Red. Then in `settleEdgeCodecChunks`'s `stored` branch: for the
+   first stored chunk and every 32nd after it, HEAD the blob through the
+   chunk store (`chunkStore.head` — add it beside `exists`, returning ETag
+   and size, on `engine.ChunkContext`) and compare the ETag (unquoted,
+   lower-case) and the size to `c.BackendETag` / `c.SealedSize`; a
+   mismatch → `fail(errEdgeChunkHeadMismatch)` → the commit answers 400
+   `InvalidRequest` with a suggestion naming the mismatch. Then in
+   routing_truth.go's chunked sample: a chunk row with `encryption_algo =
+   'AES256-EW'` is read through `openEdgeCodecChunk` (the read probe's
+   `unreadable` verdict). Test: a codec object whose chunk blob is
+   overwritten with other bytes of the same length is `unreadable` in the
+   next run. Green.
+5. RP68-5. Test: chunk_move's dry run over one `AES256-EW` row reports it
+   `at_address` (not missing/damaged). Red. Then the verify branch: when
+   the row's `encryption_algo` is `AES256-EW`, verify by MD5 of the blob
+   against `ciphertext_hash`. Green.
+6. RP68-4. Rename the metric outcomes: index-time `hit` / `miss`;
+   commit-time `referenced` / `stored` / `head_mismatch` / `failed`; the
+   reaper's codec expiry counts `claims_dropped` instead of `retired`.
+   Update the `init()` pre-creation lists and the Help strings. Tests
+   asserting labels updated.
+7. `make lint && make test` green; `make test-db` then `go test -race
+   ./internal/api/ -run 'TestEdgeCodec|TestIndexHolds|TestChunkMove|TestRoutingTruth'`.
+   PR title: `fix(api): WP-EDGE-2 Part B Part 0 — the RP68 fixes [WP-EDGE-2]`.
+   Body: the six items with their test names. `gh pr merge --auto`.
+
+PR A — the Worker 0.3.0. Branch `stage1a-p46b-worker`, after PR 0 merged.
+8. Step 0 probes, each answered in a scratchpad file you will paste into
+   the note: 0.2 `wrangler deploy --dry-run --outdir` of a Worker with
+   index.js + chunker.wasm + wasm_exec.js + e2ee.wasm as modules: list the
+   output files and their sha256; decision: one manifest row per module
+   file (`edge-ingest` for index.js, `edge-chunker` for chunker.wasm,
+   `sdk-wasm` for e2ee.wasm when its bytes equal the sdk's build, a new
+   closed-list client `edge-wasm-exec` for wasm_exec.js — add it to
+   internal/translog/entries.go's list). 0.3 in `wrangler dev`: time
+   WebCrypto AES-GCM over 64 × 1 MiB segments and the e2ee.wasm
+   instantiate; 0.4 the chunker's rate on 100 MiB in `wrangler dev`.
+   Write the numbers down before step 9.
+9. Node test first (edge/s3-ingest/test/codec.test.js) with a fake control
+   plane (an HTTP server answering admit/index/commit in the harness's
+   shapes) and a fake backend (an HTTP server storing PUT bodies and
+   answering an MD5 ETag): a 20 MiB body through the Worker's pipeline
+   function makes index calls of ≤ 64 chunks, one PUT per miss with
+   `content-length` = sealed_length, and a commit whose chunk list matches
+   the fake backend's ETags; the golden body's boundaries through the
+   TransformStream equal `internal/crypto/testdata/chunker_golden.json`.
+   Red (the function does not exist). Then write `src/codec.js`:
+   `async function runCodec(request, admit, env, ctx)` — the body through
+   a TransformStream whose transform feeds `storedChunker.push`, each
+   completed chunk length cutting a Uint8Array from the buffer; per chunk:
+   `crypto.subtle.digest("SHA-256", chunk)`; chunks queued until 64 (or
+   the end) → one index call; per miss: `sealChunk(pub, version, chunk)`
+   (step 10) → `fetch(url, {method:"PUT", headers: send_headers, body:
+   sealed})`, the ETag from the response; hits recorded; at most 4 chunks
+   between hash and PUT at once (a counting semaphore; the reader awaits
+   it — this is the back-pressure); after the last PUT: the commit with
+   the ordered list and the body's MD5 (compute MD5 in JS over the stream
+   — a small pure-JS MD5 is acceptable here; measure it). Any throw →
+   commit `{outcome:"edge_error"}` and respond 503 with `Retry-After: 30`
+   and the S3 `SlowDown` XML; never `fetch(request)` after the body was
+   read. In index.js: when `admit.codec` is set, call `runCodec` instead
+   of `moveBody`. Green.
+10. The sealer, test first: `test/seal.test.js` seals a 3 MiB chunk under a
+    public key exported by the Go test
+    `TestEdgeCodec_ExportVectorForNode` (write it: it derives a lab key
+    pair with a fixed seed and writes `testdata/edge_codec_node.json`
+    {seed hex, public key base64}); the sealed bytes are written to a file
+    the Go test `TestEdgeCodec_NodeSealedChunkOpens` reads and opens with
+    `crypto.OpenWrappedChunk` under the same seed, comparing the plaintext.
+    Run the Go side after the node side; both must pass. Then write
+    `src/seal.js`: chunkKey = 32 random bytes; wrap =
+    `storedE2EE.sealTo(pub, chunkKey, utf8("stored/edge-codec/chunk-key/v1"),
+    null)` (1169 bytes — assert); header = [0x06, 0x03] ‖ version u32 BE ‖
+    wrap ‖ 1048576 u32 BE ‖ 7 random bytes; DEK = HKDF-SHA256(chunkKey,
+    salt = empty, info = utf8("stored/edge-codec/stream-v1") ‖ header, 32
+    bytes) through `crypto.subtle.deriveBits`; for segment i of ≤ 1 MiB:
+    nonce = prefix(7) ‖ i u32 BE ‖ (last ? 1 : 0) — read `stream.go`'s
+    nonce function and copy its byte order exactly; AES-256-GCM with
+    additionalData = header; output = header ‖ ct_0 ‖ … ‖ ct_{n-1}; assert
+    the total equals `sealed_length` from the index answer.
+11. Back-pressure and memory: a node test that feeds a 200 MiB body through
+    the pipeline with a fake backend that delays every PUT by 50 ms asserts
+    the peak number of chunks held ≤ 4 (instrument the semaphore). Then in
+    `wrangler dev`, upload 1 GiB and read the isolate memory it reports;
+    if it exceeds 100 MB, lower the bound to 3 and re-measure. Write both
+    numbers into the note.
+12. Lab proof (write a script `edge/s3-ingest/lab/codec-proof.sh` that does
+    it; keep it in the repo). Origin: a local vaultaire with
+    `ENCRYPTION_MASTER_KEY_FILE`, `EDGE_SERVICE_TOKEN`, `EDGE_TRUST_ANY_PEER=true`,
+    flags `edge_ingest`, `edge_codec`, `chunking` ON for the lab tenant (via
+    the admin API). Worker: `npx -y wrangler@4.151.3 dev` with the origin
+    as upstream; aws-cli with the lab key through it as an HTTP proxy
+    (`HTTPS_PROXY`/`--endpoint-url`, as Part A's lab did — read
+    docs/reviews/WP-EDGE-1A.md § Step 0 for the exact topology).
+    Run and record: (a) `aws s3 cp` of a 100 MiB file: admitted codec,
+    chunk count = the golden count for that body if you use
+    `crypto.GoldenBody` bytes (write them with a tiny Go program), read back
+    MD5-equal; (b) the same file again: 0 PUTs on the backend, 100 % hits;
+    (c) the SQL comparison: `tenant_chunk_refs` of the Worker's object vs
+    the harness's for the same body (run the harness upload against the
+    same lab DB with `go test -run TestEdgeCodecHarness_EndToEnd` pointed
+    at it, or replay its SQL) — same count, offsets, sizes; (d) an aws-cli
+    multipart with default 8 MiB parts and one with `--cli-write-timeout`
+    irrelevant, `multipart_chunksize 64MB`; (e) a 300 MiB body made of a
+    4 MiB block repeated (parallel parts sharing chunks) — no 503 in the
+    aws-cli debug log; (f) kill aws-cli at 50 %: within 20 min + 5 the
+    reaper's run shows `claims_dropped`; (g) two tampered Worker builds
+    (`wrangler dev` with `CODEC_TAMPER=etag` / `=key` env read only in a
+    test branch of seal.js — never deployable: assert at module load that
+    `CODEC_TAMPER` is unset when `env.ENVIRONMENT === "production"`): the
+    commit is refused 400, nothing stored for the object; (h) throughput:
+    1 GiB through 0.3.0 codec vs the same through 0.2.1 pass-through, MB/s
+    both, and the index call's p50/p95 from the Worker's log lines.
+13. README: a § "0.3.0 — the codec pipeline" (what runs, the 503 rule, the
+    memory bound, the module files and their manifest rows). Manifest rows
+    for every module file (sha256 of the deploy artefacts from step 8's
+    recipe; the Deploy repro step must rebuild them — extend
+    scripts/repro-check-clients.sh for the new clients). `make test-edge`
+    runs every node test. PR title `feat(edge): WP-EDGE-2 Part B — the
+    Worker 0.3.0 codec pipeline [WP-EDGE-2]`; body cites contract 4, 5, 6,
+    the Step 0 numbers and the lab proof's (a)–(h).
+
+PR B — `cmd/tools/dedup-measure`. Branch `stage1a-p46b-dedup-measure`.
+14. Test first (`cmd/tools/dedup-measure/main_test.go`): a temp tree with
+    three top-level directories holding files whose bytes overlap in known
+    amounts (write them from `crypto.GoldenBody` slices) yields the
+    expected per-tenant and cross-tenant unique byte totals. Red. Then the
+    tool: flags `-dir <path>` or `-bucket <name> -endpoint <url>` (reads
+    `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from the environment,
+    never a flag), `-tenants-by topdir`; chunk every file with
+    `crypto.DefaultChunker()`, sha256 per chunk; output a table: tenants,
+    files, total bytes, unique bytes within each tenant (sum), unique bytes
+    across all, and `cross_tenant_only_fraction = (sum of per-tenant unique
+    − global unique) / total`. Never writes. Row in cmd/tools/README.md.
+    Confirm `go list -deps ./cmd/vaultaire` does not include it. PR title
+    `feat(tools): dedup-measure — the F-3 number [WP-EDGE-2]`.
+
+PR C — docs. Branch `stage1a-p46b-docs`.
+15. docs/reviews/WP-EDGE-2B.md: Step 0 answers (0.1–0.5 with numbers),
+    what was built (PR 0, A, B), the lab proof table (a)–(h), decisions
+    (number them D-EDGE-22…), residuals (number them RB3-n), open
+    questions. docs/STATUS.md header line. docs/IMPLEMENTATION_PLAN.md:
+    one status bullet under § 40.10 after the Part A one; the three § 40.5
+    sentences from RP68 C-3/C-4/C-5 (one line each: "a request through the
+    dispatcher is billed as one, whatever it serves"; "no Cron Triggers /
+    Queue consumers on user Workers is inferred from the API surface and
+    builder reports, not documented"; Dynamic Workers "GA in practice since
+    2026-10-22, billed since 2026-05-26, Workers Paid only"). CLAUDE.md:
+    the `edge_admits` bullet's codec sentence gains "every edge write ≥ 4
+    MiB of a codec tenant"; edge/s3-ingest/README. In this file
+    (WP-EDGE-PROMPTS.md): refresh Prompt 47's two editions with the line
+    numbers as they are after your PRs, and mark 46b DONE in the chain.
+    Memory: update the ledger row 46B (never a new line).
+16. Deploy, LAST, with RB-9's capture armed: on the box, `sudo tcpdump -i lo
+    -s0 -w /tmp/rb9.pcap tcp port <ACTIVE_PORT>` (the port from
+    /opt/vaultaire/ACTIVE_PORT; sudo password in the Keychain
+    `vaultaire-slc-sudo`); then from edge/s3-ingest `source
+    ~/fairforge/.cloudflare-creds.env; CLOUDFLARE_API_TOKEN=$CLOUDFLARE_ZONE_TOKEN
+    CLOUDFLARE_ACCOUNT_ID=$CLOUDFLARE_PROD_ACCOUNT_ID npx -y wrangler@4.151.3
+    deploy`; within 15 s fire the signed pass-through probe (a GET with
+    If-None-Match + Range of a nonexistent bucket using `.env.bench`'s
+    `VAULTAIRE_BENCH_*` pair against s3.stored.cloud — 404 = auth passed,
+    403 = the bug); stop tcpdump; `tcpdump -r` the pcap for the two
+    requests, diff their headers, write the diff into WP-EDGE-2B.md § RB-9,
+    delete the pcap. The flag `edge_codec` stays OFF on prod. Verify
+    `curl -s https://stored.ge/health` and the Worker's version in the
+    Cloudflare dashboard's deployments list.
+
+Done means: PR 0, A, B, C merged through the queue; the lab proof table
+filled; the deploy's manifest rows in the log (`translog-verify -client`
+on each module file); the ledger row updated; Prompt 47 refreshed here.
+
+## Stage 1a Prompt 47: WP-EDGE-3 — the data node (`VAULTAIRE_ROLE=node`), `data_plane_hosts`, `host=slc` (Part 0: RP70's findings)
+
+*Draft written 2026-10-27 by RP68 ahead of its turn; Prompt 46b's closeout
+refreshes it with the line numbers as they are then. Two editions; paste one.*
+
+Continue from WP-EDGE-2 Part B (note docs/reviews/WP-EDGE-2B.md — its
+§ Decisions, § Residuals RB3-n, RB-9's capture result) and from its
+post-merge review RP70 (docs/reviews/WP-EDGE-2B-REVIEW.md — its findings
+are THIS prompt's Part 0; if RP70 has not run, run it first as its own
+session). `git log origin/main`, `gh pr list`.
+
+Read first: plan § 40.10 (the principle: the control plane picks a host
+per request; "the first hosts are the client and SLC itself, which exist";
+"unmetered data nodes running this binary stateless"), contract lines 4,
+10 (the attested data plane is NOT this — a node claims nothing of it; say
+so in the note), 13 (the tenant is the unit of disclosure — a tenant-scoped
+node admits one tenant); docs/reviews/WP-EDGE-1A.md RE-9 (the Cloudflare
+peer rule is the Worker's; a node is another peer); the RP68 review's
+RP68-3 (a BYO node's reports are never trusted for integrity: the HEAD
+sample becomes 100 % for a tenant-scoped host) and the 2026-10-26 COGS
+thread's rule (a customer-run host's reports are never trusted for
+METERING: a tenant-scoped host's GET is metered at the admitted span, not
+at its report); internal/api/edge_codec_harness_test.go (the Go pipeline
+that becomes the node's); internal/clientip (`PeerIsCloudflare`);
+cmd/vaultaire/main.go (the boot); deploy/ (the unit files' shape).
+
+Lane: Engine. Migration 112 `data_plane_hosts`. PRs: (0) RP70's fixes; (A)
+`internal/dataplane` — the pipeline as a package + the node role + the
+registry + per-host tokens; (B) `host=slc` + the registry-driven admit +
+the steering flag; (C) docs (WP-EDGE-3.md, DEPLOY.md § data nodes,
+deploy/node/, STATUS, plan 40.10, CLAUDE.md rows, Prompt 48 refreshed here).
+
+What to build
+1. `internal/dataplane`: the Worker's logic in Go, lifted from the harness —
+   `Mover` (admit → presigned PUT/GET → commit; the Part A/B shapes) and
+   `Codec` (admit → chunk with `crypto.DefaultChunker` → sha256 → index per
+   64 → `crypto.SealWrappedChunk` per miss → PUT → commit; the Part B
+   shapes), a `ControlPlane` interface with two implementations: HTTP (the
+   node: the edge calls over the service channel) and in-process (the
+   origin: the same functions called directly — `host=slc`). The harness
+   becomes a consumer of this package (its tests keep passing unchanged:
+   that is the proof the lift lost nothing).
+2. The node role: `VAULTAIRE_ROLE=node` boots `cmd/vaultaire` with NO
+   database, NO engine, NO jobs and only the data-plane routes (PutObject,
+   UploadPart, GetObject on its own hostname, `/health`, `/metrics`); env
+   `NODE_CONTROL_PLANE_URL`, `NODE_TOKEN` (credential → `_FILE` → env, the
+   master key's rules), `NODE_PUBLIC_HOST`; a heartbeat every 30 s to
+   `POST /api/v1/edge/heartbeat` (version, build sha, load). Everything
+   else the binary does is refused at boot in this role (a `STORAGE_MODE`,
+   a `DB_HOST` set = a Warn naming what is ignored). `deploy/node/`
+   carries the systemd unit and a one-line install (`curl | sh` is NOT it:
+   a script that downloads the signed release, verifies it with
+   `release-sign verify`, installs the unit).
+3. Migration 112 `data_plane_hosts`: `host` (PK, the public hostname),
+   `kind` (`edge` | `node` | `slc`), `address` (the peer IP the control
+   plane accepts the token from; NULL for `edge` = the Cloudflare rule),
+   `token_hash` (NULL for `edge` = the service token), `tenant_id` (NULL =
+   a platform host; set = a tenant-scoped host that admits ONLY that
+   tenant's requests and whose reports are never trusted — RP68-3 at
+   100 %, GET metered at the admitted span), `weight`, `health`
+   (`up` | `down` | `draining`), `last_seen`, `version`, `created_at`.
+   Seeded with the two hosts that exist: `s3.stored.cloud` (`edge`) and
+   `slc` (`slc`, weight 0). Admin routes `GET/PUT/DELETE
+   /api/v1/admin/data-plane-hosts/{host}` (admin JWT, audited
+   `data_plane.host_set`); the token is minted once and shown once.
+4. The edge calls accept a node: `edgeCallAuthorized` becomes "the service
+   token from a Cloudflare peer (the Worker) OR a host's token from that
+   host's registered address" (constant-time compare against
+   `token_hash`; `EDGE_TRUST_ANY_PEER` stays lab-only). Every admit and
+   commit records `host` on the `edge_admits` row (migration 112 adds the
+   column) and the metric families already labelled `host` carry it.
+5. `host=slc`: the origin's own PutObject / UploadPart / GetObject for an
+   edge-eligible request (flag `edge_ingest`, ≥ EDGE_MIN_BYTES, the
+   pass-through matrix's cases excluded) go through `internal/dataplane`
+   in-process — admit and commit as function calls, the bytes through the
+   same mover/codec on the same box — so every byte is labelled by host
+   and the rows are the ONE shape. Behind flag `data_plane_slc` (per
+   tenant, default OFF): OFF = the handlers as today. Proven equal rows
+   (the harness oracle) before the flag goes on for tenant zero on prod.
+6. Steering: Step 0.1 decides. If aws-cli, rclone and the SDKs follow a
+   307 on PutObject/GetObject to another host with a fresh signature, the
+   origin answers 307 to the healthiest node of highest `weight` for
+   edge-eligible requests behind flag `edge_redirect` (per tenant, default
+   OFF); if not, a node is reached by the hostname the customer configures
+   and the registry drives health, metrics and the admit's refusal of a
+   `down` host only. Either way the control plane never proxies bytes.
+7. Health: `vaultaire_data_plane_host_up{host,kind}` from `last_seen`
+   (a host unseen 90 s is `down`), rule `DataPlaneHostDown` (warn; page
+   when the only `up` host of a tenant-scoped set is down), the System page
+   card.
+
+Step 0 — probes into WP-EDGE-3.md: 0.1 the 307 behaviour of aws-cli v2,
+rclone, aws-sdk-go-v2 and boto3 on PutObject and GetObject to another
+hostname (a lab origin answering 307 Location to a second lab origin);
+0.2 the node's throughput on a VPS-class box (the Hostbrr test box in
+memory, or the Mac): a 1 GiB codec PUT through the node to Lyve, MB/s and
+CPU; 0.3 what a node leaks in its logs (nothing but admit ids and sizes —
+grep the node's log for hashes, keys, hostnames of other tenants).
+
+Tests (red first): the lifted package passes the harness unchanged; the
+node role refuses every non-data-plane route (a `chi.Walk` matrix); a
+node's token from another address is 404 (the edge routes' refusal), the
+right address 200; a tenant-scoped node's admit for another tenant is 403
+`AccessDenied` in the relayed XML; a tenant-scoped node's stored chunks
+are HEADed 100 %; its GET commit meters the admitted span whatever it
+reports; `host=slc` rows equal the direct handlers' rows for the same body
+(PUT, 8 MiB-part multipart, GET egress); the heartbeat flips `health`; the
+307 path (only if 0.1 says yes) re-signs; the admin routes' audit rows.
+Lab proof: two processes — the control plane on :8000 with the lab master
+key, the node on :8100 with its token — a 100 MiB `aws s3 cp` through the
+node → codec rows; a GET through the node; the control plane's log holds
+no byte path. Prod: `host=slc` at weight 0 → 1 for tenant zero (the
+Lightroom zip again: rows equal, HAProxy sees the body as today — it IS
+the origin).
+
+Architecture notes
+- A node holds the service channel's token and the request's keys only;
+  it never holds the master key or a tenant key version (contract 4); it
+  is not the attested data plane (contract 10 — say so).
+- BYO (a customer's own VPS as a tenant-scoped node) is the product shape
+  from the COGS thread: their bandwidth, our control plane; nothing it
+  reports is trusted for integrity or metering.
+- Closeout: WP-EDGE-3.md (Step 0, D-EDGE-n, residuals RB4-n), STATUS, plan
+  40.10, DEPLOY.md § data nodes, CLAUDE.md rows, the ledger row; refresh
+  Prompt 48's two editions here. The post-merge review is RP72.
+- Commit: feat(dataplane,api,database): WP-EDGE-3 — … [WP-EDGE-3]; merge
+  with `gh pr merge --auto`.
+
+ultrathink
+
+## Stage 1a Prompt 47 — Opus edition
+
+You are building WP-EDGE-3, the data node, in the Vaultaire repository.
+The Worker (edge/s3-ingest, 0.3.0) is today's only data-plane host; this
+prompt makes the Vaultaire binary itself a second kind of host (a stateless
+node on a cheap VPS), re-expresses the origin's own write path as a host
+(`host=slc`), and registers hosts in a table. Read the Opus rules in "About
+the Opus editions" above. Work in a worktree from `origin/main`. Migration
+112 is yours.
+
+Read before editing: plan § 40.10 (docs/IMPLEMENTATION_PLAN.md ~2961–2990);
+docs/ARCHITECTURE_CONTRACT.md lines 4, 10, 13; docs/reviews/WP-EDGE-2B.md
+and WP-EDGE-2B-REVIEW.md (Part 0 = its findings, in its last section's
+order); internal/api/edge_codec_harness_test.go in full (this IS the node's
+pipeline, in test form); internal/api/edge_ingest.go (`edgeCallAuthorized`,
+`handleEdgeAdmit`, `handleEdgeCommit`, `edgeAdmitPrelude`);
+internal/api/edge_get.go; internal/clientip/clientip.go (`PeerIsCloudflare`);
+cmd/vaultaire/main.go; internal/api/server.go (`NewServer`, the route
+registration order, `s3CredentialGate`); internal/api/admin_flags.go (the
+shape of an audited admin route); docs/DEPLOY.md; deploy/*.service.
+
+PR 0 — RP70's fixes, each as its fix column says, red test first. Branch
+`stage1a-p47-part0`. Merge before PR A.
+
+PR A — the package, the role, the registry. Branch `stage1a-p47-node`.
+1. `internal/dataplane/`: create `controlplane.go` with
+   `type ControlPlane interface { Admit(ctx, AdmitRequest) (AdmitResponse,
+   error); Index(ctx, IndexRequest) (IndexResponse, error); Commit(ctx,
+   CommitRequest) (CommitResponse, error) }` whose request/response types
+   are MOVED from internal/api (`edgeAdmitRequest`, `edgeAdmitResponse`,
+   `edgeIndexRequest`, `edgeIndexResponse`, `edgeCommitRequest`,
+   `edgeCommitChunk`) into this package with exported names; internal/api
+   aliases them (`type edgeAdmitRequest = dataplane.AdmitRequest`) so no
+   handler changes. Test: `go build ./...` and the whole api package's
+   tests pass unchanged.
+2. `internal/dataplane/mover.go` + `codec.go`: `func (h *Host) Write(ctx,
+   req *http.Request, body io.Reader, size int64) (*Result, error)` and
+   `Read(ctx, req) (*http.Response-like, error)`: the exact sequence the
+   harness's `uploadCodec` performs (admit; if `Codec`: chunk with
+   `crypto.DefaultChunker().Chunk`, sha256, index per 64, seal misses with
+   `crypto.SealWrappedChunk`, PUT with the signed headers, commit; else the
+   Part A move: PUT the body to the presigned link with the signed
+   headers, commit with the backend's answer; a GET: admit, presigned GET,
+   stream, commit at the headers). Test first: move the harness's helper
+   bodies (`uploadCodec`, `storeMisses`) to call `Host.Write` with an
+   in-process `ControlPlane` built over the Server's handlers (an
+   `httptest`-free adapter calling `s.edgeAdmit`-style functions — add
+   `func (s *Server) DataPlane() dataplane.ControlPlane`). Every harness
+   test must pass unchanged — that is the whole proof of step 2.
+3. The HTTP `ControlPlane` (`internal/dataplane/httpcp.go`): the three
+   calls over HTTPS with `X-Vaultaire-Edge-Token`, a 10 s timeout per call,
+   the commit on its own clock (`context.WithoutCancel` + 60 s). Test with
+   an `httptest` server replaying the harness's JSON.
+4. The node role, test first (`cmd/vaultaire/node_test.go`): with
+   `VAULTAIRE_ROLE=node`, `NODE_CONTROL_PLANE_URL=http://127.0.0.1:1`,
+   `NODE_TOKEN=x`×32, the process builds a router whose only routes are
+   `PUT /{bucket}/{key}`, `GET /{bucket}/{key}`, `/health`, `/metrics`
+   (a `chi.Walk` list, asserted exactly); `/api/v1/*`, `/dashboard`,
+   `/translog/*` are 404. Then `internal/node/` with `Serve(cfg)`: the
+   S3 request's bucket/key/query/headers go into the admit request as the
+   Worker builds them (read edge/s3-ingest/src/index.js's `admitRequest`
+   for the fields; the client IP is the node's peer), the body streams
+   through `Host.Write`, the relayed answer is written back. A heartbeat
+   goroutine POSTs `/api/v1/edge/heartbeat` every 30 s. In
+   cmd/vaultaire/main.go: `if os.Getenv("VAULTAIRE_ROLE") == "node" { node.
+   Main(); return }` before any driver or database is opened.
+5. Migration 112 `internal/database/migrations/112_data_plane_hosts.sql`:
+   the table as the chain prompt lists it (every column with a DEFAULT or
+   NULLable; `host TEXT PRIMARY KEY`; `kind TEXT NOT NULL CHECK (kind IN
+   ('edge','node','slc'))`; `health TEXT NOT NULL DEFAULT 'down'`), plus
+   `ALTER TABLE edge_admits ADD COLUMN IF NOT EXISTS host TEXT`. Two
+   seed rows with `INSERT … ON CONFLICT DO NOTHING`: `('s3.stored.cloud',
+   'edge', NULL, NULL, NULL, 1, 'up')` and `('slc', 'slc', NULL, NULL,
+   NULL, 0, 'up')`. Run `make test-db`; `TestMigrations_Reapply` and
+   `TestSQLLiteralsMatchSchema` green. The table is infrastructure: add it
+   to the export's excluded list with the reason and to
+   `TestTranslogTablesAreInfrastructure`-style guards where the schema
+   walk demands a row (run the api tests to find out which).
+6. The registry (`internal/api/data_plane_hosts.go`): `GET/PUT/DELETE
+   /api/v1/admin/data-plane-hosts/{host}` behind `requireJWT` +
+   `requireAdminMiddleware`, classified as admin WRITES in
+   `apiAdminWrites` (read internal/api/translog_read.go's lists; the
+   classifier test fails until you add them). PUT body `{kind, address,
+   tenant_id, weight, health}`; a `node` kind mints a 32-byte token on
+   first PUT, stores its sha256 and returns the token ONCE
+   (`token: "<hex>"` in that response only). Audit `data_plane.host_set`
+   via `audit.Record`. Tests: the three routes, the token shown once, the
+   audit row, 400 on a bad kind.
+7. `edgeCallAuthorized` (edge_ingest.go): today = service token +
+   Cloudflare peer. New: first try the service-token path as today; else
+   look the presented token's sha256 up in `data_plane_hosts` (a 15 s
+   cache, keyed by hash) and require the request's trusted peer IP
+   (`clientip`'s rule for the direct peer) to equal the row's `address`;
+   on success, put the host row in the request context
+   (`dataplane.WithHost`). Tests: a node token from the wrong address →
+   the edge 404; the right address → 200; a `down` host → 503 with
+   `Retry-After: 30` on admit (never on commit — a commit must always be
+   accepted).
+8. The tenant-scoped host: in `edgeAdmitPrelude`, if the context's host
+   has `tenant_id` set and the verified tenant differs → the relayed 403
+   `AccessDenied`, counted `vaultaire_data_plane_admits_total{outcome=
+   "refused"}`. In `settleEdgeCodecChunks`'s HEAD sample: `every := 32;
+   if host.TenantID != "" { every = 1 }`. In `settleEdgeGet`: for a
+   tenant-scoped host, `n = row.ContentLength` whatever
+   `BackendContentLength` says (a comment citing the COGS rule). Tests for
+   all three.
+9. `host` on the admit row: `insertEdgeAdmit` writes the context's host
+   name (`edge` for the Worker's service token, the row's `host` for a
+   node, `slc` for in-process); the metrics already labelled `host`
+   (`vaultaire_data_plane_admits_total`, `_bytes_total`) take it from the
+   row instead of the constant `edgeHost`. Test: an admit through a node
+   token carries its host.
+10. `deploy/node/vaultaire-node.service` (a copy of the app unit minus the
+    database and credentials, `Environment=VAULTAIRE_ROLE=node`,
+    `LoadCredential=node_token:/etc/vaultaire/node_token`) and
+    `deploy/node/install.sh` (downloads the release named on the command
+    line, `release-sign verify -vkey` with the public key in
+    docs/RELEASES.md, installs the binary and the unit, prints the
+    heartbeat URL). `shellcheck` clean. PR A title `feat(dataplane,node,
+    api,database): WP-EDGE-3 — the data node role, data_plane_hosts (112),
+    per-host tokens [WP-EDGE-3]`.
+
+PR B — `host=slc` and steering. Branch `stage1a-p47-slc`, after PR A.
+11. Test first: with flag `data_plane_slc` ON for a tenant, a 12 MiB PUT
+    through `HandlePut` produces rows identical to the same PUT through a
+    node (the harness fixture's comparison helper: head row columns, the
+    version row, `tenant_chunk_refs` count/offsets, the bill); the
+    `edge_admits` row says `host = 'slc'`; a GET's egress rows equal the
+    direct path's. Red. Then in `HandlePut` / `handleUploadPart` /
+    `serveGetObject`: when the flag is on and the request is
+    edge-eligible (reuse `edgeAdmitPrelude`'s matrix by calling the
+    in-process `ControlPlane.Admit` and acting on `edge:false` as
+    "the handler as today"), hand the request to `Host.Write` / `Read`
+    with the in-process control plane. The flag OFF = no code path
+    change (assert with a test that the handlers' row-writing functions
+    are not called twice).
+12. Step 0.1's answer decides steering. Write the probe first: a lab
+    origin that answers `307` with `Location: http://127.0.0.1:8100/…` to
+    PutObject and GetObject; aws-cli v2, rclone, aws-sdk-go-v2 (a 20-line
+    Go program) and boto3 against it; record for each: followed? re-signed
+    for the new Host? Write the table into WP-EDGE-3.md. If ALL FOUR
+    follow with a fresh signature: implement `edge_redirect` (flag, per
+    tenant, default OFF): in the same three handlers, before the
+    `host=slc` branch, if a `node` host of the tenant's scope (or a
+    platform node) is `up`, answer 307 to
+    `https://<host>/<bucket>/<key>?<query>` and count
+    `vaultaire_data_plane_redirects_total{host}`; else write "steering is
+    by configuration" as a decision and skip the flag.
+13. Health: a collector reading `data_plane_hosts` (15 s cache) exports
+    `vaultaire_data_plane_host_up{host,kind}` (1 when `health='up'` and
+    `last_seen` within 90 s); the heartbeat handler updates `last_seen`,
+    `version`, `health='up'`; a sweep in the `edge_admit_reaper` run marks
+    hosts unseen 90 s `down`. Rules in a new
+    `deploy/monitoring/vaultaire-dataplane.yml` (`DataPlaneHostDown`
+    warn after 5 min; a promtool test in `tests/`); add the file to the
+    rule-file test lists (grep for `vaultaire-egress.yml` to find them).
+    The System page gets a "Data-plane hosts" card (dashboard/handlers/
+    admin_system.go, the capacity card's pattern).
+
+Lab proof (a script `deploy/node/lab-proof.sh`): the control plane on
+:8000 (lab master key, EDGE_SERVICE_TOKEN, flags), a node on :8100
+registered via the admin route with address 127.0.0.1; `aws s3 cp` of a
+100 MiB file to `http://127.0.0.1:8100` → codec rows (compare with the
+harness), read back through the node MD5-equal, the control plane's access
+log shows no body bytes; the same through `host=slc` with the flag on;
+kill the node → `host_up` 0 within 90 s → an admit through its stale token
+503. Write the results into WP-EDGE-3.md.
+
+PR C — docs. WP-EDGE-3.md (Step 0 with the 307 table, decisions D-EDGE-n
+continuing Part B's numbers, residuals RB4-n, the lab proof), DEPLOY.md
+§ Data nodes (install, token mint, the unit, what a node never holds),
+STATUS, plan § 40.10 status bullet, CLAUDE.md rows (the env table:
+`VAULTAIRE_ROLE`, `NODE_*`; the `data_plane_hosts` table bullet; the flags),
+cmd/tools/README untouched. Refresh Prompt 48's two editions here with
+current line numbers; mark 47 DONE in the chain; the ledger row.
+
+Prod: PR A/B deploy through the queue with everything OFF; then for
+tenant zero only: `data_plane_slc` ON via the admin API (owner's TOTP is
+required for an admin JWT — if no owner, set the flag row by psql as the
+Part A operator items did and record it), the Lightroom zip through
+stored.ge once, the rows compared, the flag left ON. No node is bought
+(an owner purchase); the `slc` host row's weight stays 0.
+
+Done means: PR 0, A, B, C merged; the lab proof written; `host=slc`
+proven on prod for tenant zero; the ledger row; Prompt 48 refreshed.
+
+## Stage 1a Prompt 48: slice 3 — the second copy at the edge (mirror, RS dark), `standard_sealed_default` (dark), the 10.3 catalogue filter (Part 0: RP72's findings)
+
+*Draft written 2026-10-27 by RP68; Prompt 47's closeout refreshes it. Two
+editions; paste one.*
+
+Continue from WP-EDGE-3 (docs/reviews/WP-EDGE-3.md, § Residuals RB4-n) and
+its review RP72 (docs/reviews/WP-EDGE-3-REVIEW.md — Part 0; run it first
+if it has not). `git log origin/main`, `gh pr list`.
+
+Read first: plan § 40.10 "Slice 3" and "The invariant and the order" (the
+trap: sealing Standard by default sends every Standard byte through SLC
+unless slice 2 exists — it does now; RP68-1 made every edge write of a
+codec tenant codec); plan § 10.3 "The public-catalogue filter"; contract
+lines 3 (`modes.json` is the one source — the sentence this flag makes
+true), 4, 5 (cross-tenant dedup ONLY in the public-artefact namespace),
+8; internal/api/vault_parity_codec.go (the WP-VAULT-1 RS codec: 4+4,
+1 MiB per shard per stripe); internal/api/placement.go; internal/api/
+flags_wiring.go (`GlobalOnly`, `flagCredentialPlaintextDrop`'s 409 guard
+in admin_flags.go — the pattern for a flag refused without a master key);
+internal/api/landing/modes.json; internal/modes; docs/BACKEND_ENCRYPTION.md;
+tools/edge-ec-worker (the Rust fallback, read only); the RP66 and RP68
+reviews' D-EDGE and RB numbering.
+
+Lane: Engine. Migration 113 `blob_copies`. PRs: (0) RP72's fixes; (A) the
+mirror at the edge + `blob_copies` + the read fallback (RS dark behind
+`edge_rs`); (B) `standard_sealed_default`; (C) the catalogue filter + the
+namespace tables (migration 114 if a table is needed — claim it then);
+(D) docs.
+
+What to build
+1. The second copy, (a) MIRROR for objects under 8 MiB and — until a third
+   fast leg exists — for every size on prod: migration 113 `blob_copies`
+   (tenant, bucket, storage_key, leg, kind `mirror` | `shard`, `index`,
+   `state` `pending` | `ready` | `stale`, `etag`, `size`, `created_at`;
+   PK (tenant, storage_key, leg, index)); the write admit (Worker and
+   node) of a mirror tenant (flag `edge_mirror`, per tenant, default OFF)
+   answers TWO presigned PUTs — the placement's backend and the mirror
+   leg from `MIRROR_LEGS` (default `lyve,idrive`, the first registered leg
+   that is not the placement's) — the Worker tees the body
+   (`ReadableStream.tee()`; the node `io.MultiWriter`-style) into two
+   fetches; the commit records both (a mirror leg that failed = the
+   object committed on one, a `pending` copy row the new `blob_copies`
+   job completes from the primary within the hour, never a failed PUT for
+   the client); a codec write mirrors its STORED chunks the same way (two
+   links per miss; `global_content_index` gains nothing — the copy row
+   names the chunk address); the read admit answers the primary's link
+   and, on `fallback` with a 404/5xx from it, the Worker retries the
+   mirror's link (a second presigned GET in the admit answer: `urls:[…]`);
+   DELETE, the erasure sweep, `retired_blobs`, `routing_truth` and the
+   backend capacity job all learn the copies (each a bounded change; the
+   schema-walk tests will name them). (b) RS for ≥ 8 MiB: the WP-VAULT-1
+   codec compiled to WASM (`sdk/ecwasm`, golden vectors from
+   vault_parity_codec_test.go), k+m stripes per 8 MiB, data shards on fast
+   legs, parity on slow, no leg holding more than m, a read touching data
+   shards only — BUILT and proven in the lab behind `edge_rs` (per tenant,
+   default OFF) and left dark on prod (one fast leg).
+2. `standard_sealed_default` (global only, default OFF; turning it on
+   without a master key or with any tenant lacking a key version is 409
+   `master_key_absent` — the `credential_plaintext_drop` guard's shape): ON
+   = every Standard-mode write is placed sealed — at the edge the codec
+   (every edge write ≥ 4 MiB of every tenant: the flag implies
+   `edge_codec` for all), at the origin `placeWholeSealed` / chunk
+   encryption for the pass-through cases and sub-4 MiB bodies; a write
+   that cannot be sealed (no key version mid-flight) is 503, never
+   plaintext. `modes.json`'s Standard sentence becomes true on every
+   backend (docs/BACKEND_ENCRYPTION.md's table updated by a test that
+   reads the flag's default). Dark on prod; flipped after F-14.
+3. The 10.3 catalogue filter: tables `public_artefacts` (id, name, source
+   URL, licence, added_by, sha256 of the whole) and `public_chunks`
+   (artefact id, chunk index, PLAIN sha256 — public by construction,
+   size) seeded in the lab with one artefact set (an Ubuntu cloud image's
+   chunks, cut by the frozen chunker; a tool `cmd/tools/catalogue-seed`
+   reads a file and writes the rows, operator-run); a daily job
+   `catalogue_filter` builds a versioned Bloom filter (1 % FP; a small
+   pure-Go implementation with golden vectors, the same code compiled to
+   WASM for the Worker and the SDK) and publishes it to R2 at
+   `catalogue/<version>.bloom` + `catalogue/latest`; the Worker (and the
+   SDK) fetches it once per isolate, checks each chunk's plain hash
+   locally and marks matches in the index call (`public: true`); the
+   control plane verifies a `public` claim against `public_chunks` (a
+   false positive = refused reference, the chunk uploads as usual) and
+   references the ONE public copy (`dedup_scope = '_public'`, stored
+   plaintext — public content; a public chunk is never sealed). No
+   per-chunk round trip is added; the server learns only what was
+   referenced.
+
+Step 0 — probes into WP-EDGE-4.md: 0.1 `ReadableStream.tee()` in workerd
+with two 64 MiB PUT consumers of unequal speed: memory (the slow branch
+buffers) and whether it fits the 128 MB isolate — if not, the mirror is
+sequential (PUT then PUT from a buffer of ≤ 16 MiB chunks) and that is
+the decision; 0.2 the RS codec's rate in WASM vs native (vault_parity's
+bench numbers for native); 0.3 the Bloom filter's size for 10 M chunks at
+1 % and its WASM check rate.
+
+Tests (red first): a mirrored PUT lands on both legs with equal ETags and
+one commit; a mirror leg down → the object committed, the copy row
+`pending`, the job completes it; a read whose primary answers 404 is served
+from the mirror and counted; DELETE removes both; the erasure sweep finds
+copies; RS: a 64 MiB object's shards rebuild from any k; sealed-default:
+with the flag on, a plain `aws s3 cp` of 2 MiB, 12 MiB and 200 MiB into a
+plain bucket yields `encryption_algorithm` set on every row and
+plaintext on no backend (the fixture's fake backend asserts it);
+the flag refused without a master key; the filter: a seeded chunk is
+referenced without an upload, a false positive is refused and uploaded,
+`_public` chunks never sealed; the modes.json/BACKEND_ENCRYPTION test.
+Lab proof: tenant zero's buckets re-uploaded with `edge_mirror` ON
+(Lyve + iDrive); the owner's single copy on Lyve ends here — the
+`blob_copies` job backfills existing objects at ≤ 50 GB per run.
+
+Architecture notes
+- Contract 5: `_public` is the ONLY cross-tenant scope; it holds public
+  artefacts the operator seeded; nothing a tenant uploads enters it except
+  by matching a seeded hash.
+- The two switches that wait for F-14 are `edge_codec` ON (Prompt 46) and
+  `standard_sealed_default` ON (this prompt); both are built dark.
+- Closeout: WP-EDGE-4.md, STATUS, plan 40.10 + 10.3, CLAUDE.md rows,
+  BACKEND_ENCRYPTION.md, the ledger row; write "After the ceremony" as a
+  checklist in this file (the chain's last bullet). The post-merge review
+  is RP74.
+- Commit: feat(api,edge,database): WP-EDGE-4 — … [WP-EDGE-4]; merge with
+  `gh pr merge --auto`.
+
+ultrathink
+
+## Stage 1a Prompt 48 — Opus edition
+
+You are building WP-EDGE-4 (slice 3 of plan § 40.10) in the Vaultaire
+repository: the second copy at the edge, the dark seal-by-default flag,
+and the public-catalogue filter. Read the Opus rules above. Worktree from
+`origin/main`. Migrations 113 (and 114 only for the catalogue tables).
+
+Read before editing: plan § 40.10 "Slice 3", "The invariant and the
+order"; plan § 10.3; docs/ARCHITECTURE_CONTRACT.md lines 3, 4, 5, 8;
+docs/reviews/WP-EDGE-3.md + WP-EDGE-3-REVIEW.md; internal/api/
+vault_parity_codec.go + its test; internal/api/vault_parity.go (how legs
+are chosen: `VAULT_PARITY_LEGS`); internal/api/placement.go;
+internal/api/blob_address.go (`blobNamedBy` — every "is this blob still
+named" check); internal/api/retired_blobs.go; internal/api/
+erasure_sweep.go; internal/api/routing_truth.go; internal/api/
+admin_flags.go (`flagCredentialPlaintextDrop`'s 409 guard); internal/api/
+landing/modes.json + internal/modes; docs/BACKEND_ENCRYPTION.md;
+internal/dataplane (Prompt 47's package); edge/s3-ingest/src/codec.js.
+
+PR 0 — RP72's fixes. Branch `stage1a-p48-part0`.
+
+PR A — the mirror. Branch `stage1a-p48-mirror`.
+1. Migration 113 `113_blob_copies.sql`: the table as the chain prompt
+   lists it, every column defaulted; index on `(state, created_at)` for
+   the job; `make test-db`, the reapply test. Add it to the erasure walk
+   (`internal/account/erase.go`: tenant data, erased with the account),
+   the export's excluded list ("copies of the customer's own objects"),
+   and the sweep's bucket sources if the schema walk asks.
+2. `MIRROR_LEGS` env (default `lyve,idrive`; validated like
+   `VAULT_PARITY_LEGS`; Warn-and-default) and flag `edge_mirror` (per
+   tenant, default OFF) in flags_wiring.go. `mirrorLegFor(placementBackend)
+   string` = the first registered `EdgeWriter` in the list that is not
+   the placement's backend and whose breaker is closed, else "" (no
+   mirror this write — never a refusal).
+3. Test first (harness): with `edge_mirror` ON, a 12 MiB codec PUT's index
+   answer carries TWO urls per miss (`urls: [primary, mirror]`, `url`
+   kept = urls[0] for the 0.3.0 Worker), and the commit with two ETags
+   per stored chunk (`backend_etags: [a, b]`) writes one `blob_copies`
+   row per chunk with `state='ready'`; a Part A whole PUT's admit carries
+   two presigned PUTs the same way and the commit writes one copy row.
+   Red. Then the control plane: `edgeIndexMiss.URLs`, `edgeCommitChunk.
+   BackendETags`, `edgeAdmitResponse.URLs`; `settleEdgeCodecChunks` and
+   `commitEdgePut` write the copy rows in the commit's transaction
+   (`blobWrite.Upsert`). A commit reporting only one ETag (the mirror PUT
+   failed) writes the row `pending`. Green.
+4. The Worker: in codec.js and index.js's `moveBody`, when `urls.length ==
+   2`: `const [a, b] = body.tee()` and two fetches awaited together
+   (`Promise.allSettled`); a rejected mirror → its ETag omitted, the
+   commit says so. Node test: both PUTs receive identical bytes; a failing
+   mirror still commits. Step 0.1 first: if `tee()` with a slow branch
+   exceeds 100 MB in `wrangler dev` on a 1 GiB body, use the sequential
+   form (PUT primary; then re-PUT the mirror from the chunk buffer per
+   chunk — codec writes hold the chunk anyway; a whole-PUT mirror then
+   becomes the `blob_copies` job's, not the Worker's). Write the decision
+   as D-EDGE-n.
+5. The node (`internal/dataplane`): the same with `io.Pipe` ×2.
+6. The `blob_copies` job (interval 10 min, `BootDelay` 6 min): `pending`
+   rows older than 5 min → the primary's blob streamed to the mirror leg
+   through the engine (never SLC… it IS SLC: say in the note that the
+   repair copy is the 2× lane, rare by construction); `stale` rows
+   (written by the DELETE aftermath and `commitBlobWrite`'s displaced-blob
+   path) → deleted on the leg, then the row. `vaultaire_blob_copies_total
+   {outcome}`, a gauge of pending rows from the table.
+7. The read: the GET admit answers `urls: [primary, mirror]` when a
+   `ready` copy exists; the Worker's `serveRead`, on a backend answer that
+   is not `expect_status` from urls[0], tries urls[1] before the origin
+   fallback; the commit's `backend` names which served. `routing_truth`
+   samples copies like head rows (`kind="copy"` results). Tests for
+   each.
+8. Lab proof script `deploy/edge/mirror-proof.sh` + a backfill run on
+   tenant zero's buckets in the LAB only. PR A title `feat(api,edge,
+   database): WP-EDGE-4 Part A — the mirror at the edge, blob_copies
+   (113) [WP-EDGE-4]`.
+
+PR B — RS dark. Branch `stage1a-p48-rs`.
+9. `sdk/ecwasm`: `internal/api/vault_parity_codec.go`'s encoder/decoder
+   compiled to WASM (`make ec-wasm`, client `edge-ec`, a manifest row),
+   golden vectors from the native test asserted in node (`test/ec.test.js`).
+   Flag `edge_rs` (per tenant, default OFF): the admit of a ≥ 8 MiB write
+   answers k+m presigned PUTs (`shards: [{leg, url}]` — data legs first)
+   when ≥ k+m registered EdgeWriters exist with no leg over m, else the
+   mirror; the Worker stripes per 8 MiB through the WASM codec and PUTs
+   each shard; the commit writes `kind='shard'` rows; the read admit
+   answers the k data shards' links and the Worker concatenates. Lab only
+   (two fake fast legs in the fixture); prod: the flag off, one fast leg.
+   Tests: any k of k+m rebuild; a stripe boundary mid-object.
+
+PR C — `standard_sealed_default`. Branch `stage1a-p48-sealed`.
+10. Test first: `PUT /api/v1/admin/flags/standard_sealed_default` with the
+    master key absent → 409 `master_key_absent`; with it present and a
+    tenant without a key version → 409 `tenant_keys_missing` naming the
+    count; a tenant row → 400 `flag_global_only`. Then: register the flag
+    `GlobalOnly`; the guard in admin_flags.go beside the plaintext-drop
+    guard; the dashboard's flags page reuses the guard (it calls the same
+    service). Then `decidePlacement`: when the flag is on and the request
+    is Standard mode (not SSE-C, not Public), `encryptionRequired = true`
+    (the existing variable) — so sub-threshold bodies become
+    `placeWholeSealed` and chunked ones chunk-encrypt; the edge admit:
+    the flag ON implies `edge_codec` for every tenant (one `||` in the
+    gate). Tests: 2 MiB / 12 MiB / 200 MiB plain PUTs into a plain bucket
+    with the flag on → every row sealed, the fake backend saw no plaintext
+    (compare the first 4 bytes: a 0x04/0x06 format byte, or AES256-CE
+    ciphertext) ; a write with no key version mid-flight → 503, nothing
+    stored. `docs/BACKEND_ENCRYPTION.md`'s table: add a `TestBackendEncryption
+    DocMatchesFlagDefault` that reads the flag's default and the doc's
+    "sealed by default: yes/no" cell.
+
+PR D — the catalogue filter. Branch `stage1a-p48-catalogue`.
+11. Migration 114 `public_artefacts` + `public_chunks` (infrastructure: no
+    tenant column; excluded from the export and the erasure walk with
+    reasons). `cmd/tools/catalogue-seed -file <path> -name <n> -licence
+    <l> -source <url>`: cuts with `crypto.DefaultChunker`, inserts rows;
+    README row; operator-run, never linked into the product.
+12. `internal/catalogue/bloom.go`: a double-hashing Bloom filter (FNV-1a
+    64 split, k from the FP rate) with a versioned byte format
+    `[0x01][version u64][m u64][k u8][bits]` and golden vectors in
+    `testdata/bloom_golden.json`; the same package compiled in
+    `sdk/wasm` (export `catalogueContains(filter, hash)`) and asserted
+    in node against the goldens.
+13. The job `catalogue_filter` (daily 09:30 UTC): builds the filter from
+    `public_chunks` and writes `catalogue/<version>.bloom` and
+    `catalogue/latest` (the version number) to the public R2 bucket
+    through the `r2` driver (tenant `_catalogue`, a reserved id like
+    `_probe`); `vaultaire_catalogue_filter_version`, `_chunks`.
+14. The Worker: fetch `catalogue/latest` then the filter once per isolate
+    (cached in a module variable; re-fetched when older than 1 h); in
+    codec.js, a chunk whose plain hash the filter contains is sent with
+    `public: true`; the control plane's `edgeIndex`: a `public` chunk is
+    looked up in `public_chunks` by plain hash — found → a hit on the
+    `_public` scope row (`global_content_index` row with
+    `dedup_scope='_public'`, plaintext, created by the seed tool with the
+    chunk's blob stored at `_chunks/_public/<hash>` by the seed tool
+    through the chunk store) — not found → a miss as usual (the false
+    positive). The manifest ref carries `dedup_scope='_public'`; the
+    chunked GET already resolves scope per ref. Tests: a seeded chunk
+    referenced with 0 PUTs; a false positive uploads; `_public` rows never
+    sealed; a tenant cannot INSERT into `_public` (the index call never
+    claims there).
+
+PR E — docs: WP-EDGE-4.md (Step 0, D-EDGE-n, RB5-n, the lab proofs),
+STATUS, plan § 40.10 + § 10.3 status lines, CLAUDE.md rows (env
+`MIRROR_LEGS`; tables `blob_copies`, `public_artefacts`, `public_chunks`;
+flags `edge_mirror`, `edge_rs`, `standard_sealed_default`; the job rows),
+BACKEND_ENCRYPTION.md, the ledger row; and in this file the "After the
+ceremony" checklist: (1) F-14 ceremony (owner); (2) `tenant_key_versions`
+exist for every tenant (the `key_reencrypt` run creates on first use —
+verify); (3) `edge_codec` ON for tenant zero, the sealed proofs (a PUT
+through s3.stored.cloud → AES256-EW rows, a GET MD5-equal); (4)
+`standard_sealed_default` ON; (5) `credential_plaintext_drop` ON (Prompt
+43 B3's order); (6) the key-dependent residuals of Prompts 46/48.
+
+Prod: everything deploys dark; `edge_mirror` ON for tenant zero only
+after the lab proof; the `blob_copies` backfill of tenant zero's buckets
+is the first production use (the owner's Lightroom backups get their
+second copy on iDrive) — run it, verify copy rows = head rows for those
+buckets, write the count into the note.
+
+Done means: PR 0, A, B, C, D, E merged; the lab proofs written; tenant
+zero mirrored on prod; the ceremony checklist written here.
 
 ## The chain (owner 2026-10-26: "build everything now") — each closeout writes the next prompt here
 
@@ -1094,39 +1994,9 @@ current line numbers (the /next conventions).
   reads the admit's size). Live proof: the Lightroom zip back through
   s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
 - **Prompt 46 — WP-EDGE-2 Part A — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2A.md`; #994 Part 0 + the Worker 0.2.1 deployed with RB-9 reproduced and narrowed, #995 the codec, #997 the control plane + migration 111; the post-merge review is RP68). As rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
-- **Prompt 46b — WP-EDGE-2 Part B** (ISSUED — the full text is the `## Stage 1a Prompt 46b` section above; summary): the Worker 0.3.0 pipeline (the WASM chunker, sha256, the index call per 64 chunks, WebCrypto AES-GCM segments + the HPKE wrap from sdk/wasm, a PUT per miss, the commit; back-pressure; the per-stream rate measured — the baseline says JavaScript in the byte path halves a stream), the lab proof through wrangler dev against the harness's rows, `cmd/tools/dedup-measure` (F-3: the cross-tenant fraction of a lab corpus, the number the owner decides F-37 with), `encodeBody: "manual"` probed for RP66-1's residual. On prod the two switches that wait for F-14 stay: `edge_codec` ON and Prompt 48's `standard_sealed_default`.
-- **Prompt 47 — WP-EDGE-3, the data node.** The binary in node mode
-  (`VAULTAIRE_ROLE=node`: no DB, no routes but the mover's, the same admit/
-  commit protocol over the service token, the Worker's chunked decoder and
-  digests in Go) and `data_plane_hosts` (migration: host, kind
-  edge|node|slc, weight, health, last_seen) with the control plane picking a
-  host per admit by weight × health; `host=slc` is the origin's own write
-  path re-expressed as a node of the protocol (the handlers call admit/commit
-  in-process), so the metrics families carry every byte by host. Proven with
-  two processes in the lab (control plane + node on another port) and on
-  prod as `host=slc` beside the Worker at weight 0 → 1. A real unmetered node
-  is an owner purchase later (a VPS from a phone; `deploy/node/` carries the
-  unit and the one-line install).
-- **Prompt 48 — slice 3 + the dark seal-by-default flag + the catalogue
-  filter.** (a) The second-copy policy at the edge: an object under 8 MiB is
-  mirrored — admit answers two presigned PUTs (the placement's backend + the
-  mirror leg from the plan's leg order), the Worker tees one stream into two
-  fetches, commit records both addresses (a `mirror` column on the head row
-  or a `blob_copies` table — decide in the prompt, migration), the read path
-  falls back to the mirror on a miss; 8 MiB and up: k+m RS stripes with the
-  WP-VAULT-1 codec compiled to WASM (`tools/edge-ec-worker/codec`'s Rust is
-  the fallback), data shards on fast legs, parity on slow, no vendor above m,
-  a read touching data shards only; mirror first on prod (Lyve + iDrive;
-  tenant zero's backups get their second copy — the owner's single copy on
-  Lyve ends here). (b) `standard_sealed_default` (global, default OFF, 409
-  without a master key like `credential_plaintext_drop`): ON = every Standard
-  write is placed sealed (SSE-S3 at the edge via Prompt 46's codec, or at the
-  origin for the pass-through cases) — the switch that makes modes.json's
-  sentence true, built dark, flipped after F-14 and after Prompt 46 is ON.
-  (c) 10.3's public-catalogue filter: a versioned Bloom filter of the
-  public-artefact namespace's tags served from R2, the SDK and the Worker
-  check locally, references only; the namespace itself (10.3/10.6's tables)
-  seeded with one artefact set in the lab.
+- **Prompt 46b — WP-EDGE-2 Part B** (ISSUED 2026-10-27, REFRESHED the same day by the RP68 review (`docs/reviews/WP-EDGE-2A-REVIEW.md`): Part 0 = RP68-1…6 in the review's order, and RP68-1 changes what the pipeline admits — every edge write ≥ 4 MiB and every multipart part of a codec tenant, not only the origin's chunked placements; the full text is the `## Stage 1a Prompt 46b` section above in TWO editions, the chain's and an Opus edition; summary): the Worker 0.3.0 pipeline (the WASM chunker, sha256, the index call per 64 chunks, WebCrypto AES-GCM segments + the HPKE wrap from sdk/wasm, a PUT per miss, the commit; back-pressure; the per-stream rate measured — the baseline says JavaScript in the byte path halves a stream), the lab proof through wrangler dev against the harness's rows (default 8 MiB parts, parallel parts sharing chunks, a tampered host), `cmd/tools/dedup-measure` (F-3: the cross-tenant fraction of a lab corpus, the number the owner decides F-37 with), `encodeBody: "manual"` probed for RP66-1's residual, the three plan § 40.5 sentences (RP68 C-3/4/5). On prod the two switches that wait for F-14 stay: `edge_codec` ON and Prompt 48's `standard_sealed_default`. The post-merge review is RP70.
+- **Prompt 47 — WP-EDGE-3, the data node** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 47` and its Opus edition; Prompt 46b's closeout refreshes the line numbers; summary): `internal/dataplane` = the harness's pipeline as a package with an HTTP and an in-process control plane; `VAULTAIRE_ROLE=node` boots the binary with no DB, no engine, the data-plane routes only, a heartbeat, `deploy/node/`; migration 112 `data_plane_hosts` (host, kind edge|node|slc, address, token_hash, tenant_id — a tenant-scoped BYO host admits one tenant and nothing it reports is trusted for integrity (RP68-3 at 100 %) or metering (its GET metered at the admitted span) —, weight, health, last_seen) with audited admin routes and per-host tokens accepted from the host's registered address; `host=slc` = the origin's own edge-eligible writes and reads through the same package in-process behind `data_plane_slc` (rows proven equal); steering by 307 behind `edge_redirect` only if Step 0.1 shows aws-cli, rclone and the SDKs re-sign on a 307, else by configuration; `vaultaire_data_plane_host_up`, `DataPlaneHostDown`. Proven with two processes in the lab and on prod as `host=slc` for tenant zero. A real node is an owner purchase. The post-merge review is RP72.
+- **Prompt 48 — slice 3 + the dark seal-by-default flag + the catalogue filter** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 48` and its Opus edition; Prompt 47's closeout refreshes it; summary): (a) the second copy at the edge — migration 113 `blob_copies`; `edge_mirror` (per tenant): the admit answers two presigned PUTs (the placement's backend + the first registered leg of `MIRROR_LEGS` that is not it), the Worker tees (or PUTs sequentially — Step 0.1 decides on the isolate's memory), the commit records both, a failed mirror leg becomes a `pending` row the `blob_copies` job completes, reads fall back to the mirror before the origin, DELETE / the sweep / `retired_blobs` / `routing_truth` / capacity learn the copies; RS k+m with the WP-VAULT-1 codec in WASM (`sdk/ecwasm`) built and proven in the lab behind `edge_rs`, dark on prod (one fast leg); mirror first on prod — tenant zero's backups get their second copy on iDrive. (b) `standard_sealed_default` (global, default OFF, 409 without a master key or a tenant without a key version): ON = every Standard write placed sealed — the codec at the edge for every tenant, `placeWholeSealed` / chunk encryption at the origin — the switch that makes `modes.json`'s sentence true; built dark, flipped after F-14. (c) 10.3's catalogue filter: `public_artefacts` + `public_chunks` (migration 114) seeded in the lab by `cmd/tools/catalogue-seed`, a daily `catalogue_filter` job publishing a versioned Bloom filter to R2, the Worker and the SDK checking locally and marking `public: true`, the control plane referencing the one `_public` copy — the only cross-tenant scope (contract 5). The post-merge review is RP74.
 - **After the ceremony (one session, owner present only for the ceremony
   itself):** `edge_codec` ON for tenant zero → the sealed-object proofs →
   `standard_sealed_default` ON → `credential_plaintext_drop` (Prompt 43 B3) →
