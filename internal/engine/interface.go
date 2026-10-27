@@ -203,6 +203,17 @@ type RangeInfo struct {
 	Size int64
 }
 
+// ObjectHeader is an optional interface for drivers that report an object's
+// identity without reading it: its ETag as the backend reports it (quotes
+// stripped, lower-case) and its size — one HEAD. The edge codec's commit
+// samples the chunks an edge host stored with it (RP68-3): the host's word
+// for a blob's ETag is checked against the backend's. A missing object is a
+// *NotFoundError. Today: the edge writers (the fixed-bucket S3 driver and
+// lyve).
+type ObjectHeader interface {
+	HeadObject(ctx context.Context, container, artifact string) (RangeInfo, error)
+}
+
 // VersionedRangeGetter is an optional interface for drivers whose ranged
 // reads are real and cheap (one ranged request, no restore semantics) and
 // report the object's identity with each range. The parallel ranged GET

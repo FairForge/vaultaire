@@ -528,8 +528,11 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		return passThrough("empty") // an empty object costs nothing to move
 	}
 	// A small body is the origin's (EDGE_MIN_BYTES): two round trips fewer,
-	// and its bytes do not matter for SLC's bandwidth.
-	if s.edge.minBytes > 0 && size < s.edge.minBytes {
+	// and its bytes do not matter for SLC's bandwidth — except a part of an
+	// upload already on the edge (whole or codec): one upload is one path,
+	// the origin's stager refuses its parts, and S3 sets no minimum for the
+	// LAST part.
+	if s.edge.minBytes > 0 && size < s.edge.minBytes && !s.edgeUploadPart(sctx, req, tenantID, sr) {
 		return passThrough(edgeReasonSmall)
 	}
 
@@ -614,13 +617,27 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	// seals; with the flag and no key version the whole PUT is admitted
 	// (no_key — never a refusal, never a plaintext chunked write at the
 	// edge); without the flag the origin takes it, as Part A.
-	if req.Op == edgeOpPut && placement.Kind == placeChunked {
+	//
+	// At the edge the codec's rule is the EDGE's (RP68-1): with the flag a
+	// PUT is re-decided as a codec candidate (placementRequest.EdgeCodec —
+	// one extra decision, only with the flag on), so a 4–64 MiB PUT the
+	// origin would store whole is chunked here when the bucket allows it.
+	codecPlacement := placement
+	if req.Op == edgeOpPut && placement.Kind != placeChunked && s.flags.Enabled(flagEdgeCodec, tenantID) {
+		codecPlacement = adapter.decidePlacement(sctx, placementRequest{
+			TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: placeSize,
+			SSEC: false, SSERequested: sseRequested, EdgeCodec: true,
+		})
+	}
+	if req.Op == edgeOpPut && codecPlacement.Refusal == nil && codecPlacement.Kind == placeChunked {
 		resp, st, verdict := s.edgeAdmitCodecPut(req, p, size, attrs, storageClass, floor)
-		switch verdict {
-		case edgeCodecTaken:
+		switch {
+		case verdict == edgeCodecTaken:
 			return resp, st
-		case edgeCodecWhole:
-			// Part A's whole PUT admits it below.
+		case placement.Kind == placeWhole:
+			// The origin would store it whole: Part A's whole PUT below.
+		case verdict == edgeCodecWhole && placement.Kind == placeChunked:
+			// Part A's whole PUT admits it below (no_key).
 		default:
 			return passThrough("placement_" + placement.Kind.String())
 		}

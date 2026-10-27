@@ -196,6 +196,23 @@ func (t s3EdgeTarget) abortMultipart(ctx context.Context, uploadID string) error
 	return nil
 }
 
+// headObject is one HeadObject (the meta class, the SDK's per-path
+// attempts): the ETag unquoted and lower-cased, the size.
+func (t s3EdgeTarget) headObject(ctx context.Context, container, artifact string) (engine.RangeInfo, error) {
+	out, err := t.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key)}, sdkCallOptions(ctx)...)
+	if err != nil {
+		if s3IsNotFound(err) {
+			return engine.RangeInfo{}, &engine.NotFoundError{Container: container, Artifact: artifact}
+		}
+		return engine.RangeInfo{}, fmt.Errorf("%s head %s: %w", t.name, t.key, err)
+	}
+	info := engine.RangeInfo{ETag: strings.ToLower(strings.Trim(aws.ToString(out.ETag), `"`))}
+	if out.ContentLength != nil {
+		info.Size = *out.ContentLength
+	}
+	return info, nil
+}
+
 // --- the fixed-bucket driver (idrive, idrive-<region>, wasabi) ---
 
 func (d *IDriveDriver) edgeTarget(ctx context.Context, op, container, artifact string) (s3EdgeTarget, error) {
@@ -258,6 +275,15 @@ func (d *IDriveDriver) AbortMultipart(ctx context.Context, container, artifact, 
 		return err
 	}
 	return t.abortMultipart(ctx, uploadID)
+}
+
+// HeadObject implements engine.ObjectHeader.
+func (d *IDriveDriver) HeadObject(ctx context.Context, container, artifact string) (engine.RangeInfo, error) {
+	t, err := d.edgeTarget(ctx, "HeadObject", container, artifact)
+	if err != nil {
+		return engine.RangeInfo{}, err
+	}
+	return t.headObject(ctx, container, artifact)
 }
 
 // --- lyve ---
@@ -324,8 +350,19 @@ func (d *LyveDriver) AbortMultipart(ctx context.Context, container, artifact, up
 	return t.abortMultipart(ctx, uploadID)
 }
 
+// HeadObject implements engine.ObjectHeader.
+func (d *LyveDriver) HeadObject(ctx context.Context, container, artifact string) (engine.RangeInfo, error) {
+	t, err := d.edgeTarget(ctx, "HeadObject", container, artifact)
+	if err != nil {
+		return engine.RangeInfo{}, err
+	}
+	return t.headObject(ctx, container, artifact)
+}
+
 // The two drivers are edge writers.
 var (
-	_ engine.EdgeWriter = (*IDriveDriver)(nil)
-	_ engine.EdgeWriter = (*LyveDriver)(nil)
+	_ engine.EdgeWriter   = (*IDriveDriver)(nil)
+	_ engine.EdgeWriter   = (*LyveDriver)(nil)
+	_ engine.ObjectHeader = (*IDriveDriver)(nil)
+	_ engine.ObjectHeader = (*LyveDriver)(nil)
 )

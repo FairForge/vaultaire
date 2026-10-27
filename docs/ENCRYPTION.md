@@ -459,7 +459,13 @@ their re-home onto the new version is a pass of its own (the `key_reencrypt`
 chunk pass skips `AES256-EW` rows — a re-home changes the index identity).
 On a process without a master key none of this exists: the edge admit
 answers the whole-PUT shape (`no_key`), never a plaintext chunked write at
-the edge. Design and proofs: `docs/reviews/WP-EDGE-2A.md`.
+the edge. At the edge every write >= 4 MiB of a codec tenant is a chunked
+row; the origin would store 4–64 MiB whole (RP68-1: a whole PUT at or over
+`EDGE_MIN_BYTES` and every part of a multipart upload, wherever the bucket
+allows chunking — reads do not care). Codec rows and origin-path rows of
+one tenant never deduplicate against each other (keyed against plain
+identity, `AES256-EW` against `AES256-CE`; RP68-8). Design and proofs:
+`docs/reviews/WP-EDGE-2A.md`, `docs/reviews/WP-EDGE-2B.md`.
 
 ## Client-side keys (Private mode, the SDK key core)
 

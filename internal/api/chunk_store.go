@@ -241,6 +241,28 @@ func (c *chunkStore) existsAt(ctx context.Context, a chunkAddr) (bool, error) {
 	return sb.ExistsOn(ctx, a.backend, chunkContainer, a.key)
 }
 
+// head asks the row's backend for the blob's ETag and size at the one
+// address (engine.ObjectHeader): the edge codec's commit checks the host's
+// word for a stored chunk against it (RP68-3). The driver is called
+// directly, as routing truth does — a sampled HEAD charges no breaker.
+func (c *chunkStore) head(ctx context.Context, a chunkAddr) (engine.RangeInfo, error) {
+	g, ok := c.eng.(interface {
+		GetDriver(name string) (engine.Driver, bool)
+	})
+	if !ok || a.backend == "" {
+		return engine.RangeInfo{}, errors.New("chunk head: the engine cannot address a single backend")
+	}
+	drv, ok := g.GetDriver(a.backend)
+	if !ok {
+		return engine.RangeInfo{}, fmt.Errorf("chunk head: %w: %q", engine.ErrBackendNotRegistered, a.backend)
+	}
+	h, ok := drv.(engine.ObjectHeader)
+	if !ok {
+		return engine.RangeInfo{}, fmt.Errorf("chunk head: backend %q reports no object identity", a.backend)
+	}
+	return h.HeadObject(engine.ChunkContext(ctx), chunkContainer, a.key)
+}
+
 // legacyCopyExists reports whether a copy of the blob is still at a legacy
 // address (dedup GC asks before it deletes the row of a chunk that is not at
 // the one address: the row is what the chunk move works from).

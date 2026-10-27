@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- the backends' ETag
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -401,18 +402,30 @@ type chunkRow struct {
 	compressed     bool
 	encrypted      bool
 	ciphertextHash sql.NullString
+	// encAlgo is the row's encryption_algo: an AES256-EW row's (the edge
+	// codec, WP-EDGE-2) ciphertext hash is the backend's MD5 ETag of the
+	// sealed bytes, not a SHA-256 (RP68-5).
+	encAlgo sql.NullString
 }
 
 // verify checks a blob against the row: for an encrypted chunk the SHA-256 of
-// the blob is the row's ciphertext hash; otherwise the blob, decompressed
+// the blob is the row's ciphertext hash — its MD5 for an edge-codec row
+// (AES256-EW, the same rule as openEdgeCodecChunk); otherwise the blob, decompressed
 // when the row says it is compressed, has the row's size and plaintext hash.
 func (row chunkRow) verify(hash string, blob []byte) error {
 	if row.encrypted {
 		if !row.ciphertextHash.Valid || row.ciphertextHash.String == "" {
 			return errors.New("encrypted chunk with no ciphertext hash on its row: cannot be verified")
 		}
-		sum := sha256.Sum256(blob)
-		if hex.EncodeToString(sum[:]) != row.ciphertextHash.String {
+		var got string
+		if row.encAlgo.Valid && row.encAlgo.String == crypto.EdgeChunkEncryptionAlgo {
+			sum := md5.Sum(blob) // #nosec G401 -- the backend's ETag, an integrity check
+			got = hex.EncodeToString(sum[:])
+		} else {
+			sum := sha256.Sum256(blob)
+			got = hex.EncodeToString(sum[:])
+		}
+		if got != strings.ToLower(row.ciphertextHash.String) {
 			return errors.New("ciphertext hash mismatch")
 		}
 		return nil
@@ -479,9 +492,9 @@ func (r *chunkMoveRun) moveOne(ctx context.Context, a chunkAddr, tenants []strin
 		var row chunkRow
 		var compression sql.NullString
 		err := conn.QueryRowContext(ctx, `
-			SELECT backend_id, storage_key, size_bytes, compression_algo, encrypted, ciphertext_hash
+			SELECT backend_id, storage_key, size_bytes, compression_algo, encrypted, ciphertext_hash, encryption_algo
 			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'`,
-			a.scope, a.hash).Scan(&row.backend, &row.key, &row.size, &compression, &row.encrypted, &row.ciphertextHash)
+			a.scope, a.hash).Scan(&row.backend, &row.key, &row.size, &compression, &row.encrypted, &row.ciphertextHash, &row.encAlgo)
 		if errors.Is(err, sql.ErrNoRows) {
 			if countRow {
 				r.res.Rows--

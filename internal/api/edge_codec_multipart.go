@@ -46,8 +46,8 @@ var errUploadCodec = errors.New("multipart upload is fed through the edge codec"
 const codecUploadRefusal = "This upload is fed through the edge codec; send every part of it through s3.stored.cloud (the first part of this upload went that way)."
 
 // edgeAdmitCodecPart is the codec gate of an UploadPart admit: a part of a
-// codec upload, or a first part whose OWN size places chunked, is the
-// host's to chunk and seal.
+// codec upload, or a first part of an upload whose bucket allows chunking
+// (the edge's rule, RP68-1), is the host's to chunk and seal.
 func (s *Server) edgeAdmitCodecPart(req edgeAdmitRequest, p edgePrelude, size int64, uploadAttrs objectAttrs,
 	storageClass, floor string) (edgeAdmitResponse, int, edgeCodecVerdict) {
 	sr, sctx, rec, tenantID, bucket, key := p.sr, p.sctx, p.rec, p.tenantID, p.bucket, p.key
@@ -65,15 +65,17 @@ func (s *Server) edgeAdmitCodecPart(req edgeAdmitRequest, p edgePrelude, size in
 	}
 	eligible := up.Codec
 	if !eligible && !up.Edge {
-		// A first part: its OWN size decides (each part is chunked alone).
-		pl := s.writeAdapter().decidePlacement(sctx, placementRequest{TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: size})
+		// A first part: the EDGE's rule decides (RP68-1) — every part of a
+		// codec tenant's upload is a codec candidate wherever the bucket
+		// allows chunking (S3's 5 MiB part minimum is above EDGE_MIN_BYTES).
+		pl := s.writeAdapter().decidePlacement(sctx, placementRequest{TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: size, EdgeCodec: true})
 		eligible = pl.Refusal == nil && pl.Kind == placeChunked
 	}
 	if !eligible {
 		return edgeAdmitResponse{}, 0, edgeCodecNo
 	}
 	grant, ok := s.edgeCodecGrantFor(sctx, tenantID)
-	if !ok || func() bool { _, werr := s.edgeWriterFor(s.engine.GetPrimary()); return werr != nil }() {
+	if !ok || !s.edgeCodecStoreReady() {
 		if up.Codec {
 			// Mid-upload the keys or the chunk store's backend went away:
 			// the one-path rule refuses any other shape, so the honest
@@ -264,10 +266,10 @@ func (s *Server) commitEdgeCodecPart(ctx context.Context, row edgeAdmitRow, req 
 	refs, err := s.settleEdgeCodecChunks(cctx, row, req.Chunks)
 	if err != nil {
 		s.releaseEdgeAdmit(ctx, row)
-		if errors.Is(err, errEdgeChunkVanished) {
+		if edgeChunkRetryable(err) {
 			rec.Header().Set("Retry-After", "5")
 			WriteS3ErrorWithContext(rec, ErrServiceUnavailable, path, reqID,
-				WithSuggestion("A deduplicated chunk vanished before the commit; retry the part."))
+				WithSuggestion("A chunk could not be settled before the commit ("+err.Error()+"); retry the part."))
 		} else {
 			s.logger.Warn("edge codec part commit: chunks not settled", zap.Error(err), zap.String("admit_id", row.ID))
 			WriteS3ErrorWithContext(rec, ErrInvalidRequest, path, reqID, WithSuggestion(err.Error()))

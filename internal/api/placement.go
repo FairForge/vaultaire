@@ -72,6 +72,12 @@ type placementRequest struct {
 	SSEC bool
 	// SSERequested: x-amz-server-side-encryption: AES256 on the request.
 	SSERequested bool
+	// EdgeCodec: the write is an edge-codec candidate (RP68-1): at the edge
+	// a codec tenant's write of at least EDGE_MIN_BYTES — a whole PUT or ANY
+	// part — chunks wherever the bucket allows chunking, so the size is
+	// treated as over the chunk threshold; every other rule stays this one
+	// decision.
+	EdgeCodec bool
 }
 
 // writePlacement is the decision.
@@ -157,6 +163,7 @@ func (a *S3ToEngine) versionedChunkingEnabled(tenantID string) bool {
 // once.
 func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) writePlacement {
 	chunkThreshold := a.chunkThreshold()
+	overThreshold := req.Size > chunkThreshold || req.EdgeCodec
 
 	// A versioned bucket (Enabled or Suspended) chunks only with the
 	// tenant's `versioned_chunking` flag (WP-VM-1 Part D, default off):
@@ -174,14 +181,14 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 	// a chunk blob has one address on the primary. Asked only where it can
 	// matter (one bucket read per large write).
 	byRegion := false
-	if a.gci != nil && a.db != nil && req.Size > chunkThreshold {
+	if a.gci != nil && a.db != nil && overThreshold {
 		if name, rErr := bucketRegionDriver(ctx, a.db, a.engine, req.TenantID, req.Bucket); name != "" || rErr != nil {
 			byRegion = true
 		}
 	}
 	// The flag is read ONCE per write: a refresh between two reads could
 	// skip SSE here and then keep the object out of the chunk path (R8-03).
-	chunkable := a.gci != nil && req.Size > chunkThreshold && !versioned && !byTier && !byRegion &&
+	chunkable := a.gci != nil && overThreshold && !versioned && !byTier && !byRegion &&
 		!req.SSEC && a.chunkingEnabled(req.TenantID)
 	chunkEncrypt := chunkable && a.chunkEncSvc != nil
 

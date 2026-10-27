@@ -57,6 +57,7 @@ type edgeFakeDriver struct {
 	objects     map[string][]byte // t-<tenant>/<container>/<artifact> → bytes
 	uploads     map[string]map[int]string
 	presigns    atomic.Int32
+	heads       atomic.Int32 // HeadObject calls (RP68-3's sample)
 	creates     atomic.Int32
 	aborts      atomic.Int32
 	deletes     []string
@@ -141,6 +142,29 @@ func (d *edgeFakeDriver) Exists(ctx context.Context, container, artifact string)
 	return ok, nil
 }
 func (d *edgeFakeDriver) HealthCheck(context.Context) error { return nil }
+
+// ObjectKey implements engine.KeyAddresser (the chunk move asks it).
+func (d *edgeFakeDriver) ObjectKey(ctx context.Context, container, artifact string) string {
+	k, _ := d.key(ctx, container, artifact)
+	return k
+}
+
+// HeadObject answers the blob's MD5 ETag and size (engine.ObjectHeader).
+func (d *edgeFakeDriver) HeadObject(ctx context.Context, container, artifact string) (engine.RangeInfo, error) {
+	d.heads.Add(1)
+	k, err := d.key(ctx, container, artifact)
+	if err != nil {
+		return engine.RangeInfo{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	b, ok := d.objects[k]
+	if !ok {
+		return engine.RangeInfo{}, &engine.NotFoundError{Container: container, Artifact: artifact}
+	}
+	sum := md5.Sum(b) // #nosec G401
+	return engine.RangeInfo{ETag: hex.EncodeToString(sum[:]), Size: int64(len(b))}, nil
+}
 
 func (d *edgeFakeDriver) presign(key string, p engine.EdgePresign, query string) (string, []string, error) {
 	d.presigns.Add(1)
