@@ -518,7 +518,14 @@ trailer; a multipart part goes through the edge on every backend, and a
 single `PutObject` sent `aws-chunked` to an iDrive bucket is moved by our
 origin. On Lyve the trailer checksum is not verified by the backend; send
 Content-MD5 or use iDrive for a verified write until the codec path carries
-it.
+it. Nor does Lyve enforce `x-amz-decoded-content-length`: the edge checks
+the stored size against it when the write is committed (a `PutObject`) or
+completed (a multipart upload), and a mismatch is `400 IncompleteBody`.
+Through the edge every part of a multipart upload is a real part on the
+backend, so S3's minimum applies: every part but the last must be at least
+5 MiB, or `CompleteMultipartUpload` answers `400 EntityTooSmall` (the upload
+stays open: upload the part again and complete). aws-cli, rclone and the
+SDKs never send a smaller part.
 
 What to expect through the edge: one stream 35–50 MB/s; the client's number of
 parts in flight sets the rest (see "Fast uploads and downloads" below).

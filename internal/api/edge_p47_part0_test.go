@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -183,4 +184,25 @@ func TestEdgeComplete_AssembledSizeIsCheckedWhereTheBackendDoesNotEnforceIt(t *t
 	require.NoError(t, f.db.QueryRow(`SELECT status FROM multipart_uploads WHERE upload_id = $1`, id).Scan(&status))
 	assert.Equal(t, "aborted", status, "the upload is ended: the backend's upload is gone")
 	assert.Zero(t, f.used(), "the parts' holding released")
+}
+
+// RP72-4: a non-last part under 5 MiB is a real part of the backend's
+// multipart on the edge-whole path (D-EDGE-29 admits every part), and the
+// backend's Complete refuses it with EntityTooSmall — the client's 400 with
+// S3's own code, never a 500; the upload stays active (the client may
+// upload the part again and complete).
+func TestEdgeComplete_BackendEntityTooSmallIsTheClients400(t *testing.T) {
+	f := setupEdgeFixture(t)
+	id := f.createUpload("tiny.zip")
+	_, e1 := f.edgePart("tiny.zip", id, 1, testBytes(6000))
+	_, e2 := f.edgePart("tiny.zip", id, 2, testBytes(7000))
+	f.drv.completeErr = fmt.Errorf("edgefake complete multipart: %w",
+		&smithy.GenericAPIError{Code: "EntityTooSmall", Message: "Your proposed upload is smaller than the minimum allowed object size."})
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, e1, e2)
+	wc := f.s3(http.MethodPost, "/"+f.bucket+"/tiny.zip?uploadId="+id, []byte(completeXML), nil)
+	assert.Contains(t, wc.Body.String(), "<Code>EntityTooSmall</Code>", "S3's own code")
+	assert.NotContains(t, wc.Body.String(), "InternalError")
+	var status string
+	require.NoError(t, f.db.QueryRow(`SELECT status FROM multipart_uploads WHERE upload_id = $1`, id).Scan(&status))
+	assert.Equal(t, "active", status, "the upload stays active")
 }

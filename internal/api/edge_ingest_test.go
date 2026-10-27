@@ -66,6 +66,8 @@ type edgeFakeDriver struct {
 	aborts      atomic.Int32
 	deletes     []string
 	failPresign atomic.Bool
+	// completeErr, when set, is CompleteMultipart's answer (RP72-4).
+	completeErr error
 	// deleteGate, when set, holds every Delete until it is closed;
 	// deleteEntered is closed once a Delete has started (RP64-1's test).
 	deleteGate    chan struct{}
@@ -296,6 +298,9 @@ func (d *edgeFakeDriver) CompleteMultipart(ctx context.Context, container, artif
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return "", err
+	}
+	if d.completeErr != nil {
+		return "", d.completeErr
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/smithy-go"
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/common"
@@ -309,6 +310,19 @@ func (s *Server) completeEdgeUpload(w http.ResponseWriter, r *http.Request, t *t
 	defer ccancel()
 	backendETag, err := ew.CompleteMultipart(common.WithTenantID(cctx, t.ID), containerName, blob, up.BackendUploadID, edgeParts)
 	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == ErrEntityTooSmall {
+			// A non-last part under the S3 minimum (5 MiB) is a real part
+			// of the backend's upload on this path (D-EDGE-29 admits every
+			// part; the origin's stager would have assembled it): the
+			// backend's refusal is the client's 400 with S3's own code, and
+			// the upload stays active (RP72-4).
+			markClientRefusal(r.Context())
+			s.logger.Info("complete multipart: the backend refused a part under the S3 minimum — EntityTooSmall",
+				zap.String("upload_id", uploadID), zap.String("backend", up.Backend))
+			WriteS3Error(w, ErrEntityTooSmall, r.URL.Path, generateRequestID())
+			return
+		}
 		s.writeCompleteStoreError(w, r, err, bucket, object, uploadID, "")
 		return
 	}
