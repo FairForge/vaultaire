@@ -378,6 +378,25 @@ test("a control plane answering 503 twice is the Worker's own 503 (null)", { ski
   }
 });
 
+// RP72-3: a 401/403 from the control plane is the SERVICE channel's (the
+// token, the peer rule) — transient to the client, never "retrying unchanged
+// will fail the same way": the Worker's 503 SlowDown (runCodec answers null).
+for (const status of [401, 403]) {
+  test(`a control plane's ${status} at commit is the Worker's 503, not the client's 400`, { skip: noWasm }, async () => {
+    const deps = await codecDeps();
+    const f = await fakes({ commit: () => ({ status, json: { error: "forbidden" } }) });
+    try {
+      const body = deps.chunker.goldenBody(4629, 1 << 20).value;
+      const req = bodyRequest(body);
+      req.url = "https://s3.stored.cloud/b/k.bin";
+      const relay = await runCodec(req, admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp, requestId: "req-8" });
+      assert.equal(relay, null, "no client answer: the caller's 503 SlowDown");
+    } finally {
+      f.close();
+    }
+  });
+}
+
 test("a control plane's own 4xx is the client's 400 InvalidRequest with its error, never retried", { skip: noWasm }, async () => {
   const deps = await codecDeps();
   const f = await fakes({ commit: () => ({ status: 400, json: { error: "invalid_json" } }) });

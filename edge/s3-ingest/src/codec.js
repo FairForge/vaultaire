@@ -476,8 +476,10 @@ async function commitEdgeError(cp, admit, log, requestId) {
  * carries (a commit the control plane refused with an S3 400 included). A
  * 4xx of the control plane's OWN (its JSON error: the commit itself was
  * malformed) is the client's 400 InvalidRequest naming that error — the same
- * upload would fail the same way, so never a 503 to retry (RP70-7). null =
- * no answer (the caller's 503).
+ * upload would fail the same way, so never a 503 to retry (RP70-7) — except
+ * a 401 or 403: that is the SERVICE channel's (the token, the peer rule),
+ * transient to the client, so the Worker's 503 (RP72-3). null = no answer
+ * (the caller's 503).
  */
 async function commitOK(cp, body, log, requestId, path) {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -487,6 +489,11 @@ async function commitOK(cp, body, log, requestId, path) {
       if (r.status === 200) return await r.json();
       if (r.status === 404 || r.status === 410) {
         await r.body?.cancel();
+        return null;
+      }
+      if (r.status === 401 || r.status === 403) {
+        await r.body?.cancel();
+        log({ edge: "commit_unauthorized", op: "codec", status: r.status, request_id: requestId });
         return null;
       }
       if (r.status >= 400 && r.status < 500) {
