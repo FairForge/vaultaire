@@ -34,10 +34,10 @@ func TestEgressRatios_ComeFromThePriceFile(t *testing.T) {
 	std, vault := EgressRatios()
 
 	// Assert: the code sells what the site prints, and the site prints what
-	// was decided (0.5× downstairs + 1× attic, SMART_TIER_DESIGN 2026-09-21).
+	// was decided (2× downstairs + 1× attic since 2026-10-27 — the edge plane took transit off SLC, iDrive's free pool is 3× stored, Lyve egress is $0; it was 0.5× from SMART_TIER_DESIGN 2026-09-21).
 	assert.Equal(t, file.Egress.Std, std)
 	assert.Equal(t, file.Egress.Vault, vault)
-	assert.Equal(t, 0.5, std)
+	assert.Equal(t, 2.0, std)
 	assert.Equal(t, 1.0, vault)
 	assert.Equal(t, int64(float64(TB)*file.Egress.Std)+int64(float64(TB)*file.Egress.Vault),
 		PlanEgressAllowance(TB, TB))
@@ -48,15 +48,15 @@ func TestEgressAllowance_Precedence(t *testing.T) {
 	m := NewQuotaManager(db)
 	ctx := context.Background()
 
-	t.Run("house 6+1 is half the downstairs plus the whole attic", func(t *testing.T) {
+	t.Run("house 6+1 is twice the downstairs plus the whole attic", func(t *testing.T) {
 		tenantID := newTestTenant(t, db, m, "egress-house", "free", FreeTierLimits.StorageBytes)
 		require.NoError(t, m.SetHouse(ctx, tenantID, HouseFromTB(6, 1, 0)))
 
 		a, err := m.EgressAllowance(ctx, tenantID)
 
 		require.NoError(t, err)
-		assert.Equal(t, 4*TB, a.Bytes)
-		assert.Equal(t, 4*TB, a.PlanBytes)
+		assert.Equal(t, 13*TB, a.Bytes)
+		assert.Equal(t, 13*TB, a.PlanBytes)
 		assert.Equal(t, int64(0), a.OverrideBytes)
 		assert.Equal(t, EgressSourceHouse, a.Source)
 	})
@@ -72,23 +72,23 @@ func TestEgressAllowance_Precedence(t *testing.T) {
 		assert.Equal(t, EgressSourceHouse, a.Source)
 	})
 
-	t.Run("no house is half the single quota", func(t *testing.T) {
+	t.Run("no house is twice the single quota", func(t *testing.T) {
 		tenantID := newTestTenant(t, db, m, "egress-legacy", "vault18", 18*TB)
 
 		a, err := m.EgressAllowance(ctx, tenantID)
 
 		require.NoError(t, err)
-		assert.Equal(t, 9*TB, a.Bytes)
+		assert.Equal(t, 36*TB, a.Bytes)
 		assert.Equal(t, EgressSourceQuota, a.Source)
 	})
 
-	t.Run("free tier is 2.5 GiB", func(t *testing.T) {
+	t.Run("free tier is 10 GiB", func(t *testing.T) {
 		tenantID := newTestTenant(t, db, m, "egress-free", "free", FreeTierLimits.StorageBytes)
 
 		a, err := m.EgressAllowance(ctx, tenantID)
 
 		require.NoError(t, err)
-		assert.Equal(t, 5*GB/2, a.Bytes)
+		assert.Equal(t, 10*GB, a.Bytes)
 		assert.Equal(t, EgressSourceQuota, a.Source)
 	})
 
@@ -102,7 +102,7 @@ func TestEgressAllowance_Precedence(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 7*GB, a.Bytes)
 		assert.Equal(t, 7*GB, a.OverrideBytes)
-		assert.Equal(t, 4*TB, a.PlanBytes)
+		assert.Equal(t, 13*TB, a.PlanBytes)
 		assert.Equal(t, EgressSourceOverride, a.Source)
 	})
 
@@ -113,7 +113,7 @@ func TestEgressAllowance_Precedence(t *testing.T) {
 		a, err := m.EgressAllowance(ctx, tenantID)
 
 		require.NoError(t, err)
-		assert.Equal(t, 5*GB/2, a.Bytes)
+		assert.Equal(t, 10*GB, a.Bytes)
 		assert.Equal(t, EgressSourceQuota, a.Source)
 	})
 
@@ -144,7 +144,7 @@ func TestEgressAllowance_OverrideSurvivesSetHouseReplayAndClearHouse(t *testing.
 	a, err := m.EgressAllowance(ctx, tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, 3*TB, a.Bytes)
-	assert.Equal(t, 3*TB, a.PlanBytes)
+	assert.Equal(t, 9*TB, a.PlanBytes)
 	assert.Equal(t, EgressSourceOverride, a.Source)
 
 	// Act 2: the subscription ends.
@@ -154,7 +154,7 @@ func TestEgressAllowance_OverrideSurvivesSetHouseReplayAndClearHouse(t *testing.
 	a, err = m.EgressAllowance(ctx, tenantID)
 	require.NoError(t, err)
 	assert.Equal(t, 3*TB, a.Bytes)
-	assert.Equal(t, 5*GB/2, a.PlanBytes)
+	assert.Equal(t, 10*GB, a.PlanBytes)
 
 	// Act 3: the admin clears the override.
 	setOverride(t, db, tenantID, 0)
@@ -162,7 +162,7 @@ func TestEgressAllowance_OverrideSurvivesSetHouseReplayAndClearHouse(t *testing.
 	// Assert 3: back on the plan, nothing left behind.
 	a, err = m.EgressAllowance(ctx, tenantID)
 	require.NoError(t, err)
-	assert.Equal(t, 5*GB/2, a.Bytes)
+	assert.Equal(t, 10*GB, a.Bytes)
 	assert.Equal(t, EgressSourceQuota, a.Source)
 }
 
