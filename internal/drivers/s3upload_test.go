@@ -104,7 +104,7 @@ func TestS3ParallelUpload_SmallFile_SinglePut(t *testing.T) {
 }
 
 func TestS3ParallelUpload_LargeFile_ParallelMultipart(t *testing.T) {
-	data := bytes.Repeat([]byte("x"), 40<<20) // 40 MiB > 16 MiB → 3 parts
+	data := bytes.Repeat([]byte("x"), 2*s3UploadPartSize+8<<20) // two parts and a tail → 3 parts
 	m := newMockUploadClient()
 
 	err := s3ParallelUpload(context.Background(), m, "bucket", "key", "", bytes.NewReader(data), -1)
@@ -112,7 +112,7 @@ func TestS3ParallelUpload_LargeFile_ParallelMultipart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, m.putObjectCalls, "large file should not use a single PutObject")
 	assert.Equal(t, 1, m.createCalls)
-	assert.GreaterOrEqual(t, m.uploadParts, 3, "40 MiB / 16 MiB → at least 3 parts")
+	assert.GreaterOrEqual(t, m.uploadParts, 3, "two part sizes and a tail → at least 3 parts")
 	assert.Equal(t, 1, m.completeCalls)
 	assert.Equal(t, data, m.reassemble(), "reassembled parts must match input (integrity)")
 }
@@ -139,7 +139,7 @@ type nonSeekableReader struct{ r io.Reader }
 func (n nonSeekableReader) Read(p []byte) (int, error) { return n.r.Read(p) }
 
 func TestS3Upload_ExactPartSizeObjectUsesSinglePut(t *testing.T) {
-	// A 16 MiB object is exactly s3UploadPartSize. With an unknown-length,
+	// An object of exactly s3UploadPartSize. With an unknown-length,
 	// non-seekable body the SDK cannot tell it is the whole object, so it
 	// commits to multipart: Create + UploadPart + Complete = 3 round trips
 	// where 1 PutObject would do. Passing ContentLength must collapse it.
@@ -179,8 +179,8 @@ func TestS3Upload_BelowPartSizeStillSinglePut(t *testing.T) {
 
 func TestS3Upload_AbovePartSizeStillMultipart(t *testing.T) {
 	// Genuinely large objects must keep the parallel multipart path — that is
-	// what makes big uploads fast. 40 MiB over a 16 MiB part size = 3 parts.
-	body := bytes.Repeat([]byte("z"), 40<<20)
+	// what makes big uploads fast. Two part sizes and a tail = 3 parts.
+	body := bytes.Repeat([]byte("z"), 2*s3UploadPartSize+8<<20)
 	m := newMockUploadClient()
 
 	in := &s3.PutObjectInput{
@@ -223,7 +223,7 @@ func TestS3Upload_KnownSizeAvoidsMultipartRoundTrips(t *testing.T) {
 		n    int
 	}{
 		{"1MiB", 1 << 20},
-		{"exactly 16MiB part size", s3UploadPartSize},
+		{"exactly one part size", s3UploadPartSize},
 	}
 	for _, tc := range sizes {
 		t.Run(tc.name, func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestS3Upload_KnownSizeAvoidsMultipartRoundTrips(t *testing.T) {
 }
 
 func TestS3Upload_UnknownSizeSentinelKeepsStreaming(t *testing.T) {
-	body := bytes.Repeat([]byte("r"), 20<<20)
+	body := bytes.Repeat([]byte("r"), s3UploadPartSize+4<<20)
 	m := newMockUploadClient()
 
 	// -1 means "size unknown" — must not take the buffered fast path.
@@ -298,4 +298,18 @@ func TestS3Upload_CleanEOFShortBodyIsAnError(t *testing.T) {
 		Body: nonSeekableReader{bytes.NewReader(full)}, ContentLength: aws.Int64(declared)}
 	require.NoError(t, s3ParallelUploadInput(context.Background(), m2, in2))
 	assert.Equal(t, full, m2.reassemble())
+}
+
+// The uploader's constants (the SPEED bench § 8: 32 MiB × 8 — Lyve 713 →
+// 918, iDrive 357 → 507 MB/s from SLC against 16 MiB × 8), and
+// S3SinglePutMaxBytes moves with the part size: a body of one part is ONE
+// PutObject whose backend ETag is its MD5 (api/edge_get.go's If-Match rule,
+// D-EDGE-10).
+func TestS3Upload_ThirtyTwoMiBByEightAndTheSinglePutCutoffMovesWithIt(t *testing.T) {
+	assert.Equal(t, 32<<20, s3UploadPartSize)
+	assert.Equal(t, 8, s3UploadConcurrency)
+	assert.Equal(t, int64(s3UploadPartSize), int64(S3SinglePutMaxBytes))
+	u := uploaderFor(&mockUploadClient{})
+	assert.Equal(t, int64(s3UploadPartSize), u.PartSize)
+	assert.Equal(t, s3UploadConcurrency, u.Concurrency)
 }

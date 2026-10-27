@@ -28,12 +28,23 @@ import (
 // notice, but its symbols are not individually deprecated, so this is not flagged
 // by staticcheck.
 const (
-	s3UploadPartSize = 16 << 20 // 16 MiB per part
+	// s3UploadPartSize × s3UploadConcurrency: 32 MiB × 8 since the SPEED
+	// bench § 8 (bench-results/SPEED-2026-10-27.md, from SLC with this very
+	// client: Lyve us-west-1 713 → 918 MB/s, iDrive us-central-1 357 → 507
+	// against 16 MiB × 8). 9 × 32 MiB of part buffers per whole-object write
+	// (the manager's pool, data_path_allocations_test.go's row). The
+	// per-request PUT deadline still scales per 64 MiB (s3PutDeadline): a
+	// 32 MiB part gets 30 s at the default FIXED_BUCKET_PUT_TIMEOUT.
+	s3UploadPartSize = 32 << 20
 	// S3SinglePutMaxBytes is the largest body the S3-class drivers write as
 	// ONE PutObject (putSinglePartIfSmall; the manager does the same for a
 	// body under one part): its backend ETag is the body's MD5. A larger
 	// body is a backend multipart whose ETag is the parts' -N — unknown to
-	// the row. The edge GET's If-Match rule reads it (api/edge_get.go).
+	// the row. The edge GET's If-Match rule reads it (api/edge_get.go). It
+	// moves with the part size; a row's MD5 ETag stays what it is, so no
+	// reader changes — an object of 16–32 MiB the origin wrote before
+	// (a backend multipart then) answers an If-Match of its MD5 with 412
+	// and the edge falls back to the origin, which serves it.
 	S3SinglePutMaxBytes = s3UploadPartSize
 	s3UploadConcurrency = 8 // parallel parts in flight
 )
@@ -112,7 +123,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // uploaderCache holds one manager.Uploader per client. The uploader owns a
 // pooled set of part buffers that the SDK explicitly reuses *between* upload
 // calls; constructing a fresh uploader per PUT threw that pool away every
-// time and re-allocated Concurrency+1 part buffers (9 × 16 MiB) per object.
+// time and re-allocated Concurrency+1 part buffers (9 × 32 MiB) per object.
 // manager.Uploader is safe for concurrent use.
 var uploaderCache sync.Map // manager.UploadAPIClient -> *manager.Uploader
 

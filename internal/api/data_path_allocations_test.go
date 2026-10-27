@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/FairForge/vaultaire/internal/drivers"
 )
 
 // allocationSites: "<package>/<file>:<function>" → the budget it is under,
@@ -62,7 +64,7 @@ var allocationSites = map[string]string{
 	"api/sse_stream.go:readSealedBytes":  "per ranged 0x05 read: the 6-byte lead, the part table (≤ 160,006 bytes, the count checked first) and a part's 29-byte header (WP-SSEC-1 B.3)",
 	// The S3 uploader (idrive, lyve, wasabi, r2, s3compat): bounded per
 	// request, unbounded in number — the WP-R2-6 residual named in WP-P14.
-	"drivers/s3upload.go:putSinglePartIfSmall": "per PUT ≤ 16 MiB (a body of one part), and the manager's 8 × 16 MiB parts above it: no process budget — residual (WP-P14)",
+	"drivers/s3upload.go:putSinglePartIfSmall": "per PUT ≤ 32 MiB (a body of one part), and the manager's parts above it — 9 × 32 MiB per whole-object write (32 MiB × 8 since the SPEED bench § 8): no process budget — residual (WP-P14)",
 	// Small: a constant or a key-sized buffer that the walker cannot size.
 	"api/blob_address.go:newBlobAddress":          "17 bytes: a blob address's random bits",
 	"api/synthetic_check.go:cycle":                "a few KiB: the canary's body",
@@ -168,4 +170,10 @@ func TestDataPathBounds_EveryLargeAllocationIsUnderABudget(t *testing.T) {
 	sort.Strings(stale)
 	assert.Empty(t, unknown, "a []byte allocation of unknown or ≥ 1 MiB size with no budget named for it")
 	assert.Empty(t, stale, "rows for allocations that no longer exist")
+
+	// The uploader's row names its buffers at the constants' values: a
+	// changed part size fails here until the row is updated (concurrency 8
+	// + the one being filled).
+	assert.Contains(t, allocationSites["drivers/s3upload.go:putSinglePartIfSmall"],
+		fmt.Sprintf("9 × %d MiB per whole-object write", drivers.S3SinglePutMaxBytes>>20))
 }
