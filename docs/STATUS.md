@@ -1,6 +1,11 @@
 # Status — the live pointer
 
-Updated: 2026-10-27 21:00 UTC (**Stage 1a Prompt 46c, WP-EDGE-2 Part C — BUILT and merged** (`docs/reviews/WP-EDGE-2C.md`):
+Updated: 2026-10-27 21:45 UTC (**The Worker 0.4.0 is DEPLOYED** (21:32:50 UTC, version `0eddafac`; rows 95–98; every module byte-identical on download).
+- **RB-9 fixed**: the signed pass-through probe 2 s after the content deploy was NoSuchKey, not 403, and the capture shows `range` and `if-none-match` reaching the origin.
+- **Prod proof** (tenant zero, aws-cli DEFAULTS):
+  - the Lightroom zip's 29 aws-chunked parts were all header-signed at the edge (`admitted_unverified`: a Lyve bucket), with 0 PUTs on the origin;
+  - its download through the windowed reader was MD5-equal ×3, metered exactly, at 262 ms of CPU per 243 MB.
+- `docs/reviews/WP-EDGE-2C.md` § The deploy, § The prod proof) — previous: 2026-10-27 21:00 UTC (**Stage 1a Prompt 46c, WP-EDGE-2 Part C — BUILT and merged** (`docs/reviews/WP-EDGE-2C.md`):
 - **#1010 Part 0** — the RP70 fixes:
   - every UploadPart of an edge tenant is the edge's (D-EDGE-29);
   - the first stored chunk OPENED at commit (a wrong-key host refused at the first commit);
