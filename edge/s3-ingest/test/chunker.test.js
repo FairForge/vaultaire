@@ -1,5 +1,5 @@
-// WP-EDGE-2 Part A: the WASM chunker (sdk/chunkerwasm → wasm/chunker.wasm,
-// built by `make edge-chunker-wasm`; `make test-edge` builds it first) cuts
+// WP-EDGE-2 Part A: the WASM chunker (sdk/chunkerwasm → src/wasm/chunker.wasm,
+// built by `make edge-wasm`; `make test-edge` builds it first) cuts
 // the SAME boundaries as Go's frozen chunker — asserted against the golden
 // vectors internal/crypto/testdata/chunker_golden.json, which
 // TestChunker_GoldenBoundaries pins on the Go side. The 100 MiB body is
@@ -15,8 +15,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const wasmPath = join(here, "..", "wasm", "chunker.wasm");
-const execPath = join(here, "..", "wasm", "wasm_exec.js");
+const wasmPath = join(here, "..", "src", "wasm", "chunker.wasm");
+const execPath = join(here, "..", "src", "wasm", "wasm_exec.js");
 const vectorsPath = join(here, "..", "..", "..", "internal", "crypto", "testdata", "chunker_golden.json");
 
 async function loadChunker() {
@@ -35,7 +35,7 @@ function val(r, what) {
   return r.value;
 }
 
-test("the WASM chunker cuts the golden body at exactly Go's boundaries", { skip: !existsSync(wasmPath) && "run `make edge-chunker-wasm` first" }, async () => {
+test("the WASM chunker cuts the golden body at exactly Go's boundaries", { skip: !existsSync(wasmPath) && "run `make edge-wasm` first" }, async () => {
   const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
   const chunker = await loadChunker();
   const body = val(chunker.goldenBody(vectors.seed, vectors.size), "goldenBody");
@@ -63,7 +63,7 @@ test("the WASM chunker cuts the golden body at exactly Go's boundaries", { skip:
   console.log(`chunker.wasm: ${vectors.size >> 20} MiB in ${ms} ms (${Math.round(vectors.size / 1048576 / (ms / 1000))} MB/s in node)`);
 });
 
-test("boundaries reset per instance: each multipart part is chunked alone", { skip: !existsSync(wasmPath) && "run `make edge-chunker-wasm` first" }, async () => {
+test("boundaries reset per instance: each multipart part is chunked alone", { skip: !existsSync(wasmPath) && "run `make edge-wasm` first" }, async () => {
   const chunker = await loadChunker();
   const vectors = JSON.parse(readFileSync(vectorsPath, "utf8"));
   const body = val(chunker.goldenBody(vectors.seed, 8 << 20), "goldenBody");

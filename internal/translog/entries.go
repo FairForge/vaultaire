@@ -138,9 +138,16 @@ const (
 	ClientSDKJS       = "sdk-js"       // the JS binding that loads it (sdk/js/e2ee/index.mjs)
 	ClientEdgeIngest  = "edge-ingest"  // the mover: the Cloudflare Worker on s3.stored.cloud (edge/s3-ingest/src/index.js, published as the file — WP-EDGE-1 Part A)
 	ClientEdgeChunker = "edge-chunker" // the frozen chunker compiled to WebAssembly for the edge codec's data-plane host (sdk/chunkerwasm → chunker.wasm — WP-EDGE-2 Part A)
+	// The Worker 0.3.0's other modules (WP-EDGE-2 Part B), each published as
+	// its file and each its own row: the codec pipeline, the 0x06 sealer and
+	// the Go runtime's JS half (the toolchain's wasm_exec.js). Its e2ee.wasm
+	// is an sdk-wasm row.
+	ClientEdgeCodec    = "edge-codec"     // edge/s3-ingest/src/codec.js
+	ClientEdgeSeal     = "edge-seal"      // edge/s3-ingest/src/seal.js
+	ClientEdgeWasmExec = "edge-wasm-exec" // GOROOT/lib/wasm/wasm_exec.js of go.mod's toolchain
 )
 
-var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker}
+var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker, ClientEdgeCodec, ClientEdgeSeal, ClientEdgeWasmExec}
 
 // BuildClients lists the clients.
 func BuildClients() []string { return append([]string(nil), buildClients...) }

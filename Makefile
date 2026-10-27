@@ -55,19 +55,27 @@ test-db:
 # The mover Worker's tests (edge/s3-ingest, WP-EDGE-1 Part A): node's own
 # runner, no dependencies to install. The chunker's golden test needs the
 # WASM build beside it (WP-EDGE-2 Part A); without node the build is enough.
-test-edge: edge-chunker-wasm
+test-edge: edge-wasm
 	cd edge/s3-ingest && node --test
+	EDGE_CODEC_NODE_SEALED=$(CURDIR)/edge/s3-ingest/test/out/node_sealed_chunk.sealed \
+		go test -count=1 -run 'TestEdgeCodec_ExportVectorForNode|TestEdgeCodec_NodeSealedChunkOpens' ./internal/crypto/
 
-# The frozen chunker compiled for the edge codec's data-plane host
-# (sdk/chunkerwasm → edge/s3-ingest/wasm/chunker.wasm, gitignored), with the
-# SAME toolchain's wasm_exec.js beside it. scripts/build-client.sh is the
-# one recipe (the client_build row's, WP-EDGE-2 Part A).
-edge-chunker-wasm:
-	mkdir -p edge/s3-ingest/wasm
-	scripts/build-client.sh edge-chunker edge/s3-ingest/wasm/chunker.wasm
-	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" edge/s3-ingest/wasm/wasm_exec.js
+# The Worker's WebAssembly modules (WP-EDGE-2 Part B), every one built by
+# scripts/build-client.sh — the client_build rows' recipe, so the deployed
+# module is the manifest's bytes: the frozen chunker (edge-chunker), the key
+# core (sdk-wasm: e2ee.wasm's sealTo wraps each chunk key) and the toolchain's
+# wasm_exec.js (edge-wasm-exec). Into edge/s3-ingest/src/wasm/ (gitignored),
+# under wrangler's base_dir.
+edge-wasm:
+	mkdir -p edge/s3-ingest/src/wasm
+	scripts/build-client.sh edge-chunker edge/s3-ingest/src/wasm/chunker.wasm
+	scripts/build-client.sh sdk-wasm edge/s3-ingest/src/wasm/e2ee.wasm
+	scripts/build-client.sh edge-wasm-exec edge/s3-ingest/src/wasm/wasm_exec.js
 
-.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge edge-chunker-wasm
+# Kept for Part A's name: the chunker alone.
+edge-chunker-wasm: edge-wasm
+
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge edge-wasm edge-chunker-wasm
 
 # Code formatting
 fmt:

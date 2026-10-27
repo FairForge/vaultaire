@@ -9,15 +9,32 @@
 # file` — never on a command line). Vars: VAULTAIRE_ORIGIN is where admit
 # and commit go: the SLC host whose certificate is valid, NOT
 # s3.stored.cloud (that would loop into this Worker).
+#
+# 0.3.0 (WP-EDGE-2 Part B): the codec's modules are published as their files
+# too — src/codec.js, src/seal.js and src/wasm/{chunker.wasm, e2ee.wasm,
+# wasm_exec.js} (`make edge-wasm`, the client_build recipe) — each a
+# client_build row of its own. The codec spends CPU (≈ 11 s per GiB, the
+# chunker): the 5-minute ceiling of Workers Paid.
 name = "stored-s3-edge"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 no_bundle = true
+find_additional_modules = true
+base_dir = "src"
+rules = [
+  { type = "ESModule", globs = ["*.js", "wasm/*.js"], fallthrough = false },
+  { type = "CompiledWasm", globs = ["wasm/*.wasm"], fallthrough = false },
+]
 workers_dev = false
 routes = [{ pattern = "s3.stored.cloud/*", zone_name = "stored.cloud" }]
+
+[limits]
+cpu_ms = 300000
 
 [observability]
 enabled = true
 
 [vars]
 VAULTAIRE_ORIGIN = "https://stored.ge"
+# The codec refuses CODEC_TAMPER (a lab switch) on this environment.
+ENVIRONMENT = "production"
