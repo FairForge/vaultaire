@@ -1372,6 +1372,408 @@ Done means: PR 0, A, B, C merged through the queue; the lab proof table
 filled; the deploy's manifest rows in the log (`translog-verify -client`
 on each module file); the ledger row updated; Prompt 47 refreshed here.
 
+## Stage 1a Prompt 46c: WP-EDGE-2 Part C — the Worker 0.4.0 (aws-chunked at the edge, the windowed reader, the byte bound) and the origin's tuning (Part 0: RP70-1…7)
+
+*Written 2026-10-27 by the RP70 review (`docs/reviews/WP-EDGE-2B-REVIEW.md`)
+from its findings and the SPEED bench's "What changes"
+(`bench-results/SPEED-2026-10-27.md`). It goes BEFORE Prompt 47: it moves
+more bytes off SLC than the node does (every default aws-cli upload still
+crosses SLC today — RE-2), and the node's case after the bench is
+Cloudflare-independence, RS and GLACIER, not speed. Two editions; paste one.*
+
+Continue from WP-EDGE-2 Part B (note docs/reviews/WP-EDGE-2B.md — read
+§ Decisions D-EDGE-22…28, § Residuals RB3-1…9, the two open questions) and
+its review RP70 (docs/reviews/WP-EDGE-2B-REVIEW.md — Part 0, in its last
+section's order; D-EDGE-29 is decided there). Read the SPEED bench
+(bench-results/SPEED-2026-10-27.md §§ 1, 2, 4, 8, 9 and "What changes") —
+its numbers are this prompt's targets. `git log origin/main`, `gh pr list`.
+
+Read first: edge/s3-ingest/src/{index.js, codec.js, seal.js}, README,
+test/*.test.js, lab/codec-proof.sh; internal/api/edge_ingest.go
+(`edgeAdmitWrite`, the `edgeReasonSmall` gate ~528, `edgeUploadPart`),
+edge_codec_control.go (`edgeIndex` ~277, `settleEdgeCodecChunks`,
+`headEdgeChunk`, `referenceEdgeChunk`), edge_get.go (the GET admit, the
+presign with `range` + `if-match`, D-EDGE-10/11), internal/drivers/s3_edge.go
+(`PresignPut` / `PresignGet`, `s3EdgeTarget`), internal/drivers/s3upload.go
+(`s3UploadPartSize`, `s3UploadConcurrency`, `S3SinglePutMaxBytes`),
+internal/api/data_path_allocations_test.go (the uploader's buffer row),
+internal/crypto/stream.go (`StreamHeaderWrapped`, `ReadStreamHeader`,
+`newStreamOpener`, `prime`), internal/crypto/edge_codec.go
+(`OpenWrappedChunk`); docs/API.md § Fast uploads and downloads; contract
+lines 4, 5, 6 (cite in every PR body).
+
+Lane: Engine. No migration (next: 112). PRs: (0) RP70's fixes — control
+plane first, then the Worker; (A) aws-chunked at the edge; (B) the windowed
+reader; (C) the origin's uploader constants; (D) docs (WP-EDGE-2C.md, STATUS,
+plan 40.10, CLAUDE.md rows, Prompt 47 refreshed here with the node's case
+restated).
+
+What to build
+0. PART 0, in RP70's order. **RP70-2 / D-EDGE-29:** every UploadPart of an
+   edge tenant is the edge's whatever its size — `EDGE_MIN_BYTES` gates
+   PutObject only; an empty last part is the edge's too and commits with an
+   empty chunk list (RB3-5). **RP70-1:** the in-flight bound in BYTES (48 MiB
+   of plaintext; a chunk acquires its size), and the sealed body STREAMED
+   — `fetch(url, {body})` with a `ReadableStream` that yields the header and
+   then each segment's ciphertext as it is encrypted, through a
+   `FixedLengthStream(sealed_length)`, so no sealed copy exists whole and
+   the plaintext is released segment by segment; the peak reported in bytes.
+   **RP70-3:** the commit's sample opens the header and the FIRST SEGMENT of
+   the first stored chunk (a ranged GET of `StreamHeaderWrapped + 1 MiB +
+   16` bytes through the chunk store on the row's backend; `OpenWrappedChunk`
+   on that prefix — its `prime` verifies the wrap and the first tag; a
+   stream that ends after one segment is fine for the check), every commit;
+   the ETag + size HEAD stays for every 32nd stored chunk after it;
+   `head_mismatch` covers both. **RP70-5:** `fetch(request, {cache:
+   "no-store"})` on every pass-through. **RP70-4:** one transaction per index
+   call for its claims (locks in hash order). **RP70-6**, **RP70-7**.
+1. AWS-CHUNKED AT THE EDGE (RE-2's close; the bench's § 1): a PutObject or
+   UploadPart whose `x-amz-content-sha256` is `STREAMING-UNSIGNED-PAYLOAD-
+   TRAILER` (aws-cli ≥ 2.23's default: `Transfer-Encoding: chunked`,
+   `Content-Encoding: aws-chunked`, `x-amz-decoded-content-length`,
+   `x-amz-trailer: x-amz-checksum-crc64nvme`) is admitted on its DECODED
+   length. The mover path: the admit answers `headers` — a HEADER-SIGNED
+   backend request (SigV4 `Authorization` + `x-amz-date` with the four
+   aws-chunked headers and the streaming payload hash signed, the key's
+   secret never leaving the control plane; `engine.EdgeWriter` grows
+   `SignPut(ctx, container, artifact, decodedLength, trailer) (headers, err)`)
+   instead of a presigned URL; the Worker forwards the body and the
+   headers untouched, `Transfer-Encoding: chunked` included — zero
+   JavaScript in the byte path. iDrive verifies the trailer; **Lyve does
+   not** (the bench), and the origin verifies no trailer either today
+   (RE-6): D-EDGE-30 — a Lyve-bound aws-chunked write is admitted on the
+   length alone, the gap named in the note and in `docs/API.md`, closed by
+   D-EDGE-31 when the codec path carries the write. The codec path: the
+   cutter decodes the aws-chunked framing in its transform (the chunk-size
+   lines, the terminal chunk, the trailer) and VERIFIES the CRC64NVME (or
+   CRC32) trailer in JavaScript (a table CRC, ~200 MB/s — the pipeline
+   already touches every byte); a trailer mismatch is `edge_error` + the
+   client's 400 `XAmzContentChecksumMismatch` relayed from the commit
+   (D-EDGE-31: the edge verifies what the origin never did). The admit's
+   `content_length` is the decoded length; the reservation and the manifest
+   use it. Clients stop needing `request_checksum_calculation =
+   when_required`: `docs/API.md` loses that line.
+2. THE WINDOWED READER (RB-1's close; the bench's § 4): a whole GET (or a
+   Range GET) of ≥ 64 MiB through the edge reads 16 MiB ranges with ≤ 6 in
+   flight (the Worker's connection limit), each `arrayBuffer()` written in
+   order to a `FixedLengthStream`, 1 s of CPU per GiB. D-EDGE-32: for such a
+   read the admit's link signs `if-match` and NOT `range` (the Worker sets
+   each range; the admitted span bounds what it reads; the backend's
+   Content-Length per range summed is the commit's `backend_content_length`;
+   D-EDGE-11's exact-span rule stays for reads under 64 MiB). The commit's
+   outcome rules are Part B's; a range that fails mid-object is a cut
+   response (never a short clean end), counted. Lyve 80 → ~160 MB/s, iDrive
+   50 → ~100 per stream.
+3. THE ORIGIN'S UPLOADER: `s3UploadPartSize` 16 → 32 MiB at concurrency 8
+   (the bench's § 8: Lyve 713 → 918, iDrive 357 → 507 MB/s); `S3SinglePutMaxBytes`
+   moves with it (D-EDGE-10's If-Match cutoff: a row whose ETag is an MD5 is
+   an MD5 whatever the cutoff was, so no reader changes — say so); the
+   allocation-audit row (`data_path_allocations_test.go`) names the new
+   buffers (9 × 32 MiB per whole-object write); `FIXED_BUCKET_PUT_TIMEOUT`'s
+   per-64 MiB scaling unchanged. `GEYSER_GET_CONCURRENCY=64` is the OWNER's
+   `.env` change (write it as a [YOU] line in the note and STATUS; do not
+   touch prod's `.env`).
+4. The Worker 0.4.0's client_build rows + deploy on the production account
+   WITH RB-9's capture armed (the no-store fix is in this build: the capture
+   is the proof it worked).
+
+Step 0 — probes into WP-EDGE-2C.md: 0.1 `encodeBody: "manual"` + an
+un-decoded subrequest for a stored-Content-Encoding row (RB3-8, RP66-1's
+residual) on both backends — servable at the edge, yes or no (probe only;
+the fix is a later part); 0.2 the CRC64NVME table implementation's rate in
+workerd (and CRC32's); 0.3 a header-signed PUT's clock window: how far
+`x-amz-date` may drift before iDrive and Lyve refuse (the admit's 15-minute
+TTL must fit); 0.4 the streamed-seal PUT: does `fetch` with a
+`FixedLengthStream` body of 16 MiB reach the backend at pass-through speed
+in workerd (the bench's 35–50 MB/s), or does the stream cost more.
+
+Tests (red first): Part 0's seven (a 50 MiB aws-cli upload at 8 MiB parts
+ten times, every run edge; 256 MiB of zeros and a sparse 1 GiB image under
+the byte bound, the peak in bytes; the (g) `key` tamper refused at the
+first commit; the no-store pass-through pinned by a test that asserts the
+option; a batch of 64 misses claimed in ONE transaction; a hit nulls its
+data; a commit's 400 relayed); the aws-chunked decoder's framing on the
+captured shape (the bench's § 1 bytes: `100000\r\n` … `0\r\n` trailer
+`\r\n\r\n`), a wrong trailer refused, a Lyve-bound write admitted on the
+length with the gap counted (`vaultaire_data_plane_admits_total{outcome=
+"admitted_unverified"}`), the header-signed request's signature verified by
+the SDK's own verifier in a test, the Worker forwarding `Transfer-Encoding:
+chunked` bodies; the windowed reader's order, cut-on-failure, byte count
+and the `if-match` link without `range`; the uploader constants' audit row;
+`make test-edge` carries every node test. Lab proof through `wrangler dev`
+(the Part B script extended): aws-cli DEFAULT settings (no
+`request_checksum_calculation` line) → every part edge-admitted, 0 origin
+PUT lines, MD5-equal; a 2 GiB download through the windowed reader
+MD5-equal at ≥ 1.8× the single-stream rate; the zero-run and VM-image
+uploads under the byte bound with `wrangler dev`'s memory watched.
+
+Architecture notes
+- Contract 4, 5, 6 cited. The header signature is computed on SLC from the
+  backend key and travels like a presigned URL (a bearer for 15 minutes);
+  the Worker holds it for the request only.
+- On prod: 0.4.0 deploys with `edge_codec` OFF; aws-chunked admission and
+  the windowed reader are the MOVER's (flag `edge_ingest`, tenant zero and
+  the bench tenant) and are live for them the day they deploy — the prod
+  proof is the Lightroom zip with DEFAULT aws-cli settings and its download
+  through the windowed reader.
+- Closeout: WP-EDGE-2C.md (Step 0, D-EDGE-29…32, residuals RB4-n), STATUS,
+  plan 40.10, CLAUDE.md rows (the `edge_admits` bullet's aws-chunked and
+  windowed-read sentences; the drivers' constants), docs/API.md, the ledger
+  row; refresh Prompt 47's two editions here (its summary line restated:
+  the node is for Cloudflare-independence, RS/GLACIER off SLC and BYO hosts,
+  not speed — and its Part 0 is RP72's). The post-merge review is RP72.
+- Commit: feat(edge,api,drivers): WP-EDGE-2 Part C — … [WP-EDGE-2]; merge
+  with `gh pr merge --auto` (merge queue; never --admin).
+
+ultrathink
+
+## Stage 1a Prompt 46c — Opus edition
+
+You are building WP-EDGE-2 Part C in the Vaultaire repository
+(/Users/viera/fairforge/vaultaire): the Worker 0.4.0 and the control-plane
+changes the RP70 review (docs/reviews/WP-EDGE-2B-REVIEW.md) and the SPEED
+bench (bench-results/SPEED-2026-10-27.md) call for. Read the Opus rules in
+"About the Opus editions" above. Work in a worktree from origin/main. No
+migration.
+
+Read before editing (in this order): docs/reviews/WP-EDGE-2B.md;
+docs/reviews/WP-EDGE-2B-REVIEW.md; bench-results/SPEED-2026-10-27.md §§ 1,
+2, 4, 8, 9 and "What changes"; edge/s3-ingest/src/index.js, codec.js,
+seal.js, README.md, test/codec.test.js, test/seal.test.js, test/read.test.js,
+lab/codec-proof.sh, wrangler.toml; internal/api/edge_ingest.go (the admit
+types ~120–300, `edgeAdmitWrite` ~503, the `edgeReasonSmall` gate ~528);
+internal/api/edge_multipart.go (`edgeUploadPart`); internal/api/
+edge_codec_control.go (`edgeIndex`, `claimEdgeChunk`, `settleEdgeCodecChunks`,
+`headEdgeChunk`, `referenceEdgeChunk`); internal/api/edge_get.go;
+internal/api/chunk_store.go (`head`); internal/drivers/s3_edge.go;
+internal/drivers/s3upload.go; internal/engine/interface.go (`EdgeWriter`,
+`EdgePresign`, `ObjectHeader`); internal/crypto/stream.go and edge_codec.go;
+internal/api/data_path_allocations_test.go; docs/API.md § Fast uploads and
+downloads; docs/ARCHITECTURE_CONTRACT.md lines 4, 5, 6.
+
+PR 0 — the RP70 fixes. Branch `stage1a-p46c-part0`. Control plane first
+(steps 1–4), then the Worker (5–8); one PR, two commits is fine.
+1. RP70-2, D-EDGE-29 (every UploadPart of an edge tenant is the edge's).
+   Test first (edge_codec_harness_test.go): an UploadPart of 2 MiB on a
+   NEW upload of a codec tenant is admitted codec (not `pass_through_small`);
+   an UploadPart of 0 bytes on a codec upload is admitted and its commit
+   with an empty chunk list records a part row with `part_chunks = '[]'`
+   and size 0, and Complete reads back. Red. Then in `edgeAdmitWrite`
+   (edge_ingest.go ~528): the `edgeReasonSmall` branch applies only when
+   `req.Op == edgeOpPut` (delete the `edgeUploadPart` special case, now
+   subsumed); in `commitEdgeCodecPart` allow `len(req.Chunks) == 0` when
+   `row.ContentLength == 0`. Green. Write D-EDGE-29 into the note's draft
+   now (a scratchpad file you paste into WP-EDGE-2C.md at the end).
+2. RP70-3 (open the first segment at commit). Test first: the fake backend
+   of the fixture serves ranged GETs; a commit whose first stored chunk was
+   sealed under ANOTHER public key is refused 400 with `head_mismatch`
+   (reuse the harness's `storeMisses` with a second key pair for one
+   chunk); a commit whose first stored chunk is well-formed makes exactly
+   one ranged GET of `crypto.StreamHeaderWrapped + 1<<20 + 16` bytes (count
+   it on the fake backend) and HEADs the 33rd. Red. Then: `chunkStore.getRange(ctx,
+   addr, from, to)` through the driver's `GetRange` (every edge writer has
+   one; `engine.VersionedRangeGetter`'s method or the driver's own — read
+   s3_edge.go and the fixed-bucket driver to pick the existing one); in
+   `settleEdgeCodecChunks`, for `stored == 0` call a new
+   `openEdgeChunkPrefix(ctx, tenantID, keyed, version, since)` that fetches
+   the prefix, derives the codec private seed for `version`
+   (`tenantKeys.EdgeCodecPrivateKey`) and calls `crypto.OpenWrappedChunk`
+   on a reader over the prefix — `prime` verifies the wrap and the first
+   segment's tag; `io.ErrUnexpectedEOF` after the first segment is
+   acceptable (the prefix ends); any open error → `errEdgeChunkHeadMismatch`
+   with the reason; a backend that cannot be asked → `errEdgeChunkUnverified`.
+   The HEAD for `stored%32 == 0 && stored > 0` stays. Green.
+3. RP70-4 (one transaction per index call). Test first: an index call of
+   64 misses runs ONE transaction (count `BEGIN` through the fixture's
+   counting driver — `openCountingDB` exists in s3_batch_fanout_test.go's
+   pattern) and takes the 64 advisory locks in hash order. Red. Then
+   `edgeIndex`: sort the chunks by keyed hash, open one transaction, take
+   `pg_advisory_xact_lock` per chunk in that order, run the claim/hit
+   SELECT … FOR UPDATE and the INSERT/UPDATE per chunk inside it, commit
+   once, then presign the misses (no DB work) and record the claims. Keep
+   `claimEdgeChunk` for the single-chunk path only if something else calls
+   it; otherwise delete it. Green; the harness's race test still green.
+4. RP70-7 (relay a 4xx commit answer). Test first (node, codec.test.js): a
+   control plane answering the commit with status 200 whose relayed status
+   is 400 reaches the client as 400 with the XML body; a control plane
+   answering 503 twice yields the Worker's own 503. Red. Then `commitOK`:
+   a 200 from the control plane is always relayed (it already is); a 4xx
+   FROM the control plane itself (its own JSON error) is answered as 400
+   `InvalidRequest` with the control plane's `error` string in the
+   suggestion, not retried. Green.
+5. RP70-1 (bytes, not chunks; the streamed seal). Test first (node): a 200
+   MiB body made of 16 MiB chunks (use a body with no chunker boundary: all
+   zeros — assert the chunker cuts 16 MiB chunks) with 50 ms PUTs holds a
+   peak of ≤ 48 MiB of plaintext (the semaphore reports bytes) and the
+   fake backend receives each PUT as a streamed body whose length equals
+   `sealed_length` (the fake backend reads the body to its end and compares
+   to the `content-length` header). Red. Then: `Semaphore` becomes a byte
+   semaphore (`acquire(n)` / `release(n)`, FIFO waiters, peak in bytes;
+   `CODEC_IN_FLIGHT_BYTES = 48 << 20`); `emit` acquires `chunk.length` and a
+   chunk larger than the bound is still admitted alone (never deadlock: a
+   waiter whose n > bound proceeds when the semaphore is empty);
+   `sealChunk` becomes `sealChunkStream(e2ee, pub, version, chunk)` returning
+   `{ stream, length }` where `stream` is a `ReadableStream` that enqueues
+   the header, then encrypts and enqueues segment by segment, releasing the
+   plaintext's bytes from the semaphore as each segment is consumed (call
+   `release(segment.length)` after the enqueue of its ciphertext); the PUT
+   is `fetch(url, { method: "PUT", headers, body: stream.pipeThrough(new
+   FixedLengthStream(length)), duplex: "half" })` (read workerd's docs for
+   streaming request bodies: `FixedLengthStream` gives the Content-Length).
+   Keep `sealChunk` (whole) for the node test's cross-implementation vector
+   and assert both produce the same bytes under an injected `random`. Green.
+6. RP70-6: on the hit branch set `it.data = null` before `return` and
+   release its bytes. One test asserts a hit's bytes are released at once
+   (the semaphore's `held` drops before the batch settles).
+7. RP70-5: in index.js every `fetch(request)` the Worker passes on becomes
+   `fetch(request, { cache: "no-store" })` (write a helper `passThrough(request)`
+   and use it at every site: `kind === "pass"`, no env, the refused tamper,
+   the admit's timeout, `!admit.edge`, the codec modules failing to load,
+   the read fallback). Node test: a fake `fetch` records the init of every
+   pass-through call and asserts `cache === "no-store"`. Green.
+8. The lab (extend lab/codec-proof.sh): (i) a 50 MiB file at aws-cli's
+   default 8 MiB parts uploaded ten times — assert every run's parts were
+   admitted (the origin's `admitted` counter grows by the part count, no
+   `staged_parts`, no 400 in the aws-cli debug log); (ii) 256 MiB of zeros
+   and a 1 GiB sparse disk image (`dd` with `seek`) uploaded codec, the
+   Worker's `peak_in_flight` log line in bytes ≤ 48 MiB, `wrangler dev`'s
+   memory watched; (iii) the (g) `key` tamper refused at the first commit.
+   Write the three rows into the note's draft. PR title: `fix(api,edge):
+   WP-EDGE-2 Part C Part 0 — the RP70 fixes [WP-EDGE-2]`; body with the
+   test names and contract 4, 5, 6. `gh pr merge --auto`.
+
+PR A — aws-chunked at the edge. Branch `stage1a-p46c-aws-chunked`, after PR 0.
+9. The control plane. Test first (Go, the harness + a SigV4 verifier
+   test): an admit whose signed request carries `x-amz-content-sha256:
+   STREAMING-UNSIGNED-PAYLOAD-TRAILER`, `x-amz-decoded-content-length: N`,
+   `content-encoding: aws-chunked`, `x-amz-trailer: x-amz-checksum-crc64nvme`
+   and no `content-length` is admitted (op put and op part) with
+   `content_length = N` and answers `headers` (a map with `authorization`,
+   `x-amz-date`, `x-amz-content-sha256`, `content-encoding`,
+   `x-amz-decoded-content-length`, `x-amz-trailer`, `host`) and `url` (the
+   plain object URL, unsigned) instead of a presigned URL; the SDK's own
+   signer verification (`aws-sdk-go-v2`'s `v4.NewSigner`'s `SignHTTP` on an
+   identical request reproduces the `authorization` string) passes; a
+   Lyve-bound such admit counts `vaultaire_data_plane_admits_total{outcome=
+   "admitted_unverified"}` (new label, pre-created) and an iDrive-bound one
+   counts `admitted`. Red. Then: `engine.EdgeWriter` gains `SignPut(ctx,
+   container, artifact string, decoded int64, trailer string) (headers
+   map[string]string, url string, err error)` implemented in s3_edge.go by
+   `v4.NewSigner().SignHTTP` over a synthetic `http.Request` with the six
+   headers set and the payload hash `STREAMING-UNSIGNED-PAYLOAD-TRAILER`
+   (the SDK signs `x-amz-content-sha256` as given), expiry = the admit's
+   15 min by `x-amz-date` (the backends' 15-minute skew; Step 0.3 confirms);
+   `edgeAdmitWrite` detects the streaming shape BEFORE the `content-length`
+   requirement (today a missing content-length is a pass-through — change
+   the gate: a streaming-trailer request's length is `x-amz-decoded-content-
+   length`), admits on the decoded length, and answers `headers` + `url`
+   for the MOVER path; the codec path is unchanged here (step 11 decodes).
+   `edgeAdmitResponse` gains `Headers map[string]string` and the Worker's
+   `moveBody` uses them when present (step 10). A multipart edge part the
+   same way (the presigned UploadPart becomes a header-signed one).
+   `docs/API.md`: delete the `request_checksum_calculation = when_required`
+   line; add one sentence: "On Lyve the trailer checksum is not verified by
+   the backend; send `Content-MD5` or use iDrive for a verified write until
+   the codec path carries it" (D-EDGE-30). Green.
+10. The Worker's mover. Test first (node, a new test/awschunked.test.js):
+    with an admit carrying `headers`, `moveBody` forwards the request's
+    body untouched with those headers (plus `transfer-encoding: chunked`
+    when the request had no content-length) to `admit.url` and never reads
+    the body; the commit's outcome is the backend's status as before. Red.
+    Then in index.js: `classify` no longer passes a `STREAMING-` request
+    through; `moveBody` sets `headers` from `admit.headers` when present
+    and `body: request.body` with `duplex: "half"`. Green.
+11. The codec's decoder. Test first (node): the cutter fed the bench's
+    captured aws-chunked shape (`100000\r\n` + 1 MiB + `\r\n` … `0\r\n`
+    `x-amz-checksum-crc64nvme:<b64>\r\n\r\n`) emits the decoded bytes to
+    the chunker, verifies the CRC64NVME (and CRC32 when that is the
+    trailer) and fails with `checksum_mismatch` on a wrong trailer; the
+    commit for a mismatch is `edge_error` and the client's answer is 400
+    `XAmzContentChecksumMismatch` (relayed from the control plane: add
+    `outcome: "checksum_mismatch"` to the commit request, answered 400 by
+    `commitEdgeCodecPut` / `Part` with everything given back). Red. Then
+    `src/awschunked.js`: a `TransformStream` that parses the framing
+    (hex size, CRLF, the data, CRLF; the terminal `0`; the trailer lines;
+    the final CRLF), updates a table CRC64NVME (polynomial 0xAD93D23594C93659
+    reflected — write the 256-entry table at module load; verify against
+    node's `crypto` which has no CRC64, so pin it against three known
+    vectors from the bench's capture and from the AWS SDK's test vectors)
+    or CRC32 (zlib's), and compares the trailer; `runCodec` pipes
+    `request.body` through it when the admit says the shape is streaming
+    (`admit.streaming_trailer`). The MD5 and the chunker see decoded bytes.
+    Green. Step 0.2's rate goes in the note.
+12. Lab: aws-cli with its DEFAULT config (no checksum line) → a 100 MiB
+    `s3 cp` through `wrangler dev`: every part admitted, 0 origin PUT lines,
+    MD5-equal; the same with `edge_codec` ON → the codec path with the
+    decoder, MD5-equal, a corrupted trailer (edit one byte of a captured
+    body with the right length) → 400 on the client. PR title `feat(edge,
+    api,drivers): WP-EDGE-2 Part C — aws-chunked at the edge: header-signed
+    moves, the codec's decoder verifies the trailer [WP-EDGE-2]`.
+
+PR B — the windowed reader. Branch `stage1a-p46c-window`, after PR A.
+13. Control plane. Test first: a GET admit of a 100 MiB object answers
+    `window: {range_bytes: 16777216, in_flight: 6}` and a link that signs
+    `if-match` (when provable, D-EDGE-10) but NOT `range`; a GET admit of
+    a 10 MiB object answers the Part B link (range signed, no window). Red.
+    Then `edgeAdmitGet`: for an admitted span ≥ 64 MiB, `PresignGet` with
+    `Range: ""` (add a parameter), `edgeAdmitResponse.Window`; the commit's
+    `backend_content_length` is the sum the Worker reports; `settleEdgeGet`
+    unchanged otherwise. Write D-EDGE-32 in the note draft. Green.
+14. The Worker. Test first (node, read.test.js): with `admit.window`, the
+    reader fetches ranges of 16 MiB with ≤ 6 in flight (count concurrent
+    fetches on the fake backend), writes them in order to a
+    `FixedLengthStream(content_length)`, the client receives the exact
+    bytes; a range that answers a non-206 cuts the stream (the fake
+    client sees an aborted body, never a clean short end) and the commit
+    reports `fallback`… no: once bytes were sent the commit reports
+    `error` with the bytes sent so far (read edge_get.go's outcome rules
+    and follow them); CPU under 1.2 s per GiB in `wrangler dev`. Red. Then
+    `serveRead`: the window branch, each range `fetch(url, {headers:
+    {range}, cache: "no-store"})`, `arrayBuffer()`, written in order; the
+    commit at the first range's headers as today (`backend_content_length`
+    = the sum when done — add `bytes_sent` to the commit when the stream
+    ends, the control plane meters the sum). Green.
+15. Lab: a 2 GiB object through `wrangler dev`: single-stream vs window,
+    MD5-equal, ≥ 1.8×. PR title `feat(edge,api): WP-EDGE-2 Part C — the
+    windowed edge reader [WP-EDGE-2]`.
+
+PR C — the origin's uploader. Branch `stage1a-p46c-uploader`.
+16. Test first: `TestDataPathBounds_EveryLargeAllocationIsUnderABudget`
+    fails on the changed constants until its row is updated; a test
+    asserting `S3SinglePutMaxBytes == s3UploadPartSize`. Then
+    `s3UploadPartSize = 32 << 20`, concurrency 8, `S3SinglePutMaxBytes`
+    follows; the audit row: "9 × 32 MiB per whole-object write"; one
+    sentence in CLAUDE.md's `FIXED_BUCKET_PUT_TIMEOUT` row (the per-64 MiB
+    scaling is unchanged: a 32 MiB part gets 30 s). PR title `perf(drivers):
+    the S3-class uploader at 32 MiB × 8 — +29 % Lyve, +42 % iDrive from SLC
+    (the SPEED bench § 8) [40.10]`.
+
+PR D — docs and the deploy. Branch `stage1a-p46c-docs`.
+17. docs/reviews/WP-EDGE-2C.md (Step 0.1–0.4, what was built, the lab
+    tables, D-EDGE-29…32, residuals RB4-n, a [YOU] line:
+    `GEYSER_GET_CONCURRENCY=64` in prod's `.env` + `vaultaire-switch restart`
+    = +81 % on landing-zone reads); STATUS header; plan § 40.10 one status
+    bullet; CLAUDE.md (the `edge_admits` bullet: aws-chunked admission and
+    the windowed read; the env table's `EDGE_MIN_BYTES` row: PutObject only;
+    the drivers' constants); docs/API.md; edge/s3-ingest/README (0.4.0). In
+    WP-EDGE-PROMPTS.md: refresh Prompt 47's two editions (its summary line
+    restated: the node is for Cloudflare-independence, RS and GLACIER off
+    SLC, and BYO hosts — not speed; Part 0 = RP72's findings); mark 46c DONE
+    in the chain. The ledger row 46C in memory.
+18. Deploy the Worker 0.4.0 LAST, with the RB-9 capture armed exactly as
+    Part B did (tcpdump on the box, the signed pass-through probe within
+    15 s, the diff of the two requests, the pcap deleted): the expected
+    result is NO 403 — the no-store fix proven. The manifest rows for every
+    module (the recipe is `make edge-wasm` + `scripts/build-client.sh`).
+    Then the prod proof: the Lightroom zip through `s3.stored.cloud` with
+    aws-cli's DEFAULT settings (tenant zero; `edge_ingest` is on): every
+    part admitted, 0 origin PUT lines; and its download through the
+    windowed reader MD5-equal with the rate in the note.
+
+Done means: PR 0, A, B, C, D merged; the lab tables filled; 0.4.0 deployed
+with the RB-9 result; the prod proof written; Prompt 47 refreshed; the
+ledger row.
+
 ## Stage 1a Prompt 47: WP-EDGE-3 — the data node (`VAULTAIRE_ROLE=node`), `data_plane_hosts`, `host=slc` (Part 0: RP70's findings)
 
 *Draft written 2026-10-27 by RP68 ahead of its turn; REFRESHED 2026-10-27 by
@@ -2023,8 +2425,9 @@ current line numbers (the /next conventions).
   reads the admit's size). Live proof: the Lightroom zip back through
   s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
 - **Prompt 46 — WP-EDGE-2 Part A — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2A.md`; #994 Part 0 + the Worker 0.2.1 deployed with RB-9 reproduced and narrowed, #995 the codec, #997 the control plane + migration 111; the post-merge review is RP68). As rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
-- **Prompt 46b — WP-EDGE-2 Part B — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2B.md`; #1002 Part 0 = RP68-1…6 + a part of an upload already on the edge is never `small`; #1003 one upload is one path under the lock (the lab's finding: aws-cli's small tail staged beside codec parts); #1005 the Worker 0.3.0 — `src/codec.js` + `src/seal.js` + three wasm modules, each a client_build row (new clients `edge-codec`, `edge-seal`, `edge-wasm-exec`), ≤ 4 chunks between hash and PUT, edge_error + 503 after the body is read; #1004 `cmd/tools/dedup-measure`; the lab proof (a)–(h) in the note; Step 0.5 `encodeBody: "manual"` not run (RB3-8). Deployed 14:23:57 UTC (`7c1cd872`, `edge_codec` OFF); RB-9 captured — the first pass-through after a content deploy lost the signed `range` + `if-none-match` (RB3-9: `cache: "no-store"` on the pass-through, Prompt 47 Part 0 with RP70). Two open questions for the owner: D-EDGE-5 for parts (RB3-2) and the commit's sample by GET + open (RB3-1 — a wrong-key host passes the HEAD sample). The post-merge review is RP70.)
-- **Prompt 47 — WP-EDGE-3, the data node** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 47` and its Opus edition; Prompt 46b's closeout refreshes the line numbers; summary): `internal/dataplane` = the harness's pipeline as a package with an HTTP and an in-process control plane; `VAULTAIRE_ROLE=node` boots the binary with no DB, no engine, the data-plane routes only, a heartbeat, `deploy/node/`; migration 112 `data_plane_hosts` (host, kind edge|node|slc, address, token_hash, tenant_id — a tenant-scoped BYO host admits one tenant and nothing it reports is trusted for integrity (RP68-3 at 100 %) or metering (its GET metered at the admitted span) —, weight, health, last_seen) with audited admin routes and per-host tokens accepted from the host's registered address; `host=slc` = the origin's own edge-eligible writes and reads through the same package in-process behind `data_plane_slc` (rows proven equal); steering by 307 behind `edge_redirect` only if Step 0.1 shows aws-cli, rclone and the SDKs re-sign on a 307, else by configuration; `vaultaire_data_plane_host_up`, `DataPlaneHostDown`. Proven with two processes in the lab and on prod as `host=slc` for tenant zero. A real node is an owner purchase. The post-merge review is RP72.
+- **Prompt 46b — WP-EDGE-2 Part B — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2B.md`; #1002 Part 0 = RP68-1…6 + a part of an upload already on the edge is never `small`; #1003 one upload is one path under the lock (the lab's finding: aws-cli's small tail staged beside codec parts); #1005 the Worker 0.3.0 — `src/codec.js` + `src/seal.js` + three wasm modules, each a client_build row (new clients `edge-codec`, `edge-seal`, `edge-wasm-exec`), ≤ 4 chunks between hash and PUT, edge_error + 503 after the body is read; #1004 `cmd/tools/dedup-measure`; the lab proof (a)–(h) in the note; Step 0.5 `encodeBody: "manual"` not run (RB3-8). Deployed 14:23:57 UTC (`7c1cd872`, `edge_codec` OFF); RB-9 captured — the first pass-through after a content deploy lost the signed `range` + `if-none-match` (RB3-9: `cache: "no-store"` on the pass-through, Prompt 47 Part 0 with RP70). Two open questions for the owner: D-EDGE-5 for parts (RB3-2) and the commit's sample by GET + open (RB3-1 — a wrong-key host passes the HEAD sample). The post-merge review is RP70. **Reviewed 2026-10-27, RP70 (`docs/reviews/WP-EDGE-2B-REVIEW.md`): HOLDS at P2** — RP70-1 the in-flight bound counts chunks not bytes (max-size chunks = the isolate), RP70-2 the small-tail race hits every ≤ 10-part upload (D-EDGE-29), RP70-3 a wrong-key host passes the HEAD sample (open the first segment at commit), RP70-4…8; all into Prompt 46c Part 0.)
+- **Prompt 46c — WP-EDGE-2 Part C — the Worker 0.4.0 + the origin's tuning** (ISSUED 2026-10-27 by RP70 in two editions above — `## Stage 1a Prompt 46c` and its Opus edition; summary): Part 0 = RP70-1…7 (the byte bound + the streamed seal, D-EDGE-29 every UploadPart of an edge tenant is the edge's, the first-segment open at commit, `cache: "no-store"` on every pass-through, one transaction per index call); aws-chunked at the edge (RE-2's close, the bench's § 1: the mover forwards aws-cli's default body under a HEADER-signed streaming-trailer request the control plane mints — iDrive verifies the trailer, Lyve does not, D-EDGE-30; the codec path decodes and verifies the trailer itself, D-EDGE-31); the windowed reader (RB-1's close, the bench's § 4: 16 MiB ranges × 6 in flight, the link signs `if-match` not `range` for reads ≥ 64 MiB, D-EDGE-32); the S3-class uploader at 32 MiB × 8 (the bench's § 8); `GEYSER_GET_CONCURRENCY=64` as a [YOU] line. Goes before Prompt 47: it moves every default aws-cli upload off SLC. The post-merge review is RP72.
+- **Prompt 47 — WP-EDGE-3, the data node** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 47` and its Opus edition; Prompt 46c's closeout refreshes the line numbers and its Part 0 = RP72's findings. **After the SPEED bench the node is not a speed project**: the Worker reaches 840–980 MB/s per client; the node's case is Cloudflare-independence (the undue-burden clause), RS and GLACIER writes off SLC, and tenant-scoped BYO hosts; summary): `internal/dataplane` = the harness's pipeline as a package with an HTTP and an in-process control plane; `VAULTAIRE_ROLE=node` boots the binary with no DB, no engine, the data-plane routes only, a heartbeat, `deploy/node/`; migration 112 `data_plane_hosts` (host, kind edge|node|slc, address, token_hash, tenant_id — a tenant-scoped BYO host admits one tenant and nothing it reports is trusted for integrity (RP68-3 at 100 %) or metering (its GET metered at the admitted span) —, weight, health, last_seen) with audited admin routes and per-host tokens accepted from the host's registered address; `host=slc` = the origin's own edge-eligible writes and reads through the same package in-process behind `data_plane_slc` (rows proven equal); steering by 307 behind `edge_redirect` only if Step 0.1 shows aws-cli, rclone and the SDKs re-sign on a 307, else by configuration; `vaultaire_data_plane_host_up`, `DataPlaneHostDown`. Proven with two processes in the lab and on prod as `host=slc` for tenant zero. A real node is an owner purchase. The post-merge review is RP72.
 - **Prompt 48 — slice 3 + the dark seal-by-default flag + the catalogue filter** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 48` and its Opus edition; Prompt 47's closeout refreshes it; summary): (a) the second copy at the edge — migration 113 `blob_copies`; `edge_mirror` (per tenant): the admit answers two presigned PUTs (the placement's backend + the first registered leg of `MIRROR_LEGS` that is not it), the Worker tees (or PUTs sequentially — Step 0.1 decides on the isolate's memory), the commit records both, a failed mirror leg becomes a `pending` row the `blob_copies` job completes, reads fall back to the mirror before the origin, DELETE / the sweep / `retired_blobs` / `routing_truth` / capacity learn the copies; RS k+m with the WP-VAULT-1 codec in WASM (`sdk/ecwasm`) built and proven in the lab behind `edge_rs`, dark on prod (one fast leg); mirror first on prod — tenant zero's backups get their second copy on iDrive. (b) `standard_sealed_default` (global, default OFF, 409 without a master key or a tenant without a key version): ON = every Standard write placed sealed — the codec at the edge for every tenant, `placeWholeSealed` / chunk encryption at the origin — the switch that makes `modes.json`'s sentence true; built dark, flipped after F-14. (c) 10.3's catalogue filter: `public_artefacts` + `public_chunks` (migration 114) seeded in the lab by `cmd/tools/catalogue-seed`, a daily `catalogue_filter` job publishing a versioned Bloom filter to R2, the Worker and the SDK checking locally and marking `public: true`, the control plane referencing the one `_public` copy — the only cross-tenant scope (contract 5). The post-merge review is RP74.
 - **After the ceremony (one session, owner present only for the ceremony
   itself):** `edge_codec` ON for tenant zero → the sealed-object proofs →
