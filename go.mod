@@ -39,21 +39,21 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0
+	filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e
 	github.com/gtank/ristretto255 v0.2.0
+	github.com/nbd-wtf/opentimestamps v0.4.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/transparency-dev/formats v0.1.1
 	github.com/transparency-dev/merkle v0.0.2
 	github.com/xssnick/raptorq v1.6.0
-	go.etcd.io/bbolt v1.4.3
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/mod v0.41.0
 	golang.org/x/sync v0.24.0
 )
 
 require (
-	filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.13.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0 // indirect
-	github.com/aead/siphash v1.0.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.22 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.6 // indirect
@@ -76,26 +76,16 @@ require (
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792 // indirect
-	github.com/btcsuite/winsvc v1.0.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.0.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
-	github.com/decred/dcrd/lru v1.0.0 // indirect
-	github.com/golang/snappy v0.0.4 // indirect
-	github.com/jessevdk/go-flags v1.4.0 // indirect
-	github.com/jrick/logrotate v1.0.0 // indirect
-	github.com/kkdai/bstream v0.0.0-20161212061736-f391b8402d23 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/nbd-wtf/opentimestamps v0.4.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
-	github.com/stretchr/objx v0.5.3 // indirect
-	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/text v0.43.0 // indirect
