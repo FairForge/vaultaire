@@ -10,7 +10,9 @@ package api
 // after the expiry: 410); a GET (Part B) is a read whose commit was lost —
 // its admitted size is metered, nothing released, NO orphan_write queued
 // (its storage_key is the live object's blob). The row is expired.
-// Terminal rows older than 7 days are deleted.
+// Terminal rows are deleted past their retention: writes after 7 days, GETs
+// after 24 h (RP66-6 — nothing later reads a GET row and aws-cli writes one
+// per 8 MiB range; the access log keeps the bytes).
 
 import (
 	"context"
@@ -26,7 +28,11 @@ import (
 const (
 	edgeAdmitReaperJobName = "edge_admit_reaper"
 	edgeAdmitRetention     = 7 * 24 * time.Hour
-	edgeAdmitReapBatch     = 500
+	// edgeGetRetention: terminal GET rows go after a day (RP66-6) — nothing
+	// later reads them (the access log has the bytes), and aws-cli downloads
+	// in 8 MiB ranges, one admit row each. Writes keep the 7-day retention.
+	edgeGetRetention   = 24 * time.Hour
+	edgeAdmitReapBatch = 500
 )
 
 var edgeAdmitReaperTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -125,8 +131,9 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 			res.ReleasedBytes += row.ReservedBytes
 		}
 	}
-	del, err := r.s.db.ExecContext(ctx, `DELETE FROM edge_admits WHERE state IN ('committed', 'failed', 'expired') AND finished_at < NOW() - make_interval(secs => $1)`,
-		int(edgeAdmitRetention.Seconds()))
+	del, err := r.s.db.ExecContext(ctx, `DELETE FROM edge_admits WHERE state IN ('committed', 'failed', 'expired')
+		AND finished_at < NOW() - make_interval(secs => CASE WHEN op = 'get' THEN $2::int ELSE $1::int END)`,
+		int(edgeAdmitRetention.Seconds()), int(edgeGetRetention.Seconds()))
 	if err != nil {
 		return res, fmt.Errorf("delete terminal admits: %w", err)
 	}

@@ -129,6 +129,7 @@ func TestEdgeAdmitGet_PassThroughMatrix(t *testing.T) {
 	assert.Equal(t, http.StatusPartialContent, resp.ExpectStatus, "the backend answers the signed Range")
 	assert.Equal(t, http.StatusOK, resp.Status, "the client gets the origin's 200")
 	assert.Equal(t, "edgefake", resp.Backend)
+	assert.Equal(t, int64(8192), resp.ContentLength, "the admitted span: the Worker's length check (RP66-2)")
 	assert.Equal(t, 1, f.pending())
 	f.exec(`DELETE FROM edge_admits WHERE tenant_id = $1`, f.tenantID)
 
@@ -191,6 +192,12 @@ func TestEdgeAdmitGet_PassThroughMatrix(t *testing.T) {
 	rowShape("no backend", `backend_name = NULL`, "backend:")
 	rowShape("empty", `backend_name = 'edgefake', size_bytes = 0`, "empty")
 	f.exec(`UPDATE object_head_cache SET size_bytes = 8192 WHERE tenant_id = $1 AND object_key = 'obj.bin'`, f.tenantID)
+	// A stored Content-Encoding: the Workers runtime re-encodes a Response
+	// body to match the header it is given, and the backend's answer carries
+	// plain bytes with no encoding header — the origin serves it correctly,
+	// the edge would gzip the gzip (RP66-1).
+	rowShape("stored content encoding", `content_encoding = 'gzip'`, "content_encoding")
+	f.exec(`UPDATE object_head_cache SET content_encoding = '' WHERE tenant_id = $1 AND object_key = 'obj.bin'`, f.tenantID)
 
 	// Versioned, behind a delete marker: the origin's 404.
 	f.exec(`UPDATE buckets SET versioning_status = 'Enabled' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
@@ -571,4 +578,89 @@ func TestEdgeAdmitGet_NeverRefusesOnItsOwn(t *testing.T) {
 	assert.Error(t, edgePresignSigns("https://b.invalid/x?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=ab&X-Amz-SignedHeaders=host", "if-match"))
 	assert.Error(t, edgePresignSigns("https://b.invalid/x?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=ab&X-Amz-SignedHeaders=host%3Bif-match", "if-match", "range"))
 	assert.NoError(t, edgePresignSigns("https://b.invalid/x?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=ab&X-Amz-SignedHeaders=host%3Bif-match%3Brange", "if-match", "range"))
+}
+
+// --- Part 0 of WP-EDGE-2 (the RP66 fixes) ---
+
+// RP66-3 + RP66-2: a served edge read refreshes last_accessed exactly as the
+// origin's cache hit does (the smart_demotion job reads it), and is counted
+// once in vaultaire_object_integrity_unverified_total{path="edge"} — the
+// edge path serves bytes no one checks beyond the length, and the counter
+// says so. RP66-5: the response's x-amz-request-id is the Worker's (what the
+// admit row and the access-log row carry).
+func TestEdgeCommitGet_ServedTouchesLastAccessedAndCountsUnverified(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.putObject("touch.bin", testBytes(6000), nil)
+	f.wireEgress(1<<30, 0, nil)
+	f.exec(`UPDATE object_head_cache SET last_accessed = NOW() - interval '3 days' WHERE tenant_id = $1 AND object_key = 'touch.bin'`, f.tenantID)
+
+	req := f.signedGet("/"+f.bucket+"/touch.bin", nil, nil)
+	resp := f.admit(req)
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Equal(t, req.RequestID, resp.ResponseHeaders["X-Amz-Request-Id"],
+		"the id the client sees is the one the logs hold (RP66-5)")
+
+	before := promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified"))
+	_, code := f.commit(servedCommit(resp.AdmitID, 6000, http.StatusOK))
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, before+1, promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified")),
+		"every served edge read is unverified by design (RP66-2)")
+
+	// The touch is fire-and-forget, as the origin's.
+	assert.Eventually(t, func() bool {
+		var age float64
+		if err := f.db.QueryRow(`SELECT EXTRACT(EPOCH FROM (NOW() - last_accessed)) FROM object_head_cache
+			WHERE tenant_id = $1 AND object_key = 'touch.bin'`, f.tenantID).Scan(&age); err != nil {
+			return false
+		}
+		return age < 60
+	}, 3*time.Second, 50*time.Millisecond, "last_accessed refreshed (RP66-3)")
+
+	// A fallback touches nothing and counts nothing.
+	f.exec(`UPDATE object_head_cache SET last_accessed = NOW() - interval '3 days' WHERE tenant_id = $1 AND object_key = 'touch.bin'`, f.tenantID)
+	resp = f.admit(f.signedGet("/"+f.bucket+"/touch.bin", nil, nil))
+	require.True(t, resp.Edge)
+	served := promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified"))
+	_, code = f.commit(edgeCommitRequest{AdmitID: resp.AdmitID, Outcome: edgeGetFallback, BackendStatus: 500, BackendCode: "InternalError"})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, served, promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified")))
+	time.Sleep(150 * time.Millisecond)
+	var age float64
+	require.NoError(t, f.db.QueryRow(`SELECT EXTRACT(EPOCH FROM (NOW() - last_accessed)) FROM object_head_cache
+		WHERE tenant_id = $1 AND object_key = 'touch.bin'`, f.tenantID).Scan(&age))
+	assert.Greater(t, age, float64(3600), "the origin's own serve touches it; the edge fallback does not")
+}
+
+// RP66-6: terminal GET rows are purged after 24 h (nothing later reads them;
+// the access log has the bytes) — a 1 TB aws-cli download writes ~131,000 of
+// them. Writes keep the 7-day retention.
+func TestEdgeReaper_TerminalGetRowsPurgedAt24h(t *testing.T) {
+	f := setupEdgeFixture(t)
+	insert := func(id, op, state string, finishedAgo string) {
+		f.exec(`INSERT INTO edge_admits (id, tenant_id, bucket, object_key, op, backend, storage_key, content_length, state, expires_at, finished_at)
+			VALUES ($1, $2, $3, 'purge.bin', $4, 'edgefake', 'purge.bin@x', 100, $5, NOW(), NOW() - $6::interval)`,
+			id, f.tenantID, f.bucket, op, state, finishedAgo)
+	}
+	insert("purgegetold0000000000000001", edgeOpGet, "committed", "25 hours")
+	insert("purgegetnew0000000000000002", edgeOpGet, "committed", "23 hours")
+	insert("purgeputmid0000000000000003", edgeOpPut, "failed", "25 hours")
+	insert("purgeputold0000000000000004", edgeOpPut, "expired", "8 days")
+
+	_, err := f.srv.edgeReaper.RunOnce(context.Background())
+	require.NoError(t, err)
+
+	left := map[string]bool{}
+	rows, err := f.db.Query(`SELECT id FROM edge_admits WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		left[id] = true
+	}
+	require.NoError(t, rows.Err())
+	assert.False(t, left["purgegetold0000000000000001"], "a terminal get row past 24 h is purged")
+	assert.True(t, left["purgegetnew0000000000000002"], "a younger get row stays")
+	assert.True(t, left["purgeputmid0000000000000003"], "a write keeps the 7-day retention")
+	assert.False(t, left["purgeputold0000000000000004"], "a write past 7 days is purged")
 }

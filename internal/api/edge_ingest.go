@@ -137,12 +137,15 @@ type edgeAdmitResponse struct {
 	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
 	// A GET (Part B): the status the backend must answer (206 — every link
 	// names a Range, the whole object's for a whole read), the status the
-	// CLIENT gets (200, or 206 for the client's own Range) and the ORIGIN's
+	// CLIENT gets (200, or 206 for the client's own Range), the ORIGIN's
 	// response headers the Worker serves in place of the backend's
-	// (object_headers.go's set).
+	// (object_headers.go's set), and the admitted span in bytes — the
+	// backend's Content-Length must equal it or the Worker falls back to the
+	// origin, whose integrity path decides (RP66-2).
 	ExpectStatus    int               `json:"expect_status,omitempty"`
 	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
+	ContentLength   int64             `json:"content_length,omitempty"`
 }
 
 // edgeCommitRequest is what the Worker reports: the backend's answer. No

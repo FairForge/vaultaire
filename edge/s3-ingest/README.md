@@ -56,7 +56,8 @@ plus the client's `Content-MD5` signed into the link.
   JSON), the error relay, the read half (`readResponse`: the backend's body
   under the origin's headers with the client's status; `readFetchInit`:
   exactly the signed headers, `cache: "no-store"`; `readSucceeded` /
-  `readCommit`: served at `expect_status`, fallback on anything else).
+  `readCommit`: served at `expect_status` with the backend's Content-Length
+  equal to the admitted span (0.2.1, RP66-2), fallback on anything else).
 - `wrangler.toml` — name `stored-s3-edge`, route `s3.stored.cloud/*` on the
   stored.cloud zone of the PRODUCTION account, observability on, var
   `VAULTAIRE_ORIGIN`.
@@ -104,8 +105,11 @@ the backend's body under `response_headers` and `status`, and commits
 `{admit_id, outcome: served|fallback|error, backend_status,
 backend_content_length, duration_ms}` in the background
 (`ctx.waitUntil`; one retry). A backend status other than `expect_status`,
-or no answer, is a fallback: the client's request goes to the origin
-unchanged. A mid-body backend failure is a cut body, as at the origin.
+a Content-Length at the backend's headers that is not the admit's
+`content_length` (0.2.1, RP66-2 — the one integrity property this path can
+check; the origin's integrity reader then decides), or no answer, is a
+fallback: the client's request goes to the origin unchanged. A mid-body
+backend failure is a cut body, as at the origin.
 
 aws-chunked bodies (`x-amz-content-sha256: STREAMING-*`, what aws-cli v2
 sends over TLS) pass through to the origin: decoding them would put

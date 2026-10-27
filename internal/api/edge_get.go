@@ -140,14 +140,21 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		return passThrough("conditional")
 	}
 	// The kinds the edge never reads: a chunked object (the content index),
-	// a sealed one (a key on SLC), a vault-floor one (tape, its restore
-	// semantics, the parity rebuild), a strict target (sia's promotion,
-	// blomp, sync), a Smart-demoted one (its promotion), an empty one.
+	// a sealed one (a key on SLC), one stored with a Content-Encoding (the
+	// Workers runtime re-encodes a Response body to match the header it is
+	// given — `encodeBody: "automatic"` — while the backend's answer carries
+	// the already-encoded bytes with no encoding header: the runtime would
+	// gzip the gzip under the row's Content-Length; RP66-1), a vault-floor
+	// one (tape, its restore semantics, the parity rebuild), a strict target
+	// (sia's promotion, blomp, sync), a Smart-demoted one (its promotion),
+	// an empty one.
 	switch {
 	case row.isChunked:
 		return passThrough("chunked")
 	case row.encAlgo != "":
 		return passThrough("sealed")
+	case row.attrs.ContentEncoding != "":
+		return passThrough("content_encoding")
 	case row.floor == usage.FloorVault:
 		return passThrough("vault")
 	case row.backend == "" || engine.IsStrictTarget(row.backend):
@@ -280,7 +287,14 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	} else {
 		oh.write(hrec, headersWhole, nil)
 	}
-	hrec.Header().Set("x-amz-request-id", generateRequestID())
+	// The id the client sees is the one the admit row, the access-log row
+	// and the Worker's log line carry (RP66-5): a customer quoting it from a
+	// failed download can be found.
+	respReqID := req.RequestID
+	if respReqID == "" {
+		respReqID = generateRequestID()
+	}
+	hrec.Header().Set("x-amz-request-id", respReqID)
 	responseHeaders := hrec.relay().Headers
 
 	// The row: nothing reserved, nothing minted — the admit remembers what
@@ -302,7 +316,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		zap.String("admit_id", admit.ID), zap.String("request_id", req.RequestID))
 	return edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
 		ExpectStatus: http.StatusPartialContent, Status: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob,
-		ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+		ContentLength: length, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
 }
 
 // edgeGetIfMatch is the If-Match a read's link signs: the row's digest
@@ -339,14 +353,37 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 	switch req.Outcome {
 	case edgeGetServed:
 		n := req.BackendContentLength
-		if n <= 0 || n > row.ContentLength {
-			// The backend's Content-Length is the truth of the body it sent;
-			// none, or more than the admitted bytes (a backend serving a
-			// longer object under an If-Match that passed cannot happen —
-			// the address is immutable), falls back to what was admitted.
+		switch {
+		case n == 0:
+			// No Content-Length at the backend's headers (neither backend
+			// answers a ranged GET chunked today): no length check was
+			// possible, the admitted size is metered (RP66-7).
+			s.logger.Debug("edge commit get: no backend content length — the admitted size is metered",
+				zap.Int64("admitted", row.ContentLength), zap.String("admit_id", row.ID))
+			n = row.ContentLength
+		case n < 0, n > row.ContentLength:
+			// More than the admitted bytes (a backend serving a longer object
+			// under an If-Match that passed cannot happen — the address is
+			// immutable): clamped to what was admitted. The 0.2.1 Worker
+			// falls back on any mismatch before serving (RP66-2).
 			s.logger.Warn("edge commit get: the backend's content length is not the admitted one — the admitted size is metered",
 				zap.Int64("backend_content_length", req.BackendContentLength), zap.Int64("admitted", row.ContentLength), zap.String("admit_id", row.ID))
 			n = row.ContentLength
+		}
+		// The edge serves bytes the origin's integrity reader never sees:
+		// beyond the Worker's length check the body is unverified by design,
+		// and the counter says so, once per served read (RP66-2).
+		objectIntegrityUnverified.WithLabelValues(integrityPathEdge, "unverified").Inc()
+		// The origin refreshes last_accessed on every cache hit (the
+		// smart_demotion job reads it): an edge read is a read (RP66-3).
+		// Fire-and-forget, as the origin's own touch.
+		if s.db != nil {
+			go func() { // #nosec G118 -- fire-and-forget access-time touch, the origin's own pattern
+				_, _ = s.db.ExecContext(context.Background(), `
+					UPDATE object_head_cache SET last_accessed = NOW()
+					WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
+					row.TenantID, row.Bucket, row.Key)
+			}()
 		}
 		s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
 		status := row.Attrs.Status

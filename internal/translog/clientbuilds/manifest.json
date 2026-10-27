@@ -47,6 +47,14 @@
       "sha256": "b7e56881ee677d82d4d999ce4e5d523d5106655736bb2533f6ac8dc30c186786",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-ingest",
+      "version": "0.2.1",
+      "source_commit": "a2cc249dc828b92d64533ad71ba647031abfea2b",
+      "sha256": "4714c3985a0cd409c3056da6968a1bc7c16e5d63a59d18e5d3ff8706f1300083",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }

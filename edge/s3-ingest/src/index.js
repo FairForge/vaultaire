@@ -128,14 +128,21 @@ export function backendErrorCode(xml) {
 
 /**
  * readSucceeded says whether the backend's answer is the one the control
- * plane expected (expect_status: 206 — every link names the byte span the
- * backend serves, the whole object's for a whole read). Anything else —
+ * plane expected: expect_status (206 — every link names the byte span the
+ * backend serves, the whole object's for a whole read) AND, when the
+ * backend answered a Content-Length, exactly the admitted span
+ * (admit.content_length — RP66-2: the one integrity property this path can
+ * check; a truncated blob must fall back to the origin, whose integrity
+ * reader decides, never reach the client as a short body). Anything else —
  * Lyve's HEAD 200 / GET 500 of 2026-10-21, a 412 under a replaced blob, a
  * 403 from a dead key — is the origin's to serve (it has the failover
  * path: the breaker, the fan-out, the parity rebuild).
  */
 export function readSucceeded(backendResponse, admit) {
-  return !!backendResponse && backendResponse.status === admit.expect_status;
+  if (!backendResponse || backendResponse.status !== admit.expect_status) return false;
+  const cl = backendResponse.headers.get("content-length");
+  if (cl !== null && admit.content_length > 0 && Number(cl) !== admit.content_length) return false;
+  return true;
 }
 
 /**

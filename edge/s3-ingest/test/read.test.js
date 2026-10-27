@@ -94,3 +94,19 @@ test("readSucceeded / readCommit: served at expect_status, fallback on anything 
   const noLen = readCommit(admit, new Response(null, { status: 200 }), null, Date.now());
   assert.equal(noLen.backend_content_length, 0);
 });
+
+test("a backend Content-Length that is not the admitted span is a fallback (RP66-2, Worker 0.2.1)", () => {
+  const admit = { admit_id: "a2", expect_status: 206, status: 200, content_length: 4096 };
+  const exact = new Response("x", { status: 206, headers: { "content-length": "4096" } });
+  assert.equal(readSucceeded(exact, admit), true);
+  const short = new Response("x", { status: 206, headers: { "content-length": "100" } });
+  assert.equal(readSucceeded(short, admit), false, "a truncated blob falls back: the origin's integrity path decides");
+  const c = readCommit(admit, short, null, Date.now());
+  assert.equal(c.outcome, "fallback");
+  assert.equal(c.backend_content_length, 100);
+  // No Content-Length at the headers = no check (metered as admitted by the
+  // control plane, RP66-7); an admit without the field (an older control
+  // plane) = no check either.
+  assert.equal(readSucceeded(new Response(null, { status: 206 }), admit), true);
+  assert.equal(readSucceeded(short, { expect_status: 206 }), true);
+});
