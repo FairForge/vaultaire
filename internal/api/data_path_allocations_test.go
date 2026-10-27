@@ -34,6 +34,7 @@ var allocationSites = map[string]string{
 	"crypto/chunk_encryption.go:sealChunk":     "PUT budget: the ciphertext is part of the chunk's hold (chunk + compressed + sealed, shrunk to the real sizes)",
 	"crypto/chunker.go:Chunk":                  "not a request path: the whole-buffer chunker (cmd/tools/dedup-migrate); the server uses ChunkContextDepth",
 	"crypto/chunker.go:ChunkBytes":             "not a request path: the whole-buffer chunker (tests, tools)",
+	"crypto/chunker_golden.go:GoldenBody":      "not a request path: the chunker golden vectors' deterministic test body (the Go golden test and the WASM chunker's node test, ≤ 100 MiB — WP-EDGE-2)",
 	// The GET budget (LARGE_GET_PARALLEL_BUDGET_BYTES, s3_large_get.go).
 	"api/s3_large_get.go:openParallelGet":    "GET budget: parts of the parallel ranged reader (parfetch)",
 	"api/s3_large_get.go:openParallelSealed": "GET budget: segment-aligned parts of the parallel sealed reader (parfetch)",

@@ -49,7 +49,7 @@ func TestStreamV4_NewSSES3BlobsAreFormat0x04WithTheSameLayout(t *testing.T) {
 	assert.Len(t, h.Raw, StreamHeaderSSES3)
 	assert.Equal(t, 2+4+1088+4+7, StreamHeaderSSES3)
 	assert.Equal(t, 2+16+4+7, StreamHeaderSSEC)
-	assert.Equal(t, StreamHeaderSSES3, MaxStreamHeader)
+	assert.Equal(t, StreamHeaderWrapped, MaxStreamHeader, "the 0x06 header is the longest since WP-EDGE-2")
 	for _, f := range []byte{StreamFormatV3, StreamFormat} {
 		raw := append([]byte{f}, blob[1:StreamHeaderSSES3]...)
 		hf, err := ParseStreamHeader(raw)
