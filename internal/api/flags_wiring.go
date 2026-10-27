@@ -105,6 +105,17 @@ const (
 	// (docs/DEPLOY.md).
 	flagEdgeIngest = "edge_ingest"
 
+	// flagEdgeCodec lets a tenant's chunked-eligible PutObject / UploadPart
+	// be chunked, keyed-hashed and SEALED by the data-plane host (WP-EDGE-2,
+	// plan 40.10 slice 2): the admit answers the tenant's codec public key
+	// instead of a presigned PUT, the host asks /api/v1/edge/index per
+	// chunk, uploads the misses as 0x06 blobs and commits the manifest.
+	// Needs edge_ingest's gate AND a tenant key version: on a process with
+	// no master key the admit answers Part A's whole PUT (reason no_key) —
+	// never a refusal and never a plaintext chunked write at the edge.
+	// Default OFF, per tenant first; dark on prod until the F-14 ceremony.
+	flagEdgeCodec = "edge_codec"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -136,6 +147,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagSiaBackend, false)
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagEdgeIngest, false)
+	fl.Register(flagEdgeCodec, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")

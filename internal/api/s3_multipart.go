@@ -446,11 +446,17 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 	declared := body.declared
 
 	// An edge upload takes no staged part (WP-EDGE-1 Part A): its parts are
-	// the backend's, and Complete asks the backend to assemble them. The
-	// reservation re-checks this under the upload's lock (errUploadEdge).
+	// the backend's, and Complete asks the backend to assemble them. A
+	// codec upload likewise (WP-EDGE-2): its parts are chunk lists. The
+	// reservation re-checks this under the upload's lock (errUploadEdge,
+	// errUploadCodec).
 	if s.db != nil {
-		if up, rErr := readEdgeUpload(r.Context(), s.db, tenantID, uploadID); rErr == nil && up.Edge {
-			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(edgeUploadRefusal))
+		if up, rErr := readEdgeUpload(r.Context(), s.db, tenantID, uploadID); rErr == nil && (up.Edge || up.Codec) {
+			hint := edgeUploadRefusal
+			if up.Codec {
+				hint = codecUploadRefusal
+			}
+			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(hint))
 			return "", 0, false
 		}
 	}
@@ -689,6 +695,10 @@ type partRecord struct {
 	// backend answered the Worker, what the backend's Complete is given. No
 	// staged file exists for such a part.
 	BackendETag string
+	// PartChunks is a codec part's ordered chunk list (WP-EDGE-2,
+	// multipart_parts.part_chunks): Complete concatenates the parts' lists
+	// into one manifest. No staged file exists for such a part either.
+	PartChunks []byte
 }
 
 // stagedSize is the number of bytes the part's staging file holds: the
@@ -852,7 +862,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	var parts []partRecord
 	if s.db != nil {
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT part_number, etag, size_bytes, sealed_md5, COALESCE(backend_etag, '') FROM multipart_parts
+			SELECT part_number, etag, size_bytes, sealed_md5, COALESCE(backend_etag, ''), part_chunks FROM multipart_parts
 			WHERE upload_id = $1
 			ORDER BY part_number ASC
 		`, uploadID)
@@ -864,7 +874,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var p partRecord
-			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5, &p.BackendETag); err != nil {
+			if err := rows.Scan(&p.PartNumber, &p.ETag, &p.Size, &p.SealedMD5, &p.BackendETag, &p.PartChunks); err != nil {
 				s.logger.Error("failed to scan part row", zap.Error(err))
 				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
 				return
@@ -939,6 +949,16 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			}
 			continue
 		}
+		if edgeUp.Codec {
+			// A codec part's bytes are the chunk store's (WP-EDGE-2): its
+			// chunk list stands in for the staged file, asserted the same way.
+			if len(p.PartChunks) == 0 {
+				s.logger.Error("complete multipart: a codec upload holds a part without its chunk list", zap.String("upload_id", uploadID), zap.Int("part", p.PartNumber))
+				WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+				return
+			}
+			continue
+		}
 		st, statErr := os.Stat(partFilePath(uploadID, p.PartNumber))
 		if statErr != nil || st.Size() != p.stagedSize() {
 			s.logger.Warn("complete multipart: part data missing or short on disk",
@@ -1005,6 +1025,18 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 	})
 	if placement.Refusal != nil {
 		placement.Refusal.write(w, r)
+		return
+	}
+	if edgeUp.Codec {
+		// A codec upload (WP-EDGE-2): the parts' chunk lists concatenated
+		// into one manifest — the chunks are sealed (AES256-EW), so a bucket
+		// that now requires encryption at rest is satisfied as the chunked
+		// path satisfies it.
+		var bill *writeBill
+		if s.quotaManager != nil {
+			bill = &writeBill{Floor: floor, Held: uploadHeld(uploadID)}
+		}
+		s.completeCodecUpload(w, r, t, bucket, object, uploadID, edgeUp, parts, attrs, floor, bill, finalETag)
 		return
 	}
 	if edgeUp.Edge {
@@ -1424,6 +1456,13 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		_ = s.abortEdgeUpload(context.WithoutCancel(r.Context()), t.ID, bucket, uploadID, edgeUp)
+		if edgeUp.Codec && s.gci != nil {
+			// The parts' chunk references go back with the abort (WP-EDGE-2);
+			// the multipart reaper is the net for a crash between the two.
+			if _, rErr := releaseAbortedCodecParts(context.WithoutCancel(r.Context()), s.db, s.gci, s.logger); rErr != nil {
+				s.logger.Warn("abort multipart: codec part references not released — the reaper retries", zap.Error(rErr))
+			}
+		}
 	} else {
 		memUploadsMu.Lock()
 		mu, ok := memUploads[uploadID]

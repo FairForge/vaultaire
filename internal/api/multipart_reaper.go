@@ -10,6 +10,7 @@ import (
 	"github.com/lib/pq"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -39,6 +40,9 @@ type MultipartReaper struct {
 	// engine aborts the backend half of an edge upload (WP-EDGE-1 Part A);
 	// nil = such uploads are left for a process that has one.
 	engine *engine.CoreEngine
+	// gci releases the chunk references of an aborted codec upload's parts
+	// (WP-EDGE-2); nil = left for a process that has one.
+	gci *crypto.GlobalContentIndex
 }
 
 // MultipartReapResult holds the outcome of a single reap cycle.
@@ -53,6 +57,9 @@ type MultipartReapResult struct {
 	// abandoned edge upload); BackendAbortFailed: left for the next pass.
 	BackendAborted     int `json:"backend_aborted"`
 	BackendAbortFailed int `json:"backend_abort_failed"`
+	// CodecPartsReleased: chunk references of ABORTED codec uploads' parts
+	// given back (WP-EDGE-2).
+	CodecPartsReleased int `json:"codec_parts_released,omitempty"`
 }
 
 // orphanStagingGrace is how old a staging directory with no upload row must
@@ -118,6 +125,14 @@ func (m *MultipartReaper) RunOnce(ctx context.Context) (MultipartReapResult, err
 		return result, fmt.Errorf("abort edge backend uploads: %w", err)
 	}
 	result.BackendAborted, result.BackendAbortFailed = aborted, failed
+
+	if m.gci != nil {
+		released, err := releaseAbortedCodecParts(ctx, m.db, m.gci, m.logger)
+		if err != nil {
+			return result, fmt.Errorf("release aborted codec parts: %w", err)
+		}
+		result.CodecPartsReleased = released
+	}
 
 	return result, nil
 }

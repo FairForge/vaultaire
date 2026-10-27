@@ -115,6 +115,9 @@ var exportExcludedTables = map[string]string{
 // password or code, with why it is never exported (or why its name is a
 // false positive). The schema walk fails on a column missing here.
 var exportNeverColumns = map[string]string{
+	"global_content_index.keyed_hash":      "a keyed HMAC of a chunk hash (WP-EDGE-2), not a key: still never exported — the index is infrastructure, outside the export, and the keyed hash is the dedup identity, meaningless without the tenant's index key",
+	"edge_admits.codec":                    "false positive (codec ends in 'dec' the scanner reads as a decryption word): a boolean saying the admit took the edge-codec shape (WP-EDGE-2); edge_admits is a transient admission table, excluded from the export as a whole",
+	"multipart_uploads.codec":              "false positive (as edge_admits.codec): a boolean marking a codec upload (WP-EDGE-2), no secret in it",
 	"users.password_hash":                  "credential",
 	"users.password_changed_at":            "false positive (a timestamp, WP-R5-10); the change itself is in the audit section",
 	"users.email_verify_token":             "credential (single-use link)",
