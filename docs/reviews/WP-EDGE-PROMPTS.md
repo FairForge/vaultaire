@@ -999,7 +999,9 @@ What to build
    commit (the first stored chunk + 1 in 32; a mismatch refuses the commit,
    `head_mismatch`), `routing_truth`'s chunked sample reads codec chunks
    through `openEdgeCodecChunk`; **RP68-5** `chunk_move` verifies AES256-EW
-   by MD5; **RP68-4** the metric names. Each with its red test.
+   by MD5; **RP68-4** the metric names (and the endpoint presence test
+   #1000 added — RB2-6: the families were never registered before it).
+   Each with its red test. Start after #1000 is on main.
 1. THE WORKER 0.3.0 (edge/s3-ingest): a codec admit (admit.codec set) runs
    the pipeline instead of moveBody — the request body through a
    TransformStream into the WASM chunker (chunker.wasm + wasm_exec.js
@@ -1214,7 +1216,11 @@ PR 0 — the RP68 fixes (control plane, Go). Branch `stage1a-p46b-part0`.
    commit-time `referenced` / `stored` / `head_mismatch` / `failed`; the
    reaper's codec expiry counts `claims_dropped` instead of `retired`.
    Update the `init()` pre-creation lists and the Help strings. Tests
-   asserting labels updated.
+   asserting labels updated — including the presence assertions #1000
+   added to `TestMetricsEndpoint_KeepsLegacySeries`
+   (internal/api/prom_metrics_test.go) for the new outcome labels; keep
+   that test reading the ENDPOINT, not the vec (RB2-6's lesson: the three
+   families were declared, pre-created and never registered until #1000).
 7. `make lint && make test` green; `make test-db` then `go test -race
    ./internal/api/ -run 'TestEdgeCodec|TestIndexHolds|TestChunkMove|TestRoutingTruth'`.
    PR title: `fix(api): WP-EDGE-2 Part B Part 0 — the RP68 fixes [WP-EDGE-2]`.

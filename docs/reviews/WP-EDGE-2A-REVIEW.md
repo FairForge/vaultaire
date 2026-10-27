@@ -69,6 +69,7 @@ corrected eligibility rule, not re-written after.
 - **RB2-3:** RP68-5 closes it.
 - **RB2-4 (P4, stands):** the erasure releases manifest refs set-based; `part_chunks` refs of ACTIVE uploads of the erased tenant drift until the rows go with the tenant.
 - **RB2-5 (informational, stands).**
+- **RB2-6 (P4, found by the Part A session after this review, fixed in #1000):** the three `vaultaire_edge_codec_*` families were declared and pre-created but never `MustRegister`ed, so the prod scrape after #997 showed none of them. This review missed it: it read the vec declarations and not the endpoint. Lesson kept in the prompts: a new metric's pre-creation test reads `/metrics`, not the vec.
 - **RB-9 (open):** the first-request 403 after a content-changing Worker deploy; the headers capture is armed for the 0.3.0 deploy (46b Step 0.1).
 
 ## The Cloudflare re-read (#996, plan § 40.5; `hearth/docs/cloudflare/workers-for-platforms/`, `dynamic-workers/`)
