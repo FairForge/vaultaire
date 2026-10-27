@@ -53,11 +53,21 @@ test-db:
 	@echo "$(TEST_DB): migrations applied"
 
 # The mover Worker's tests (edge/s3-ingest, WP-EDGE-1 Part A): node's own
-# runner, no dependencies to install.
-test-edge:
+# runner, no dependencies to install. The chunker's golden test needs the
+# WASM build beside it (WP-EDGE-2 Part A); without node the build is enough.
+test-edge: edge-chunker-wasm
 	cd edge/s3-ingest && node --test
 
-.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge
+# The frozen chunker compiled for the edge codec's data-plane host
+# (sdk/chunkerwasm → edge/s3-ingest/wasm/chunker.wasm, gitignored), with the
+# SAME toolchain's wasm_exec.js beside it. scripts/build-client.sh is the
+# one recipe (the client_build row's, WP-EDGE-2 Part A).
+edge-chunker-wasm:
+	mkdir -p edge/s3-ingest/wasm
+	scripts/build-client.sh edge-chunker edge/s3-ingest/wasm/chunker.wasm
+	cp "$$(go env GOROOT)/lib/wasm/wasm_exec.js" edge/s3-ingest/wasm/wasm_exec.js
+
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge edge-chunker-wasm
 
 # Code formatting
 fmt:
@@ -83,7 +93,7 @@ lint: lint-version-check
 lint-wasm: lint-version-check
 	@bin=$$(mktemp -d "$${TMPDIR:-/tmp}/lint-wasm.XXXXXX") && trap 'rm -rf "$$bin"' EXIT && \
 		GOBIN="$$bin" GOOS= GOARCH= go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) && \
-		GOOS=js GOARCH=wasm "$$bin/golangci-lint" run ./sdk/wasm/
+		GOOS=js GOARCH=wasm "$$bin/golangci-lint" run ./sdk/wasm/ ./sdk/chunkerwasm/
 
 lint-version-check:
 	@grep -q 'version: $(GOLANGCI_LINT_VERSION)$$' .github/workflows/ci.yml || \

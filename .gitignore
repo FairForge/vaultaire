@@ -160,3 +160,6 @@ __pycache__/
 
 # The key core compiled to WebAssembly (make sdk-wasm)
 sdk/wasm/dist/
+
+# The frozen chunker compiled to WebAssembly for the edge codec (make edge-chunker-wasm)
+edge/s3-ingest/wasm/

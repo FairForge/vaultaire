@@ -15,8 +15,12 @@ package crypto
 //
 //	header   = [format][kind u8][kind material][segment_size u32 BE][nonce_prefix 7]
 //	format   = 0x04 (every writer since WP-R8-3 A.2) | 0x03 (before; opened only)
+//	           | 0x06 (a wrapped-key chunk blob of the edge codec, WP-EDGE-2 —
+//	             sealed and opened by edge_codec.go; 0x05 is the SSE-C
+//	             multipart container, ssec_multipart.go)
 //	kind 0x01 SSE-S3: material = [key_version u32 BE][ML-KEM-768 ciphertext 1088]
 //	kind 0x02 SSE-C:  material = [salt 16]
+//	kind 0x03 wrapped (0x06 only): material = [key_version u32 BE][wrapped chunk key 1169]
 //	body     = segment_0 ‖ … ‖ segment_{n-1}
 //	segment_i = AES-256-GCM(DEK, nonce_i, aad, plaintext_i)  (ct ‖ tag 16)
 //	aad      = 0x04: header ‖ "vaultaire-sse-identity-v4" ‖ len‖tenant ‖ len‖bucket ‖ len‖key (len u32 BE)
@@ -96,9 +100,20 @@ const (
 	// StreamFormatV3 is the format before it (header-only AAD): opened,
 	// never written.
 	StreamFormatV3 byte = 0x03
-	// StreamKindSSES3 / StreamKindSSEC are the header's kind byte.
-	StreamKindSSES3 byte = 0x01
-	StreamKindSSEC  byte = 0x02
+	// StreamFormatWrapped is the dual-key chunk blob of the edge codec
+	// (WP-EDGE-2, 0x06 — 0x05 is the SSE-C multipart container,
+	// ssec_multipart.go): the 0x04 layout whose kind material wraps a RANDOM
+	// per-chunk key to the tenant's codec public key (edge_codec.go). The
+	// AAD is the header alone, like a 0x03's — a chunk is shared by every
+	// object of the tenant that holds its bytes, so it has no bucket or key
+	// to bind; what binds its content is the keyed-hash check after the open
+	// (the index row's keyed hash of the plaintext).
+	StreamFormatWrapped byte = 0x06
+	// StreamKindSSES3 / StreamKindSSEC are the header's kind byte (formats
+	// 0x03/0x04); StreamKindWrapped is 0x06's only kind.
+	StreamKindSSES3   byte = 0x01
+	StreamKindSSEC    byte = 0x02
+	StreamKindWrapped byte = 0x03
 	// StreamSegmentSize is the plaintext bytes per segment every writer
 	// uses. It is written into each header, so changing it never breaks a
 	// reader of older blobs.
@@ -108,13 +123,18 @@ const (
 	streamNoncePrefixSize = 7
 	streamSaltSize        = 16
 	streamTail            = 4 + streamNoncePrefixSize
-	// StreamHeaderSSES3 / StreamHeaderSSEC are the header lengths of the
-	// two kinds (1105 and 29 bytes).
+	// StreamHeaderSSES3 / StreamHeaderSSEC / StreamHeaderWrapped are the
+	// header lengths of the kinds (1105, 29 and 1186 bytes).
 	StreamHeaderSSES3 = 2 + 4 + mlkem.CiphertextSize768 + streamTail
 	StreamHeaderSSEC  = 2 + streamSaltSize + streamTail
+	// A 0x06 header's material: [key_version u32][the wrapped chunk key —
+	// an sdk/go/e2ee 0x03 sealed box of the 32-byte key: format byte,
+	// X-Wing encapsulation (1120), ciphertext+tag (48)].
+	StreamWrapLen       = 1 + 1120 + 32 + streamTagSize
+	StreamHeaderWrapped = 2 + 4 + StreamWrapLen + streamTail
 	// MaxStreamHeader is the longest header: a ranged reader fetches this
 	// many bytes first.
-	MaxStreamHeader = StreamHeaderSSES3
+	MaxStreamHeader = StreamHeaderWrapped
 
 	// A header's segment size outside these bounds is refused before any
 	// buffer is sized from it.
@@ -134,8 +154,10 @@ const (
 )
 
 // IsStreamFormat reports whether b is the first byte of a streaming blob
-// (0x03 or 0x04).
-func IsStreamFormat(b byte) bool { return b == StreamFormat || b == StreamFormatV3 }
+// (0x03, 0x04 or 0x06 — WP-EDGE-2).
+func IsStreamFormat(b byte) bool {
+	return b == StreamFormat || b == StreamFormatV3 || b == StreamFormatWrapped
+}
 
 // StreamIdentity is the object a 0x04 blob is sealed for: the tenant, the
 // bucket and the KEY (never the blob's address — a retained version, a
@@ -214,14 +236,15 @@ func StreamCiphertextLength(headerLen, segmentSize int, size int64) int64 {
 	return int64(headerLen) + size + StreamSegments(size, segmentSize)*streamTagSize
 }
 
-// StreamHeader is a parsed 0x03 / 0x04 header.
+// StreamHeader is a parsed 0x03 / 0x04 / 0x06 header.
 type StreamHeader struct {
 	Raw         []byte
-	Format      byte // 0x03 or 0x04
+	Format      byte // 0x03, 0x04 or 0x06
 	Kind        byte
-	KeyVersion  int    // SSE-S3
+	KeyVersion  int    // SSE-S3 and wrapped (0x06): the tenant key version
 	KEMCipher   []byte // SSE-S3
 	Salt        []byte // SSE-C
+	Wrap        []byte // wrapped (0x06): the chunk key sealed to the codec public key
 	SegmentSize int
 	NoncePrefix []byte
 }
@@ -233,8 +256,21 @@ func streamHeaderLen(kind byte) (int, error) {
 		return StreamHeaderSSES3, nil
 	case StreamKindSSEC:
 		return StreamHeaderSSEC, nil
+	case StreamKindWrapped:
+		return StreamHeaderWrapped, nil
 	}
 	return 0, fmt.Errorf("%w: unknown kind 0x%02x", ErrStreamCorrupt, kind)
+}
+
+// streamKindOfFormat refuses a kind that does not belong to its format: the
+// SSE kinds are 0x03/0x04's, the wrapped kind is 0x06's alone. A header
+// claiming any other pair never sizes a buffer or derives a key.
+func streamKindOfFormat(format, kind byte) error {
+	wrapped := kind == StreamKindWrapped
+	if wrapped != (format == StreamFormatWrapped) {
+		return fmt.Errorf("%w: kind 0x%02x does not belong to format 0x%02x", ErrStreamCorrupt, kind, format)
+	}
+	return nil
 }
 
 // ParseStreamHeader parses a header from b, which must start with it (it may
@@ -246,6 +282,9 @@ func ParseStreamHeader(b []byte) (*StreamHeader, error) {
 	}
 	n, err := streamHeaderLen(b[1])
 	if err != nil {
+		return nil, err
+	}
+	if err := streamKindOfFormat(b[0], b[1]); err != nil {
 		return nil, err
 	}
 	if len(b) < n {
@@ -266,6 +305,14 @@ func ParseStreamHeader(b []byte) (*StreamHeader, error) {
 	case StreamKindSSEC:
 		h.Salt = raw[off : off+streamSaltSize]
 		off += streamSaltSize
+	case StreamKindWrapped:
+		h.KeyVersion = int(binary.BigEndian.Uint32(raw[off:]))
+		off += 4
+		h.Wrap = raw[off : off+StreamWrapLen]
+		off += StreamWrapLen
+		if h.KeyVersion < 1 {
+			return nil, fmt.Errorf("%w: key version %d", ErrStreamCorrupt, h.KeyVersion)
+		}
 	}
 	seg := binary.BigEndian.Uint32(raw[off:])
 	off += 4
@@ -310,6 +357,9 @@ func newStreamHeaderFormat(format, kind byte, material []byte, segmentSize int) 
 	}
 	if !IsStreamFormat(format) {
 		return nil, fmt.Errorf("sse stream: format 0x%02x", format)
+	}
+	if err := streamKindOfFormat(format, kind); err != nil {
+		return nil, err
 	}
 	h := make([]byte, 0, 2+len(material)+streamTail)
 	h = append(h, format, kind)
