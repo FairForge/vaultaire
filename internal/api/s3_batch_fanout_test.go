@@ -50,6 +50,8 @@ type queryLog struct {
 	peaks    map[string]int // the most that ran at once, by text
 	running  int
 	peak     int
+	begins   int      // transactions begun (RP70-4: one per index call)
+	lockArgs []string // the second argument of every pg_advisory_xact_lock, in order
 }
 
 func (l *queryLog) add(q string) {
@@ -110,8 +112,23 @@ func (l *queryLog) peakTotal() int {
 
 func (l *queryLog) reset() {
 	l.mu.Lock()
-	l.queries = nil
+	l.queries, l.begins, l.lockArgs = nil, 0, nil
 	l.mu.Unlock()
+}
+
+// beginCount is the number of transactions begun since the last reset.
+func (l *queryLog) beginCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.begins
+}
+
+// advisoryLockArgs is the second argument of every advisory lock taken
+// since the last reset, in the order they were taken.
+func (l *queryLog) advisoryLockArgs() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lockArgs...)
 }
 
 // count is the number of recorded statements that name the table.
@@ -155,6 +172,11 @@ func (c *countingConn) QueryContext(ctx context.Context, query string, args []dr
 }
 
 func (c *countingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if strings.Contains(query, "pg_advisory_xact_lock") && len(args) >= 2 {
+		c.log.mu.Lock()
+		c.log.lockArgs = append(c.log.lockArgs, fmt.Sprint(args[1].Value))
+		c.log.mu.Unlock()
+	}
 	c.log.enter(query)
 	defer c.log.leave(query)
 	return c.Conn.(driver.ExecerContext).ExecContext(ctx, query, args)
@@ -166,6 +188,9 @@ func (c *countingConn) PrepareContext(ctx context.Context, query string) (driver
 }
 
 func (c *countingConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	c.log.mu.Lock()
+	c.log.begins++
+	c.log.mu.Unlock()
 	return c.Conn.(driver.ConnBeginTx).BeginTx(ctx, opts)
 }
 

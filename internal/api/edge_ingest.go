@@ -524,16 +524,20 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		WriteS3Error(rec, ErrMissingContentLength, sr.URL.Path, generateRequestID())
 		return refusalOf(rec)
 	}
-	if size == 0 {
-		return passThrough("empty") // an empty object costs nothing to move
-	}
-	// A small body is the origin's (EDGE_MIN_BYTES): two round trips fewer,
-	// and its bytes do not matter for SLC's bandwidth — except a part of an
-	// upload already on the edge (whole or codec): one upload is one path,
-	// the origin's stager refuses its parts, and S3 sets no minimum for the
-	// LAST part.
-	if s.edge.minBytes > 0 && size < s.edge.minBytes && !s.edgeUploadPart(sctx, req, tenantID, sr) {
-		return passThrough(edgeReasonSmall)
+	// A small PutObject is the origin's (EDGE_MIN_BYTES): two round trips
+	// fewer, and its bytes do not matter for SLC's bandwidth; an empty one
+	// costs nothing to move. An UploadPart is the edge's whatever its size,
+	// an empty last part included (D-EDGE-29, RP70-2): a part is never
+	// alone — its upload is the unit, one upload is one path, and a small
+	// tail passed to the origin's stager raced the codec parts of every
+	// upload of ten parts or fewer.
+	if req.Op == edgeOpPut {
+		if size == 0 {
+			return passThrough("empty")
+		}
+		if s.edge.minBytes > 0 && size < s.edge.minBytes {
+			return passThrough(edgeReasonSmall)
+		}
 	}
 
 	// The flag, per tenant.

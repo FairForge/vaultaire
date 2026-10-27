@@ -75,22 +75,6 @@ func readEdgeUpload(ctx context.Context, q interface {
 	return u, nil
 }
 
-// edgeUploadPart reports whether an UploadPart admit names an upload already
-// fed through the edge (whole or codec): its parts are the edge's whatever
-// their size — EDGE_MIN_BYTES never sends one to the origin's stager, which
-// refuses it (one upload is one path; S3 sets no minimum for the last part).
-func (s *Server) edgeUploadPart(ctx context.Context, req edgeAdmitRequest, tenantID string, sr *http.Request) bool {
-	if req.Op != edgeOpPart || s.db == nil {
-		return false
-	}
-	uploadID := sr.URL.Query().Get("uploadId")
-	if uploadID == "" {
-		return false
-	}
-	up, err := readEdgeUpload(ctx, s.db, tenantID, uploadID)
-	return err == nil && !up.Ended && (up.Edge || up.Codec)
-}
-
 // edgePartReservation is what reserveEdgePart settled: the bytes it
 // reserved and the upload's edge state (the backend upload to presign on).
 type edgePartReservation struct {
