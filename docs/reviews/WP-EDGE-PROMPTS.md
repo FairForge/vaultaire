@@ -684,206 +684,263 @@ no AI attribution lines; merge with `gh pr merge --auto` (merge queue; no
 
 ---
 
-## Stage 1a Prompt 46: WP-EDGE-2 — slice 2 against the LAB master key (the chunker in WASM, the dual key, the keyed index; dark on prod)
+## Stage 1a Prompt 46: WP-EDGE-2 Part A — slice 2 against the LAB master key: the codec and the control plane (Part 0: RP66-1/2/3/5/6/7)
 
 ```
-Stage 1a Prompt 46: WP-EDGE-2 — slice 2 against the LAB master key (Part 0: RP66)
+Stage 1a Prompt 46: WP-EDGE-2 Part A — slice 2 against the LAB master key: the
+codec and the control plane (Part 0: RP66-1/2/3/5/6/7)
 
-Continue from WP-EDGE-1 Part B (2026-10-26: #984 Part 0, #985 the control
-plane + migration 110, #986 the Worker 0.2.0, the docs PR; deployed; reads
-leave SLC for tenant zero; note docs/reviews/WP-EDGE-1B.md — read its
-§ Decisions D-EDGE-10…15 and § Residuals RB-1…8) and from its post-merge
-review RP66 (docs/reviews/WP-EDGE-1B-REVIEW.md — the findings it marks
-"before Prompt 46" are THIS prompt's Part 0; if the review has not been
-written when you start, write it first as the review session would: read
-every file of #985/#986 whole, adversarially, verdict + table + re-checks).
+Continue from WP-EDGE-1 Part B (2026-10-26: #984 Part 0, #985 the control plane +
+migration 110, #986 the Worker 0.2.0, #992 docs; deployed; reads leave SLC for
+tenant zero; note docs/reviews/WP-EDGE-1B.md — read § Decisions D-EDGE-10…15 and
+§ Residuals RB-1…9) and from its post-merge review RP66
+(docs/reviews/WP-EDGE-1B-REVIEW.md — HOLDS at P2; RP66-1 and RP66-2 must land
+before `edge_ingest` widens, and they are THIS prompt's Part 0 with RP66-3/5/6/7).
 Most recent merged PR and open PRs: `git log origin/main`, `gh pr list`.
 
-Read first: docs/ARCHITECTURE_CONTRACT.md lines 4, 5, 6 (cite in the PR
-body: keys only through the one hierarchy; no global convergent key; dedup
-by a keyed index); docs/IMPLEMENTATION_PLAN.md § 40.10 "The invariant and
-the order" and "Build everything now" (the serial order; slice 2 is proven
-on a LAB master key, deployed DARK, refused on prod without a master key —
-the same refusal placement.go gives today); docs/surfaces/ENGINE.md;
-docs/ENCRYPTION.md (the tenant key versions, ML-KEM-768 seeds, the 0x03
-streaming format — internal/crypto/stream.go and its golden vectors);
-docs/reviews/WP-R8-4.md (the frozen chunker: restic's Rabin polynomial,
-min/avg/max bits — crypto.ChunkerIdentity); sdk/go/e2ee (HPKE with X-Wing:
-the wrap the Worker reuses); internal/api/chunk_store.go + chunk_claim.go
-(a chunk's ONE address in `_global` under the reserved tenant,
-claim → PUT → ready, the pending takeover window) and placement.go (the
-one decision; `chunked` placement; the `chunking` flag); CLAUDE.md
-Architecture Decisions 2, 7, 8; bench-results/EDGE-RELAY-2026-10-26.md
-(the baseline: JavaScript in the byte path halves a stream to ~25 MB/s —
-slice 2 PUTS JavaScript (WASM) in the byte path on purpose; measure it,
-report the number, the trade is the owner's decision in 40.10).
+THIS IS PART A OF TWO. The Prompt 46 text written on 2026-10-26 asked one session
+for the codec, the control plane, the Worker 0.3.0, the lab proof and the F-3 tool
+— more than WP-EDGE-1 Part A (4,400 lines). Part A here is the codec in Go with
+its WASM build pinned by golden vectors, and the control plane's index/commit half
+proven by a Go harness that plays the Worker; Part B (Prompt 46b, written by THIS
+closeout) is the Worker 0.3.0 pipeline, the lab proof through wrangler dev and
+cmd/tools/dedup-measure. Two corrections of that text, found by RP66 (RP66-8):
+(1) a per-admit keyed hash cannot be mapped to the tenant's keyed hash — the Worker
+sends sha256(chunk) over the service-token channel and the CONTROL PLANE applies
+the tenant index key, in memory for the call, never stored or logged; (2) the
+dual-key stream's format byte is NOT 0x04 (the CURRENT StreamFormat, every writer
+since WP-R8-3 A.2; 0x03 is opened only) nor 0x05 (the SSE-C multipart header) —
+it is 0x06; verify in internal/crypto/stream.go:93–101 before you type it.
 
-Lane: Engine. Next migration: 111 (110 was Part B's) — ONLY if the batched
-index call needs a table (a per-tenant index key version column, or the
-keyed-hash column on global_content_index); the keyed hash may live in a
-new column `global_content_index.keyed_hash` (NULL for every row written
-before) — decide in Step 0 and say so. Four PRs:
-(0) RP66 fixes; (A) the codec: the chunker + the 0x04 header in Go, the
-WASM build, the golden tests; (B) the control plane: the index call, the
-public-key hand-out on admit, the manifest commit, flag `edge_codec`;
-(C) the Worker 0.3.0; then the docs PR after the lab proof (WP-EDGE-2.md
-with Step 0 answers / decisions / residuals, STATUS, plan 40.10, CLAUDE.md,
-API.md, ENCRYPTION.md, the Prompt 47 text into WP-EDGE-PROMPTS.md).
+Read first: docs/ARCHITECTURE_CONTRACT.md lines 4, 5, 6 (cite in the PR body:
+keys only through the one hierarchy; no global convergent key; dedup by a keyed
+index); docs/IMPLEMENTATION_PLAN.md § 40.10 "The invariant and the order" and
+"Build everything now" (slice 2 is proven on a LAB master key, deployed DARK,
+refused on prod without a master key — the same refusal placement.go gives
+today); docs/surfaces/ENGINE.md; docs/ENCRYPTION.md (tenant key versions, the
+ML-KEM-768 seed, the 0x04 streaming format — internal/crypto/stream.go, its
+golden vectors in stream_test.go); docs/reviews/WP-R8-4.md (the frozen chunker:
+crypto.ChunkerIdentity / DefaultChunkerIdentity, internal/crypto/chunker.go:47);
+sdk/go/e2ee (e2ee.go: the HPKE wrap with X-Wing the sealer reuses; the WASM
+build in sdk/wasm and scripts/build-client.sh); internal/api/chunk_store.go,
+chunk_claim.go (claim → PUT → ready, the 3 min takeover window, the one address
+`_chunks/<tenant>/<hash>.k<N>` for an encrypted-scope chunk), chunked_write.go
+(storeChunkedObject: the rows a chunked write produces — the commit must produce
+the SAME rows), placement.go (the one decision; `chunked`; the `chunking` flag);
+CLAUDE.md Architecture Decisions 2, 7, 8; docs/reviews/WP-EDGE-1A.md § Decisions
+(D-EDGE-3 one upload one path, D-EDGE-9 the JSON body); bench-results/
+EDGE-RELAY-2026-10-26.md (JavaScript in the byte path halves a stream — slice 2
+puts WASM in it on purpose; Part B measures it).
 
-Scope: a PutObject / UploadPart admitted at the edge (Part A's gate) of a
-tenant with the `edge_codec` flag (default OFF, per tenant; needs a tenant
-key version — on prod there is none without a master key, so the admit
-answers {edge:false, reason:"no_key"} and Part A's whole-object path takes
-it as today) is chunked, keyed-hashed, sealed and uploaded chunk by chunk
-BY THE WORKER; the control plane answers the index (hit / miss per keyed
-hash), signs the misses' links into `_global` and writes the manifest at
-commit exactly as storeChunkedObject does. Reads of such an object are the
-origin's (Part B passes a chunked row through) — the edge-side open of
-sealed segments with a released key is Prompt 47's or later, say so.
+Lane: Engine. Next migration: 111 — `global_content_index.keyed_hash` (BYTEA/TEXT,
+NULL on every row written before; a partial unique index with the scope) and
+`edge_admits.codec BOOLEAN NOT NULL DEFAULT FALSE` (or `attrs.codec`; decide in
+Step 0.4 and say so); additive. Four PRs: (0) the RP66 fixes — Worker 0.2.1 +
+the control plane; (A) the codec: the 0x06 format in Go, the keyed hash, the WASM
+chunker build + golden vectors; (B) the control plane: the admit's codec answer,
+POST /api/v1/edge/index, the codec commit, the reaper, flag `edge_codec`, the
+metrics, migration 111; then (C) the docs PR after the harness proof
+(WP-EDGE-2A.md with Step 0 answers / decisions / residuals, STATUS, plan 40.10,
+CLAUDE.md rows, ENCRYPTION.md, the Prompt 46b text into this file).
+
+Scope: a PutObject / UploadPart admitted at the edge (Part A's gate) of a tenant
+with the `edge_codec` flag (default OFF, per tenant; needs a tenant key version —
+on prod there is none without a master key, so the admit answers Part A's whole
+PUT, reason `no_key`, never a refusal and never a plaintext chunked write) is
+chunked, hashed, sealed under a random per-chunk key wrapped to the tenant's
+ML-KEM-768 public key, and uploaded chunk by chunk BY THE DATA-PLANE HOST; the
+control plane answers the index (hit / miss per hash), signs each miss's link
+into `_global`, and writes the manifest at commit exactly as storeChunkedObject
+does. In Part A the data-plane host is a Go test harness; Part B makes it the
+Worker. Reads of such an object are the origin's (Part B of WP-EDGE-1 passes a
+chunked row through); the edge-side open with a released key is Prompt 47's or
+later — say so.
 
 What to build
-1. PART 0 (own PR, first): RP66's fixes exactly as its fix column.
+1. PART 0 (own PR, first — each fix exactly as RP66's fix column):
+   a. RP66-1 (P2): internal/api/edge_get.go edgeAdmitGet — a row with a non-empty
+      `content_encoding` passes through (`passThrough("content_encoding")`; the
+      Workers runtime re-encodes a body whose Response carries Content-Encoding,
+      and the fixed-bucket driver never sent the encoding to the backend); a row
+      in TestEdgeAdmitGet_PassThroughMatrix (red first).
+   b. RP66-2 (P3) + RP66-7: the admit answers `content_length` (the admitted
+      span); edge/s3-ingest/src/index.js readSucceeded = status === expect_status
+      AND (no content-length header OR Number(content-length) === admit.content_
+      length) — a mismatch is a `fallback` (the origin's integrity path decides;
+      the backend body cancelled); settleEdgeGet counts every served read in
+      vaultaire_object_integrity_unverified_total{path="edge",reason="unverified"}
+      (object_integrity.go's counter — pre-create the pair) and a missing
+      Content-Length is Debug, metered as admitted. Node test: the length
+      mismatch → fallback. Worker 0.2.1: a new manifest row (sha256 of the
+      deployed file), `wrangler deploy` on the production account, the deployed
+      script downloaded back byte-identical.
+   c. RP66-3 (P3): settleEdgeGet (served) runs the origin's detached
+      `UPDATE object_head_cache SET last_accessed = NOW()`
+      (s3_engine_adapter.go:515–520, context.Background()).
+   d. RP66-5 (P4): the response's x-amz-request-id = req.RequestID (the Worker's;
+      what the admit row and the access-log row carry), as commitEdgePart does.
+   e. RP66-6 (P4): the reaper purges terminal `get` rows after 24 h; writes keep
+      7 d (two DELETEs, or one with a CASE).
+   f. Step 0.5 at the 0.2.1 deploy: RB-9's capture — a signed pass-through GET
+      (If-None-Match with Range) through s3.stored.cloud every 5 s for two
+      minutes after `wrangler deploy` returns, the origin's `auth` Debug on, the
+      first failing request's headers kept; the answer (or "not reproduced, N
+      requests") into WP-EDGE-2A.md and the RB-9 line of WP-EDGE-1B.md.
 2. THE CODEC (Go first, one implementation):
-   a. internal/crypto: the chunker is already frozen (WP-R8-4,
-      crypto.ChunkerIdentity). Add `crypto/chunkwasm` (or a build tag):
-      the SAME chunker compiled with GOOS=js GOARCH=wasm into
-      edge/s3-ingest/wasm/chunker.wasm by scripts/build-client.sh (a new
-      client `edge-chunker`, its row in the manifest — the Deploy job's
-      repro-check rebuilds it; `make lint-wasm` covers it). A golden test
-      in Go (`TestChunker_GoldenBoundaries`) and the SAME vectors in a
-      node test that runs the wasm (`test/chunker.test.js`): a fixed 100
-      MiB pseudo-random body (a seed, never a file in the repo) → the exact
-      boundary offsets, byte-identical between Go and WASM. Boundaries reset
-      at part edges (each 64 MiB part is chunked alone — the manifest's
-      chunk list is the concatenation; say in the note that cross-part
-      dedup is therefore by chunk content, not by position).
-   b. The 0x04 header of the streaming format (internal/crypto/stream.go):
-      the 0x03 layout + a wrap kind byte + the KEM ciphertext (X-Wing, as
-      sdk/go/e2ee's HPKE) + the tenant key VERSION. A random chunk key per
-      chunk; the chunk sealed in 0x03's segments under it; the chunk key
-      wrapped with HPKE to the tenant's ML-KEM-768 public key of that
-      version. Open: unwrap under the tenant private seed of the recorded
-      version (tenant_key_versions, WP-R8-1), then 0x03's open. 0x01/0x02/
-      0x03 blobs still open (the golden vectors gain the 0x04 case; a 0x04
-      vector with a FIXED test seed and a fixed KEM ephemeral — the HPKE
-      test-vector trick — so the ciphertext is reproducible).
-   c. The keyed hash: HMAC-SHA256(tenant_index_key, sha256(chunk plaintext))
-      where tenant_index_key = HKDF(tenant key version's chunk key, label
-      "stored/index/v1") — ONE hierarchy (contract line 4); the index
-      stores the keyed hash ONLY (`TestIndexHoldsNoPlainHash`: no column,
-      log line or metric carries sha256(chunk)); dedup is per tenant by
-      construction (contract line 5) — the cross-tenant forms are 10.3's
-      filter and F-37's consented pool, neither here.
+   a. The chunker is frozen (WP-R8-4, crypto.ChunkerIdentity). Add its WASM
+      build: the SAME package compiled with GOOS=js GOARCH=wasm into
+      edge/s3-ingest/wasm/chunker.wasm by scripts/build-client.sh (a new client
+      `edge-chunker` with its row in internal/translog/clientbuilds/manifest.json;
+      scripts/repro-check-clients.sh rebuilds it; `make lint-wasm` covers it).
+      A golden test in Go (TestChunker_GoldenBoundaries) and the SAME vectors in
+      a node test running the wasm (edge/s3-ingest/test/chunker.test.js, under
+      `make test-edge`): a 100 MiB pseudo-random body from a FIXED seed (never a
+      file in the repo) → the exact boundary offsets, byte-identical between Go
+      and WASM. Boundaries reset at part edges (each 64 MiB part is chunked
+      alone; the manifest's chunk list is the parts' concatenation — cross-part
+      dedup is by chunk content, not position; say so in the note).
+   b. The 0x06 format (internal/crypto/stream.go): the 0x04 layout + a wrap kind
+      byte + the KEM ciphertext (X-Wing, as sdk/go/e2ee's HPKE) + the tenant key
+      VERSION. A random chunk key per chunk; the chunk sealed in the 0x04 layout's
+      1 MiB segments under it; the chunk key wrapped with HPKE to the tenant's
+      ML-KEM-768 public key of that version. Open: unwrap under the tenant private
+      seed of the recorded version (tenant_key_versions, WP-R8-1), then the 0x04
+      open. 0x03/0x04/0x05 blobs still open (IsStreamFormat grows by 0x06; every
+      reader that switches on the format byte is found by grep and listed in the
+      note). The golden vectors gain the 0x06 case with a FIXED test seed and a
+      fixed KEM ephemeral (the HPKE test-vector trick) so the ciphertext is
+      reproducible.
+   c. The keyed hash: HMAC-SHA256(tenant_index_key, sha256(chunk plaintext)) where
+      tenant_index_key = HKDF(the key version's chunk key, "stored/index/v1") —
+      ONE hierarchy (contract line 4); the index stores the keyed hash ONLY
+      (TestIndexHoldsNoPlainHash: no column, log line or metric of the new path
+      carries sha256(chunk) — the test greps the schema, the zap fields and the
+      metric labels); dedup is per tenant by construction (contract line 5): the
+      cross-tenant forms are 10.3's filter and F-37's pool, neither here.
+   d. D-EDGE-16 (rewritten): the data-plane host learns NO long-lived key. It
+      sends sha256(chunk) in the index call (the service-token channel, TLS to
+      the control plane); the control plane applies the tenant index key, in
+      memory for the call. The host already holds the plaintext; the hash adds
+      nothing to what it knows. Argue it in the note against the stored text's
+      per-admit key (impossible: HMAC(K_tenant, h) is not computable from
+      HMAC(K_admit, h) without h).
 3. THE CONTROL PLANE:
-   a. admit (op put/part, Part A's gate passed): with the `edge_codec` flag
-      ON AND a tenant key version AND the placement `chunked`-eligible
-      (the chunking flag, > the threshold, unversioned, unpinned, plain
-      bucket — placement.go's rule for storeChunkedObject; a body under
-      the chunk threshold stays Part A's whole PUT), the admit answers
-      {edge:true, codec:{version, kem_public_key (base64), index_key_id},
-      ...} and NO presigned PUT for the body; the admit row records
-      op 'put'/'part' + `codec = true` (a column, migration 111 if needed,
-      or in attrs). Without a key version: {edge:true} as Part A (the whole
-      PUT) — never a refusal, never a plaintext chunked write.
-   b. POST /api/v1/edge/index (the token gate, D-EDGE-9's JSON shape):
-      {admit_id, hashes:[keyed hash …]} → {hits:[…], misses:[{hash, url,
-      send_headers}]}: each miss is a presigned PUT into `_global` at the
-      ONE address (`engine.ChunkContext`, chunk_store.go's rule; the key
-      `_chunks/<tenant>/<keyed hash>.k<version>` — the encrypted-scope
-      layout) with a CLAIM taken as chunk_claim.go takes it (pending,
-      pending_since = the admit; the takeover window applies — a Worker
-      that dies leaves a claim the next writer takes over), the link
-      signing content-length and the Worker's Content-MD5 of the SEALED
-      bytes (Part A's rule: the backend enforces it). A hit references
-      the ready row (IncrementRef at commit, never at index time — a
-      Worker that dies holds no reference). ≤ 10,000 hashes per call;
-      one call per part.
+   a. admit (op put/part, Part A's gate passed): with `edge_codec` ON for the
+      tenant AND a tenant key version (crypto.TenantKeys) AND a `chunked`-eligible
+      placement (placement.go's rule for storeChunkedObject: the chunking flag,
+      above the chunk threshold, unversioned, unpinned, a plain bucket; a body
+      under the threshold stays Part A's whole PUT), the admit answers
+      {edge:true, codec:{version, kem_public_key (base64), chunk_threshold,
+      segment_size}, admit_id, ...} and NO presigned PUT for the body; the row
+      records `codec = true`. Without a key version: {edge:true} as Part A, the
+      Debug line says `no_key`.
+   b. POST /api/v1/edge/index (the token gate; D-EDGE-9's JSON shape):
+      {admit_id, chunks:[{hash (hex sha256), size}]} → {hits:[hash…],
+      misses:[{hash, url, send_headers, sealed_length}]}: per hash the control
+      plane computes the keyed hash and looks the tenant's encrypted scope up
+      (ready rows only); each miss is a presigned PUT into `_global` at the ONE
+      address (`engine.ChunkContext`, chunk_store.go's rule; the key
+      `_chunks/<tenant>/<keyed hash hex>.k<version>`) with a CLAIM taken as
+      chunk_claim.go takes it (pending, pending_since = the admit id; the takeover
+      window applies — a host that dies leaves a claim the next writer takes over
+      after 3 min), the link signing content-length = the sealed length the host
+      can compute from the plaintext size (D-EDGE-17: no Content-MD5 on a chunk
+      link — the host would have to seal every chunk before asking; the backend's
+      ETag of the sealed bytes is recorded at commit as the row's ciphertext_hash
+      and every chunked GET verifies the stored blob against it, as today). A hit
+      is referenced at COMMIT (IncrementRef), never at index time — a host that
+      dies holds no reference. ≤ 10,000 hashes per call; one call per part.
    c. commit: {admit_id, chunks:[{hash, size, sealed_size, backend_etag,
-      status}], ...}: every miss's backend answer ok → readyChunk (the
-      row's ciphertext hash = the sealed MD5 the backend answered — the
-      0x04 blob's MD5; state ready, +1 ref), every hit → IncrementRef;
-      then the manifest (ReplaceObjectManifestTx) + the chunked head row
-      (backend `chunked`, encryption AES256-CE's successor name for 0x04,
-      is_chunked, the ETag = the Worker's whole-body MD5 — NOTE: this
-      REVERSES Part A's "no JS in the byte path": the Worker reads every
-      byte anyway to chunk it, so the MD5 is free; say so) in ONE
-      transaction through commitBlobWrite's rules for a chunked row
-      (atomicHeadUpsert); a failed commit drops the claims (dropChunkClaim)
-      and references. A multipart: each part's commit stores its chunks
-      and refs on the upload row (a `part_chunks` JSONB on multipart_parts
-      or a table — Step 0 decides); Complete concatenates the parts' chunk
-      lists into one manifest (the -N ETag as today).
-   d. The reaper: an expired codec admit drops its pending claims and
-      the blobs the Worker reported landed (chunk_orphans' rule for the
-      rest).
-   e. Flag `edge_codec` (per tenant first); `vaultaire_edge_codec_*`
-      metrics: chunks_total{outcome=hit|miss|stored|failed}, bytes_total
-      {kind=plaintext|sealed}, index_calls_total.
-4. THE WORKER (0.3.0): for a codec admit, a TransformStream pipeline per
-   part: the body → the WASM chunker (boundaries) → per chunk: sha256 →
-   HMAC with the index key (handed out by admit? NO — the index key never
-   leaves the control plane: the Worker sends sha256(chunk) HMAC'd under a
-   PER-ADMIT key the admit hands out, derived by the control plane from
-   the tenant index key and the admit id (HKDF), so the Worker learns no
-   long-lived key; the control plane re-derives and maps to the tenant
-   keyed hash — write this down as D-EDGE-16 and argue it in the note) →
-   the index call per batch of N chunks (N = 64) → misses: a random chunk
-   key (crypto.getRandomValues), seal (WebCrypto AES-GCM per 1 MiB
-   segment in the 0x03 layout + the 0x04 header with the HPKE wrap — the
-   X-Wing KEM from sdk/wasm's build, the SAME code as sdk/js/e2ee) → PUT
-   to the presigned link → collect the backend ETags → commit. Memory:
-   at most N chunks in flight; back-pressure on the request body (the
-   TransformStream's high-water mark). Measure the per-stream rate (the
-   baseline says ~25 MB/s with JS in the path; WASM may do better or
-   worse — the number goes in the note and in the PR body).
-5. cmd/tools/dedup-measure (F-3): walks a lab corpus (a directory), chunks
-   it with the frozen chunker, reports the cross-tenant duplicate fraction
-   for a given tenant partition — the number the owner decides F-37 with.
-   Plaintext hashes in a tool's memory only, never written.
+      status}], body_md5, …}: every miss's backend answer ok → readyChunk (state
+      ready, the backend, ciphertext_hash = the backend's MD5 ETag of the sealed
+      bytes, encryption_key_version = the admit's, +1 ref), every hit →
+      IncrementRef (0 rows = re-stored by the host? NO: a vanished hit is the
+      commit's error — the host retries the part; say so); then the manifest
+      (ReplaceObjectManifestTx) + the chunked head row (backend `chunked`,
+      is_chunked, the encryption name of the 0x06 chunks — a new constant beside
+      AES256-CE, the ETag = the host's whole-body MD5 for a PUT: the host reads
+      every byte to chunk it, so the digest is free — this REVERSES Part A's
+      "no JS in the byte path" for codec writes; say so) in ONE transaction
+      through atomicHeadUpsert's rules for a chunked row; a failed commit drops
+      the claims (dropChunkClaim) and the references taken. A multipart: each
+      part's commit stores its chunk list on the part row (`multipart_parts.
+      part_chunks` JSONB — Step 0.4) and takes its references; Complete
+      concatenates the parts' lists into one manifest (the -N ETag as today) —
+      the origin's completeMultipartUpload gains the codec branch beside the edge
+      branch (one upload one path, D-EDGE-3: a codec part on an upload with a
+      staged or an edge-whole part is 400 InvalidRequest).
+   d. The reaper: an expired codec admit drops its pending claims; blobs the host
+      reported landed and never committed are chunk_orphans' (the 24 h grace).
+   e. Flag `edge_codec` (per tenant first; registerFlags). Metrics
+      vaultaire_edge_codec_chunks_total{outcome=hit|miss|stored|failed},
+      _bytes_total{kind=plaintext|sealed}, _index_calls_total — pre-created.
+4. THE HARNESS (Part A's proof of 3): internal/api/edge_codec_harness_test.go —
+   a Go "Worker": chunks a body with the Go chunker, hashes, calls /index over
+   httptest, seals the misses with the Go 0x06 sealer under the admit's public
+   key, PUTs them to the presigned links (edgeFakeDriver records the sealed
+   bytes; one run against the bench iDrive pair under a build tag), commits;
+   then the ORIGIN reads the object back (the lab master key file) MD5-equal.
+   This harness is also Part B's oracle: the Worker must produce the same rows.
+5. NOT HERE (Prompt 46b): the Worker 0.3.0 pipeline (TransformStream → the WASM
+   chunker → sha256 → the index call per 64 chunks → WebCrypto AES-GCM per 1 MiB
+   segment + the HPKE wrap from sdk/wasm → PUT per miss → commit; back-pressure;
+   the per-stream rate), the lab proof through wrangler dev, cmd/tools/
+   dedup-measure (F-3).
 
-Step 0 — probes, answers into WP-EDGE-2.md: 0.1 the WASM chunker's
-boundaries on the 100 MiB seed body equal Go's (byte-identical), and its
-throughput in workerd (wrangler dev) and in node; 0.2 WebCrypto AES-GCM +
-the X-Wing KEM from sdk/wasm in a Worker: a 64 MiB part sealed per chunk —
-MB/s, peak memory; 0.3 the claim/takeover window against a Worker that
-dies mid-part (chunk_claim.go's rule holds: the next writer takes over
-after the window); 0.4 whether the index call needs a table (the keyed
-hash column) — decide migration 111.
+Step 0 — probes, answers into WP-EDGE-2A.md: 0.1 the WASM chunker's boundaries on
+the 100 MiB seed body equal Go's (byte-identical) and its throughput in node
+(workerd is Part B's); 0.2 the X-Wing KEM from sdk/wasm callable standalone in
+node (bundle size, ms per wrap) — enough to know Part B is buildable; 0.3 the
+claim/takeover window against a host that dies mid-part (chunk_claim.go's rule
+holds: the next writer takes over after the window; the harness kills itself);
+0.4 migration 111's shape (keyed_hash column + index; edge_admits.codec;
+multipart_parts.part_chunks) — decide and say why; 0.5 RB-9's capture at the
+0.2.1 deploy (Part 0 f).
 
-Tests (red first): the golden boundaries (Go + node), the 0x04 vectors, the
-index call (hit/miss/claim/takeover), the commit (manifest + refs + head
-row = storeChunkedObject's rows for the same body: compare row by row),
-a failed commit drops the claims, the reaper, the flag OFF / no key version
-→ Part A's whole PUT, `TestIndexHoldsNoPlainHash` (grep the schema, the
-log lines, the metrics), the Worker's pipeline on a 3-chunk body with a
-fake control plane (node), the multipart concatenation.
+Tests (red first): the golden boundaries (Go + node), the 0x06 vectors + every
+older format still opens, the keyed hash (a fixed key version → a fixed value;
+TestIndexHoldsNoPlainHash), the index call (hit / miss / claim / takeover / a
+second host racing the same miss), the commit (manifest + refs + head row =
+storeChunkedObject's rows for the same body, compared row by row), a failed
+commit drops the claims, the reaper, the flag OFF / no key version → Part A's
+whole PUT, the multipart concatenation + the one-path refusal, the harness end
+to end (a second upload of the same bytes = 100 % hits and 0 PUTs; the origin
+reads it back). Part 0: the matrix row, the length-mismatch fallback (node), the
+last_accessed touch, the request id, the 24 h purge. Structural:
+TestSQLLiteralsMatchSchema, TestEdgeRoutes_NeverCapturedByTheS3Gate (the index
+route too), migration 111 in the walk.
+
+Key files
+- internal/api/edge_get.go:73 edgeAdmitGet (:91 the conditional list — RP66-1
+  beside it), :283 the request id, :337 settleEdgeGet
+- internal/api/edge_ingest.go:284 edgeAdmit, :304 edgePrelude, :396 edgeAdmitWrite
+  (the codec branch goes after the placement decision), :791 edgeCommit, :921
+  settleEdgeAdmit; edge_reaper.go:82 (the purge), :116 (the op switch)
+- internal/api/chunk_claim.go, chunk_store.go, chunked_write.go, placement.go,
+  s3_multipart.go (completeMultipartUpload's branches), edge_multipart.go
+- internal/crypto/stream.go:93–101 (the format bytes), :307 newStreamHeaderFormat;
+  chunker.go:47; stream_test.go (the golden vectors)
+- sdk/go/e2ee/e2ee.go (the HPKE wrap), sdk/wasm, scripts/build-client.sh,
+  scripts/repro-check-clients.sh, internal/translog/clientbuilds/manifest.json
+- edge/s3-ingest/src/index.js:137 readSucceeded, :170 readCommit; test/read.test.js
 
 Architecture notes
-- Contract lines 4, 5, 6 cited in every PR body. The keyed index stores no
-  plain hash; the Worker holds no long-lived key (D-EDGE-16); the control
-  plane never sees a plaintext byte (it sees keyed hashes and manifests).
-- On prod: deployed DARK. `edge_codec` ON for a tenant without a key
-  version does nothing (the admit answers Part A's whole PUT); with the
-  F-14 ceremony the owner's session flips it and runs the sealed proofs.
-  The lab proves everything with ENCRYPTION_MASTER_KEY_FILE.
-- Two-slot deploy: migration 111 additive if any; the previous build
-  answers `invalid_op`/unknown fields to a 0.3.0 Worker's index call (404
-  → the Worker falls back to Part A's whole PUT? NO: a codec admit with no
-  index route must pass the request through to the origin — the Worker
-  treats a 404 on /index as "admit unavailable" for THIS request and
-  `fetch(request)`); deploy the origin first.
-- Live proof, lab: a 200 MiB upload through wrangler dev chunked +
-  sealed at the edge, the manifest's chunks = Go's boundaries, a second
-  upload of the same bytes = 100 % hits and 0 PUTs, the object read back
-  through the origin MD5-equal (the origin opens 0x04 under the lab key),
-  a Worker killed mid-part → takeover, the rate numbers. Prod: deployed
-  dark, the flag OFF, a tenant-zero upload still Part A's whole PUT
-  (`reason: no_key` in the Debug line).
-- Closeout: write Prompt 47 (WP-EDGE-3, the data node) into this file per
-  the chain; STATUS, plan 40.10, the Stage 1a ledger row 46; the
-  post-merge review is RP68.
-- Commit: feat(crypto,api,edge): WP-EDGE-2 — … [WP-EDGE-2]; merge with
-  `gh pr merge --auto` (merge queue; never --admin).
+- Contract lines 4, 5, 6 cited in every PR body. The index stores no plain hash;
+  the host holds no long-lived key (D-EDGE-16 rewritten); the control plane sees
+  plaintext HASHES for the duration of a call and never a plaintext byte.
+- On prod: deployed DARK. `edge_codec` ON for a tenant without a key version does
+  nothing (Part A's whole PUT); with the F-14 ceremony the owner's session flips
+  it and runs the sealed proofs. The lab proves everything with
+  ENCRYPTION_MASTER_KEY_FILE.
+- Two-slot deploy: migration 111 additive; a codec admit comes only from the new
+  build, so no old-build Worker interaction exists; deploy the origin first.
+- Operator items: the 0.2.1 Worker deploy (Part 0) with RB-9's capture; the
+  `edge-chunker` manifest row; nothing else — the flag stays OFF.
+- Closeout: write Prompt 46b (WP-EDGE-2 Part B: the Worker 0.3.0, the lab proof,
+  dedup-measure; its Part 0 = RP68's findings) into this file per the chain;
+  STATUS, plan 40.10, the Stage 1a ledger row 46; the post-merge review is RP68.
+- Commit: feat(crypto,api,edge): WP-EDGE-2 Part A — … [WP-EDGE-2]; merge with
+  `gh pr merge --auto` (merge queue; no --squash/--delete-branch, never --admin).
 
 ultrathink
 ```
@@ -915,34 +972,8 @@ current line numbers (the /next conventions).
   passes through; the access-log row; a lost commit still meters (the reaper
   reads the admit's size). Live proof: the Lightroom zip back through
   s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
-- **Prompt 46 — WP-EDGE-2, slice 2 against the LAB master key** (written in full below by Prompt 45's closeout, 2026-10-26). Built and
-  proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK
-  (flag `edge_codec`, per tenant; on prod without a master key the admit
-  answers {edge:false} and the origin refuses as placement.go does today).
-  (a) The frozen chunker (WP-R8-4, restic Rabin polynomial) compiled to WASM
-  from the Go module (one implementation; `make lint-wasm`), pinned to the
-  golden boundaries by a test the Worker runs in CI (node --test + the wasm);
-  per 64 MiB part, boundaries reset at part edges. (b) The dual key: the
-  tenant's ML-KEM-768 public key served to the Worker by admit (from
-  `tenant_key_versions`, newest version), a random key per chunk, the chunk
-  sealed in the 0x03 streaming format, the chunk key wrapped with HPKE
-  (X-Wing as in sdk/go/e2ee) to the public key — a NEW header version of the
-  format (0x04: wrap kind + KEM ciphertext + version), opened on the control
-  plane by unwrapping the chunk key under the tenant private seed; 0x03 blobs
-  still open; `internal/crypto/stream.go`'s golden vectors gain the 0x04 case.
-  (c) The batched index call: the Worker sends HMAC(tenant_index_key,
-  sha256(chunk)) for the part's chunks (the index key derived from the
-  tenant key version under its own HKDF label — ONE hierarchy, contract line
-  4), the control plane answers hits/misses, the Worker uploads misses only
-  (presigned PUT per chunk into `_global` at the one address, WP-R8-7), the
-  manifest written by the control plane on commit (`global_content_index`,
-  `tenant_chunk_refs`, the chunked head row with backend `chunked`). The
-  index stores the keyed hash only (`TestIndexHoldsNoPlainHash`). (d) The
-  F-3 measurement tool (`cmd/tools/dedup-measure`): the cross-tenant fraction
-  of the plaintext index on a lab corpus, the number the owner decides F-37
-  with. On prod the two switches that wait for F-14 are: `edge_codec` ON and
-  the `standard_sealed_default` flag of Prompt 48 — both one admin call after
-  the ceremony. Contract lines 4, 5, 6 cited.
+- **Prompt 46 — WP-EDGE-2 Part A, slice 2 against the LAB master key: the codec and the control plane** (rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
+- **Prompt 46b — WP-EDGE-2 Part B** (written by Prompt 46's closeout): the Worker 0.3.0 pipeline (the WASM chunker, sha256, the index call per 64 chunks, WebCrypto AES-GCM segments + the HPKE wrap from sdk/wasm, a PUT per miss, the commit; back-pressure; the per-stream rate measured — the baseline says JavaScript in the byte path halves a stream), the lab proof through wrangler dev against the harness's rows, `cmd/tools/dedup-measure` (F-3: the cross-tenant fraction of a lab corpus, the number the owner decides F-37 with), `encodeBody: "manual"` probed for RP66-1's residual. On prod the two switches that wait for F-14 stay: `edge_codec` ON and Prompt 48's `standard_sealed_default`.
 - **Prompt 47 — WP-EDGE-3, the data node.** The binary in node mode
   (`VAULTAIRE_ROLE=node`: no DB, no routes but the mover's, the same admit/
   commit protocol over the service token, the Worker's chunked decoder and
