@@ -236,10 +236,12 @@ type (
 // handleEdgeIndex is POST /api/v1/edge/index (the service-token gate, as
 // admit and commit).
 func (s *Server) handleEdgeIndex(w http.ResponseWriter, r *http.Request) {
-	if !s.edgeCallAuthorized(r) {
+	host, _, ok := s.edgeCaller(r)
+	if !ok {
 		s.edgeNotFound(w, r)
 		return
 	}
+	r = r.WithContext(dataplane.WithHost(r.Context(), host))
 	var req edgeIndexRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})

@@ -139,6 +139,14 @@ func Country(r *http.Request) string {
 	return c
 }
 
+// TrustedPeer is the address HAProxy accepted the connection from (the last
+// X-Forwarded-For entry of its last occurrence, else RemoteAddr): the
+// direct peer of the origin. A data node's edge calls are accepted only
+// from the IP its registry row names (WP-EDGE-3) — this address.
+func TrustedPeer(r *http.Request) string {
+	return trustedPeer(r)
+}
+
 // PeerIsCloudflare reports whether the trusted peer of r — the address
 // HAProxy accepted the connection from — is inside Cloudflare's published
 // edge ranges: the request came through the proxied edge. The edge ingest

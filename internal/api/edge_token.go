@@ -14,7 +14,10 @@ package api
 // wrangler dev talks to a local origin from 127.0.0.1.
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/clientip"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/recovery/secret"
 )
 
@@ -119,17 +123,43 @@ func edgeConfigOrFatal(logger *zap.Logger, getenv func(string) string, readFile 
 	return cfg
 }
 
-// edgeCallAuthorized is the auth of an admit or commit call: the token
-// compared in constant time, and the peer a Cloudflare edge unless the lab
-// switch is on. Anything else is a 404 — the route does not exist to
-// anyone else (never a 401 that says it does).
-func (s *Server) edgeCallAuthorized(r *http.Request) bool {
+// edgeCaller is the auth of an edge call (admit, index, commit, heartbeat):
+// the Worker — the service token, compared in constant time, from a
+// Cloudflare peer (unless the lab switch is on) — or a registered data node
+// (WP-EDGE-3) — its token, looked up by sha256 in data_plane_hosts (the
+// 15 s cache), from the IP its row names (clientip.TrustedPeer, the direct
+// peer HAProxy saw; never a header the node writes). ok false = the route
+// does not exist to this caller (the handlers' 404 — never a 401 that says
+// it does). health is the host's registry health ("up" for the Worker).
+func (s *Server) edgeCaller(r *http.Request) (h dataplane.HostInfo, health string, ok bool) {
 	if len(s.edge.token) == 0 {
-		return false
+		return h, "", false
 	}
 	got := r.Header.Get(edgeTokenHeader)
-	if got == "" || subtle.ConstantTimeCompare([]byte(got), s.edge.token) != 1 {
-		return false
+	if got == "" {
+		return h, "", false
 	}
-	return s.edge.trustAnyPeer || clientip.PeerIsCloudflare(r)
+	if subtle.ConstantTimeCompare([]byte(got), s.edge.token) == 1 {
+		if !s.edge.trustAnyPeer && !clientip.PeerIsCloudflare(r) {
+			return h, "", false
+		}
+		return dataplane.HostInfo{Name: edgeHost, Kind: dataplane.KindEdge}, "up", true
+	}
+	if s.db == nil {
+		return h, "", false
+	}
+	sum := sha256.Sum256([]byte(got))
+	row, found, err := s.dataPlaneHosts().byTokenHash(r.Context(), hex.EncodeToString(sum[:]))
+	if err != nil {
+		s.log().Warn("edge call: the host registry could not be read", zap.Error(err))
+		return h, "", false
+	}
+	if !found || row.Kind != dataplane.KindNode || row.Address == "" {
+		return h, "", false
+	}
+	peer := net.ParseIP(clientip.TrustedPeer(r))
+	if peer == nil || !peer.Equal(net.ParseIP(row.Address)) {
+		return h, "", false
+	}
+	return dataplane.HostInfo{Name: row.Host, Kind: row.Kind, TenantID: row.TenantID}, row.Health, true
 }

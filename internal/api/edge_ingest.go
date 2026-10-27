@@ -241,10 +241,19 @@ func edgeDescriptor(req edgeAdmitRequest) (auth.RequestDescriptor, *http.Request
 
 // handleEdgeAdmit is POST /api/v1/edge/admit.
 func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
-	if !s.edgeCallAuthorized(r) {
+	host, health, ok := s.edgeCaller(r)
+	if !ok {
 		s.edgeNotFound(w, r)
 		return
 	}
+	if health != "up" {
+		// A host the registry marks down or draining takes no new request
+		// (its commits are still accepted: the bytes may have landed).
+		w.Header().Set("Retry-After", "30")
+		writeEdgeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "host_" + health})
+		return
+	}
+	r = r.WithContext(dataplane.WithHost(r.Context(), host))
 	var req edgeAdmitRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, edgeAdmitBodyMax)).Decode(&req); err != nil {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
@@ -260,7 +269,7 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, status := s.edgeAdmit(r.Context(), req)
-	countEdgeAdmit(edgeHost, req.Op, resp, status)
+	countEdgeAdmit(host.Name, req.Op, resp, status)
 	if status == http.StatusOK && resp.Refusal == nil && !resp.Edge {
 		// Why the origin took it — the one trace of a pass-through (Debug:
 		// one line per declined request; the counter is the signal).
@@ -1010,10 +1019,12 @@ const (
 
 // handleEdgeCommit is POST /api/v1/edge/commit.
 func (s *Server) handleEdgeCommit(w http.ResponseWriter, r *http.Request) {
-	if !s.edgeCallAuthorized(r) {
+	host, _, ok := s.edgeCaller(r)
+	if !ok {
 		s.edgeNotFound(w, r)
 		return
 	}
+	r = r.WithContext(dataplane.WithHost(r.Context(), host))
 	var req edgeCommitRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, edgeAdmitBodyMax)).Decode(&req); err != nil {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})

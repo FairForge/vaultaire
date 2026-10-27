@@ -266,5 +266,8 @@ func TestAdminReadRoutes_APIExemptAreTheAggregates(t *testing.T) {
 		"POST /api/v1/admin/tenants/{tenant_id}/payments", "POST /api/v1/admin/tenants/{tenant_id}/entitlement",
 		"POST /api/v1/admin/tenants/{tenant_id}/refunds", "POST /api/v1/admin/payments/stripe/stop-renewals",
 		"POST /api/v1/admin/payments/stripe/resume-renewals",
+		// WP-EDGE-3 (D-EDGE-34): a tenant-scoped data-plane host's row is
+		// that tenant's record; a platform host's answers no scope.
+		"/api/v1/admin/data-plane-hosts/{host}",
 	}, logged, "every other admin route is an aggregate, infrastructure, scaffolding or a mutation")
 }
