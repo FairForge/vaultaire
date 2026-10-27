@@ -1712,6 +1712,8 @@ proven on prod for tenant zero; the ledger row; Prompt 48 refreshed.
 *Draft written 2026-10-27 by RP68; Prompt 47's closeout refreshes it. Two
 editions; paste one.*
 
+**SPEED bench inputs (2026-10-27, `bench-results/SPEED-2026-10-27.md`):** the second copy at the edge is a **tee** (44 MB/s per stream = the pass-through, 1 ms of CPU per 64 MiB); RS 4+2 and 8+4 go to the **node or the async mover** (26–29 MB/s per stream and 0.75–0.92 s of CPU per 64 MiB at the edge, Rust-SIMD and Go alike), so `edge_rs` stays dark and its encoder lives off the Worker; RaptorQ: no, F-11 stands; **GLACIER-class writes are not sealed whole at the edge.** Vail does enforce a presign (bench 11), but a sealed 0x06 stream with RS 4+4 computed as it streams is JS on every byte (< 30 MB/s), and a Worker → Vail stream is 12–16 MB/s. So they stay at the origin (the node after Prompt 47), sealed with their parity there.
+
 Continue from WP-EDGE-3 (docs/reviews/WP-EDGE-3.md, § Residuals RB4-n) and
 its review RP72 (docs/reviews/WP-EDGE-3-REVIEW.md — Part 0; run it first
 if it has not). `git log origin/main`, `gh pr list`.
@@ -1832,6 +1834,8 @@ Architecture notes
 ultrathink
 
 ## Stage 1a Prompt 48 — Opus edition
+
+**SPEED bench inputs (2026-10-27, `bench-results/SPEED-2026-10-27.md`):** the second copy at the edge is a **tee** (44 MB/s per stream = the pass-through, 1 ms of CPU per 64 MiB); RS 4+2 and 8+4 go to the **node or the async mover** (26–29 MB/s per stream and 0.75–0.92 s of CPU per 64 MiB at the edge, Rust-SIMD and Go alike), so `edge_rs` stays dark and its encoder lives off the Worker; RaptorQ: no, F-11 stands; **GLACIER-class writes are not sealed whole at the edge.** Vail does enforce a presign (bench 11), but a sealed 0x06 stream with RS 4+4 computed as it streams is JS on every byte (< 30 MB/s), and a Worker → Vail stream is 12–16 MB/s. So they stay at the origin (the node after Prompt 47), sealed with their parity there.
 
 You are building WP-EDGE-4 (slice 3 of plan § 40.10) in the Vaultaire
 repository: the second copy at the edge, the dark seal-by-default flag,
