@@ -27,8 +27,9 @@ import (
 // SDK middleware — no test waits the 15 s it proves. #742 gave a body under
 // 64 MiB the base scaled by its size with a 10 s floor; the probe checks it
 // end to end through Put, on the Lyve driver and the fixed-bucket driver,
-// at the default FIXED_BUCKET_PUT_TIMEOUT: a 16 MiB part (s3UploadPartSize)
-// 15 s, the last 8 MiB part and a 2 MiB chunk 10 s. The sync bridge keeps
+// at the default FIXED_BUCKET_PUT_TIMEOUT: a 32 MiB part (s3UploadPartSize
+// since the SPEED bench § 8; 15 s at the old 16 MiB) 30 s, the last 8 MiB
+// part and a 2 MiB chunk 10 s. The sync bridge keeps
 // its own rule (webdavPutDeadline: 2 min per started 64 MiB) — a bridge
 // answers a PUT only after its own upload to Sync's cloud.
 
@@ -91,24 +92,25 @@ func recordingS3Client(t *testing.T, url string, rec *deadlineRecorder) *s3.Clie
 }
 
 // putShapes uploads the three shapes through put and checks each request's
-// deadline: a 40 MiB body (parts of 16, 16 and 8 MiB) and a 2 MiB chunk.
+// deadline: a 72 MiB body (parts of 32, 32 and 8 MiB — the uploader's
+// 32 MiB parts since the SPEED bench § 8) and a 2 MiB chunk.
 func putShapes(t *testing.T, rec *deadlineRecorder, put func(key string, body []byte) error) {
 	t.Helper()
-	big := randomBody(t, 40<<20)
+	big := randomBody(t, 72<<20)
 	require.NoError(t, put("big.bin", big))
 	parts := rec.of("UploadPart")
-	require.Len(t, parts, 3, "40 MiB = parts of 16 + 16 + 8 MiB")
-	var fifteen, ten int
+	require.Len(t, parts, 3, "72 MiB = parts of 32 + 32 + 8 MiB")
+	var thirty, ten int
 	for _, p := range parts {
 		require.True(t, p.has)
 		switch {
-		case p.remaining > 14*time.Second && p.remaining <= 15*time.Second:
-			fifteen++
+		case p.remaining > 29*time.Second && p.remaining <= 30*time.Second:
+			thirty++
 		case p.remaining > 9*time.Second && p.remaining <= 10*time.Second:
 			ten++
 		}
 	}
-	assert.Equal(t, 2, fifteen, "a 16 MiB part gets 15 s: %+v", parts)
+	assert.Equal(t, 2, thirty, "a 32 MiB part gets 30 s (the per-64 MiB scaling): %+v", parts)
 	assert.Equal(t, 1, ten, "the last 8 MiB part gets the 10 s floor: %+v", parts)
 	for _, op := range []string{"CreateMultipartUpload", "CompleteMultipartUpload"} {
 		for _, r := range rec.of(op) {
@@ -123,7 +125,7 @@ func putShapes(t *testing.T, rec *deadlineRecorder, put func(key string, body []
 	near(t, 10*time.Second, puts[0], "a 2 MiB chunk")
 }
 
-func TestLyveUploadPart_ASixteenMiBPartGetsFifteenSecondsAtTheDefault(t *testing.T) {
+func TestLyveUploadPart_AThirtyTwoMiBPartGetsThirtySecondsAtTheDefault(t *testing.T) {
 	t.Setenv("FIXED_BUCKET_PUT_TIMEOUT", "")
 	srv := httptest.NewServer(newStallS3())
 	t.Cleanup(srv.Close)
@@ -137,7 +139,7 @@ func TestLyveUploadPart_ASixteenMiBPartGetsFifteenSecondsAtTheDefault(t *testing
 	})
 }
 
-func TestFixedBucketUploadPart_ASixteenMiBPartGetsFifteenSecondsAtTheDefault(t *testing.T) {
+func TestFixedBucketUploadPart_AThirtyTwoMiBPartGetsThirtySecondsAtTheDefault(t *testing.T) {
 	t.Setenv("FIXED_BUCKET_PUT_TIMEOUT", "")
 	srv := httptest.NewServer(newStallS3())
 	t.Cleanup(srv.Close)

@@ -116,7 +116,7 @@ customer-facing, registered only where the OneDrive fleet env is present.
 | Driver | Miss shape (`Get`/`Delete`) | `List` | `Exists` | `HealthCheck` | Streaming / buffering | ctx | Known gaps |
 |--------|-----------------------------|--------|----------|---------------|------------------------|-----|------------|
 | local | `*fs.PathError` wrapping `ErrNotExist`; a path escaping `DATA_PATH` → `NotFoundError` | OK: honours `prefix`, hides `.tmp-*`, relative slash names | OK via `resolvePath` | `os.Stat(basePath)` — weak (passes on a full disk) | temp + `fsync` + `rename`; no parent-dir fsync (WP-R7-6); no `GetRange` | fs, unused | a key naming a directory opens and fails on first read; empty dirs remain after Delete |
-| s3 (`s3compat`) | SDK `%w`, typed | OK: paginated, relative to `<root>/<container>/` | OK typed | signed `ListObjectsV2 MaxKeys=1` | ≤16 MiB single PUT, else 16 MiB × 8 parts | OK | `Name()` ≠ registration key |
+| s3 (`s3compat`) | SDK `%w`, typed | OK: paginated, relative to `<root>/<container>/` | OK typed | signed `ListObjectsV2 MaxKeys=1` | ≤32 MiB single PUT, else 32 MiB × 8 parts | OK | `Name()` ≠ registration key |
 | quotaless | last SDK error after **3 attempts + 5 s of sleeps** | paginated, strips `personal-files/<c>/` | via base, retries | signed list, 10 s, no `MaxKeys` | **`io.ReadAll` whole body**, then `materialize` | sleeps ignore ctx | violates the no-in-request-retry rule; all Put options dropped |
 | lyve | SDK `%w`; Lyve answers 204 on a missing Delete | OK | OK | signed `HeadBucket` | as s3compat; `GetRange` | OK | only driver honouring every Put option |
 | idrive (+ regions) | SDK `%w` | OK | OK | signed `HeadBucket` | as s3compat; `GetRange` | OK | `Name()` is `idrive` for every regional registration (engine uses keys) |
@@ -142,7 +142,7 @@ restart, WP-R7-6). `VAULTAIRE_TUNED_TRANSPORT=false` returns
 | Driver | HTTP version | Response-header timeout | Retry policy | Put path | Request checksum | Response validation |
 |--------|--------------|-------------------------|--------------|----------|------------------|---------------------|
 | local | — | — | — | temp + rename | — | — |
-| s3 (`s3compat`) | h2 attempted | none | SDK standard: 3 attempts, 20 s max backoff | single PUT ≤16 MiB; manager 16 MiB × 8 above | SDK default `WhenSupported` (CRC32 trailer) | `WhenSupported` |
+| s3 (`s3compat`) | h2 attempted | none | SDK standard: 3 attempts, 20 s max backoff | single PUT ≤32 MiB; manager 32 MiB × 8 above | SDK default `WhenSupported` (CRC32 trailer) | `WhenSupported` |
 | quotaless | h2 attempted | none | SDK 3 **+ driver 3 with 1 s / 4 s sleeps** | `materialize` → single `PutObject` | `WhenSupported` (README: incompatible with the Minio gateway) | `WhenSupported` (README: corrupts) |
 | lyve | **h1 pinned** | none | SDK 3 | as s3compat | `WhenSupported` — accepted | `WhenSupported` |
 | idrive (+ regions, one transport each) | h1 pinned | none | SDK 3 | as s3compat | `WhenSupported` — accepted | `WhenSupported` |
@@ -154,7 +154,7 @@ restart, WP-R7-6). `VAULTAIRE_TUNED_TRANSPORT=false` returns
 
 `s3ParallelUpload` (`internal/drivers/s3upload.go`) is the shared upload path:
 objects that fit in one 16 MiB part go as a single `PutObject`; larger ones
-use the SDK `manager.Uploader` with 8 concurrent 16 MiB parts, one uploader
+use the SDK `manager.Uploader` with 8 concurrent 32 MiB parts (16 MiB until the 2026-10-27 SPEED bench § 8), one uploader
 cached per client. A body that ends before its declared `ContentLength` is an
 error, never a shorter object. The chunk path hands drivers ≤16 MiB bodies, so
 the manager's concurrency only applies to whole-object PUTs (resilient,
