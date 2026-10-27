@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- the S3 content digest
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -56,6 +58,12 @@ func setupCodecFixture(t *testing.T) *codecFixture {
 	f.srv.chunkEncSvc = crypto.NewChunkEncryptionService(keys)
 	f.srv.sseService = crypto.NewSSEService(keys)
 	f.srv.chunkingThreshold = 256 << 10
+	// EDGE_MIN_BYTES is the codec's threshold at the edge (RP68-1): a small
+	// one here, so the tests move a few MiB.
+	f.srv.edge.minBytes = 256 << 10
+	// A hit's wait on a young claim (RP68-2): 60 s in production; the
+	// harness's dead-host ladder would wait it out.
+	f.srv.edge.codecHitWait = 3 * time.Second
 	require.NoError(t, f.fl.Set(context.Background(), flagEdgeCodec, f.tenantID, true, "test"))
 	require.NoError(t, f.fl.Refresh(context.Background()))
 	t.Cleanup(func() {
@@ -209,11 +217,10 @@ func TestEdgeCodecAdmit_Gates(t *testing.T) {
 	assert.Empty(t, resp.URL)
 	assert.Equal(t, int64(len(body)), f.used(), "the write is reserved as a whole PUT's would be")
 
-	// A body under the threshold stays Part A's whole PUT, codec or not.
+	// A body under EDGE_MIN_BYTES is the origin's, codec or not.
 	small := f.admit(f.signed("/"+f.bucket+"/small.bin", nil, testBytes(8192), nil, ""))
-	require.True(t, small.Edge)
-	assert.Nil(t, small.Codec)
-	assert.NotEmpty(t, small.URL)
+	assert.False(t, small.Edge)
+	assert.Equal(t, edgeReasonSmall, small.Reason)
 }
 
 func TestEdgeCodecHarness_EndToEnd(t *testing.T) {
@@ -289,7 +296,14 @@ func TestEdgeCodecHarness_EndToEnd(t *testing.T) {
 	// A second upload of the same bytes: 100 % hits, 0 PUTs.
 	puts := f.drv.presigns.Load()
 	before := f.objectCount()
+	indexHits := promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("hit"))
+	referenced := promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("referenced"))
 	relay2, idx2, _ := f.uploadCodec("e2e-again.bin", body)
+	// RP68-4: hit is the INDEX's answer (once per distinct hash asked),
+	// referenced the COMMIT's (once per chunk of the body) — never both
+	// under one name.
+	assert.Equal(t, indexHits+float64(len(idx2.Hits)), promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("hit")))
+	assert.Equal(t, referenced+float64(len(chunks)), promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("referenced")))
 	assert.Equal(t, http.StatusOK, relay2.Status)
 	assert.Empty(t, idx2.Misses, "every chunk deduplicated")
 	assert.Len(t, idx2.Hits, len(idx.Misses))
@@ -437,9 +451,13 @@ func TestEdgeCodecCommit_FailureAndExpiryDropEverything(t *testing.T) {
 	require.True(t, a2.Edge && a2.Codec != nil)
 	_ = f.index(a2.AdmitID, chunks)
 	f.exec(`UPDATE edge_admits SET expires_at = NOW() - interval '1 minute' WHERE id = $1`, a2.AdmitID)
+	dropped := promtestutil.ToFloat64(edgeAdmitReaperTotal.WithLabelValues("claims_dropped"))
 	res, err := f.srv.edgeReaper.RunOnce(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.Expired)
+	assert.Equal(t, 1, res.ClaimsDropped, "a codec admit's expiry drops claims (RP68-4)")
+	assert.Zero(t, res.Retired, "nothing queued for the blob collector, so nothing retired")
+	assert.Equal(t, dropped+1, promtestutil.ToFloat64(edgeAdmitReaperTotal.WithLabelValues("claims_dropped")))
 	assert.Zero(t, f.used())
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = $1`, f.tenantID).Scan(&left))
 	assert.Zero(t, left)
@@ -554,4 +572,324 @@ func TestEdgeCodecMultipart_ConcatenationAndOnePath(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM multipart_parts p JOIN multipart_uploads u ON u.upload_id = p.upload_id
 		WHERE u.upload_id = $1 AND p.part_chunks IS NOT NULL`, upload2).Scan(&withChunks))
 	assert.Zero(t, withChunks, "the aborted parts' lists are cleared with their references")
+}
+
+// --- Prompt 46b Part 0: the RP68 fixes ---
+
+// fixedChunks cuts body into size-byte chunks: the control plane trusts the
+// host's boundaries (only their sum is checked), so a test may cut many
+// small distinct chunks without running the chunker over a large body.
+func fixedChunks(body []byte, size int) []crypto.Chunk {
+	var out []crypto.Chunk
+	for off := 0; off < len(body); off += size {
+		end := min(off+size, len(body))
+		sum := sha256.Sum256(body[off:end])
+		out = append(out, crypto.Chunk{Data: body[off:end], Hash: hex.EncodeToString(sum[:]), Size: end - off, Offset: int64(off), Index: len(out)})
+	}
+	return out
+}
+
+// codecCommit runs index → store → commit for one admit over the given
+// chunks (the harness's pipeline with the caller's boundaries).
+func (f *codecFixture) codecCommit(resp edgeAdmitResponse, body []byte, chunks []crypto.Chunk) *edgeRelay {
+	f.t.Helper()
+	idx := f.index(resp.AdmitID, chunks)
+	entries := f.storeMisses(resp.Codec, chunks, idx)
+	sum := md5.Sum(body) // #nosec G401
+	relay, code := f.commit(edgeCommitRequest{AdmitID: resp.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
+	require.Equal(f.t, http.StatusOK, code)
+	return relay
+}
+
+// RP68-1: at the edge every write >= EDGE_MIN_BYTES of a codec tenant is the
+// codec's — a 4–64 MiB whole PUT and every part of an aws-cli multipart
+// (8 MiB parts), which the ORIGIN would store whole.
+func TestEdgeCodecAdmit_EdgeRuleCoversWhatTheOriginStoresWhole(t *testing.T) {
+	f := setupCodecFixture(t)
+	f.srv.chunkingThreshold = 64 << 20 // the origin's default: these bodies are below it
+	f.srv.edge.minBytes = 4 << 20
+
+	// (a) a 12 MiB whole PUT: admitted codec, read back MD5-equal.
+	body := crypto.GoldenBody(1201, 12<<20)
+	relay, _, resp := f.uploadCodec("twelve.bin", body)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Equal(t, int64(4<<20), resp.Codec.ChunkThreshold, "the grant's threshold is EDGE_MIN_BYTES")
+	h, ok := f.head("twelve.bin")
+	require.True(t, ok)
+	assert.Equal(t, chunkedBackendSentinel, h.backend, "a chunked row at the edge where the origin would store it whole")
+	w := f.originGet("twelve.bin", nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.True(t, bytes.Equal(body, w.Body.Bytes()))
+
+	// (b) a multipart upload whose first part is 8 MiB: admitted codec;
+	// its Complete reads back.
+	uploadID := f.createUpload("eight.zip")
+	part1 := crypto.GoldenBody(1202, 8<<20)
+	part2 := crypto.GoldenBody(1203, 6<<20)
+	var etags []string
+	for n, pb := range [][]byte{part1, part2} {
+		q := url.Values{"uploadId": {uploadID}, "partNumber": {fmt.Sprint(n + 1)}}
+		pr := f.admit(f.signed("/"+f.bucket+"/eight.zip", q, pb, nil, ""))
+		require.True(t, pr.Edge, "%+v", pr)
+		require.NotNil(t, pr.Codec, "part %d is the codec's: %+v", n+1, pr)
+		r := f.codecCommit(pr, pb, f.chunksOf(pb))
+		require.Equal(t, http.StatusOK, r.Status, r.Body)
+		etags = append(etags, r.Headers["Etag"])
+	}
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, etags[0], etags[1])
+	wc := f.s3(http.MethodPost, "/"+f.bucket+"/eight.zip?uploadId="+uploadID, []byte(completeXML), nil)
+	require.Equal(t, http.StatusOK, wc.Code, wc.Body.String())
+	rb := f.originGet("eight.zip", nil)
+	require.Equal(t, http.StatusOK, rb.Code, rb.Body.String())
+	assert.True(t, bytes.Equal(append(append([]byte{}, part1...), part2...), rb.Body.Bytes()))
+
+	// (c) a 2 MiB PUT (under EDGE_MIN_BYTES): pass_through_small as before.
+	small := f.admit(f.signed("/"+f.bucket+"/two.bin", nil, crypto.GoldenBody(1204, 2<<20), nil, ""))
+	assert.False(t, small.Edge)
+	assert.Equal(t, edgeReasonSmall, small.Reason)
+}
+
+// A codec (or edge) upload's LAST part may be under EDGE_MIN_BYTES (S3 has
+// no minimum for it): it must still be the edge's — a small part passed
+// through to the origin's stager is refused on a one-path upload.
+func TestEdgeCodecMultipart_SmallLastPartStaysOnTheEdge(t *testing.T) {
+	f := setupCodecFixture(t)
+	f.srv.chunkingThreshold = 64 << 20
+	f.srv.edge.minBytes = 4 << 20
+	uploadID := f.createUpload("tail.zip")
+	part1 := crypto.GoldenBody(1301, 8<<20)
+	part2 := crypto.GoldenBody(1302, 1<<20+5)
+	var etags []string
+	for n, pb := range [][]byte{part1, part2} {
+		q := url.Values{"uploadId": {uploadID}, "partNumber": {fmt.Sprint(n + 1)}}
+		pr := f.admit(f.signed("/"+f.bucket+"/tail.zip", q, pb, nil, ""))
+		require.True(t, pr.Edge, "part %d: %+v", n+1, pr)
+		require.NotNil(t, pr.Codec, "part %d: %+v", n+1, pr)
+		r := f.codecCommit(pr, pb, f.chunksOf(pb))
+		require.Equal(t, http.StatusOK, r.Status, r.Body)
+		etags = append(etags, r.Headers["Etag"])
+	}
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, etags[0], etags[1])
+	wc := f.s3(http.MethodPost, "/"+f.bucket+"/tail.zip?uploadId="+uploadID, []byte(completeXML), nil)
+	require.Equal(t, http.StatusOK, wc.Code, wc.Body.String())
+	rb := f.originGet("tail.zip", nil)
+	require.Equal(t, http.StatusOK, rb.Code)
+	assert.Equal(t, len(part1)+len(part2), rb.Body.Len())
+}
+
+// RP68-2: parallel parts of ONE upload sharing a chunk — the part holding
+// the hit commits FIRST, while the claimer has not; it waits for the claim
+// to flip ready and succeeds, never a 503.
+func TestEdgeCodecCommit_HitWaitsForAYoungClaim(t *testing.T) {
+	f := setupCodecFixture(t)
+	uploadID := f.createUpload("shared.zip")
+	body := crypto.GoldenBody(1401, 2<<20+999)
+	chunks := f.chunksOf(body)
+	sum := md5.Sum(body) // #nosec G401
+	bodyMD5 := hex.EncodeToString(sum[:])
+
+	admitPart := func(n int) edgeAdmitResponse {
+		q := url.Values{"uploadId": {uploadID}, "partNumber": {fmt.Sprint(n)}}
+		pr := f.admit(f.signed("/"+f.bucket+"/shared.zip", q, body, nil, ""))
+		require.True(t, pr.Edge && pr.Codec != nil, "part %d: %+v", n, pr)
+		return pr
+	}
+	p1 := admitPart(1)
+	idx1 := f.index(p1.AdmitID, chunks)
+	require.Len(t, idx1.Misses, len(chunks), "part 1 claims every chunk")
+	p2 := admitPart(2)
+	idx2 := f.index(p2.AdmitID, chunks)
+	require.Empty(t, idx2.Misses, "part 2 sees part 1's young claims as hits")
+
+	hits := make([]edgeCommitChunk, 0, len(chunks))
+	for _, c := range chunks {
+		hits = append(hits, edgeCommitChunk{Hash: c.Hash, Size: int64(c.Size), Status: "hit"})
+	}
+	type result struct {
+		relay *edgeRelay
+		code  int
+	}
+	done := make(chan result, 1)
+	go func() {
+		w := f.call("/api/v1/edge/commit", edgeCommitRequest{AdmitID: p2.AdmitID, Outcome: edgeOutcomeOK, Chunks: hits, BodyMD5: bodyMD5}, f.token)
+		var relay edgeRelay
+		_ = json.Unmarshal(w.Body.Bytes(), &relay)
+		done <- result{&relay, w.Code}
+	}()
+	release := make(chan struct{})
+	go func() { time.Sleep(200 * time.Millisecond); close(release) }()
+	<-release
+	select {
+	case r := <-done:
+		t.Fatalf("part 2's commit answered before part 1 stored its chunks: %d %+v", r.code, r.relay)
+	default:
+	}
+	entries := f.storeMisses(p1.Codec, chunks, idx1)
+	relay1, code1 := f.commit(edgeCommitRequest{AdmitID: p1.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: bodyMD5})
+	require.Equal(t, http.StatusOK, code1)
+	require.Equal(t, http.StatusOK, relay1.Status, relay1.Body)
+	select {
+	case r := <-done:
+		require.Equal(t, http.StatusOK, r.code)
+		assert.Equal(t, http.StatusOK, r.relay.Status, "the hit waited for the claim, never a 503: %s", r.relay.Body)
+	case <-time.After(30 * time.Second):
+		t.Fatal("part 2's commit never answered")
+	}
+}
+
+// RP68-2: a hit whose claim is DROPPED (the claimer failed) fails at once.
+func TestEdgeCodecCommit_HitOfADroppedClaimFailsAtOnce(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(1402, 1<<20+77)
+	chunks := f.chunksOf(body)
+	sum := md5.Sum(body) // #nosec G401
+	a1 := f.admit(f.signed("/"+f.bucket+"/drop1.bin", nil, body, nil, ""))
+	_ = f.index(a1.AdmitID, chunks)
+	a2 := f.admit(f.signed("/"+f.bucket+"/drop2.bin", nil, body, nil, ""))
+	require.Empty(t, f.index(a2.AdmitID, chunks).Misses)
+	relay, _ := f.commit(edgeCommitRequest{AdmitID: a1.AdmitID, Outcome: edgeOutcomeEdgeError})
+	require.Equal(t, http.StatusServiceUnavailable, relay.Status)
+	hits := make([]edgeCommitChunk, 0, len(chunks))
+	for _, c := range chunks {
+		hits = append(hits, edgeCommitChunk{Hash: c.Hash, Size: int64(c.Size), Status: "hit"})
+	}
+	start := time.Now()
+	relay2, _ := f.commit(edgeCommitRequest{AdmitID: a2.AdmitID, Outcome: edgeOutcomeOK, Chunks: hits, BodyMD5: hex.EncodeToString(sum[:])})
+	assert.Equal(t, http.StatusServiceUnavailable, relay2.Status)
+	assert.Less(t, time.Since(start), 5*time.Second, "a row that is gone is no wait")
+}
+
+// RP68-6: a hit whose size is not the row's is refused (it would shift every
+// later chunk's offset in the manifest).
+func TestEdgeCodecCommit_HitSizeMustBeTheRows(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(1501, 3<<20+11)
+	chunks := fixedChunks(body, 1<<20)
+	first := f.admit(f.signed("/"+f.bucket+"/size1.bin", nil, body, nil, ""))
+	require.Equal(t, http.StatusOK, f.codecCommit(first, body, chunks).Status)
+
+	a := f.admit(f.signed("/"+f.bucket+"/size2.bin", nil, body, nil, ""))
+	require.Empty(t, f.index(a.AdmitID, chunks).Misses)
+	hits := make([]edgeCommitChunk, 0, len(chunks))
+	for _, c := range chunks {
+		hits = append(hits, edgeCommitChunk{Hash: c.Hash, Size: int64(c.Size), Status: "hit"})
+	}
+	hits[0].Size++ // the total still adds up
+	hits[1].Size--
+	sum := md5.Sum(body) // #nosec G401
+	relay, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: hits, BodyMD5: hex.EncodeToString(sum[:])})
+	assert.Equal(t, http.StatusBadRequest, relay.Status, relay.Body)
+	assert.Contains(t, relay.Body, "InvalidRequest")
+	_, ok := f.head("size2.bin")
+	assert.False(t, ok)
+}
+
+// RP68-3 (a): the commit HEADs the first stored chunk and every 32nd after
+// it on the backend; a mismatch refuses the commit and gives back
+// everything.
+func TestEdgeCodecCommit_HeadSampleOfStoredChunks(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(1601, 40<<20)
+	chunks := fixedChunks(body, 1<<20)
+	require.Len(t, chunks, 40)
+	a := f.admit(f.signed("/"+f.bucket+"/forty.bin", nil, body, nil, ""))
+	idx := f.index(a.AdmitID, chunks)
+	entries := f.storeMisses(a.Codec, chunks, idx)
+	f.drv.heads.Store(0)
+	sum := md5.Sum(body) // #nosec G401
+	relay, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Equal(t, int32(2), f.drv.heads.Load(), "the first stored chunk and the 33rd")
+
+	// A host that reports another ETag than the backend holds.
+	body2 := crypto.GoldenBody(1602, 3<<20)
+	chunks2 := fixedChunks(body2, 1<<20)
+	before := promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("head_mismatch"))
+	usedBefore := f.used()
+	a2 := f.admit(f.signed("/"+f.bucket+"/lie.bin", nil, body2, nil, ""))
+	idx2 := f.index(a2.AdmitID, chunks2)
+	entries2 := f.storeMisses(a2.Codec, chunks2, idx2)
+	entries2[0].BackendETag = strings.Repeat("ab", 16)
+	sum2 := md5.Sum(body2) // #nosec G401
+	relay2, _ := f.commit(edgeCommitRequest{AdmitID: a2.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries2, BodyMD5: hex.EncodeToString(sum2[:])})
+	assert.Equal(t, http.StatusBadRequest, relay2.Status, relay2.Body)
+	assert.Contains(t, relay2.Body, "InvalidRequest")
+	assert.Equal(t, before+1, promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("head_mismatch")))
+	assert.Equal(t, usedBefore, f.used(), "the reservation given back")
+	var refsLeft int
+	keyed := func(c crypto.Chunk) string {
+		ik, _, err := f.keys.IndexKey(context.Background(), f.tenantID, a2.Codec.Version)
+		require.NoError(t, err)
+		plain, _ := hex.DecodeString(c.Hash)
+		k, err := crypto.KeyedChunkHash(ik, plain)
+		require.NoError(t, err)
+		return k
+	}
+	for _, c := range chunks2 {
+		var n int
+		require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2`, f.tenantID, keyed(c)).Scan(&n))
+		refsLeft += n
+	}
+	assert.Zero(t, refsLeft, "every claim of the refused commit dropped, nothing referenced")
+	_, ok := f.head("lie.bin")
+	assert.False(t, ok)
+}
+
+// RP68-3 (c): routing_truth's chunked sample OPENS a codec chunk — a blob
+// overwritten with other bytes of the same length is unreadable.
+func TestRoutingTruth_CodecChunkOpenedNotJustRead(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(1701, 2<<20+3)
+	relay, _, _ := f.uploadCodec("probe.bin", body)
+	require.Equal(t, http.StatusOK, relay.Status)
+	c := NewRoutingTruthChecker(f.db, f.srv.engine, f.srv.gci, zap.NewNop())
+	require.NotNil(t, c)
+	c.scopeTenant = f.tenantID
+	c.JobName = "routing_truth_codec_test"
+	c.tenantKeys = f.keys
+	res, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+	require.Positive(t, res.Chunks.Chunks)
+	assert.Zero(t, res.Chunks.Unreadable, "an intact codec chunk opens")
+
+	var key string
+	require.NoError(t, f.db.QueryRow(`SELECT storage_key FROM global_content_index WHERE dedup_scope = $1 AND keyed_hash IS NOT NULL ORDER BY storage_key LIMIT 1`, f.tenantID).Scan(&key))
+	f.drv.mu.Lock()
+	k := "t-_global/_global/" + key
+	orig := f.drv.objects[k]
+	require.NotEmpty(t, orig)
+	f.drv.objects[k] = crypto.GoldenBody(99, len(orig))
+	f.drv.mu.Unlock()
+	res, err = c.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Chunks.Unreadable, "the poisoned codec chunk is found by the daily sample")
+}
+
+// RP68-5: the chunk move verifies a codec row by the MD5 its row records.
+func TestChunkMove_CodecRowVerifiesByMD5(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(1801, 1<<20+9)
+	relay, _, _ := f.uploadCodec("move.bin", body)
+	require.Equal(t, http.StatusOK, relay.Status)
+	m := NewChunkMover(f.db, f.srv.engine, zap.NewNop())
+	require.NotNil(t, m)
+	m.tenantsOverride = []string{f.tenantID} // the shared test DB: this tenant's prefix only
+	res, err := m.Run(context.Background(), ChunkMoveOptions{Backend: "edgefake", DryRun: true})
+	require.NoError(t, err)
+	require.Positive(t, res.Rows)
+	assert.Zero(t, res.Missing, "%+v", res)
+	assert.Equal(t, res.Rows, res.AtAddress, "%+v", res)
+}
+
+// The same rule for an edge-WHOLE upload (Part A's): its small last part is
+// the edge's — the origin's stager refuses a part of an edge upload.
+func TestEdgeMultipart_SmallLastPartOfAnEdgeUploadStaysOnTheEdge(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.srv.edge.minBytes = 4096
+	id := f.createUpload("whole-tail.zip")
+	_, e1 := f.edgePart("whole-tail.zip", id, 1, testBytes(8192))
+	_, e2 := f.edgePart("whole-tail.zip", id, 2, testBytes(100)) // under EDGE_MIN_BYTES
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, e1, e2)
+	wc := f.s3(http.MethodPost, "/"+f.bucket+"/whole-tail.zip?uploadId="+id, []byte(completeXML), nil)
+	require.Equal(t, http.StatusOK, wc.Code, wc.Body.String())
 }

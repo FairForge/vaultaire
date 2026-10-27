@@ -37,11 +37,11 @@ const (
 
 var edgeAdmitReaperTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "vaultaire_edge_admit_reaper_total",
-	Help: "Edge admits the reaper handled: expired (a pending admit past its expiry, reservation released), retired (a PUT's address queued for the collector), metered (an expired GET admit, its admitted size metered as egress), deleted (terminal rows past retention), failed.",
+	Help: "Edge admits the reaper handled: expired (a pending admit past its expiry, reservation released), retired (a whole PUT's address queued for the collector), claims_dropped (an expired edge-codec admit: its chunk claims dropped, nothing queued), metered (an expired GET admit, its admitted size metered as egress), deleted (terminal rows past retention), failed.",
 }, []string{"outcome"})
 
 func init() {
-	for _, o := range []string{"expired", "retired", "metered", "deleted", "failed"} {
+	for _, o := range []string{"expired", "retired", "claims_dropped", "metered", "deleted", "failed"} {
 		edgeAdmitReaperTotal.WithLabelValues(o)
 	}
 }
@@ -51,8 +51,9 @@ type EdgeAdmitReapResult struct {
 	Expired       int   `json:"expired"`
 	ReleasedBytes int64 `json:"released_bytes"`
 	Retired       int   `json:"retired"`
-	GetsMetered   int   `json:"gets_metered"`  // expired GET admits (Part B)
-	MeteredBytes  int64 `json:"metered_bytes"` // their admitted sizes, metered as egress
+	ClaimsDropped int   `json:"claims_dropped"` // expired edge-codec admits (WP-EDGE-2): claims dropped, nothing queued
+	GetsMetered   int   `json:"gets_metered"`   // expired GET admits (Part B)
+	MeteredBytes  int64 `json:"metered_bytes"`  // their admitted sizes, metered as egress
 	Deleted       int64 `json:"deleted"`
 	Failed        int   `json:"failed"`
 }
@@ -118,12 +119,18 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 		}
 		res.Expired++
 		edgeAdmitReaperTotal.WithLabelValues("expired").Inc()
-		switch row.Op {
-		case edgeOpGet:
+		switch {
+		case row.Codec:
+			// An edge-codec admit holds no whole blob: its expiry dropped
+			// its chunk claims and released its reservation (RP68-4).
+			res.ReleasedBytes += row.ReservedBytes
+			res.ClaimsDropped++
+			edgeAdmitReaperTotal.WithLabelValues("claims_dropped").Inc()
+		case row.Op == edgeOpGet:
 			res.GetsMetered++
 			res.MeteredBytes += row.ContentLength
 			edgeAdmitReaperTotal.WithLabelValues("metered").Inc()
-		case edgeOpPut:
+		case row.Op == edgeOpPut:
 			res.ReleasedBytes += row.ReservedBytes
 			res.Retired++
 			edgeAdmitReaperTotal.WithLabelValues("retired").Inc()

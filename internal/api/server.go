@@ -489,6 +489,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// default kept (R13-19).
 	s.routingTruth = NewRoutingTruthChecker(s.db, s.engine, s.gci, logger)
 	if s.routingTruth != nil {
+		s.routingTruth.tenantKeys = s.tenantKeys // edge-codec chunks are opened (RP68-3 c)
 		knob := func(name string, set func(int)) {
 			if v := os.Getenv(name); v != "" {
 				if n, err := strconv.Atoi(v); err == nil && n >= 0 {

@@ -112,6 +112,9 @@ type RoutingTruthChecker struct {
 	gci    *crypto.GlobalContentIndex
 	chunks *chunkStore
 	logger *zap.Logger
+	// tenantKeys opens an edge-codec chunk (AES256-EW) in the chunked
+	// sample (RP68-3 c); nil = such chunks are read, not opened.
+	tenantKeys *crypto.TenantKeys
 
 	// Sample is the number of whole-object head rows asked per backend and
 	// run (ROUTING_TRUTH_SAMPLE, default 300).
@@ -734,6 +737,9 @@ func (c *RoutingTruthChecker) sampleChunked(ctx context.Context, res *RoutingTru
 				continue
 			}
 			result := c.checkChunk(ctx, chunkAddr{scope: scope, hash: ref.PlaintextHash, backend: backend, key: key})
+			if result == "present" {
+				result = c.openCodecChunk(ctx, scope, backend, key, ref, lookup.Entry)
+			}
 			routingChunkChecks.WithLabelValues(backend, result).Inc()
 			switch result {
 			case "present":
@@ -797,6 +803,49 @@ func (c *RoutingTruthChecker) checkChunk(ctx context.Context, a chunkAddr) strin
 		}
 	}
 	return "missing"
+}
+
+// openCodecChunk: an edge-codec chunk (AES256-EW, a 0x06 blob — WP-EDGE-2)
+// is OPENED, not only read (RP68-3 c): its integrity rests on what the edge
+// host uploaded, and a blob that does not hash to its row, does not open
+// under its version or does not bind to its keyed hash is unreadable — found
+// by the daily sample, not at a customer's read. Any other chunk keeps the
+// verdict it has; so does every chunk when this process holds no tenant keys.
+func (c *RoutingTruthChecker) openCodecChunk(ctx context.Context, scope, backend, key string, ref crypto.TenantChunkRef, e *crypto.GCIEntry) string {
+	if c.tenantKeys == nil || e == nil || !e.Encrypted || e.EncryptionAlgo == nil || *e.EncryptionAlgo != crypto.EdgeChunkEncryptionAlgo {
+		return "present"
+	}
+	d, ok := c.eng.GetDriver(backend)
+	if !ok {
+		return "error"
+	}
+	cctx, cancel := context.WithTimeout(ctx, routingExistsTimeout)
+	defer cancel()
+	rc, err := d.Get(engine.ChunkContext(cctx), chunkContainer, key)
+	if err != nil {
+		return "unreadable"
+	}
+	blob, err := io.ReadAll(io.LimitReader(rc, maxChunkBlobBytes+1))
+	_ = rc.Close()
+	if err != nil || len(blob) > maxChunkBlobBytes {
+		return "unreadable"
+	}
+	desc := chunkDesc{scope: scope, storageKey: key, backendID: backend, plaintextHash: ref.PlaintextHash, size: e.SizeBytes,
+		encrypted: true, encAlgo: crypto.EdgeChunkEncryptionAlgo}
+	if e.CiphertextHash != nil {
+		desc.ciphertextHash = *e.CiphertextHash
+	}
+	switch {
+	case e.EncryptionKeyVersion != nil:
+		desc.keyVersion = *e.EncryptionKeyVersion
+	default:
+		desc.keyVersion = ref.EncryptionKeyVersion
+	}
+	if _, err := openEdgeCodecBlob(cctx, c.tenantKeys, desc, scope, blob); err != nil {
+		c.logger.Warn("routing truth: edge-codec chunk does not open", zap.String("backend", backend), zap.String("hash", shortHash(ref.PlaintextHash)), zap.Error(err))
+		return "unreadable"
+	}
+	return "present"
 }
 
 // summarizeRoutingTruth is the one-line note.

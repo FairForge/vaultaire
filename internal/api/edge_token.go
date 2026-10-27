@@ -17,6 +17,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -41,6 +42,10 @@ type edgeConfig struct {
 	// (EDGE_MIN_BYTES, default 4 MiB; 0 = off): two round trips fewer for
 	// a small body, and its bytes do not matter for SLC's bandwidth.
 	minBytes int64
+	// codecHitWait bounds how long a codec commit waits for a hit whose
+	// row is another writer's YOUNG claim to flip ready (RP68-2; 0 =
+	// edgeCodecHitWaitDefault). Tests lower it.
+	codecHitWait time.Duration
 }
 
 // edgeMinBytesDefault is EDGE_MIN_BYTES' default.

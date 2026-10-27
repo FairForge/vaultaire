@@ -60,7 +60,7 @@ const edgeIndexMaxChunks = 10000
 var (
 	edgeCodecChunks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_edge_codec_chunks_total",
-		Help: "Chunks of edge-codec writes by outcome: hit (deduplicated at index time), miss (a link handed out), stored (a miss's blob committed ready), failed (a chunk the commit could not settle).",
+		Help: "Chunks of edge-codec writes by outcome. At the index (once per distinct hash asked): hit (a ready row, or another writer's young claim), miss (a claim taken and a link handed out). At the commit (once per chunk of the body): referenced (a hit's reference taken), stored (a miss's blob committed ready), head_mismatch (a commit refused: the backend holds other bytes than the host reported), failed (a commit whose chunks could not be settled).",
 	}, []string{"outcome"})
 	edgeCodecBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_edge_codec_bytes_total",
@@ -73,7 +73,7 @@ var (
 )
 
 func init() {
-	for _, o := range []string{"hit", "miss", "stored", "failed"} {
+	for _, o := range []string{"hit", "miss", "referenced", "stored", "head_mismatch", "failed"} {
 		edgeCodecChunks.WithLabelValues(o)
 	}
 	edgeCodecBytes.WithLabelValues("plaintext")
@@ -108,8 +108,27 @@ func (s *Server) edgeCodecGrantFor(ctx context.Context, tenantID string) (*edgeC
 			zap.Error(err), zap.String("tenant_id", tenantID))
 		return nil, false
 	}
+	// The codec's threshold at the edge is EDGE_MIN_BYTES (RP68-1): every
+	// edge write of a codec tenant at or above it is chunked.
 	return &edgeCodecGrant{Version: version, KEMPublicKey: pub,
-		ChunkThreshold: s.writeAdapter().chunkThreshold(), SegmentSize: crypto.StreamSegmentSize}, true
+		ChunkThreshold: s.edge.minBytes, SegmentSize: crypto.StreamSegmentSize}, true
+}
+
+// edgeCodecStoreReady reports whether the chunk store's backend (the engine
+// primary) can take codec chunks from the edge: an EdgeWriter whose breaker
+// is closed that also answers a HEAD's ETag and size (engine.ObjectHeader —
+// the commit's sample, RP68-3).
+func (s *Server) edgeCodecStoreReady() bool {
+	primary := s.engine.GetPrimary()
+	if _, err := s.edgeWriterFor(primary); err != nil {
+		return false
+	}
+	drv, ok := s.engine.GetDriver(primary)
+	if !ok {
+		return false
+	}
+	_, ok = drv.(engine.ObjectHeader)
+	return ok
 }
 
 // edgeAdmitCodecPut is the codec gate of a PUT admit, called once the
@@ -130,10 +149,10 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 		return edgeAdmitResponse{}, 0, edgeCodecWhole
 	}
 	// The chunk links are signed on the engine primary (the chunk store's
-	// placement): it must be an EdgeWriter whose breaker is closed, or the
-	// origin takes the write (the pass-through, as Part A's backend rule).
-	primary := s.engine.GetPrimary()
-	if _, err := s.edgeWriterFor(primary); err != nil {
+	// placement): it must be an EdgeWriter whose breaker is closed and that
+	// answers the commit's HEAD sample, or the origin takes the write (the
+	// pass-through, as Part A's backend rule).
+	if !s.edgeCodecStoreReady() {
 		return edgeAdmitResponse{}, 0, edgeCodecNo
 	}
 
@@ -518,10 +537,15 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			}
 		}
 		s.dropEdgeCodecClaims(cctx, row)
-		edgeCodecChunks.WithLabelValues("failed").Inc()
+		if errors.Is(ferr, errEdgeChunkHeadMismatch) {
+			edgeCodecChunks.WithLabelValues("head_mismatch").Inc()
+		} else {
+			edgeCodecChunks.WithLabelValues("failed").Inc()
+		}
 		return nil, ferr
 	}
 
+	stored := 0 // stored chunks seen: the HEAD sample's position
 	for _, c := range chunks {
 		plain, decErr := hex.DecodeString(c.Hash)
 		if decErr != nil || len(plain) != 32 {
@@ -547,6 +571,15 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			if !isOurs {
 				return fail(errors.New("a stored chunk this admit never claimed"))
 			}
+			// RP68-3: the host's word for the blob is checked against the
+			// backend on a sample — the first stored chunk of the commit and
+			// every edgeCodecHeadEvery-th after it — before the claim flips.
+			if stored%edgeCodecHeadEvery == 0 {
+				if hErr := s.headEdgeChunk(ctx, row.TenantID, keyed, version, since, etag, c.SealedSize); hErr != nil {
+					return fail(hErr)
+				}
+			}
+			stored++
 			flipped, fErr := s.readyEdgeChunk(ctx, row.TenantID, keyed, since, etag)
 			if fErr != nil {
 				return fail(fErr)
@@ -563,13 +596,18 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			// row stands, exactly as a hit.
 			fallthrough
 		case "hit":
-			ct, ver, refErr := s.referenceEdgeChunk(ctx, row.TenantID, keyed)
+			ct, ver, rowSize, refErr := s.referenceEdgeChunk(ctx, row.TenantID, keyed)
 			if refErr != nil {
 				return fail(refErr)
 			}
 			taken = append(taken, keyed)
+			if rowSize != c.Size {
+				// RP68-6: the host's size would shift every later chunk's
+				// offset in the manifest.
+				return fail(fmt.Errorf("%w: the host says %d bytes, the index row %d", errEdgeChunkSizeMismatch, c.Size, rowSize))
+			}
 			refs = append(refs, edgeCodecRef{Keyed: keyed, Size: c.Size, CiphertextHash: ct, KeyVersion: ver})
-			edgeCodecChunks.WithLabelValues("hit").Inc()
+			edgeCodecChunks.WithLabelValues("referenced").Inc()
 		default:
 			return fail(fmt.Errorf("a chunk's status is stored or hit, not %q", c.Status))
 		}
@@ -610,30 +648,131 @@ func (s *Server) readyEdgeChunk(ctx context.Context, tenantID, keyed string, sin
 	return n == 1, nil
 }
 
-// referenceEdgeChunk takes a hit's reference and reads what the ready row
-// records (the blob's ciphertext hash and key version — copied, never
-// recomputed: storeChunkedObject's rule).
-func (s *Server) referenceEdgeChunk(ctx context.Context, tenantID, keyed string) (*string, int, error) {
-	var ct sql.NullString
-	var ver sql.NullInt32
-	err := s.db.QueryRowContext(ctx, `
-		UPDATE global_content_index
-		   SET ref_count = ref_count + 1, last_accessed_at = NOW(), marked_for_deletion = FALSE, marked_at = NULL
-		 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'
-		RETURNING ciphertext_hash, encryption_key_version`, tenantID, keyed).Scan(&ct, &ver)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, 0, errEdgeChunkVanished
+// edgeCodecHeadEvery: the commit HEADs the first stored chunk and every
+// edgeCodecHeadEvery-th after it (RP68-3; a tenant-scoped host in Prompt 47
+// gets every chunk).
+const edgeCodecHeadEvery = 32
+
+// errEdgeChunkHeadMismatch: the backend holds other bytes than the host
+// reported for a stored chunk (RP68-3) — the commit's 400, everything given
+// back. errEdgeChunkUnverified: the backend could not be asked — the
+// commit's retryable 503.
+var (
+	errEdgeChunkHeadMismatch = errors.New("a stored chunk's backend ETag or size is not what the host reported (head_mismatch)")
+	errEdgeChunkUnverified   = errors.New("a stored chunk could not be checked on the backend")
+)
+
+// edgeChunkRetryable: the commit's error is the host's retry (503 SlowDown),
+// not its fault.
+func edgeChunkRetryable(err error) bool {
+	return errors.Is(err, errEdgeChunkVanished) || errors.Is(err, errEdgeChunkUnverified)
+}
+
+// headEdgeChunk HEADs a stored chunk at its one address on the backend its
+// claim names and compares the backend's ETag (unquoted, lower-case) and
+// size to what the host reported.
+func (s *Server) headEdgeChunk(ctx context.Context, tenantID, keyed string, version int, since time.Time, etag string, sealedSize int64) error {
+	var backend string
+	if err := s.db.QueryRowContext(ctx, `SELECT backend_id FROM global_content_index
+		WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'pending' AND pending_since = $3`,
+		tenantID, keyed, since).Scan(&backend); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // not ours any more: the flip below finds that and references what stands
+		}
+		return fmt.Errorf("%w: %w", errEdgeChunkUnverified, err)
 	}
+	hctx, cancel := context.WithTimeout(ctx, edgeBackendCallTimeout)
+	defer cancel()
+	info, err := s.writeAdapter().chunks().head(hctx, chunkAddr{scope: tenantID, hash: keyed, backend: backend, key: edgeCodecChunkKey(tenantID, keyed, version)})
 	if err != nil {
-		return nil, 0, err
+		if isObjectMissingErr(err) {
+			return fmt.Errorf("%w: the backend holds no blob at the chunk's address", errEdgeChunkHeadMismatch)
+		}
+		return fmt.Errorf("%w: %w", errEdgeChunkUnverified, err)
 	}
-	s.gci.InvalidateCache(tenantID, keyed)
-	var ctp *string
-	if ct.Valid {
-		v := ct.String
-		ctp = &v
+	if strings.ToLower(strings.Trim(info.ETag, `"`)) != etag || info.Size != sealedSize {
+		return fmt.Errorf("%w: the backend answers ETag %s, %d bytes", errEdgeChunkHeadMismatch, info.ETag, info.Size)
 	}
-	return ctp, int(ver.Int32), nil
+	return nil
+}
+
+// errEdgeChunkSizeMismatch: a hit's size is not its index row's (RP68-6) —
+// the commit's 400.
+var errEdgeChunkSizeMismatch = errors.New("a deduplicated chunk's size is not its index row's")
+
+// edgeCodecHitWaitDefault bounds a hit's wait on a young claim (RP68-2).
+const edgeCodecHitWaitDefault = 60 * time.Second
+
+// referenceEdgeChunk takes a hit's reference and reads what the ready row
+// records (the blob's ciphertext hash, key version and plaintext size —
+// copied, never recomputed: storeChunkedObject's rule). A row that is
+// another writer's YOUNG claim (D-EDGE-20's hit) is waited for — parallel
+// parts of one upload sharing a chunk (RP68-2): polled with chunk_claim.go's
+// backoff (25 ms doubling to 1 s) for up to edgeCodecHitWait on the commit's
+// own clock, then errEdgeChunkVanished; a row that is gone, or a claim past
+// the takeover window, is errEdgeChunkVanished at once (the host retries
+// and its index call stores it).
+func (s *Server) referenceEdgeChunk(ctx context.Context, tenantID, keyed string) (*string, int, int64, error) {
+	bound := s.edge.codecHitWait
+	if bound <= 0 {
+		bound = edgeCodecHitWaitDefault
+	}
+	wctx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	const waitMin, waitMax = 25 * time.Millisecond, time.Second
+	wait := waitMin
+	for {
+		var ct sql.NullString
+		var ver sql.NullInt32
+		var size int64
+		err := s.db.QueryRowContext(wctx, `
+			UPDATE global_content_index
+			   SET ref_count = ref_count + 1, last_accessed_at = NOW(), marked_for_deletion = FALSE, marked_at = NULL
+			 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'ready'
+			RETURNING ciphertext_hash, encryption_key_version, size_bytes`, tenantID, keyed).Scan(&ct, &ver, &size)
+		if err == nil {
+			s.gci.InvalidateCache(tenantID, keyed)
+			var ctp *string
+			if ct.Valid {
+				v := ct.String
+				ctp = &v
+			}
+			return ctp, int(ver.Int32), size, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			if wctx.Err() != nil && ctx.Err() == nil {
+				return nil, 0, 0, errEdgeChunkVanished
+			}
+			return nil, 0, 0, err
+		}
+		var young bool
+		err = s.db.QueryRowContext(wctx, `
+			SELECT state = 'pending' AND pending_since >= clock_timestamp() - make_interval(secs => $3)
+			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2`,
+			tenantID, keyed, edgeCodecTakeover.Seconds()).Scan(&young)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, 0, 0, errEdgeChunkVanished
+		case err != nil:
+			if wctx.Err() != nil && ctx.Err() == nil {
+				return nil, 0, 0, errEdgeChunkVanished
+			}
+			return nil, 0, 0, err
+		case !young:
+			return nil, 0, 0, errEdgeChunkVanished
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-wctx.Done():
+			t.Stop()
+			if ctx.Err() != nil {
+				return nil, 0, 0, ctx.Err()
+			}
+			return nil, 0, 0, errEdgeChunkVanished
+		case <-t.C:
+		}
+		wait = min(wait*2, waitMax)
+	}
 }
 
 // commitEdgeCodecPut is the codec PUT's commit: the chunks settled, then the
@@ -672,10 +811,10 @@ func (s *Server) commitEdgeCodecPut(ctx context.Context, row edgeAdmitRow, req e
 	codecRefs, err := s.settleEdgeCodecChunks(cctx, row, req.Chunks)
 	if err != nil {
 		s.releaseEdgeAdmit(ctx, row)
-		if errors.Is(err, errEdgeChunkVanished) {
+		if edgeChunkRetryable(err) {
 			rec.Header().Set("Retry-After", "5")
 			WriteS3ErrorWithContext(rec, ErrServiceUnavailable, path, reqID,
-				WithSuggestion("A deduplicated chunk vanished before the commit; retry the upload."))
+				WithSuggestion("A chunk could not be settled before the commit ("+err.Error()+"); retry the upload."))
 			s.recordEdgeAccess(row, rec.status, 0, 0)
 			return "failed", 0
 		}

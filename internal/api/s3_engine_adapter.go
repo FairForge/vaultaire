@@ -1713,7 +1713,13 @@ func (a *S3ToEngine) fetchAndVerifyChunk(ctx context.Context, d chunkDesc, tenan
 // the keyed-hash check against the row (what binds the content, as the plain
 // sha256 binds a convergent chunk).
 func (a *S3ToEngine) openEdgeCodecChunk(ctx context.Context, d chunkDesc, tenantID string, blob []byte) ([]byte, error) {
-	if a.tenantKeys == nil {
+	return openEdgeCodecBlob(ctx, a.tenantKeys, d, tenantID, blob)
+}
+
+// openEdgeCodecBlob is openEdgeCodecChunk's rule for any caller holding the
+// tenant keys (the chunked GET, routing truth's chunked sample — RP68-3 c).
+func openEdgeCodecBlob(ctx context.Context, keys *crypto.TenantKeys, d chunkDesc, tenantID string, blob []byte) ([]byte, error) {
+	if keys == nil {
 		return nil, fmt.Errorf("%w: chunk %s: no tenant keys on this process (ENCRYPTION_MASTER_KEY)", errChunkDecrypt, shortHash(d.plaintextHash))
 	}
 	if d.ciphertextHash != "" {
@@ -1722,7 +1728,7 @@ func (a *S3ToEngine) openEdgeCodecChunk(ctx context.Context, d chunkDesc, tenant
 			return nil, fmt.Errorf("%w: chunk %s: stored bytes do not hash to the recorded ciphertext MD5", errChunkIntegrity, shortHash(d.plaintextHash))
 		}
 	}
-	priv, err := a.tenantKeys.EdgeCodecPrivateKey(ctx, tenantID, d.keyVersion)
+	priv, err := keys.EdgeCodecPrivateKey(ctx, tenantID, d.keyVersion)
 	if err != nil {
 		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
 	}
@@ -1735,7 +1741,7 @@ func (a *S3ToEngine) openEdgeCodecChunk(ctx context.Context, d chunkDesc, tenant
 	if err != nil {
 		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
 	}
-	indexKey, _, err := a.tenantKeys.IndexKey(ctx, tenantID, d.keyVersion)
+	indexKey, _, err := keys.IndexKey(ctx, tenantID, d.keyVersion)
 	if err != nil {
 		return nil, fmt.Errorf("%w: chunk %s: %w", errChunkDecrypt, shortHash(d.plaintextHash), err)
 	}
