@@ -101,6 +101,9 @@ func (s *Server) initMetrics() {
 		// The edge mover (WP-EDGE-1 Part A): admits by outcome, bytes by
 		// data-plane host, the admit reaper.
 		reg.MustRegister(dataPlaneAdmits, dataPlaneBytes, edgeAdmitReaperTotal)
+		// The edge codec (WP-EDGE-2 Part A): chunks by outcome, bytes by
+		// kind, index calls.
+		reg.MustRegister(edgeCodecChunks, edgeCodecBytes, edgeCodecIndexCalls)
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))

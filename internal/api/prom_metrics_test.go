@@ -58,6 +58,12 @@ func TestMetricsEndpoint_KeepsLegacySeries(t *testing.T) {
 	assert.Contains(t, body, "# TYPE vaultaire_requests_total counter")
 	assert.Contains(t, body, "\nvaultaire_requests_total 5\n")
 	assert.Contains(t, body, "\nvaultaire_errors_total 2\n")
+	// The edge codec's series exist at 0 from boot (WP-EDGE-2; they were
+	// declared and pre-created but never registered — found on the prod
+	// scrape after the #997 deploy).
+	assert.Contains(t, body, `vaultaire_edge_codec_chunks_total{outcome="hit"} 0`)
+	assert.Contains(t, body, `vaultaire_edge_codec_bytes_total{kind="sealed"} 0`)
+	assert.Contains(t, body, "vaultaire_edge_codec_index_calls_total")
 }
 
 func TestBackendCollector_HealthCircuitAndWriteFailures(t *testing.T) {
