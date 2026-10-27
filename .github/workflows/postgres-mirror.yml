@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install crane
-        uses: imjasonh/setup-crane@v0.4
+        uses: imjasonh/setup-crane@v0.7
 
       - name: Copy the official image
         id: copy
