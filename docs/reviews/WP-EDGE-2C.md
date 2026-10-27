@@ -247,3 +247,42 @@ A 2 GiB GoldenBody object, uploaded through the mover at 64 MB parts (row `idriv
 - `chunker.wasm`, `e2ee.wasm` and `wasm_exec.js` are byte-identical to their existing rows: `edge-chunker` 0.1.0, `sdk-wasm` 0.2.0, `edge-wasm-exec` 0.3.0.
 - The rows reach prod's log at the server's boot after this PR deploys.
 - The Worker 0.4.0 deploys AFTER that, with RB-9's capture armed. Its result and the prod proof are this note's follow-up section (the docs PR after the deploy).
+
+## The deploy and RB-9
+
+**Deployed 2026-10-27 21:32:50 UTC**: the Worker 0.4.0 from main `ce74b6d7`, version `0eddafac-424e-46ec-90ab-291e4ad8b900`, 9,210.53 KiB / 2,630.57 KiB gzipped. The server was already on `ce74b6d7`, which holds the rows.
+- The rows were appended at that server's boot: **entries 95–98** (`edge-ingest`, `edge-codec`, `edge-seal`, `edge-awschunked` 0.4.0).
+- `make edge-wasm` in a clean checkout, and `wrangler deploy --dry-run --outdir` before the deploy: all seven modules were byte-identical to their rows.
+- The deployed script, downloaded back (`…/workers/scripts/stored-s3-edge/content/v2`), was byte-identical module for module:
+  - `index.js` `d7489599…`
+  - `codec.js` `a0262b07…`
+  - `seal.js` `b211fcd4…`
+  - `awschunked.js` `2ff68eb5…`
+  - `wasm/chunker.wasm` `c5b1467a…`
+  - `wasm/e2ee.wasm` `bc06f7a6…`
+  - `wasm/wasm_exec.js` `0c949f49…`
+- `edge_codec` stays OFF on prod (no key version until F-14). `/health` healthy, 21/21.
+
+**RB-9 — fixed.**
+- The capture was armed exactly as Part B's: `tcpdump -i lo -s0 -U tcp port 8001` (the active slot) before the deploy.
+- The signed pass-through probe: aws-cli `get-object` with `--range bytes=0-1 --if-none-match '"abc"'`, the bench key, a nonexistent bucket. It fired at 21:32:52, about 2 s after the deploy returned, and again 20 s later.
+- **Both answered NoSuchKey: the signature verified, no 403.** Part B's first probe after its content deploy was 403 SignatureDoesNotMatch.
+- The capture shows both requests reaching the origin WITH `range: bytes=0-1` and `if-none-match: "abc"`. `fetch(request, {cache: "no-store"})` (RP70-5) is the fix.
+- The pcap, its log and the scripts were removed from the box; tcpdump stopped.
+
+## The prod proof (tenant zero, aws-cli's DEFAULT settings)
+
+The Lightroom zip `lightroom-backups/old-lightroom-catalogs/LRViera23_2025-04-03 2051.zip` (242,911,992 B, on Lyve) was read from `stored.ge` (53.7 MB/s, MD5 `26c0d8ca…`). It was then uploaded to `lightroom-backups/p46c-proof/LRViera23.zip` through `s3.stored.cloud` with the Mac's `stored` profile, which carries only `region`: aws-cli 2.28.19's defaults.
+
+| | Result |
+|---|---|
+| upload | aws-cli sent all **29 parts aws-chunked**, `x-amz-trailer: x-amz-checksum-crc64nvme`, Transfer-Encoding chunked. **29/29 admitted header-signed** (`admitted_unverified` +29: the bucket is on Lyve — D-EDGE-30, RB4-3), 29 committed. **0 PUT lines on the origin**: its log for the key holds only Create and Complete (two POSTs). 28.4 MB/s on the Mac's uplink. The row: 242,911,992 bytes, ETag `347535c4…-29` |
+| download | `aws s3api get-object` (ONE GetObject: the windowed reader, 15 ranges) three times: **67.4 / 58.7 / 39.5 MB/s, MD5-equal** (`26c0d8ca…`). `vaultaire_data_plane_admits_total{op="get",outcome="admitted"}` +3; three commits each metering exactly 242,911,992 bytes. The same GET through `stored.ge`: 57.2 MB/s — the Mac's downlink is the limit on both paths |
+| the edge's own numbers (`wrangler tail`, one more windowed GET) | **cpuTime 262 ms** for 242.9 MB ≈ **1.16 s per GiB** (target < 1.2); Worker wall 2,942 ms ≈ 83 MB/s from Lyve into the Worker |
+
+The proof object was deleted after, with no upload left open.
+
+## Teardown
+
+- The lab (Part 0, PR A and PR B cases) was torn down after PR B's runs: the Worker and the origin stopped; 196 blobs of the lab tenant deleted from iDrive us-central-1 (`t-<lab tenant>/` 8, `t-_global/_global/_chunks/<lab tenant>/` 188) and its 3 open backend uploads aborted; `t-_lab/` empty on iDrive and Lyve; the DB `vaultaire_edgelab` dropped; the lab key, token and credentials removed.
+- The Step 0 probe Worker `sb-p46c-probe` was deleted from the bench account; its six objects were deleted; `~/p46c-probe` was removed from SLC.
