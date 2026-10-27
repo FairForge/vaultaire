@@ -55,6 +55,14 @@
       "sha256": "4714c3985a0cd409c3056da6968a1bc7c16e5d63a59d18e5d3ff8706f1300083",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-chunker",
+      "version": "0.1.0",
+      "source_commit": "155b4ae5ba04e3ca52552a5779df8ab65fdd8b65",
+      "sha256": "c5b1467a9baf911fe4adaa096e153488a76ccf66ec6d0de17144936c588cd031",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }
