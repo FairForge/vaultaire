@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadGo, noWasm } from "./wasm-loader.js";
-import { MD5, Semaphore, chunkStream, runCodec, CODEC_IN_FLIGHT } from "../src/codec.js";
+import { MD5, Semaphore, chunkStream, runCodec, CODEC_IN_FLIGHT_BYTES } from "../src/codec.js";
 import { sealedLength } from "../src/seal.js";
 import { codecTamper } from "../src/index.js";
 
@@ -36,7 +36,7 @@ function readAll(req) {
 }
 
 /** fakes starts the backend and the control plane; known = hashes the index holds as ready. */
-async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set() } = {}) {
+async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set(), commit = null } = {}) {
   const st = { puts: [], indexCalls: [], commits: [], stored: new Map(), inFlightPuts: 0, peakPuts: 0 };
   const backend = await listen(async (req, res) => {
     const body = await readAll(req);
@@ -68,6 +68,11 @@ async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set() } = {}
       return res.end(JSON.stringify({ hits, misses }));
     }
     st.commits.push(body);
+    if (commit) {
+      const c = commit(body, st.commits.length);
+      res.writeHead(c.status, { "content-type": "application/json" });
+      return res.end(JSON.stringify(c.json));
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ status: body.outcome === "ok" ? 200 : 503, headers: { ETag: `"${body.body_md5 || ""}"` }, body: "" }));
   });
@@ -200,20 +205,110 @@ test("runCodec: a repeated chunk is asked once and committed as a hit after its 
   }
 });
 
-test("back-pressure: a 200 MiB body with every PUT delayed 50 ms holds at most CODEC_IN_FLIGHT chunks", { skip: noWasm }, async () => {
+test("Semaphore counts bytes: FIFO waiters, the peak in bytes, a waiter larger than the bound proceeds alone", async () => {
+  const sem = new Semaphore(10);
+  await sem.acquire(6);
+  assert.equal(sem.held, 6);
+  assert.equal(sem.wouldAdmit(4), true);
+  assert.equal(sem.wouldAdmit(5), false);
+  const order = [];
+  const a = sem.acquire(5).then(() => order.push("a5"));
+  const b = sem.acquire(1).then(() => order.push("b1")); // FIFO: never ahead of a
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(order, [], "b fits but waits behind a");
+  sem.release(6);
+  await Promise.all([a, b]);
+  assert.deepEqual(order, ["a5", "b1"]);
+  assert.equal(sem.held, 6);
+  sem.release(6);
+  // A chunk larger than the bound is admitted when nothing is held: never a deadlock.
+  await sem.acquire(25);
+  assert.equal(sem.held, 25);
+  const c = sem.acquire(1);
+  let cDone = false;
+  c.then(() => { cDone = true; });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(cDone, false, "nothing beside an oversized holder");
+  sem.release(25);
+  await c;
+  assert.equal(sem.peak, 25);
+});
+
+/** maxChunkBody is n bytes of 16 MiB regions of distinct constant non-zero bytes:
+ * the chunker finds no boundary in any (an all-zero run cuts at the 1 MiB
+ * minimum and dedups), so it cuts 16 MiB chunks — the RP70-1 shape. */
+function maxChunkBody(n) {
+  const body = new Uint8Array(n);
+  for (let k = 0; k * (16 << 20) < n; k++) body.fill(0x11 + (k % 200), k * (16 << 20), Math.min(n, (k + 1) * (16 << 20)));
+  return body;
+}
+
+test("back-pressure in BYTES: 200 MiB of 16 MiB chunks, PUTs +50 ms — at most 48 MiB of plaintext held, every PUT a streamed body of its sealed length", { skip: noWasm }, async () => {
   const deps = await codecDeps();
   const f = await fakes({ putDelayMs: 50 });
   try {
-    const body = deps.chunker.goldenBody(4623, 200 << 20).value;
-    const sem = new Semaphore(CODEC_IN_FLIGHT);
+    const body = maxChunkBody(200 << 20);
+    const sem = new Semaphore(CODEC_IN_FLIGHT_BYTES);
     const started = Date.now();
     const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp, sem });
     assert.equal(relay.status, 200);
-    assert.ok(sem.peak <= CODEC_IN_FLIGHT, `peak ${sem.peak}`);
-    assert.equal(sem.peak, CODEC_IN_FLIGHT, "the bound is reached (the PUTs are the slow side)");
-    assert.ok(f.st.peakPuts <= CODEC_IN_FLIGHT, `peak PUTs ${f.st.peakPuts}`);
-    const ms = Date.now() - started;
-    console.log(`back-pressure: 200 MiB, PUTs +50 ms: ${ms} ms, peak held ${sem.peak}, index calls ${f.st.indexCalls.length} (batches ${f.st.indexCalls.slice(0, 8)}…), rss ${Math.round(process.memoryUsage().rss / 1048576)} MiB`);
+    const sizes = f.st.commits[0].chunks.map((c) => c.size);
+    assert.ok(sizes.slice(0, -1).every((n) => n === 16 << 20), `the chunker cuts max-size chunks: ${sizes.map((n) => n >> 20)}`);
+    assert.equal(CODEC_IN_FLIGHT_BYTES, 48 << 20);
+    assert.ok(sem.peak <= CODEC_IN_FLIGHT_BYTES, `peak ${sem.peak} bytes`);
+    assert.ok(sem.peak >= 32 << 20, `the bound is reached: peak ${sem.peak}`);
+    assert.equal(sem.held, 0, "everything released");
+    assert.equal(f.st.puts.length, sizes.length);
+    for (const p of f.st.puts) {
+      assert.equal(p.length, p.contentLength, "the body's length is its content-length");
+      assert.ok(sizes.some((n) => sealedLength(n) === p.length), `a sealed length: ${p.length}`);
+    }
+    console.log(`byte bound: 200 MiB of 16 MiB chunks, PUTs +50 ms: ${Date.now() - started} ms, peak ${sem.peak >> 20} MiB, index calls ${f.st.indexCalls.length}, rss ${Math.round(process.memoryUsage().rss / 1048576)} MiB`);
+  } finally {
+    f.close();
+  }
+});
+
+test("RP70-6: a hit's bytes are released at once — before the batch's PUTs settle", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  // Learn the hashes of the first half; the second run sees them as hits
+  // beside slow misses.
+  const half = deps.chunker.goldenBody(4629, 6 << 20).value;
+  const first = await fakes();
+  let known;
+  try {
+    await runCodec(bodyRequest(half), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: first.cp });
+    known = new Set(first.st.commits[0].chunks.map((c) => c.hash));
+  } finally {
+    first.close();
+  }
+  const body = new Uint8Array((6 << 20) + (6 << 20));
+  body.set(half, 0);
+  body.set(deps.chunker.goldenBody(4630, 6 << 20).value, 6 << 20);
+  const f = await fakes({ putDelayMs: 400, known });
+  try {
+    const sem = new Semaphore(CODEC_IN_FLIGHT_BYTES);
+    const heldAtPutEnd = [];
+    const origRelease = sem.release.bind(sem);
+    let firstPutDone = null;
+    const backendDone = f.st;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, {
+      ...deps, controlPlane: f.cp, sem,
+      fetch: async (url, init) => {
+        const r = await fetch(url, init);
+        if (firstPutDone === null) { firstPutDone = Date.now(); heldAtPutEnd.push(sem.held); }
+        return r;
+      },
+    });
+    void origRelease; void backendDone;
+    assert.equal(relay.status, 200);
+    const hits = f.st.commits[0].chunks.filter((c) => c.status === "hit");
+    const hitBytes = hits.reduce((a, c) => a + c.size, 0);
+    assert.ok(hitBytes > 0, "the precondition: hits beside misses");
+    // Every hit's bytes were gone before the first slow PUT answered: what
+    // is still held then is at most the misses' plaintext.
+    const missBytes = f.st.commits[0].chunks.filter((c) => c.status === "stored").reduce((a, c) => a + c.size, 0);
+    assert.ok(heldAtPutEnd[0] <= missBytes, `held ${heldAtPutEnd[0]} at the first PUT's answer, misses ${missBytes}`);
   } finally {
     f.close();
   }
@@ -252,4 +347,52 @@ test("CODEC_TAMPER is a lab switch: refused when ENVIRONMENT is production", () 
   assert.equal(codecTamper({ CODEC_TAMPER: "key", ENVIRONMENT: "lab" }), "key");
   assert.throws(() => codecTamper({ CODEC_TAMPER: "etag", ENVIRONMENT: "production" }), /production/);
   assert.throws(() => codecTamper({ CODEC_TAMPER: "other" }), /CODEC_TAMPER/);
+});
+
+// RP70-7: what the commit answers reaches the client as the S3 answer it is.
+test("a commit relayed as 400 reaches the client as 400 with its XML", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const xml = '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>InvalidRequest</Code><Message>a stored chunk this admit never claimed</Message></Error>';
+  const f = await fakes({ commit: (b) => (b.outcome === "ok" ? { status: 200, json: { status: 400, headers: { "Content-Type": "application/xml" }, body: xml } } : { status: 200, json: { status: 503 } }) });
+  try {
+    const body = deps.chunker.goldenBody(4626, 2 << 20).value;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    assert.equal(relay.status, 400);
+    assert.equal(relay.body, xml);
+    assert.equal(f.st.commits.filter((c) => c.outcome === "ok").length, 1, "a relayed answer is never retried");
+  } finally {
+    f.close();
+  }
+});
+
+test("a control plane answering 503 twice is the Worker's own 503 (null)", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ commit: () => ({ status: 503, json: { error: "no_database" } }) });
+  try {
+    const body = deps.chunker.goldenBody(4627, 1 << 20).value;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    assert.equal(relay, null);
+    assert.equal(f.st.commits.length, 2, "one retry of a lost answer");
+  } finally {
+    f.close();
+  }
+});
+
+test("a control plane's own 4xx is the client's 400 InvalidRequest with its error, never retried", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ commit: () => ({ status: 400, json: { error: "invalid_json" } }) });
+  try {
+    const body = deps.chunker.goldenBody(4628, 1 << 20).value;
+    const req = bodyRequest(body);
+    req.url = "https://s3.stored.cloud/b/k.bin";
+    const relay = await runCodec(req, admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp, requestId: "req-7" });
+    assert.ok(relay, "an answer, not the Worker's 503");
+    assert.equal(relay.status, 400);
+    assert.match(relay.body, /<Code>InvalidRequest<\/Code>/);
+    assert.match(relay.body, /invalid_json/);
+    assert.match(relay.body, /<Resource>\/b\/k.bin<\/Resource>/);
+    assert.equal(f.st.commits.length, 1, "not retried");
+  } finally {
+    f.close();
+  }
 });

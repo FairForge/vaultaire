@@ -289,6 +289,74 @@ case_h_off() { # the 0.2.1 mover's path: edge_codec OFF and the bucket without S
 	sql "UPDATE feature_flags SET enabled = true WHERE flag_key = 'edge_codec' AND tenant_id = '$(tenant)'"
 }
 
+# --- Prompt 46c Part 0 (WP-EDGE-2C.md § The lab) ---
+
+admitted() { metric "vaultaire_data_plane_admits_total\\{host=\"edge\",op=\"$1\",outcome=\"$2\"\\}" | awk '{print $2+0}'; }
+
+case_p0_parts() { # RP70-2: 50 MiB at aws-cli's default 8 MiB parts, ten times — every part admitted, never staged, never a 400
+	golden 46301 52428800 "$LAB/p0-50.dat"
+	aws configure set default.s3.multipart_threshold 8MB
+	aws configure set default.s3.multipart_chunksize 8MB
+	local before_adm before_pass before_small n=0 bad=0
+	before_adm=$(admitted part admitted)
+	before_pass=$(admitted part pass_through)
+	before_small=$(admitted part pass_through_small)
+	for i in $(seq 10); do
+		aws_lab s3 cp "$LAB/p0-50.dat" "s3://$BUCKET/p0/fifty-$i.dat" --no-progress --debug 2>"$LAB/p0-$i.log" >/dev/null || bad=$((bad + 1))
+		grep -qE '"PUT /[^"]*partNumber[^"]*" 400|status_code=400|HTTP/1.1" 400' "$LAB/p0-$i.log" && bad=$((bad + 1))
+		n=$((n + 7))
+	done
+	echo "p0_parts: parts admitted +$(( $(admitted part admitted) - before_adm )) (expected $n), pass_through +$(( $(admitted part pass_through) - before_pass )), small +$(( $(admitted part pass_through_small) - before_small )), failed or 400 runs: $bad"
+	echo "p0_parts: staged_parts lines in the worker log: $(grep -c '"reason":"staged_parts"' "$LAB/worker.log" || true)"
+	aws_origin s3 cp "s3://$BUCKET/p0/fifty-10.dat" "$LAB/p0-50.back" --no-progress >/dev/null
+	echo "p0_parts: $(md5of "$LAB/p0-50.dat") / $(md5of "$LAB/p0-50.back")"
+	sql "SELECT 'p0_parts: rows ' || COUNT(*) || ' ' || string_agg(DISTINCT backend_name, ',') FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key LIKE 'p0/fifty-%'"
+}
+
+# rss_watch <pidfile-out>: samples the workerd processes' RSS every 0.5 s
+# until killed; prints the peak in MiB at the end (the lab's memory number —
+# the local workerd process, not an edge isolate; RB3-6).
+rss_watch() {
+	local peak=0 r
+	trap 'echo $((peak / 1024)); exit 0' TERM
+	while :; do
+		r=$(ps -ax -o rss=,comm= | awk '/workerd/ {s += $1} END {print s+0}')
+		[ "$r" -gt "$peak" ] && peak=$r
+		sleep 0.5
+	done
+}
+
+case_p0_bytes() { # RP70-1: zeros, 16 MiB constant runs (the chunker's maximum), a 1 GiB sparse image — the peak in BYTES
+	python3 - "$LAB" <<'PY2'
+import sys
+lab = sys.argv[1]
+with open(f"{lab}/zeros256.dat", "wb") as f:
+    f.write(b"\0" * (256 << 20))
+with open(f"{lab}/runs256.dat", "wb") as f:
+    for k in range(16):
+        f.write(bytes([0x11 + k]) * (16 << 20))
+PY2
+	rm -f "$LAB/sparse1g.img"
+	dd if=/dev/zero of="$LAB/sparse1g.img" bs=1 count=0 seek=1073741824 2>/dev/null
+	for off in 1 97 300 511 777 1000; do dd if=/dev/urandom of="$LAB/sparse1g.img" bs=1048576 count=3 seek="$off" conv=notrunc 2>/dev/null; done
+	aws configure set default.s3.multipart_threshold 8MB
+	aws configure set default.s3.multipart_chunksize 64MB
+	for f in zeros256.dat runs256.dat sparse1g.img; do
+		local mark w peak
+		mark=$(wc -l <"$LAB/worker.log")
+		rss_watch >"$LAB/rss-$f.txt" &
+		w=$!
+		aws_lab s3 cp "$LAB/$f" "s3://$BUCKET/p0/$f" --no-progress >/dev/null
+		kill -TERM $w; wait $w 2>/dev/null || true
+		peak=$(tail -n +"$((mark + 1))" "$LAB/worker.log" | grep '"edge":"codec"' | python3 -c '
+import json,sys
+v=[json.loads(l[l.index("{"):]) for l in sys.stdin if "{" in l]
+print(max((x.get("peak_in_flight_bytes",0) for x in v), default=0)>>20, "MiB peak over", len(v), "requests; chunks", sum(x["chunks"] for x in v), "misses", sum(x["misses"] for x in v))')
+		aws_origin s3 cp "s3://$BUCKET/p0/$f" "$LAB/$f.back" --no-progress >/dev/null
+		echo "p0_bytes $f: $peak; workerd RSS peak $(cat "$LAB/rss-$f.txt") MiB; $(md5of "$LAB/$f") / $(md5of "$LAB/$f.back")"
+	done
+}
+
 down() {
 	stop_worker
 	if [ -f "$LAB/origin.pid" ]; then kill "$(cat "$LAB/origin.pid")" 2>/dev/null || true; rm -f "$LAB/origin.pid"; fi
@@ -305,5 +373,5 @@ origin) start_origin; echo "origin up" ;;
 worker) stop_worker; start_worker "${TAMPER:-}"; echo "worker up" ;;
 run) "case_$1" "${@:2}" ;;
 down) down "$@" ;;
-*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off> | down" >&2; exit 2 ;;
+*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off|p0_parts|p0_bytes> | down" >&2; exit 2 ;;
 esac

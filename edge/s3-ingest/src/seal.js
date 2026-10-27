@@ -65,11 +65,12 @@ export async function hkdf32(secret, info) {
 }
 
 /**
- * sealChunk seals one chunk (a Uint8Array) as a 0x06 blob under the codec
- * public key of key version `version`. e2ee is the storedE2EE module (its
- * sealTo); `random` fills a Uint8Array (crypto.getRandomValues).
+ * sealSetup makes what one 0x06 blob is sealed under: a random chunk key
+ * wrapped to the codec public key, the header, the DEK (a non-extractable
+ * WebCrypto key) and the nonce prefix. The chunk key is zeroed before it
+ * returns. Both sealers call it, in the same order of randomness.
  */
-export async function sealChunk(e2ee, pub, version, chunk, random = (b) => crypto.getRandomValues(b)) {
+async function sealSetup(e2ee, pub, version, random) {
   if (!Number.isInteger(version) || version < 1) throw new Error(`edge codec: key version ${version}`);
   const chunkKey = random(new Uint8Array(32));
   const r = e2ee.sealTo(pub, chunkKey, CHUNK_KEY_INFO, null);
@@ -92,17 +93,74 @@ export async function sealChunk(e2ee, pub, version, chunk, random = (b) => crypt
   chunkKey.fill(0);
   const dek = await crypto.subtle.importKey("raw", dekBits, "AES-GCM", false, ["encrypt"]);
   dekBits.fill(0);
+  return { header, dek, prefix };
+}
 
+async function sealSegment(setup, pt, i, last) {
+  return new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce(setup.prefix, i, last), additionalData: setup.header, tagLength: 128 }, setup.dek, pt));
+}
+
+/**
+ * sealChunk seals one chunk (a Uint8Array) as a 0x06 blob under the codec
+ * public key of key version `version`, whole — the cross-implementation
+ * vector's sealer (test/seal.test.js; the Go opener opens it). The pipeline
+ * streams (sealChunkStream): no sealed copy of a chunk exists whole there.
+ * e2ee is the storedE2EE module (its sealTo); `random` fills a Uint8Array
+ * (crypto.getRandomValues).
+ */
+export async function sealChunk(e2ee, pub, version, chunk, random = (b) => crypto.getRandomValues(b)) {
+  const setup = await sealSetup(e2ee, pub, version, random);
   const out = new Uint8Array(sealedLength(chunk.length));
-  out.set(header, 0);
+  out.set(setup.header, 0);
   const segments = chunk.length <= 0 ? 1 : Math.ceil(chunk.length / SEGMENT_SIZE);
   let w = HEADER_LEN;
   for (let i = 0; i < segments; i++) {
     const pt = chunk.subarray(i * SEGMENT_SIZE, Math.min(chunk.length, (i + 1) * SEGMENT_SIZE));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce(prefix, i, i === segments - 1), additionalData: header, tagLength: 128 }, dek, pt));
+    const ct = await sealSegment(setup, pt, i, i === segments - 1);
     out.set(ct, w);
     w += ct.length;
   }
   if (w !== out.length) throw new Error(`edge codec: sealed ${w} bytes, the length function says ${out.length}`);
   return out;
+}
+
+/**
+ * sealChunkStream seals one chunk as a 0x06 blob STREAMED (RP70-1): the
+ * chunk is its plaintext SEGMENTS (each its own buffer of SEGMENT_SIZE
+ * bytes, the last ≤), and the returned {stream, length} yields the header,
+ * then each segment's ciphertext encrypted when the consumer asks for it
+ * (highWaterMark 0: nothing is sealed ahead of the PUT reading it). As each
+ * segment is sealed its plaintext buffer is dropped from `segments` and
+ * opts.onSegment(bytes) is called — the caller's byte semaphore releases
+ * it. The bytes are exactly sealChunk's for the same randomness.
+ */
+export async function sealChunkStream(e2ee, pub, version, segments, opts = {}) {
+  const random = opts.random || ((b) => crypto.getRandomValues(b));
+  const onSegment = opts.onSegment || (() => {});
+  const n = segments.length;
+  if (n < 1) throw new Error("edge codec: a chunk has at least one segment");
+  let size = 0;
+  for (let k = 0; k < n; k++) {
+    if (k < n - 1 && segments[k].length !== SEGMENT_SIZE) throw new Error(`edge codec: segment ${k} is ${segments[k].length} bytes, not ${SEGMENT_SIZE}`);
+    size += segments[k].length;
+  }
+  const setup = await sealSetup(e2ee, pub, version, random);
+  let i = -1;
+  const stream = new ReadableStream({
+    async pull(ctl) {
+      if (i < 0) {
+        ctl.enqueue(setup.header);
+        i = 0;
+        return;
+      }
+      const pt = segments[i];
+      segments[i] = null;
+      const ct = await sealSegment(setup, pt, i, i === n - 1);
+      i++;
+      ctl.enqueue(ct);
+      onSegment(pt.length);
+      if (i === n) ctl.close();
+    },
+  }, { highWaterMark: 0 });
+  return { stream, length: sealedLength(size) };
 }

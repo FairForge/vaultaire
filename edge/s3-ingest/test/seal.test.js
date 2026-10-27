@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadGo, noWasm } from "./wasm-loader.js";
-import { HEADER_LEN, WRAP_LEN, sealChunk, sealedLength } from "../src/seal.js";
+import { HEADER_LEN, WRAP_LEN, SEGMENT_SIZE, sealChunk, sealChunkStream, sealedLength } from "../src/seal.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const vector = JSON.parse(readFileSync(join(here, "..", "..", "..", "internal", "crypto", "testdata", "edge_codec_node.json"), "utf8"));
@@ -47,4 +47,50 @@ test("sealChunk: a 0x06 blob of the golden 3 MiB chunk under the lab public key 
 test("sealChunk refuses a version below 1", { skip: noWasm }, async () => {
   const e2ee = await loadGo("e2ee.wasm", "storedE2EE");
   await assert.rejects(sealChunk(e2ee, new Uint8Array(Buffer.from(vector.public_key, "base64")), 0, new Uint8Array(4)), /key version/);
+});
+
+/** seeded is a deterministic `random` (the injected randomness of both sealers). */
+function seeded(seed) {
+  let x = seed;
+  return (b) => {
+    for (let i = 0; i < b.length; i++) {
+      x = (x * 1103515245 + 12345) >>> 0;
+      b[i] = x >>> 24;
+    }
+    return b;
+  };
+}
+
+test("sealChunkStream yields exactly sealChunk's bytes (the same injected random), segment by segment, releasing each segment's plaintext as it is read", { skip: noWasm }, async () => {
+  const e2ee = await loadGo("e2ee.wasm", "storedE2EE");
+  const chunker = await loadGo("chunker.wasm", "storedChunker");
+  const pub = new Uint8Array(Buffer.from(vector.public_key, "base64"));
+  for (const size of [1, SEGMENT_SIZE, 3 * SEGMENT_SIZE + 77]) {
+    const plain = chunker.goldenBody(size, size).value;
+    // sealTo's own randomness is the wasm's: the wrap differs per call, so
+    // the comparison seals the wrap once and feeds both from it.
+    const realSealTo = e2ee.sealTo;
+    const wrap = realSealTo(pub, new Uint8Array(32), new TextEncoder().encode("x"), null).value;
+    const fixed = { ...e2ee, sealTo: () => ({ value: wrap }) };
+    const whole = await sealChunk(fixed, pub, 7, plain, seeded(size));
+    const segments = [];
+    for (let o = 0; o < plain.length; o += SEGMENT_SIZE) segments.push(plain.slice(o, o + SEGMENT_SIZE));
+    const released = [];
+    const lengths = segments.map((p) => p.length);
+    const s = await sealChunkStream(fixed, pub, 7, segments, { random: seeded(size), onSegment: (n) => released.push(n) });
+    assert.equal(s.length, sealedLength(size));
+    const parts = [];
+    const reader = s.stream.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      parts.push(value);
+    }
+    const streamed = Buffer.concat(parts);
+    assert.equal(streamed.length, s.length);
+    assert.ok(Buffer.from(whole).equals(streamed), `size ${size}: the streamed blob is the whole sealer's`);
+    assert.deepEqual(released, lengths, "each segment's plaintext released as it is sealed");
+    assert.ok(segments.every((p) => p === null), "and dropped");
+    assert.equal(parts.length, 1 + lengths.length, "the header, then one piece per segment");
+  }
 });
