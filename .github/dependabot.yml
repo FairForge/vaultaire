@@ -1,31 +1,32 @@
 version: 2
 updates:
+  # ONE weekly PR for every Go module (2026-10-28): thirteen separate
+  # dependabot PRs piled up between 2026-10-12 and 10-27, and every merge of
+  # one deploys prod and makes the rest rebase. A single grouped PR is one CI
+  # run, one review and one deploy a week.
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 5
     ignore:
       # FastCDC chunking core — 0.5.0 breaks build-and-test (PR #319).
       # Revisit after launch; do not auto-bump a dedup-critical dependency.
       - dependency-name: "github.com/restic/chunker"
     groups:
-      aws:
+      all:
         patterns:
-          - "github.com/aws/aws-sdk-go*"
-      # One PR for the golang.org/x/* bumps: five separate ones each forced
-      # the others to rebase under the strict status-check policy (2026-10-06).
-      golang-x:
-        patterns:
-          - "golang.org/x/*"
-      test-dependencies:
-        patterns:
-          - "*test*"
-          - "*mock*"
+          - "*"
 
+  # The same for GitHub Actions: one weekly PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      all:
+        patterns:
+          - "*"
