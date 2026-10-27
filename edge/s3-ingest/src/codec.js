@@ -128,11 +128,14 @@ export const INDEX_BATCH = 64;
  * under the bound, FIFO — a small waiter never overtakes a large one; a
  * waiter larger than the bound proceeds alone when nothing is held (a chunk
  * is never refused: no deadlock). It records its peak in bytes (the tests
- * and the codec log line read it).
+ * and the codec log line read it). With a parent (RP72-6) every byte it
+ * takes is the parent's too: acquired from its own bound first, then from
+ * the parent's; released from both.
  */
 export class Semaphore {
-  constructor(bound) {
+  constructor(bound, parent = null) {
     this.bound = bound;
+    this.parent = parent;
     this.used = 0;
     this.waiters = [];
     this.peak = 0;
@@ -140,9 +143,9 @@ export class Semaphore {
   get held() {
     return this.used;
   }
-  /** wouldAdmit says whether acquire(n) would not wait. */
+  /** wouldAdmit says whether acquire(n) would not wait (on this bound or the parent's). */
   wouldAdmit(n) {
-    return this.waiters.length === 0 && this.fits(n);
+    return this.waiters.length === 0 && this.fits(n) && (!this.parent || this.parent.wouldAdmit(n));
   }
   fits(n) {
     return this.used === 0 || this.used + n <= this.bound;
@@ -152,7 +155,11 @@ export class Semaphore {
     this.peak = Math.max(this.peak, this.used);
   }
   acquire(n) {
-    if (this.wouldAdmit(n)) {
+    const own = this.acquireOwn(n);
+    return this.parent ? own.then(() => this.parent.acquire(n)) : own;
+  }
+  acquireOwn(n) {
+    if (this.waiters.length === 0 && this.fits(n)) {
       this.take(n);
       return Promise.resolve();
     }
@@ -166,7 +173,32 @@ export class Semaphore {
       this.take(w.n);
       w.res();
     }
+    if (this.parent) this.parent.release(n);
   }
+}
+
+/**
+ * ISOLATE_BYTES is the ONE byte budget of an isolate (RP72-6): the codec's
+ * chunk plaintext (each write's own CODEC_IN_FLIGHT_BYTES under it) and the
+ * windowed reader's ranges (a full window, 6 × 16 MiB) are taken from it, so
+ * a max-size codec write and a full window can never meet at 144 MiB in an
+ * isolate of 128 MB. Shared FIFO; a request larger than it proceeds alone.
+ */
+export const ISOLATE_BYTES = 96 << 20;
+let isolate = new Semaphore(ISOLATE_BYTES);
+
+/** isolateBudget is the isolate's byte budget. */
+export function isolateBudget() {
+  return isolate;
+}
+
+/** setIsolateBudget replaces the isolate's budget (the tests); returns the restore. */
+export function setIsolateBudget(bytes) {
+  const prev = isolate;
+  isolate = new Semaphore(bytes);
+  return () => {
+    isolate = prev;
+  };
 }
 
 function hex(buf) {
@@ -301,7 +333,7 @@ export async function runCodec(request, admit, env, ctx, deps) {
   const doFetch = deps.fetch || fetch;
   const cp = deps.controlPlane;
   const log = deps.log || (() => {});
-  const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT_BYTES);
+  const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT_BYTES, isolateBudget()); // this write's bound, under the isolate's (RP72-6)
   const tamper = deps.tamper || "";
   const started = Date.now();
   // An aws-chunked body (0.4.0, D-EDGE-31): the admit names its trailer and

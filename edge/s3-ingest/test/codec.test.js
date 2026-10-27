@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadGo, noWasm } from "./wasm-loader.js";
-import { MD5, Semaphore, chunkStream, runCodec, CODEC_IN_FLIGHT_BYTES } from "../src/codec.js";
+import { MD5, Semaphore, chunkStream, runCodec, CODEC_IN_FLIGHT_BYTES, ISOLATE_BYTES, isolateBudget, setIsolateBudget } from "../src/codec.js";
 import { sealedLength } from "../src/seal.js";
 import { codecTamper } from "../src/index.js";
 
@@ -413,5 +413,54 @@ test("a control plane's own 4xx is the client's 400 InvalidRequest with its erro
     assert.equal(f.st.commits.length, 1, "not retried");
   } finally {
     f.close();
+  }
+});
+
+// RP72-6: ONE isolate-wide byte budget (96 MiB) for the codec's chunk
+// plaintext and the windowed reader's ranges: a codec write's bytes are
+// counted against the window's (and the reverse), so a max-size codec write
+// and a full window can never meet in one isolate at 144 MiB. A child
+// semaphore (the write's own 48 MiB) takes from its parent too.
+test("a child semaphore takes from its parent: one budget for the isolate", async () => {
+  const parent = new Semaphore(10);
+  const child = new Semaphore(8, parent);
+  await child.acquire(6);
+  assert.equal(parent.held, 6, "the child's bytes are the parent's");
+  assert.equal(child.wouldAdmit(5), false, "the parent is the limit (4 left)");
+  let got = false;
+  const p = child.acquire(4).then(() => (got = true));
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(got, false, "waits on its own bound (6 + 4 > 8)");
+  child.release(6);
+  await p;
+  assert.equal(parent.held, 4);
+  child.release(4);
+  assert.equal(parent.held, 0);
+  assert.equal(ISOLATE_BYTES, 96 << 20, "the window's full budget, shared");
+});
+
+test("a codec write waits on the isolate budget a window holds", { skip: noWasm }, async () => {
+  const restore = setIsolateBudget(4 << 20);
+  const deps = await codecDeps();
+  const f = await fakes();
+  try {
+    const iso = isolateBudget();
+    await iso.acquire(4 << 20); // a windowed read holds the isolate's budget
+    const body = deps.chunker.goldenBody(4630, 3 << 20).value;
+    let done = false;
+    const run = runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp, requestId: "req-9" }).then((r) => {
+      done = true;
+      return r;
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(done, false, "the codec waits: the isolate's bytes are held");
+    assert.equal(f.st.puts.length, 0, "no chunk stored while the budget is held");
+    iso.release(4 << 20);
+    const relay = await run;
+    assert.equal(relay.status, 200);
+    assert.equal(iso.held, 0, "everything given back");
+  } finally {
+    f.close();
+    restore();
   }
 });

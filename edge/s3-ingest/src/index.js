@@ -39,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { Semaphore, runCodec, s3ErrorXML } from "./codec.js";
+import { ISOLATE_BYTES, isolateBudget, runCodec, s3ErrorXML, setIsolateBudget } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -420,18 +420,15 @@ function fixedLength(n) {
  * isolate hold at once: one full window (6 × 16 MiB). An isolate serves
  * concurrent requests, and 6 × 16 MiB per read would be 192 MiB for two —
  * past the isolate's 128 MB; concurrent reads share the budget (FIFO, a
- * range admitted alone when nothing is held — never a deadlock).
+ * range admitted alone when nothing is held — never a deadlock). Since
+ * RP72-6 it is the isolate's ONE budget (src/codec.js isolateBudget): the
+ * codec's chunk plaintext is taken from it too.
  */
-export const WINDOW_ISOLATE_BYTES = 6 * (16 << 20);
-let windowBudget = new Semaphore(WINDOW_ISOLATE_BYTES);
+export const WINDOW_ISOLATE_BYTES = ISOLATE_BYTES;
 
-/** setWindowBudget replaces the isolate's window budget (the tests); returns the restore. */
+/** setWindowBudget replaces the isolate's budget (the tests); returns the restore. */
 export function setWindowBudget(bytes) {
-  const prev = windowBudget;
-  windowBudget = new Semaphore(bytes);
-  return () => {
-    windowBudget = prev;
-  };
+  return setIsolateBudget(bytes);
 }
 
 /** windowRange is range i of a windowed read: [first byte, last byte]. */
@@ -454,7 +451,12 @@ export function windowRange(admit, i) {
  * the first's — CUTS the client's body (an aborted stream, never a clean
  * short end). The commit is made when the stream ends: served with the
  * bytes sent, or error with the bytes sent before the cut (the control
- * plane meters what the client received).
+ * plane meters what the client received). A client that disconnects
+ * (workerd fires request.signal) stops the reader at once (RP72-5): no
+ * range is launched after it, the ranges in flight are cancelled, the body
+ * is aborted, and the commit is `served` with the bytes sent and
+ * backend_code client_disconnected — a client leaving is never the
+ * backend's failure (no breaker charge).
  */
 async function serveWindow(request, env, ctx, admit, requestId) {
   const started = Date.now();
@@ -464,11 +466,12 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     const [a, b] = windowRange(admit, i);
     return b - a + 1;
   };
+  const ranges = new AbortController(); // cancels the ranges in flight when the read ends early
   const get = (i) => {
     const [a, b] = windowRange(admit, i);
-    return fetch(admit.url, { method: "GET", headers: { ...(admit.send_headers || {}), range: `bytes=${a}-${b}` }, cache: "no-store" });
+    return fetch(admit.url, { method: "GET", headers: { ...(admit.send_headers || {}), range: `bytes=${a}-${b}` }, cache: "no-store", signal: ranges.signal });
   };
-  const budget = windowBudget;
+  const budget = isolateBudget();
   let first = null;
   let error = null;
   await budget.acquire(lengthOf(0));
@@ -495,6 +498,16 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     let sent = 0;
     let failure = null;
     const pending = new Map();
+    const gone = Object.assign(new Error("the client disconnected"), { clientGone: true, code: "client_disconnected" });
+    const onAbort = () => {
+      if (!failure) failure = gone;
+      ranges.abort(gone);
+      writer.abort(gone).catch(() => {}); // a write waiting on a body nobody drains rejects
+    };
+    if (request.signal) {
+      if (request.signal.aborted) onAbort();
+      else request.signal.addEventListener("abort", onAbort, { once: true });
+    }
     const held = new Set(); // ranges whose bytes this read holds of the isolate's budget
     const fetchRange = async (i) => {
       if (i > 0) {
@@ -515,7 +528,7 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     };
     let next = 0;
     const launch = () => {
-      while (next < n && pending.size < w.in_flight) {
+      while (next < n && pending.size < w.in_flight && !failure) {
         const p = fetchRange(next);
         p.catch(() => {}); // awaited in order below; a rejection ahead of its turn is not unhandled
         pending.set(next, p);
@@ -525,6 +538,7 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     try {
       launch();
       for (let i = 0; i < n; i++) {
+        if (failure) throw failure;
         const buf = await pending.get(i);
         pending.delete(i);
         launch();
@@ -535,16 +549,19 @@ async function serveWindow(request, env, ctx, admit, requestId) {
       }
       await writer.close();
     } catch (e) {
-      failure = e;
+      failure = failure && failure.clientGone ? failure : e;
       // Give this read's ranges back FIRST: a pending range may be waiting
       // on exactly that budget (it then sees the failure, gives back what
       // it took and ends).
       for (const i of held) budget.release(lengthOf(i));
       held.clear();
-      await writer.abort(e).catch(() => {});
+      ranges.abort(failure);
+      await writer.abort(failure).catch(() => {});
       await Promise.allSettled(pending.values());
     }
-    const commit = { admit_id: admit.admit_id, outcome: failure ? "error" : "served", backend_status: failure ? failure.status || 0 : 206,
+    if (request.signal) request.signal.removeEventListener("abort", onAbort);
+    const clientGone = !!(failure && failure.clientGone);
+    const commit = { admit_id: admit.admit_id, outcome: failure && !clientGone ? "error" : "served", backend_status: failure && !clientGone ? failure.status || 0 : 206,
       backend_code: failure ? String(failure.code || failure.message || failure).slice(0, 120) : "", backend_content_length: sent, bytes_sent: sent,
       duration_ms: Date.now() - started };
     console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, ranges: n, outcome: commit.outcome, backend_status: commit.backend_status, bytes: sent, ms: commit.duration_ms }));
