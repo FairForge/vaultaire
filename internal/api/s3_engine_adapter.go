@@ -1319,6 +1319,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// shared helper so multipart complete and CopyObject cannot drift from
 	// it again (R3-08).
 	var backendName string
+	putOutcome := &engine.PutOutcome{} // the driver's answer: the row's backend_etag (RP72-1)
+	putOpts = append(putOpts, engine.WithPutOutcome(putOutcome))
 	backendName, err = placeObject(r.Context(), a.db, a.engine, a.logger, t.ID, bucket, container, blob, hashingBody, putOpts...)
 	if err != nil {
 		switch {
@@ -1418,8 +1420,8 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				// body_md5 stays NULL: a PUT's ETag is the body's MD5 (A.4).
 				_, execErr := tx.ExecContext(r.Context(), `
 				INSERT INTO object_head_cache
-					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, body_md5, ssec_key_md5, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, $19, NULL, NULLIF($20, ''), NOW())
+					(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata, encryption_algorithm, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key, body_md5, ssec_key_md5, backend_etag, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, FALSE, $17, $18, $19, NULL, NULLIF($20, ''), NULLIF($21, ''), NOW())
 				ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 					size_bytes            = EXCLUDED.size_bytes,
 					etag                  = EXCLUDED.etag,
@@ -1440,8 +1442,9 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 					storage_key           = EXCLUDED.storage_key,
 					body_md5              = EXCLUDED.body_md5,
 					ssec_key_md5          = EXCLUDED.ssec_key_md5,
+					backend_etag          = EXCLUDED.backend_etag,
 					updated_at            = NOW()
-			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob, ssecKeyMD5)
+			`, t.ID, bucket, artifact, metadataSize, etag, contentType, backendName, metaJSON, encryptionAlgorithm, contentDisposition, contentEncoding, contentLanguage, echoHdrs.CacheControl, echoHdrs.Expires, echoHdrs.WebsiteRedirect, usage.FloorOf(resolvedStorageClass), tagsJSON, encryptionKeyVersion, blob, ssecKeyMD5, putOutcome.BackendETag())
 				return execErr
 			}})
 		versionID = flip.VersionID

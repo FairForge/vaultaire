@@ -1428,8 +1428,10 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 		Version: &versionWrite{Size: row.ContentLength, ETag: etag, ContentType: attrs.ContentType, Backend: row.Backend,
 			Blob: versionBlobRef{StorageKey: row.StorageKey}},
 		Upsert: func(tx *sql.Tx) error {
+			// The backend's ETag the Worker reported is the row's
+			// backend_etag (RP72-1): checked above to be the body's MD5.
 			return upsertWholeObjectHeadRow(cctx, tx, row.TenantID, row.Bucket, row.Key, row.StorageKey, row.ContentLength, etag,
-				row.Backend, row.Floor, attrs)
+				row.Backend, row.Floor, attrs, etag)
 		}})
 	if dbErr != nil {
 		s.releaseEdgeAdmit(ctx, row)

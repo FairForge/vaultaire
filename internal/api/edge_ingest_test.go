@@ -99,7 +99,7 @@ func (d *edgeFakeDriver) Get(ctx context.Context, container, artifact string) (i
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
-func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, data io.Reader, _ ...engine.PutOption) error {
+func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return err
@@ -111,6 +111,10 @@ func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, da
 	d.mu.Lock()
 	d.objects[k] = b
 	d.mu.Unlock()
+	// The backend's answer, as the S3-class drivers report it (RP72-1): a
+	// single PutObject's ETag is the body's MD5.
+	sum := md5.Sum(b) // #nosec G401
+	engine.ApplyPutOptions(opts...).Outcome.SetBackendETag(`"` + hex.EncodeToString(sum[:]) + `"`)
 	return nil
 }
 func (d *edgeFakeDriver) Delete(ctx context.Context, container, artifact string) error {

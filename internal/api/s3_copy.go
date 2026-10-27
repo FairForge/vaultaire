@@ -539,7 +539,8 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 		return
 	}
 	putCtx, putCancel := backendCallCtx(r.Context(), s.longOpAnswerGrace())
-	backendName, err := placeObject(putCtx, s.db, s.engine, s.logger, t.ID, destBucket, destContainer, destBlob, tee, putOpts...)
+	outcome := &engine.PutOutcome{} // the driver's answer: the row's backend_etag (RP72-1)
+	backendName, err := placeObject(putCtx, s.db, s.engine, s.logger, t.ID, destBucket, destContainer, destBlob, tee, append(putOpts, engine.WithPutOutcome(outcome))...)
 	putCancel()
 	if err != nil {
 		releaseReservation()
@@ -598,7 +599,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				// body_md5 stays NULL: the copy's ETag is the MD5 of the bytes it
 				// wrote (as on AWS, a copy is a single-part object) — of a -N
 				// source too (A.4).
-				return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, destBlob, counter.n, etag, backendName, floor, attrs, enc, "")
+				return upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, destBucket, destKey, destBlob, counter.n, etag, backendName, floor, attrs, enc, "", outcome.BackendETag())
 			}})
 		if dbErr != nil {
 			releaseReservation()

@@ -305,7 +305,7 @@ func (s *Server) completeEdgeUpload(w http.ResponseWriter, r *http.Request, t *t
 		Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: up.Backend,
 			Blob: versionBlobRef{StorageKey: blob}},
 		Upsert: func(tx *sql.Tx) error {
-			if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, up.Backend, floor, attrs, objectEncryption{}, ""); err != nil {
+			if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, up.Backend, floor, attrs, objectEncryption{}, "", etagValue); err != nil {
 				return err
 			}
 			return markCompleted(pctx, tx)

@@ -441,7 +441,7 @@ func (r *SmartDemotionRunner) demote(ctx context.Context, hot, cold engine.Drive
 	}
 	defer func() { _ = tx.Rollback() }()
 	upd, err := tx.ExecContext(ctx,
-		`UPDATE object_head_cache SET backend_name = $1
+		`UPDATE object_head_cache SET backend_name = $1, backend_etag = NULL -- the cold copy's answer is not known (RP72-1)
 		 WHERE tenant_id = $2 AND bucket = $3 AND object_key = $4
 		   AND backend_name = $5 AND etag = $6 AND NOT is_chunked AND COALESCE(storage_key, '') = $7`,
 		r.ColdBackend, tenantID, c.bucket, c.key, r.HotBackend, c.etag, c.storageKey)

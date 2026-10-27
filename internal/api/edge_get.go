@@ -54,6 +54,7 @@ const (
 // edgeGetRow is what the admit reads of the head row.
 type edgeGetRow struct {
 	contentType, etag, backend, encAlgo, storageKey, floor, bodyMD5 string
+	backendETag                                                     string
 	size                                                            int64
 	updatedAt                                                       time.Time
 	metadata, tags                                                  []byte
@@ -119,14 +120,14 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	var row edgeGetRow
 	err = s.db.QueryRowContext(sctx, `
 		SELECT h.content_type, h.size_bytes, h.etag, h.updated_at, COALESCE(h.metadata, '{}'), COALESCE(h.backend_name, ''), COALESCE(h.encryption_algorithm, ''), COALESCE(h.tags, '{}'), COALESCE(h.content_disposition, ''), COALESCE(h.content_encoding, ''), COALESCE(h.content_language, ''), COALESCE(h.cache_control, ''), COALESCE(h.http_expires, ''), COALESCE(h.website_redirect_location, ''), h.is_chunked, h.floor, COALESCE(h.storage_key, ''),
-		       COALESCE(h.body_md5, ''),
+		       COALESCE(h.body_md5, ''), COALESCE(h.backend_etag, ''),
 		       `+objectLockColumns+`
 		FROM object_head_cache h
 		LEFT JOIN object_locks l ON l.tenant_id = h.tenant_id AND l.bucket = h.bucket AND l.object_key = h.object_key
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3`,
 		tenantID, bucket, key).Scan(&row.contentType, &row.size, &row.etag, &row.updatedAt, &row.metadata, &row.backend, &row.encAlgo, &row.tags,
 		&row.attrs.ContentDisposition, &row.attrs.ContentEncoding, &row.attrs.ContentLanguage, &row.echo.CacheControl, &row.echo.Expires, &row.echo.WebsiteRedirect,
-		&row.isChunked, &row.floor, &row.storageKey, &row.bodyMD5, &row.lockMode, &row.lockUntil, &row.legalHold)
+		&row.isChunked, &row.floor, &row.storageKey, &row.bodyMD5, &row.backendETag, &row.lockMode, &row.lockUntil, &row.legalHold)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return passThrough("no_row") // the origin's NoSuchKey, with its suggestion
@@ -235,7 +236,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	// (edgeGetIfMatch, D-EDGE-10).
 	_, blob := objectBlobAddress(tenantID, bucket, key, row.storageKey)
 	container := tenantID + "_" + bucket
-	ifMatch := edgeGetIfMatch(row.etag, row.bodyMD5, row.size)
+	ifMatch := edgeGetIfMatch(row.etag, row.bodyMD5, row.backendETag, row.size, row.updatedAt)
 	start, end := int64(0), row.size-1
 	if rng != nil {
 		start, end = rng.start, rng.end
@@ -343,28 +344,58 @@ const (
 	edgeWindowInFlight = 6
 )
 
-// edgeGetIfMatch is the If-Match a read's link signs: the row's digest
-// ONLY when it is provably the backend's own ETag (D-EDGE-10) — an
-// edge-assembled multipart (a -N ETag with no body_md5: the backend's own
-// answer, recorded at Complete), or an object the origin wrote as ONE
-// backend PutObject (at most drivers.S3SinglePutMaxBytes: its ETag is the
-// body's MD5 — the row's single ETag, or the body_md5 of an
-// origin-assembled multipart). A larger origin-written object is a backend
-// multipart whose -N the row does not know: no If-Match, the immutable
-// address is the guard. (The lab, 2026-10-26: a 64 MiB origin-written
-// object's link signed body_md5 and both backends answered 412.) A digest
-// that turns out wrong is a 412 → the origin serves: never other bytes.
-func edgeGetIfMatch(etag, bodyMD5 string, size int64) string {
+// edgeGetIfMatch is the If-Match a read's link signs: the backend's own
+// ETag where the row recorded it at the write (backend_etag, RP72-1 —
+// migration 112: every mover commit and every origin write whose driver
+// reports it), else the row's digest ONLY when it is provably the backend's
+// ETag (D-EDGE-10) — an edge-assembled multipart (a -N ETag with no
+// body_md5: the backend's own answer, recorded at Complete), or an object
+// the origin wrote as ONE backend PutObject (at most the single-PUT cutoff
+// IN FORCE WHEN THE ROW WAS WRITTEN: its ETag is the body's MD5 — the
+// row's single ETag, or the body_md5 of an origin-assembled multipart). A
+// larger origin-written object is a backend multipart whose -N the row
+// does not know: no If-Match, the immutable address is the guard. (The
+// lab, 2026-10-26: a 64 MiB origin-written object's link signed body_md5
+// and both backends answered 412; RP72-1: a 20 MiB row of before #1011 —
+// 16 MiB parts then — was signed its MD5 against the moved 32 MiB cutoff
+// and read through the origin on every read, for ever.) A digest that
+// turns out wrong is a 412 → the origin serves: never other bytes.
+func edgeGetIfMatch(etag, bodyMD5, backendETag string, size int64, written time.Time) string {
+	if b := strings.Trim(strings.TrimSpace(backendETag), `"`); b != "" {
+		return `"` + b + `"`
+	}
 	etag = strings.Trim(etag, `"`)
 	multipart := strings.Contains(etag, "-")
 	switch {
 	case multipart && bodyMD5 == "":
 		return `"` + etag + `"` // the backend's own -N (an edge-assembled upload)
-	case size <= drivers.S3SinglePutMaxBytes:
+	case size <= singlePutMaxBytesAt(written):
 		return `"` + integrityDigest(bodyMD5, etag) + `"` // one backend PUT: the body's MD5
 	default:
 		return ""
 	}
+}
+
+// s3SinglePutCutoffBefore is when the origin's S3-class uploader moved from
+// 16 MiB to 32 MiB parts (#1011, d7532439: its Deploy ran 19:52:34 →
+// 19:57:38 UTC on 2026-10-27; the minute after its end, so a row the old
+// slot wrote while the switch ran is read under the old rule — a row the
+// new slot wrote then loses only its If-Match). A row written before it was
+// one backend PutObject only up to s3SinglePutMaxBytesBefore (RP72-1).
+var s3SinglePutCutoffBefore = time.Date(2026, 10, 27, 19, 58, 0, 0, time.UTC)
+
+// s3SinglePutMaxBytesBefore is the single-PUT cutoff before #1011 (the
+// 16 MiB part size of #279, 2026-06-02).
+const s3SinglePutMaxBytesBefore = 16 << 20
+
+// singlePutMaxBytesAt is the largest body the origin wrote as ONE backend
+// PutObject at the time a row was written (its updated_at: every whole
+// write upserts it).
+func singlePutMaxBytesAt(written time.Time) int64 {
+	if !written.IsZero() && written.Before(s3SinglePutCutoffBefore) {
+		return s3SinglePutMaxBytesBefore
+	}
+	return drivers.S3SinglePutMaxBytes
 }
 
 // settleEdgeGet is the GET's commit under the admit row's lock: `served`

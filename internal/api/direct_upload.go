@@ -267,7 +267,7 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: "r2", Blob: versionBlobRef{StorageKey: blob}},
 		Upsert: func(tx *sql.Tx) error {
 			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, req.Key, blob, size, etag, "r2", "standard",
-				objectAttrs{ContentType: contentType})
+				objectAttrs{ContentType: contentType}, etag) // R2's own HEAD answer
 		}})
 	if err != nil {
 		s.releaseQuota(context.WithoutCancel(ctx), tenantID, "standard", size)

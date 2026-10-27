@@ -251,7 +251,7 @@ func predictRelease(ctx context.Context, db *sql.DB, tenantID, bucket, key, floo
 	res, err := commitBlobWrite(ctx, db, blobWrite{TenantID: tenantID, Bucket: bucket, Key: key, DryRun: true,
 		Version: &versionWrite{Blob: versionBlobRef{StorageKey: addr}},
 		Upsert: func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, key, addr, 0, "", "", floor, objectAttrs{})
+			return upsertWholeObjectHeadRow(ctx, tx, tenantID, bucket, key, addr, 0, "", "", floor, objectAttrs{}, "")
 		}})
 	if err != nil {
 		return 0, fmt.Errorf("predict the release of %s/%s: %w", bucket, key, err)

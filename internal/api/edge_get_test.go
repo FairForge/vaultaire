@@ -338,9 +338,11 @@ func TestEdgeAdmitGet_IfMatchIsTheRowsDigest(t *testing.T) {
 	}
 	h, _ := f.head("single.bin")
 	assert.Equal(t, `"`+h.etag+`"`, ifMatchOf(), "a single PUT: the MD5 ETag")
+	// The rest are rows with no recorded backend ETag (written before
+	// migration 112, RP72-1): the rule infers it.
 	// An origin-assembled multipart: the -N ETag with the whole body's MD5
 	// recorded — the backend holds one PUT of the whole body.
-	f.exec(`UPDATE object_head_cache SET etag = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3', body_md5 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
+	f.exec(`UPDATE object_head_cache SET etag = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3', body_md5 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', backend_etag = NULL WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
 	assert.Equal(t, `"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"`, ifMatchOf())
 	// An edge-assembled multipart: the backend's own -N ETag, no body_md5.
 	f.exec(`UPDATE object_head_cache SET etag = 'cccccccccccccccccccccccccccccccc-4', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'single.bin'`, f.tenantID)
@@ -677,7 +679,8 @@ func TestEdgeAdmitGet_WindowForLargeReads(t *testing.T) {
 	f.putObject("big.bin", testBytes(8192), nil)
 	// The row of a 100 MiB edge-assembled object (its -N is the backend's
 	// own: if-match provable) — the admit reads the row, never the bytes.
-	f.exec(`UPDATE object_head_cache SET size_bytes = $2, etag = 'cccccccccccccccccccccccccccccccc-13', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'big.bin'`,
+	// (No recorded backend ETag: a row of before migration 112 — RP72-1.)
+	f.exec(`UPDATE object_head_cache SET size_bytes = $2, etag = 'cccccccccccccccccccccccccccccccc-13', body_md5 = NULL, backend_etag = NULL WHERE tenant_id = $1 AND object_key = 'big.bin'`,
 		f.tenantID, int64(100<<20))
 	path := "/" + f.bucket + "/big.bin"
 	// A Worker that does not say it reads a window (0.3.0 and before) gets

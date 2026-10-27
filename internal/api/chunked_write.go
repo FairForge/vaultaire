@@ -390,6 +390,7 @@ func upsertChunkedObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucke
 			is_chunked                = TRUE,
 			tags                      = EXCLUDED.tags,
 			storage_key               = EXCLUDED.storage_key, -- the manifest's address (WP-VM-1)
+			backend_etag              = NULL, -- a manifest has no one backend answer (RP72-1)
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, chunkedBackendSentinel, attrs.metadataJSON(), encAlgo,
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
