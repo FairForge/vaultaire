@@ -664,3 +664,98 @@ func TestEdgeReaper_TerminalGetRowsPurgedAt24h(t *testing.T) {
 	assert.True(t, left["purgeputmid0000000000000003"], "a write keeps the 7-day retention")
 	assert.False(t, left["purgeputold0000000000000004"], "a write past 7 days is purged")
 }
+
+// --- Prompt 46c PR B: the windowed reader (D-EDGE-32) ---
+
+// A read of at least 64 MiB through the edge is the Worker's windowed
+// reader's: the admit answers window {range_bytes: 16 MiB, in_flight: 6}
+// and the span's start, and its link signs if-match where provable
+// (D-EDGE-10) but NOT range — the Worker names each 16 MiB range. A read
+// under 64 MiB keeps Part B's exact-span link (D-EDGE-11).
+func TestEdgeAdmitGet_WindowForLargeReads(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.putObject("big.bin", testBytes(8192), nil)
+	// The row of a 100 MiB edge-assembled object (its -N is the backend's
+	// own: if-match provable) — the admit reads the row, never the bytes.
+	f.exec(`UPDATE object_head_cache SET size_bytes = $2, etag = 'cccccccccccccccccccccccccccccccc-13', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'big.bin'`,
+		f.tenantID, int64(100<<20))
+	path := "/" + f.bucket + "/big.bin"
+	// A Worker that does not say it reads a window (0.3.0 and before) gets
+	// Part B's exact-span link whatever the size: it would GET a range-less
+	// link, receive a 200 where it expects a 206 and fall back — charging
+	// the backend's breaker on every large read until 0.4.0 is deployed.
+	old := f.admit(f.signedGet(path, nil, nil))
+	require.True(t, old.Edge, "%+v", old)
+	assert.Nil(t, old.Window, "no window without the Worker's feature")
+	assert.Equal(t, "bytes=0-104857599", old.SendHeaders["range"])
+
+	resp := f.admit(windowed(f.signedGet(path, nil, nil)))
+	require.True(t, resp.Edge, "%+v", resp)
+	require.NotNil(t, resp.Window, "a 100 MiB read is windowed")
+	assert.Equal(t, int64(16<<20), resp.Window.RangeBytes)
+	assert.Equal(t, 6, resp.Window.InFlight)
+	assert.Equal(t, int64(0), resp.Window.Start)
+	assert.Equal(t, int64(100<<20), resp.ContentLength)
+	u, err := url.Parse(resp.URL)
+	require.NoError(t, err)
+	assert.Empty(t, u.Query().Get("x-probe-range"), "the link signs no range")
+	assert.NotContains(t, u.Query().Get("X-Amz-SignedHeaders"), "range")
+	assert.Equal(t, `"cccccccccccccccccccccccccccccccc-13"`, resp.SendHeaders["if-match"], "if-match where provable")
+	_, hasRange := resp.SendHeaders["range"]
+	assert.False(t, hasRange)
+	assert.Equal(t, http.StatusOK, resp.Status)
+
+	// A client Range of ≥ 64 MiB: windowed from its start.
+	ranged := f.admit(windowed(f.signedGet(path, nil, map[string]string{"Range": "bytes=10485760-"})))
+	require.NotNil(t, ranged.Window, "%+v", ranged)
+	assert.Equal(t, int64(10<<20), ranged.Window.Start)
+	assert.Equal(t, int64(90<<20), ranged.ContentLength)
+	assert.Equal(t, http.StatusPartialContent, ranged.Status)
+
+	// No if-match provable (an origin-written object past the single-PUT
+	// cutoff): still windowed, the link signing neither — the Worker
+	// checks every range's ETag against the first's.
+	f.exec(`UPDATE object_head_cache SET etag = 'dddddddddddddddddddddddddddddddd' WHERE tenant_id = $1 AND object_key = 'big.bin'`, f.tenantID)
+	plain := f.admit(windowed(f.signedGet(path, nil, nil)))
+	require.NotNil(t, plain.Window, "%+v", plain)
+	assert.Empty(t, plain.SendHeaders["if-match"])
+
+	// 10 MiB: Part B's link — the exact span signed, no window.
+	f.exec(`UPDATE object_head_cache SET size_bytes = $2 WHERE tenant_id = $1 AND object_key = 'big.bin'`, f.tenantID, int64(10<<20))
+	small := f.admit(windowed(f.signedGet(path, nil, nil)))
+	require.True(t, small.Edge)
+	assert.Nil(t, small.Window)
+	assert.Equal(t, "bytes=0-10485759", small.SendHeaders["range"])
+}
+
+// The windowed read's commit: served meters the bytes the Worker sent (the
+// sum of its ranges); a read cut mid-object (a later range failed after
+// bytes went out) meters what was sent and charges the backend's breaker.
+func TestEdgeCommitGet_WindowMetersWhatWasSent(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.putObject("win.bin", testBytes(8192), nil)
+	f.exec(`UPDATE object_head_cache SET size_bytes = $2, etag = 'cccccccccccccccccccccccccccccccc-13', body_md5 = NULL WHERE tenant_id = $1 AND object_key = 'win.bin'`,
+		f.tenantID, int64(100<<20))
+	f.wireEgress(1<<40, 0, nil)
+	path := "/" + f.bucket + "/win.bin"
+	a := f.admit(windowed(f.signedGet(path, nil, nil)))
+	require.NotNil(t, a.Window)
+	before := f.egressRecorded()
+	relay, code := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeGetServed, BackendStatus: 206, BackendContentLength: 100 << 20, BytesSent: 100 << 20})
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, http.StatusOK, relay.Status)
+	assert.Equal(t, before+int64(100<<20), f.egressRecorded())
+
+	cut := f.admit(windowed(f.signedGet(path, nil, nil)))
+	before = f.egressRecorded()
+	_, code = f.commit(edgeCommitRequest{AdmitID: cut.AdmitID, Outcome: edgeGetError, BackendStatus: 500, BackendCode: "InternalError", BytesSent: 48 << 20})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, before+int64(48<<20), f.egressRecorded(), "a cut read meters what the client received")
+	assert.Equal(t, "failed", f.admitState(cut.AdmitID))
+}
+
+// windowed marks a description as a Worker that reads a window (0.4.0).
+func windowed(req edgeAdmitRequest) edgeAdmitRequest {
+	req.Features = append(req.Features, edgeFeatureWindow)
+	return req
+}

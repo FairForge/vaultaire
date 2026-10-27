@@ -138,6 +138,12 @@ type EdgePresign struct {
 	// address itself.
 	Range   string
 	IfMatch string
+	// Window: a windowed read (WP-EDGE-2 Part C, D-EDGE-32) — the Worker
+	// names each 16 MiB range itself, so the link signs NO range and the
+	// If-Match only where the control plane knows the backend's ETag; a link
+	// signing neither is then expected (the address is immutable, and the
+	// Worker checks every range's ETag against the first's).
+	Window bool
 }
 
 // EdgePart is one part of an edge multipart upload as the backend reported

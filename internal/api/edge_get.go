@@ -240,13 +240,24 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	if rng != nil {
 		start, end = rng.start, rng.end
 	}
+	// A read of at least edgeWindowMin is the windowed reader's (D-EDGE-32:
+	// the bench § 4 doubled both backends at 16 MiB × 6) when the Worker
+	// says it reads one: the link signs no range — the Worker names each one
+	// inside the admitted span — and if-match where provable; under it, or
+	// for an older Worker, the exact span is signed (D-EDGE-11).
+	var window *edgeWindow
 	rangeValue := fmt.Sprintf("bytes=%d-%d", start, end)
-	presigned, signed, presignErr := ew.PresignGet(sctx, container, blob, engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL})
+	presign := engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL}
+	wantSigned := []string{"range"}
+	if length >= edgeWindowMin && req.has(edgeFeatureWindow) {
+		window = &edgeWindow{RangeBytes: edgeWindowRange, InFlight: edgeWindowInFlight, Start: start}
+		presign.Range, presign.Window, rangeValue, wantSigned = "", true, "", nil
+	}
+	presigned, signed, presignErr := ew.PresignGet(sctx, container, blob, presign)
 	if presignErr != nil {
 		s.logger.Error("edge admit get: presign failed", zap.Error(presignErr), zap.String("backend", row.backend))
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
-	wantSigned := []string{"range"}
 	if ifMatch != "" {
 		wantSigned = append(wantSigned, "if-match")
 	}
@@ -260,6 +271,10 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		case "if-match":
 			sendHeaders["if-match"] = ifMatch
 		case "range":
+			if window != nil {
+				s.logger.Error("edge admit get: a windowed read's link signs a range — refused")
+				return edgeAdmitResponse{}, http.StatusInternalServerError
+			}
 			sendHeaders["range"] = rangeValue
 		case "host":
 		default:
@@ -316,8 +331,17 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		zap.String("admit_id", admit.ID), zap.String("request_id", req.RequestID))
 	return edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
 		ExpectStatus: http.StatusPartialContent, Status: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob,
-		ContentLength: length, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+		ContentLength: length, Window: window, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
 }
+
+// The windowed reader (D-EDGE-32, the SPEED bench § 4): a read of at least
+// edgeWindowMin bytes is read by the Worker as edgeWindowRange ranges with
+// at most edgeWindowInFlight in flight (a Worker's six connections).
+const (
+	edgeWindowMin      = 64 << 20
+	edgeWindowRange    = 16 << 20
+	edgeWindowInFlight = 6
+)
 
 // edgeGetIfMatch is the If-Match a read's link signs: the row's digest
 // ONLY when it is provably the backend's own ETag (D-EDGE-10) — an
@@ -353,6 +377,10 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 	switch req.Outcome {
 	case edgeGetServed:
 		n := req.BackendContentLength
+		if req.BytesSent > 0 {
+			// A windowed read: the bytes the Worker wrote, its ranges summed.
+			n = req.BytesSent
+		}
 		switch {
 		case n == 0:
 			// No Content-Length at the backend's headers (neither backend
@@ -401,30 +429,56 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 		})
 		rec.WriteHeader(http.StatusOK)
 		return "committed", n
-	default:
-		// The origin served it (the Worker's fallback is fetch(request)):
-		// nothing metered here. The backend's answer is a read outcome of
-		// that backend — a 5xx, a 403 (a dead key) or no answer charges
-		// its breaker as the origin's own read would; a 404 is logged
-		// loud (the row names a blob the backend does not hold) and a 412
-		// (the digest moved under an immutable address) is impossible by
-		// construction — neither is the backend's health.
+	case edgeGetError, edgeGetFallback:
+		if req.BytesSent <= 0 {
+			return s.settleEdgeGetFallback(row, req, rec)
+		}
+		// A windowed read cut mid-object: a range failed after bytes had
+		// gone to the client, whose body was cut (never a clean short end).
+		// What was sent is metered — the client has it — and the backend's
+		// answer charges its breaker; the origin served nothing.
+		n := min(req.BytesSent, row.ContentLength)
+		s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
+		s.recordEdgeAccess(row, http.StatusInternalServerError, 0, n)
 		if s.engine != nil {
 			if rerr := edgeBackendReadError(req); rerr != nil {
 				s.engine.RecordReadOutcome(row.Backend, rerr)
 			}
 		}
-		level := s.logger.Warn
-		if req.BackendStatus == http.StatusNotFound {
-			level = s.logger.Error
-		}
-		level("edge commit get: the backend did not serve the object — the origin did",
-			zap.String("outcome", req.Outcome), zap.Int("backend_status", req.BackendStatus), zap.String("backend_code", req.BackendCode),
-			zap.String("backend", row.Backend), zap.String("storage_key", row.StorageKey), zap.String("tenant_id", row.TenantID),
-			zap.String("bucket", row.Bucket), zap.String("key", row.Key), zap.String("admit_id", row.ID))
+		s.logger.Warn("edge commit get: a windowed read was cut mid-object — what was sent is metered",
+			zap.Int64("bytes_sent", n), zap.Int64("admitted", row.ContentLength), zap.Int("backend_status", req.BackendStatus),
+			zap.String("backend_code", req.BackendCode), zap.String("backend", row.Backend), zap.String("admit_id", row.ID))
 		rec.WriteHeader(http.StatusOK)
-		return "failed", 0
+		return "failed", n
+	default:
+		return s.settleEdgeGetFallback(row, req, rec)
 	}
+}
+
+// settleEdgeGetFallback is the commit of a read the origin served.
+func (s *Server) settleEdgeGetFallback(row edgeAdmitRow, req edgeCommitRequest, rec *relayRecorder) (string, int64) {
+	// The origin served it (the Worker's fallback is fetch(request)):
+	// nothing metered here. The backend's answer is a read outcome of
+	// that backend — a 5xx, a 403 (a dead key) or no answer charges
+	// its breaker as the origin's own read would; a 404 is logged
+	// loud (the row names a blob the backend does not hold) and a 412
+	// (the digest moved under an immutable address) is impossible by
+	// construction — neither is the backend's health.
+	if s.engine != nil {
+		if rerr := edgeBackendReadError(req); rerr != nil {
+			s.engine.RecordReadOutcome(row.Backend, rerr)
+		}
+	}
+	level := s.logger.Warn
+	if req.BackendStatus == http.StatusNotFound {
+		level = s.logger.Error
+	}
+	level("edge commit get: the backend did not serve the object — the origin did",
+		zap.String("outcome", req.Outcome), zap.Int("backend_status", req.BackendStatus), zap.String("backend_code", req.BackendCode),
+		zap.String("backend", row.Backend), zap.String("storage_key", row.StorageKey), zap.String("tenant_id", row.TenantID),
+		zap.String("bucket", row.Bucket), zap.String("key", row.Key), zap.String("admit_id", row.ID))
+	rec.WriteHeader(http.StatusOK)
+	return "failed", 0
 }
 
 // edgeBackendReadError is the read outcome a failed edge GET charges to the

@@ -54,14 +54,16 @@ func TestEdgePresignGet_SignsRangeAndIfMatch(t *testing.T) {
 
 			// A range: both signed.
 			u, signed, err = tc.ew.PresignGet(ctx, "tenant-abc_bkt", "obj.bin",
-				engine.EdgePresign{IfMatch: `"abc"`, Range: "bytes=100-299", TTL: 15 * 60 * 1e9})
+				engine.EdgePresign{IfMatch: `"etag-of-the-row"`, Range: "bytes=100-299", TTL: 15 * 60 * 1e9})
 			require.NoError(t, err)
 			assert.ElementsMatch(t, []string{"host", "if-match", "range"}, signed)
 			pu, err = url.Parse(u)
 			require.NoError(t, err)
 			assert.Equal(t, "host;if-match;range", pu.Query().Get("X-Amz-SignedHeaders"))
 			assert.Equal(t, "900", pu.Query().Get("X-Amz-Expires"))
-			assert.False(t, strings.Contains(pu.RawQuery, "abc"), "the If-Match value travels as a header, never in the link")
+			// A value no hex signature can spell (`abc` was in the hex
+			// signature ~1.5 % of the time: a CI flake).
+			assert.False(t, strings.Contains(pu.RawQuery, "etag-of-the-row"), "the If-Match value travels as a header, never in the link")
 
 			// A Range alone (the backend's ETag unknown to the row): signed.
 			_, signed, err = tc.ew.PresignGet(ctx, "tenant-abc_bkt", "obj.bin", engine.EdgePresign{Range: "bytes=0-1"})

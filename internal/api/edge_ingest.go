@@ -115,6 +115,23 @@ type edgeAdmitRequest struct {
 	Headers   map[string]string `json:"headers"`
 	ClientIP  string            `json:"client_ip"`
 	RequestID string            `json:"request_id"`
+	// Features the Worker reads (0.4.0: "window"): an answer a Worker does
+	// not know is never given — a 0.3.0 Worker would GET a windowed link
+	// whole and fall back, charging the backend's breaker.
+	Features []string `json:"features,omitempty"`
+}
+
+// edgeFeatureWindow: the Worker reads a windowed answer (D-EDGE-32).
+const edgeFeatureWindow = "window"
+
+// has says whether the Worker named the feature.
+func (r edgeAdmitRequest) has(feature string) bool {
+	for _, f := range r.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // edgeExpect tells the Worker what the backend will enforce.
@@ -146,6 +163,11 @@ type edgeAdmitResponse struct {
 	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	ContentLength   int64             `json:"content_length,omitempty"`
+	// Window (WP-EDGE-2 Part C, D-EDGE-32): a read of at least 64 MiB is
+	// the Worker's windowed reader's — 16 MiB ranges, at most 6 in flight,
+	// from Start over ContentLength bytes, each written in order; the link
+	// signs no range.
+	Window *edgeWindow `json:"window,omitempty"`
 	// An aws-chunked write (WP-EDGE-2 Part C): StreamingTrailer is the
 	// trailer the body's framing ends in (the codec decodes the framing and
 	// VERIFIES it — D-EDGE-31), ContentLength the DECODED length. The mover
@@ -164,6 +186,14 @@ type edgeAdmitResponse struct {
 	// batch of chunk hashes, uploads the misses as 0x06 blobs and commits
 	// the chunk list.
 	Codec *edgeCodecGrant `json:"codec,omitempty"`
+}
+
+// edgeWindow is a windowed read's shape: the range size, the most ranges
+// in flight (a Worker's connection limit), the span's first byte.
+type edgeWindow struct {
+	RangeBytes int64 `json:"range_bytes"`
+	InFlight   int   `json:"in_flight"`
+	Start      int64 `json:"start"`
 }
 
 // edgeCodecGrant is what a codec admit hands the data-plane host: the
@@ -193,6 +223,10 @@ type edgeCommitRequest struct {
 	// is metered (the Worker cannot see the end of a stream it does not
 	// touch; edge_get.go).
 	BackendContentLength int64 `json:"backend_content_length,omitempty"`
+	// A windowed GET (D-EDGE-32): the bytes the Worker wrote to the client,
+	// reported when its stream ended — the sum of its ranges, or what went
+	// out before a range failed and the body was cut.
+	BytesSent int64 `json:"bytes_sent,omitempty"`
 	// A codec write (WP-EDGE-2): the ordered chunk list and the body's MD5
 	// (hex) — a PUT's ETag, a part's part digest.
 	Chunks  []edgeCommitChunk `json:"chunks,omitempty"`

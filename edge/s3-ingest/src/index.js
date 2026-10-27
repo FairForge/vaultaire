@@ -39,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { runCodec, s3ErrorXML } from "./codec.js";
+import { Semaphore, runCodec, s3ErrorXML } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -121,6 +121,9 @@ export function describe(request, op, requestId) {
     headers,
     client_ip: request.headers.get("cf-connecting-ip") || "",
     request_id: requestId,
+    // What this Worker reads (0.4.0): the control plane never answers a
+    // shape an older Worker would misread (a windowed GET).
+    features: ["window"],
   };
 }
 
@@ -403,6 +406,154 @@ async function serveRead(request, env, ctx, admit, requestId) {
   return readResponse(backend, admit);
 }
 
+// --- the windowed reader (0.4.0, D-EDGE-32) -----------------------------------
+
+/** fixedLength is a FixedLengthStream of n bytes where the runtime has one
+ * (workerd: the client's Content-Length is the stream's, a short body an
+ * error), an identity TransformStream elsewhere (node: the tests). */
+function fixedLength(n) {
+  return typeof globalThis.FixedLengthStream === "function" ? new globalThis.FixedLengthStream(n) : new TransformStream();
+}
+
+/**
+ * WINDOW_ISOLATE_BYTES bounds the range buffers ALL windowed reads of one
+ * isolate hold at once: one full window (6 × 16 MiB). An isolate serves
+ * concurrent requests, and 6 × 16 MiB per read would be 192 MiB for two —
+ * past the isolate's 128 MB; concurrent reads share the budget (FIFO, a
+ * range admitted alone when nothing is held — never a deadlock).
+ */
+export const WINDOW_ISOLATE_BYTES = 6 * (16 << 20);
+let windowBudget = new Semaphore(WINDOW_ISOLATE_BYTES);
+
+/** setWindowBudget replaces the isolate's window budget (the tests); returns the restore. */
+export function setWindowBudget(bytes) {
+  const prev = windowBudget;
+  windowBudget = new Semaphore(bytes);
+  return () => {
+    windowBudget = prev;
+  };
+}
+
+/** windowRange is range i of a windowed read: [first byte, last byte]. */
+export function windowRange(admit, i) {
+  const w = admit.window;
+  const a = w.start + i * w.range_bytes;
+  return [a, Math.min(w.start + admit.content_length, a + w.range_bytes) - 1];
+}
+
+/**
+ * serveWindow streams an admitted read of ≥ 64 MiB as the windowed reader
+ * (the SPEED bench § 4: 16 MiB ranges, ≤ 6 in flight, doubled both
+ * backends): each range is its own GET on the admit's link (which signs no
+ * range — the Worker names each inside the admitted span — and the
+ * if-match where provable), read whole (`arrayBuffer()`: ~1 s of CPU per
+ * GiB) and written IN ORDER to a FixedLengthStream of the span. The FIRST
+ * range decides, as Part B's single GET: anything but a 206 of the expected
+ * length is the origin's (fallback — no byte has left the edge). After it,
+ * a range that fails — another status, another length, another ETag than
+ * the first's — CUTS the client's body (an aborted stream, never a clean
+ * short end). The commit is made when the stream ends: served with the
+ * bytes sent, or error with the bytes sent before the cut (the control
+ * plane meters what the client received).
+ */
+async function serveWindow(request, env, ctx, admit, requestId) {
+  const started = Date.now();
+  const w = admit.window;
+  const n = Math.ceil(admit.content_length / w.range_bytes);
+  const lengthOf = (i) => {
+    const [a, b] = windowRange(admit, i);
+    return b - a + 1;
+  };
+  const get = (i) => {
+    const [a, b] = windowRange(admit, i);
+    return fetch(admit.url, { method: "GET", headers: { ...(admit.send_headers || {}), range: `bytes=${a}-${b}` }, cache: "no-store" });
+  };
+  const budget = windowBudget;
+  let first = null;
+  let error = null;
+  await budget.acquire(lengthOf(0));
+  try {
+    first = await get(0);
+  } catch (e) {
+    error = e;
+  }
+  const firstLength = first ? first.headers.get("content-length") : null;
+  if (!first || first.status !== 206 || (firstLength !== null && Number(firstLength) !== lengthOf(0))) {
+    budget.release(lengthOf(0));
+    const commit = readCommit(admit, first, error, started);
+    if (commit.outcome === "served") commit.outcome = "fallback"; // a 206 of another length
+    ctx.waitUntil(commitRead(env, commit, requestId));
+    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, ms: commit.duration_ms }));
+    if (first) await first.body?.cancel();
+    return passThrough(request);
+  }
+  const etag = first.headers.get("etag");
+  const { readable, writable } = fixedLength(admit.content_length);
+  const writer = writable.getWriter();
+
+  const pump = async () => {
+    let sent = 0;
+    let failure = null;
+    const pending = new Map();
+    const held = new Set(); // ranges whose bytes this read holds of the isolate's budget
+    const fetchRange = async (i) => {
+      if (i > 0) {
+        await budget.acquire(lengthOf(i));
+        if (failure) {
+          budget.release(lengthOf(i));
+          throw failure;
+        }
+      }
+      held.add(i);
+      const r = i === 0 ? first : await get(i);
+      const len = r.headers.get("content-length");
+      if (r.status !== 206 || (len !== null && Number(len) !== lengthOf(i)) || (etag && r.headers.get("etag") !== etag)) {
+        const code = backendErrorCode(await r.text().catch(() => ""));
+        throw Object.assign(new Error(`range ${i}: ${r.status}`), { status: r.status, code: code || (r.status === 206 ? "range_mismatch" : "") });
+      }
+      return new Uint8Array(await r.arrayBuffer());
+    };
+    let next = 0;
+    const launch = () => {
+      while (next < n && pending.size < w.in_flight) {
+        const p = fetchRange(next);
+        p.catch(() => {}); // awaited in order below; a rejection ahead of its turn is not unhandled
+        pending.set(next, p);
+        next++;
+      }
+    };
+    try {
+      launch();
+      for (let i = 0; i < n; i++) {
+        const buf = await pending.get(i);
+        pending.delete(i);
+        launch();
+        await writer.write(buf);
+        sent += buf.length;
+        held.delete(i);
+        budget.release(lengthOf(i));
+      }
+      await writer.close();
+    } catch (e) {
+      failure = e;
+      // Give this read's ranges back FIRST: a pending range may be waiting
+      // on exactly that budget (it then sees the failure, gives back what
+      // it took and ends).
+      for (const i of held) budget.release(lengthOf(i));
+      held.clear();
+      await writer.abort(e).catch(() => {});
+      await Promise.allSettled(pending.values());
+    }
+    const commit = { admit_id: admit.admit_id, outcome: failure ? "error" : "served", backend_status: failure ? failure.status || 0 : 206,
+      backend_code: failure ? String(failure.code || failure.message || failure).slice(0, 120) : "", backend_content_length: sent, bytes_sent: sent,
+      duration_ms: Date.now() - started };
+    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, ranges: n, outcome: commit.outcome, backend_status: commit.backend_status, bytes: sent, ms: commit.duration_ms }));
+    await commitRead(env, commit, requestId);
+  };
+  ctx.waitUntil(pump());
+  return new Response(readable, { status: admit.status || admit.expect_status, headers: admit.response_headers || {} });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const kind = classify(request);
@@ -438,7 +589,7 @@ export default {
       return passThrough(request);
     }
 
-    if (kind.kind === "get") return serveRead(request, env, ctx, admit, requestId);
+    if (kind.kind === "get") return admit.window ? serveWindow(request, env, ctx, admit, requestId) : serveRead(request, env, ctx, admit, requestId);
     if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
 
     const moved = await moveBody(request, admit);

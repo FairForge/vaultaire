@@ -146,3 +146,24 @@ func TestEdgeSignPut_HeaderSignedStreamingTrailer(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, wasabi.EdgeStreaming().Supported)
 }
+
+// TestEdgePresignGet_Window (D-EDGE-32): a windowed read's link signs no
+// range (the Worker names each one) and if-match only when known; a link
+// signing neither is made only for a window, and a window never signs a
+// range.
+func TestEdgePresignGet_Window(t *testing.T) {
+	fixed, err := NewFixedBucketS3Driver("idrive", "AKIAFAKE", "fakesecret", "https://fake.idrive.invalid", "us-central-1", "vaultaire", zap.NewNop())
+	require.NoError(t, err)
+	ctx := common.WithTenantID(context.Background(), "tenant-edge")
+	u, signed, err := fixed.PresignGet(ctx, "tenant-edge_bkt", "k", engine.EdgePresign{IfMatch: `"abc-3"`, Window: true, TTL: 15 * time.Minute})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"host", "if-match"}, signed)
+	assert.NotContains(t, signedHeadersOf(t, u), "range")
+	_, signed, err = fixed.PresignGet(ctx, "tenant-edge_bkt", "k", engine.EdgePresign{Window: true, TTL: 15 * time.Minute})
+	require.NoError(t, err, "a window may sign neither: the address is immutable, the Worker checks every range's ETag")
+	assert.ElementsMatch(t, []string{"host"}, signed)
+	_, _, err = fixed.PresignGet(ctx, "tenant-edge_bkt", "k", engine.EdgePresign{TTL: time.Minute})
+	assert.Error(t, err, "outside a window, never a link signing neither")
+	_, _, err = fixed.PresignGet(ctx, "tenant-edge_bkt", "k", engine.EdgePresign{Range: "bytes=0-9", Window: true})
+	assert.Error(t, err, "a window never signs a range")
+}
