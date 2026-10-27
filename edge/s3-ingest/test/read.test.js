@@ -300,3 +300,33 @@ test("a cut under a tight budget never hangs: the read gives its ranges back bef
     restoreBudget();
   }
 });
+
+// RP72-5: a client that disconnects mid-window (workerd fires request.signal)
+// stops the reader — no range is launched after the signal, the ranges in
+// flight are cancelled, the read ends (it never waits on a body nobody
+// drains), and the commit meters what was sent as a SERVED read: a client
+// that went away is never the backend's failure (no breaker charge).
+test("a client that disconnects mid-window stops the reader: no range launched after the signal, the bytes sent metered as served", { timeout: 10_000 }, async () => {
+  const object = new Uint8Array(40 * (1 << 20)).map((_, i) => (i * 3) & 255);
+  const f = windowFakes({ object, admit: windowAdmit(object.length), delayMs: 20 });
+  try {
+    const ac = new AbortController();
+    const req = new Request("https://s3.stored.cloud/b/obj", { method: "GET", headers: { authorization: sig }, signal: ac.signal });
+    const waits = [];
+    const resp = await worker.fetch(req, env, { waitUntil: (p) => waits.push(p) });
+    const reader = resp.body.getReader();
+    await reader.read(); // the client takes a little, then goes — and nobody drains the body any more
+    const launchedAtAbort = f.st.ranges.length;
+    ac.abort();
+    await Promise.all(waits);
+    assert.ok(f.st.ranges.length <= launchedAtAbort + 1, `no range launched after the signal (${launchedAtAbort} → ${f.st.ranges.length})`);
+    assert.ok(f.st.ranges.length < 40, "the read stopped");
+    assert.equal(f.st.commits.length, 1);
+    const c = f.st.commits[0];
+    assert.equal(c.outcome, "served", "a client leaving is not the backend's failure");
+    assert.equal(c.backend_code, "client_disconnected");
+    assert.ok(c.bytes_sent > 0 && c.bytes_sent < object.length, `what was sent is metered: ${c.bytes_sent}`);
+  } finally {
+    f.restore();
+  }
+});

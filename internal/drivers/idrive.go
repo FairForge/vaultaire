@@ -312,9 +312,11 @@ func (d *IDriveDriver) Put(ctx context.Context, container, artifact string, data
 	// The sia driver paces its source (SIA_WRITE_BUDGET, sia_write.go);
 	// data is unchanged everywhere else.
 	data = d.pacedSource(ctx, data)
-	if err := s3ParallelUpload(ctx, d.uploadClient(), d.bucket, key, options.ContentType, data, options.ContentLength); err != nil {
+	etag, err := s3ParallelUploadETag(ctx, d.uploadClient(), d.bucket, key, options.ContentType, data, options.ContentLength)
+	if err != nil {
 		return err
 	}
+	options.Outcome.SetBackendETag(etag) // the head row's backend_etag (RP72-1)
 	return nil
 }
 

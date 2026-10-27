@@ -264,6 +264,11 @@ type edgeAdmitAttrs struct {
 	// keyed hash → the claim's pending_since. The commit flips them ready;
 	// an expiry or a failed commit drops them (the reaper's rule).
 	CodecClaims map[string]time.Time `json:"codec_claims,omitempty"`
+	// CheckLength: an aws-chunked write to a backend that does not enforce
+	// x-amz-decoded-content-length (RP72-2, Lyve) — the PUT's commit HEADs
+	// the blob, and the upload's Complete the assembled object, against the
+	// admitted size.
+	CheckLength bool `json:"check_length,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -773,6 +778,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
 			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent")},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
+	row.Attrs.CheckLength = stream != nil && !streamProps.EnforcesDecodedLength
 	container := tenantID + "_" + bucket
 	var presigned string
 	var signed []string
@@ -1401,6 +1407,25 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 			return state, n, deleteAfter
 		}
 	}
+	if row.Op == edgeOpPut && row.Attrs.CheckLength {
+		// The backend took the aws-chunked body whatever length it decoded
+		// to (RP72-2): the blob's size must be the admitted one — the row,
+		// the bill and the reservation say it.
+		size, hErr := s.edgeBlobSize(ctx, row)
+		switch {
+		case hErr != nil:
+			rec.Header().Set("Retry-After", "30")
+			s.logger.Warn("edge commit: the blob's size could not be checked — 503, removed", zap.Error(hErr),
+				zap.String("backend", row.Backend), zap.String("admit_id", row.ID))
+			state, n, _ := fail(ErrServiceUnavailable)
+			return state, n, deleteAfter
+		case size != row.ContentLength:
+			s.logger.Warn("edge commit: the backend stored another length than the client signed — IncompleteBody, removed",
+				zap.Int64("stored", size), zap.Int64("signed", row.ContentLength), zap.String("backend", row.Backend), zap.String("admit_id", row.ID))
+			state, n, _ := fail(ErrIncompleteBody)
+			return state, n, deleteAfter
+		}
+	}
 	var state string
 	var n int64
 	switch row.Op {
@@ -1410,6 +1435,26 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 		state, n = s.commitEdgePart(ctx, row, req, rec, etag, reqID)
 	}
 	return state, n, nil
+}
+
+// edgeBlobSize is the size the backend holds at an admitted PUT's address
+// (one HEAD — engine.ObjectHeader, which every EdgeWriter has).
+func (s *Server) edgeBlobSize(ctx context.Context, row edgeAdmitRow) (int64, error) {
+	drv, ok := s.engine.GetDriver(row.Backend)
+	if !ok {
+		return 0, fmt.Errorf("backend %s is not registered", row.Backend)
+	}
+	h, ok := drv.(engine.ObjectHeader)
+	if !ok {
+		return 0, fmt.Errorf("backend %s cannot be asked for an object's size", row.Backend)
+	}
+	hctx, cancel := context.WithTimeout(common.WithTenantID(context.WithoutCancel(ctx), row.TenantID), edgeBackendCallTimeout)
+	defer cancel()
+	info, err := h.HeadObject(hctx, row.TenantID+"_"+row.Bucket, row.StorageKey)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size, nil
 }
 
 // commitEdgePut is the PUT's commit: commitBlobWrite exactly as HandlePut,
@@ -1428,8 +1473,10 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 		Version: &versionWrite{Size: row.ContentLength, ETag: etag, ContentType: attrs.ContentType, Backend: row.Backend,
 			Blob: versionBlobRef{StorageKey: row.StorageKey}},
 		Upsert: func(tx *sql.Tx) error {
+			// The backend's ETag the Worker reported is the row's
+			// backend_etag (RP72-1): checked above to be the body's MD5.
 			return upsertWholeObjectHeadRow(cctx, tx, row.TenantID, row.Bucket, row.Key, row.StorageKey, row.ContentLength, etag,
-				row.Backend, row.Floor, attrs)
+				row.Backend, row.Floor, attrs, etag)
 		}})
 	if dbErr != nil {
 		s.releaseEdgeAdmit(ctx, row)

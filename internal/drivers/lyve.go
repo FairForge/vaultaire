@@ -273,10 +273,11 @@ func (d *LyveDriver) Put(ctx context.Context, container, artifact string, data i
 	// the driver only ever talks to one regional endpoint. Through the
 	// deadline client: a PutObject or UploadPart with no answer by its
 	// deadline is sent once more on a fresh connection (put_deadline.go).
-	if err := s3ParallelUploadInput(ctx, d.uploadClient(), input); err != nil {
+	etag, err := s3ParallelUploadInputETag(ctx, d.uploadClient(), input)
+	if err != nil {
 		return fmt.Errorf("put object: %w", err)
 	}
-
+	options.Outcome.SetBackendETag(etag) // the head row's backend_etag (RP72-1)
 	return nil
 }
 

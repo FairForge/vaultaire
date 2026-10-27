@@ -111,6 +111,10 @@ var Deleted = []Rule{
 	// write's admit and its commit; a pending one's address is already the
 	// sweep's (under the tenant's prefix on its backend).
 	{"edge_admits", `DELETE FROM edge_admits WHERE tenant_id = $1`, ByTenant},
+	// A tenant-scoped data-plane host (112, WP-EDGE-3): the customer's own
+	// node, their configuration — its hostname, address and token hash go
+	// with the account (a platform host has tenant_id NULL and stays).
+	{"data_plane_hosts", `DELETE FROM data_plane_hosts WHERE tenant_id = $1`, ByTenant},
 	{"artifacts", `DELETE FROM artifacts WHERE tenant_id = $1`, ByTenant},
 	{"bucket_notifications", `DELETE FROM bucket_notifications WHERE tenant_id = $1`, ByTenant},
 	{"buckets", `DELETE FROM buckets WHERE tenant_id = $1`, ByTenant},

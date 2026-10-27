@@ -1227,6 +1227,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		// region driver for a region-pinned bucket (R3-08: complete used to go
 		// straight to the engine, i.e. the primary, under a residency label),
 		// else the backend the resolved class picks.
+		completeOutcome := &engine.PutOutcome{}
 		completeOpts := []engine.PutOption{engine.WithContentLength(putLength)}
 		if tierClass != "" {
 			completeOpts = append(completeOpts, engine.WithStorageClass(tierClass))
@@ -1235,6 +1236,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			completeOpts = append(completeOpts, engine.WithContentType(attrs.ContentType))
 		}
 		var uploadErr error
+		completeOpts = append(completeOpts, engine.WithPutOutcome(completeOutcome)) // the row's backend_etag (RP72-1)
 		backendName, uploadErr = placeObject(putCtx, s.db, s.engine, s.logger, t.ID, bucket, containerName, blob, src, completeOpts...)
 		if uploadErr == nil && !staged.verified() {
 			// A backend that took the declared length without reading to
@@ -1272,7 +1274,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 				Version: &versionWrite{Size: totalSize, ETag: etagValue, ContentType: attrs.ContentType, Backend: backendName,
 					Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 				Upsert: func(tx *sql.Tx) error {
-					if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs, enc, bodyMD5); err != nil {
+					if err := upsertWholeObjectHeadRowEnc(pctx, tx, t.ID, bucket, object, blob, totalSize, etagValue, backendName, floor, attrs, enc, bodyMD5, completeOutcome.BackendETag()); err != nil {
 						return err
 					}
 					return markCompleted(pctx, tx)

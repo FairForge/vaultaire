@@ -299,7 +299,7 @@ func (k *KeyReencryptRunner) repointReencrypted(ctx context.Context, c objectRee
 		return false, err
 	}
 	head, err := tx.ExecContext(ctx, `
-		UPDATE object_head_cache SET storage_key = $5, encryption_key_version = $6
+		UPDATE object_head_cache SET storage_key = $5, encryption_key_version = $6, backend_etag = NULL
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND NOT is_chunked
 		  AND COALESCE(storage_key, object_key) = $4 AND COALESCE(backend_name, '') = $7
 		  AND encryption_algorithm = $8 AND COALESCE(encryption_key_version, 1) = $9`,

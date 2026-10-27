@@ -66,6 +66,8 @@ type edgeFakeDriver struct {
 	aborts      atomic.Int32
 	deletes     []string
 	failPresign atomic.Bool
+	// completeErr, when set, is CompleteMultipart's answer (RP72-4).
+	completeErr error
 	// deleteGate, when set, holds every Delete until it is closed;
 	// deleteEntered is closed once a Delete has started (RP64-1's test).
 	deleteGate    chan struct{}
@@ -99,7 +101,7 @@ func (d *edgeFakeDriver) Get(ctx context.Context, container, artifact string) (i
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
-func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, data io.Reader, _ ...engine.PutOption) error {
+func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return err
@@ -111,6 +113,10 @@ func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, da
 	d.mu.Lock()
 	d.objects[k] = b
 	d.mu.Unlock()
+	// The backend's answer, as the S3-class drivers report it (RP72-1): a
+	// single PutObject's ETag is the body's MD5.
+	sum := md5.Sum(b) // #nosec G401
+	engine.ApplyPutOptions(opts...).Outcome.SetBackendETag(`"` + hex.EncodeToString(sum[:]) + `"`)
 	return nil
 }
 func (d *edgeFakeDriver) Delete(ctx context.Context, container, artifact string) error {
@@ -292,6 +298,9 @@ func (d *edgeFakeDriver) CompleteMultipart(ctx context.Context, container, artif
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return "", err
+	}
+	if d.completeErr != nil {
+		return "", d.completeErr
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

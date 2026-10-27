@@ -45,7 +45,7 @@ func (m *mockUploadClient) PutObject(_ context.Context, in *s3.PutObjectInput, _
 	if m.putErr != nil {
 		return nil, m.putErr
 	}
-	return &s3.PutObjectOutput{}, nil
+	return &s3.PutObjectOutput{ETag: aws.String(`"put-etag"`)}, nil
 }
 
 func (m *mockUploadClient) CreateMultipartUpload(_ context.Context, _ *s3.CreateMultipartUploadInput, _ ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
@@ -68,7 +68,7 @@ func (m *mockUploadClient) CompleteMultipartUpload(_ context.Context, _ *s3.Comp
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.completeCalls++
-	return &s3.CompleteMultipartUploadOutput{}, nil
+	return &s3.CompleteMultipartUploadOutput{ETag: aws.String(`"complete-etag-3"`)}, nil
 }
 
 func (m *mockUploadClient) AbortMultipartUpload(_ context.Context, _ *s3.AbortMultipartUploadInput, _ ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
@@ -312,4 +312,24 @@ func TestS3Upload_ThirtyTwoMiBByEightAndTheSinglePutCutoffMovesWithIt(t *testing
 	u := uploaderFor(&mockUploadClient{})
 	assert.Equal(t, int64(s3UploadPartSize), u.PartSize)
 	assert.Equal(t, s3UploadConcurrency, u.Concurrency)
+}
+
+// RP72-1 (Prompt 47 Part 0): the uploader reports the ETag the BACKEND
+// answered — PutObject's for a body of one part, CompleteMultipartUpload's
+// (the parts' -N) for a larger one — so the head row records it
+// (object_head_cache.backend_etag) and an edge read signs If-Match from it,
+// never by inference from the size.
+func TestS3Upload_ReportsTheBackendsETag(t *testing.T) {
+	small := bytes.Repeat([]byte("s"), 1<<20)
+	m := newMockUploadClient()
+	etag, err := s3ParallelUploadETag(context.Background(), m, "bucket", "key", "", nonSeekableReader{r: bytes.NewReader(small)}, int64(len(small)))
+	require.NoError(t, err)
+	assert.Equal(t, `"put-etag"`, etag, "a single PutObject's answer")
+
+	large := bytes.Repeat([]byte("l"), s3UploadPartSize+1)
+	m = newMockUploadClient()
+	etag, err = s3ParallelUploadETag(context.Background(), m, "bucket", "key", "", nonSeekableReader{r: bytes.NewReader(large)}, int64(len(large)))
+	require.NoError(t, err)
+	assert.Equal(t, 1, m.completeCalls)
+	assert.Equal(t, `"complete-etag-3"`, etag, "the multipart Complete's answer")
 }

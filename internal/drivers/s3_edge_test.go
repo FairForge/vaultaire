@@ -81,7 +81,7 @@ func TestEdgeSignPut_HeaderSignedStreamingTrailer(t *testing.T) {
 		region string
 		props  engine.EdgeStreamingProps
 	}{
-		"fixed-bucket": {fixed, "us-central-1", engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true}},
+		"fixed-bucket": {fixed, "us-central-1", engine.EdgeStreamingProps{Supported: true, VerifiesTrailer: true, EnforcesDecodedLength: true}}, // RP72-2: iDrive enforces the decoded length
 		"lyve":         {lyve, "us-west-1", engine.EdgeStreamingProps{Supported: true, SignatureMaxAge: 15 * time.Minute}},
 	} {
 		t.Run(name, func(t *testing.T) {

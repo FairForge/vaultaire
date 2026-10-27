@@ -60,6 +60,16 @@ const (
 // Pass it whenever the caller has it: it lets objects that fit in one part skip
 // the multipart round trips entirely (see putSinglePartIfSmall).
 func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucket, key, contentType string, body io.Reader, size int64) error {
+	_, err := s3ParallelUploadETag(ctx, client, bucket, key, contentType, body, size)
+	return err
+}
+
+// s3ParallelUploadETag is s3ParallelUpload that also returns the ETag the
+// BACKEND answered (RP72-1): PutObject's for a body of one part, the
+// multipart Complete's (the parts' -N) for a larger one — what the head
+// row records as backend_etag, so an edge read signs If-Match from the
+// backend's own answer, never by inference from the size.
+func s3ParallelUploadETag(ctx context.Context, client manager.UploadAPIClient, bucket, key, contentType string, body io.Reader, size int64) (string, error) {
 	in := &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -71,15 +81,22 @@ func s3ParallelUpload(ctx context.Context, client manager.UploadAPIClient, bucke
 	if size > 0 {
 		in.ContentLength = aws.Int64(size)
 	}
-	return s3ParallelUploadInput(ctx, client, in)
+	return s3ParallelUploadInputETag(ctx, client, in)
 }
 
 // s3ParallelUploadInput is the full-input variant of s3ParallelUpload for
 // callers that need to carry extra object metadata (CacheControl,
 // ContentEncoding, user metadata, ...) through the parallel uploader.
 func s3ParallelUploadInput(ctx context.Context, client manager.UploadAPIClient, in *s3.PutObjectInput) error {
-	if done, err := putSinglePartIfSmall(ctx, client, in); done {
-		return err
+	_, err := s3ParallelUploadInputETag(ctx, client, in)
+	return err
+}
+
+// s3ParallelUploadInputETag is s3ParallelUploadInput that also returns the
+// backend's ETag (s3ParallelUploadETag).
+func s3ParallelUploadInputETag(ctx context.Context, client manager.UploadAPIClient, in *s3.PutObjectInput) (string, error) {
+	if done, etag, err := putSinglePartIfSmall(ctx, client, in); done {
+		return etag, err
 	}
 
 	// The manager ignores ContentLength on a non-seekable body: it reads parts
@@ -98,14 +115,15 @@ func s3ParallelUploadInput(ctx context.Context, client manager.UploadAPIClient, 
 		in.Body = counted
 	}
 	uploader := uploaderFor(client)
-	if _, err := uploader.Upload(ctx, in); err != nil { //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
-		return fmt.Errorf("s3 parallel upload %s/%s: %w", aws.ToString(in.Bucket), aws.ToString(in.Key), err)
+	out, err := uploader.Upload(ctx, in) //nolint:staticcheck // manager.Uploader is deprecated in favor of transfermanager; migration is a post-launch WP
+	if err != nil {
+		return "", fmt.Errorf("s3 parallel upload %s/%s: %w", aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
 	if counted != nil && counted.n != declared {
-		return fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
+		return "", fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
 			aws.ToString(in.Bucket), aws.ToString(in.Key), counted.n, declared, io.ErrUnexpectedEOF)
 	}
-	return nil
+	return aws.ToString(out.ETag), nil
 }
 
 // countingReader counts the bytes the uploader consumed.
@@ -153,10 +171,10 @@ func uploaderFor(client manager.UploadAPIClient) *manager.Uploader { //nolint:st
 // Requires a known ContentLength. The body is read into one exactly-sized
 // buffer rather than via io.ReadAll, whose doubling growth reallocates and
 // recopies a 16 MiB body about fifteen times.
-func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, in *s3.PutObjectInput) (bool, error) {
+func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, in *s3.PutObjectInput) (bool, string, error) {
 	size := aws.ToInt64(in.ContentLength)
 	if in.ContentLength == nil || size < 0 || size > s3UploadPartSize {
-		return false, nil
+		return false, "", nil
 	}
 
 	buf := make([]byte, size)
@@ -169,10 +187,10 @@ func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, i
 		// (Go's server body reports a short Content-Length body this way).
 		// Committing the bytes that arrived would store a truncated object
 		// under the declared size and the MD5 of the partial stream (R2-06).
-		return true, fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
+		return true, "", fmt.Errorf("s3 upload %s/%s: body ended after %d of %d declared bytes: %w",
 			aws.ToString(in.Bucket), aws.ToString(in.Key), n, size, err)
 	default:
-		return true, fmt.Errorf("s3 upload %s/%s: read body: %w",
+		return true, "", fmt.Errorf("s3 upload %s/%s: read body: %w",
 			aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
 
@@ -184,9 +202,10 @@ func putSinglePartIfSmall(ctx context.Context, client manager.UploadAPIClient, i
 	// S3 layer already rejects bodies whose measured length disagrees with the
 	// declared one, and the SDK would itself send exactly ContentLength bytes.
 	in.Body = bytes.NewReader(buf)
-	if _, err := client.PutObject(ctx, in); err != nil {
-		return true, fmt.Errorf("s3 upload %s/%s: %w",
+	out, err := client.PutObject(ctx, in)
+	if err != nil {
+		return true, "", fmt.Errorf("s3 upload %s/%s: %w",
 			aws.ToString(in.Bucket), aws.ToString(in.Key), err)
 	}
-	return true, nil
+	return true, aws.ToString(out.ETag), nil
 }

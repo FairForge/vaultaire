@@ -197,11 +197,17 @@ type EdgeWriter interface {
 // XAmzContentChecksumMismatch; Lyve stores the bytes unchecked);
 // SignatureMaxAge — the clock window it enforces on x-amz-date (Lyve ±15
 // min; 0 = none: iDrive accepts a 7-day-old header signature, so one is a
-// bearer for that key until the key rotates — D-EDGE-33).
+// bearer for that key until the key rotates — D-EDGE-33);
+// EnforcesDecodedLength — it refuses a body whose decoded length is not
+// the signed x-amz-decoded-content-length (RP72-2, probed 2026-10-27 with
+// edge/s3-ingest/lab/declenprobe.go: iDrive 400 IncompleteBody one byte
+// more, 503 SlowDown one byte less; Lyve stores the bytes sent either way,
+// PutObject and UploadPart) — where false the commit checks the size.
 type EdgeStreamingProps struct {
-	Supported       bool
-	VerifiesTrailer bool
-	SignatureMaxAge time.Duration
+	Supported             bool
+	VerifiesTrailer       bool
+	SignatureMaxAge       time.Duration
+	EnforcesDecodedLength bool
 }
 
 // VendorUsage is what a backend itself reports about its account: the

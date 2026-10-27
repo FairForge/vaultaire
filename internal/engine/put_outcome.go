@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/aws/smithy-go"
@@ -34,6 +35,33 @@ type PutOutcome struct {
 	mu         sync.Mutex
 	unanswered []string
 	sent       []string
+	// backendETag is the ETag the backend answered for the write that
+	// succeeded (RP72-1), set by a driver that knows it (SetBackendETag);
+	// "" = not reported.
+	backendETag string
+}
+
+// SetBackendETag records the ETag the backend answered for a successful
+// write (a driver calls it; nil-safe). The head row records it as
+// backend_etag: an edge read signs If-Match from the backend's own answer.
+func (o *PutOutcome) SetBackendETag(etag string) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.backendETag = etag
+}
+
+// BackendETag is the ETag the backend answered, unquoted ("" when no
+// driver reported one).
+func (o *PutOutcome) BackendETag() string {
+	if o == nil {
+		return ""
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return strings.Trim(strings.TrimSpace(o.backendETag), `"`)
 }
 
 // WithPutOutcome asks Put to record its attempts' outcome in o. Drivers

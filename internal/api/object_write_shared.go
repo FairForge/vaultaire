@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -140,26 +141,30 @@ type objectEncryption struct {
 // was served through the decryptor (live: GET 500, R3-05). is_chunked is
 // forced FALSE — the caller's atomicHeadUpsertReleasing frees a displaced
 // manifest in the same transaction.
+//
+// backendETag is the ETag the backend answered for the blob (RP72-1,
+// migration 112): "" — NULL on the row — when the writer does not know it.
 func upsertWholeObjectHeadRow(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
-	size int64, etag, backendName, floor string, attrs objectAttrs) error {
-	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, storageKey, size, etag, backendName, floor, attrs, objectEncryption{}, "")
+	size int64, etag, backendName, floor string, attrs objectAttrs, backendETag string) error {
+	return upsertWholeObjectHeadRowEnc(ctx, tx, tenantID, bucket, key, storageKey, size, etag, backendName, floor, attrs, objectEncryption{}, "", backendETag)
 }
 
 // upsertWholeObjectHeadRowEnc is upsertWholeObjectHeadRow for a blob sealed
 // with enc (a generated object or a copy into an sse_enabled bucket, WP-R8-1
 // follow-up A1): size and etag are the PLAINTEXT's, as HandlePut records them.
 // bodyMD5 is the MD5 of the whole body when the ETag is not it (a Complete's
-// `-N`; A.4, 094), else "" — NULL on the row.
+// `-N`; A.4, 094), else "" — NULL on the row. backendETag is the backend's
+// answer for the blob (the ciphertext's for a sealed one), "" = unknown.
 func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, storageKey string,
-	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption, bodyMD5 string) error {
+	size int64, etag, backendName, floor string, attrs objectAttrs, enc objectEncryption, bodyMD5, backendETag string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO object_head_cache
 			(tenant_id, bucket, object_key, size_bytes, etag, content_type, backend_name, metadata,
 			 encryption_algorithm, content_disposition, content_encoding, content_language,
 			 cache_control, http_expires, website_redirect_location, floor, is_chunked, tags, encryption_key_version, storage_key,
-			 body_md5, ssec_key_md5, updated_at)
+			 body_md5, ssec_key_md5, backend_etag, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $17, $9, $10, $11, $12, $13, $14, $15, FALSE, $16, $18, NULLIF($19, ''),
-		        NULLIF($20, ''), NULLIF($21, ''), NOW())
+		        NULLIF($20, ''), NULLIF($21, ''), NULLIF($22, ''), NOW())
 		ON CONFLICT (tenant_id, bucket, object_key) DO UPDATE SET
 			size_bytes                = EXCLUDED.size_bytes,
 			etag                      = EXCLUDED.etag,
@@ -180,11 +185,12 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 			storage_key               = EXCLUDED.storage_key, -- the writer's own address (WP-R2-1)
 			body_md5                  = EXCLUDED.body_md5,
 			ssec_key_md5              = EXCLUDED.ssec_key_md5,
+			backend_etag              = EXCLUDED.backend_etag, -- the blob's own (RP72-1), NULL when unknown
 			updated_at                = NOW()`,
 		tenantID, bucket, key, size, etag, attrs.ContentType, backendName, attrs.metadataJSON(),
 		attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
 		attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, floor, attrs.tagsJSON(), enc.Algorithm, enc.KeyVersion, storageKey,
-		bodyMD5, enc.SSECKeyMD5)
+		bodyMD5, enc.SSECKeyMD5, strings.Trim(strings.TrimSpace(backendETag), `"`))
 	if err != nil {
 		return fmt.Errorf("upsert head row %s/%s: %w", bucket, key, err)
 	}
@@ -208,10 +214,16 @@ func upsertWholeObjectHeadRowEnc(ctx context.Context, tx *sql.Tx, tenantID, buck
 // stayed, no row naming them), and the address is this write's own, so the
 // collector's delete is at worst a miss — and its blobNamedBy re-check keeps
 // an address an active upload's retry (Complete reuses it) commits.
+//
+// A caller that passes its own engine.WithPutOutcome reads the backend's
+// ETag from it afterwards (RP72-1: the head row's backend_etag).
 func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap.Logger, tenantID, bucket, container, blob string,
 	body io.Reader, opts ...engine.PutOption) (string, error) {
-	outcome := &engine.PutOutcome{}
-	opts = append(opts[:len(opts):len(opts)], engine.WithPutOutcome(outcome))
+	outcome := engine.ApplyPutOptions(opts...).Outcome
+	if outcome == nil {
+		outcome = &engine.PutOutcome{}
+		opts = append(opts[:len(opts):len(opts)], engine.WithPutOutcome(outcome))
+	}
 	backend, err := placeOn(ctx, db, eng, tenantID, bucket, container, blob, body, opts...)
 	if err != nil && isBlobAddress(blob) {
 		if logger == nil {
@@ -443,6 +455,7 @@ func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bu
 			cache_control = COALESCE(v.cache_control, ''), http_expires = COALESCE(v.http_expires, ''),
 			website_redirect_location = COALESCE(v.website_redirect_location, ''),
 			body_md5 = v.body_md5, ssec_key_md5 = v.ssec_key_md5, -- what the row knows about ITS bytes (094, RP16-1)
+			backend_etag = NULL, -- a version records no backend answer (RP72-1): its created_at dates the rule
 			updated_at = v.created_at
 		FROM object_versions v
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3

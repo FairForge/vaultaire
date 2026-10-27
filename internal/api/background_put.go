@@ -293,6 +293,8 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		release()
 		return deliveredObject{}, err
 	}
+	outcome := &engine.PutOutcome{} // the driver's answer: the row's backend_etag (RP72-1)
+	opts = append(opts, engine.WithPutOutcome(outcome))
 	backendName, err := placeObject(tctx, g.db, g.eng, g.logger, tenantID, bucket, container, blob, putBody, opts...)
 	if err != nil {
 		release()
@@ -305,7 +307,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 		Version: &versionWrite{Size: size, ETag: etag, ContentType: contentType, Backend: backendName,
 			Blob: versionBlobRef{StorageKey: blob, Enc: enc}},
 		Upsert: func(tx *sql.Tx) error {
-			return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, blob, size, etag, backendName, floor, attrs, enc, "")
+			return upsertWholeObjectHeadRowEnc(tctx, tx, tenantID, bucket, key, blob, size, etag, backendName, floor, attrs, enc, "", outcome.BackendETag())
 		}})
 	if dbErr != nil {
 		// The blob is an orphan no row names (queued for the collector); the
