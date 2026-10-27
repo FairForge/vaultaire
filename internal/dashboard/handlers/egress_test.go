@@ -53,8 +53,8 @@ func TestOverview_EgressBar_UnderTheAllowance(t *testing.T) {
 	// Act
 	body := renderOverview(t, id, nil)
 
-	// Assert: 1 GiB of the 2.5 GiB allowance; 900 GiB of uploads count for nothing.
-	assert.Contains(t, body, `40% of 2.5 GB free this month, then rate-limited to 64 KB/s`)
+	// Assert: 1 GiB of the 10 GiB allowance (2× the 5 GB free tier); 900 GiB of uploads count for nothing.
+	assert.Contains(t, body, `10% of 10 GB free this month, then rate-limited to 64 KB/s`)
 	assert.Contains(t, body, `never billed`)
 	assert.NotContains(t, body, `then slower`)
 	assert.NotContains(t, body, `are rate-limited to`)
@@ -99,7 +99,7 @@ func adminTenantDetailTemplate(t *testing.T) *template.Template {
 }
 
 func TestTenantDetail_ShowsEgressUsedAllowanceOverrideAndState(t *testing.T) {
-	// Arrange: a house of 6 + 1 TB (plan allowance 4 TB) under an admin
+	// Arrange: a house of 6 + 1 TB (plan allowance 13 TB) under an admin
 	// override of 100 GB, with 150 GB downloaded this month.
 	db := testDashDB(t)
 	t.Cleanup(func() { _ = db.Close() })
@@ -125,7 +125,7 @@ func TestTenantDetail_ShowsEgressUsedAllowanceOverrideAndState(t *testing.T) {
 	assert.Contains(t, body, `Egress allowance`)
 	assert.Contains(t, body, `150 GB of 100 GB`)
 	assert.Contains(t, body, `Override: 100 GB`)
-	assert.Contains(t, body, `Plan: 4 TB`)
+	assert.Contains(t, body, `Plan: 13 TB`)
 	assert.Contains(t, body, `over, not slowed (egress_throttle is off for this tenant)`)
 	assert.Contains(t, body, `0 = the plan's allowance`)
 	assert.Contains(t, body, `value="100"`)

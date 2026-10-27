@@ -64,8 +64,12 @@ type egressFixture struct {
 // server handler to return.
 const egressTestRequestID = "X-Egress-Test-Request"
 
-// setupEgressFixture builds a tenant with quotaBytes of storage (so an
-// allowance of half that) behind a throttle of the given shape. wrap, when
+// setupEgressFixture builds a tenant with quotaBytes of storage and an
+// egress allowance of HALF that — pinned by the admin override, so the
+// tests' arithmetic (a 64 MiB quota = a 32 MiB allowance) does not move
+// with the price file's ratio (2× the Standard quota since 2026-10-27; it
+// was 0.5× when these tests were written) — behind a throttle of the given
+// shape. wrap, when
 // set, replaces the local driver with a wrapper around it.
 func setupEgressFixture(t *testing.T, quotaBytes int64, cfg usage.EgressThrottle, wrap func(engine.Driver) engine.Driver) *egressFixture {
 	t.Helper()
@@ -97,6 +101,8 @@ func setupEgressFixture(t *testing.T, quotaBytes int64, cfg usage.EgressThrottle
 	require.NoError(t, err)
 	qm := usage.NewQuotaManager(db)
 	require.NoError(t, qm.CreateTenant(context.Background(), tenantID, "starter", quotaBytes))
+	_, err = db.Exec(`UPDATE tenant_quotas SET bandwidth_limit_bytes = $2 WHERE tenant_id = $1`, tenantID, quotaBytes/2)
+	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, $2, 'public-read')`,
 		tenantID, egressTestBucket)
 	require.NoError(t, err)

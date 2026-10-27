@@ -78,7 +78,7 @@ func TestOverview_HouseRendersFromLiveData(t *testing.T) {
 	assert.Contains(t, body, `id="nightdim"`)
 	assert.Contains(t, body, `/dashboard/billing?add=downstairs`)
 	assert.Contains(t, body, `free this month, then rate-limited to`, "egress bar")
-	assert.Contains(t, body, `of 4 TB free this month`, "egress allowance = 0.5×6 TB + 1 TB")
+	assert.Contains(t, body, `of 13 TB free this month`, "egress allowance = 2×6 TB + 1 TB")
 	assert.NotContains(t, body, `ZgotmplZ`, "no html/template escaping accidents")
 	assert.NotContains(t, body, `Storage Used`, "fullness cards replace the gauge")
 
@@ -105,7 +105,7 @@ func TestOverview_LegacyTenantHouse(t *testing.T) {
 	assert.Contains(t, body, `>5 GB<`, "one honest box for the free tier")
 	assert.Contains(t, body, `0 B of 5 GB downstairs`)
 	assert.Contains(t, body, `no attic`)
-	assert.Contains(t, body, `2.5 GB`, "egress allowance = half the total")
+	assert.Contains(t, body, `10 GB`, "egress allowance = twice the total")
 }
 
 // TestOverview_WriteScreenshotFixtures renders the overview with the house
