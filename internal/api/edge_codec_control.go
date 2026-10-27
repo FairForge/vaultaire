@@ -52,6 +52,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/engine"
 )
 
@@ -221,28 +222,16 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 
 // --- the index ---
 
-// edgeIndexRequest is one batch of the host's chunk hashes.
-type edgeIndexRequest struct {
-	AdmitID string `json:"admit_id"`
-	Chunks  []struct {
-		Hash string `json:"hash"` // plain sha256, hex — for the duration of this call
-		Size int64  `json:"size"`
-	} `json:"chunks"`
-}
-
-// edgeIndexMiss is a chunk the host must store: one presigned PUT at the
-// chunk's one address, signing the SEALED length.
-type edgeIndexMiss struct {
-	Hash         string            `json:"hash"`
-	URL          string            `json:"url"`
-	SendHeaders  map[string]string `json:"send_headers"`
-	SealedLength int64             `json:"sealed_length"`
-}
-
-type edgeIndexResponse struct {
-	Hits   []string        `json:"hits"`
-	Misses []edgeIndexMiss `json:"misses"`
-}
+// The index call's wire types (internal/dataplane).
+type (
+	// edgeIndexRequest is one batch of the host's chunk hashes.
+	edgeIndexRequest = dataplane.IndexRequest
+	// edgeIndexMiss is a chunk the host must store: one presigned PUT at the
+	// chunk's one address, signing the SEALED length.
+	edgeIndexMiss = dataplane.IndexMiss
+	// edgeIndexResponse answers the call.
+	edgeIndexResponse = dataplane.IndexResponse
+)
 
 // handleEdgeIndex is POST /api/v1/edge/index (the service-token gate, as
 // admit and commit).

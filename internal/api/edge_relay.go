@@ -10,14 +10,12 @@ package api
 import (
 	"bytes"
 	"net/http"
+
+	"github.com/FairForge/vaultaire/internal/dataplane"
 )
 
-// edgeRelay is one S3 answer, as JSON for the Worker.
-type edgeRelay struct {
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body,omitempty"`
-}
+// edgeRelay is one S3 answer, as JSON for the host (dataplane.Relay).
+type edgeRelay = dataplane.Relay
 
 // relayRecorder captures what a refusal writer would have sent.
 type relayRecorder struct {

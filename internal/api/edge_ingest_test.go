@@ -41,6 +41,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/config"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
@@ -524,6 +525,137 @@ func (f *edgeFixture) signedStreaming(path string, query url.Values, decoded int
 	}
 	return edgeAdmitRequest{Op: op, Method: http.MethodPut, Host: f.host, Path: r.URL.EscapedPath(), Query: r.URL.RawQuery,
 		Headers: headers, ClientIP: "203.0.113.9", RequestID: "req-" + uuid.New().String()[:8]}
+}
+
+// signedHTTP is a client's SigV4-signed request (header-signed, as aws-cli
+// and rclone sign one) for a data-plane host to describe itself
+// (dataplane.Host.Write / Read): the request the host received.
+func (f *edgeFixture) signedHTTP(method, path string, query url.Values, body []byte, hdr map[string]string) *http.Request {
+	f.t.Helper()
+	u := "https://" + f.host + path
+	if len(query) > 0 {
+		u += "?" + query.Encode()
+	}
+	r, err := http.NewRequest(method, u, bytes.NewReader(body))
+	require.NoError(f.t, err)
+	if method == http.MethodPut {
+		r.ContentLength = int64(len(body))
+		r.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	} else {
+		r.Body, r.ContentLength = http.NoBody, 0
+	}
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	sum := sha256.Sum256(body)
+	payloadHash := hex.EncodeToString(sum[:])
+	r.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	require.NoError(f.t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: f.ak, SecretAccessKey: f.sk},
+		r, payloadHash, "s3", "us-east-1", time.Now()))
+	return r
+}
+
+// signedStreamingHTTP is aws-cli's default upload as the request a host
+// receives: aws-chunked, an unsigned payload with a checksum trailer, no
+// Content-Length (Transfer-Encoding chunked).
+func (f *edgeFixture) signedStreamingHTTP(path string, decoded int64, trailer string) *http.Request {
+	f.t.Helper()
+	r, err := http.NewRequest(http.MethodPut, "https://"+f.host+path, nil)
+	require.NoError(f.t, err)
+	r.ContentLength = -1
+	r.TransferEncoding = []string{"chunked"}
+	r.Header.Set("Content-Encoding", "aws-chunked")
+	r.Header.Set("X-Amz-Decoded-Content-Length", fmt.Sprint(decoded))
+	r.Header.Set("X-Amz-Trailer", trailer)
+	r.Header.Set("X-Amz-Content-Sha256", "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+	require.NoError(f.t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: f.ak, SecretAccessKey: f.sk},
+		r, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "s3", "us-east-1", time.Now()))
+	return r
+}
+
+// dataHost is a Go data-plane host over the in-process control plane
+// (Server.DataPlane — host=slc's) and the fake backend's transport.
+func (f *edgeFixture) dataHost() *dataplane.Host {
+	return &dataplane.Host{CP: f.srv.DataPlane(), Client: &http.Client{Transport: f.drv},
+		ClientIP: func(*http.Request) string { return "203.0.113.9" }, Logger: zap.NewNop()}
+}
+
+// RoundTrip makes the fake backend reachable over HTTP at the URLs its
+// presigns name (https://fake.backend.invalid/vaultaire/<key>): a PUT
+// stores the body (a part under its upload), a GET serves the blob or its
+// Range — what iDrive or Lyve answer a host.
+func (d *edgeFakeDriver) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "fake.backend.invalid" {
+		return nil, fmt.Errorf("fake transport: no backend at %s", r.URL.Host)
+	}
+	k := strings.TrimPrefix(r.URL.Path, "/vaultaire/")
+	q := r.URL.Query()
+	answer := func(status int, h http.Header, body []byte) *http.Response {
+		if h == nil {
+			h = http.Header{}
+		}
+		return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(bytes.NewReader(body)), ContentLength: int64(len(body)), Request: r}
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var body []byte
+		var err error
+		if r.Body != nil {
+			body, err = io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked") {
+			// A header-signed aws-chunked body: the backend stores the
+			// DECODED bytes (both backends, Step 0.3).
+			if body, err = io.ReadAll(newAWSChunkedReader(bytes.NewReader(body))); err != nil {
+				return answer(http.StatusBadRequest, nil, []byte("<Error><Code>IncompleteBody</Code></Error>")), nil
+			}
+		}
+		if cl := r.Header.Get("Content-Length"); cl != "" && cl != fmt.Sprint(len(body)) && r.Header.Get("Content-Encoding") == "" {
+			return answer(http.StatusForbidden, nil, []byte("<Error><Code>SignatureDoesNotMatch</Code></Error>")), nil
+		}
+		sum := md5.Sum(body) // #nosec G401
+		etag := `"` + hex.EncodeToString(sum[:]) + `"`
+		d.mu.Lock()
+		if uid := q.Get("uploadId"); uid != "" {
+			n := q.Get("partNumber")
+			d.objects[k+"#"+uid+"#"+n] = body
+			if d.uploads[uid] == nil {
+				d.uploads[uid] = map[int]string{}
+			}
+			var pn int
+			_, _ = fmt.Sscan(n, &pn)
+			d.uploads[uid][pn] = etag
+		} else {
+			d.objects[k] = body
+		}
+		d.mu.Unlock()
+		return answer(http.StatusOK, http.Header{"Etag": {etag}}, nil), nil
+	case http.MethodGet:
+		d.mu.Lock()
+		b, ok := d.objects[k]
+		d.mu.Unlock()
+		if !ok {
+			return answer(http.StatusNotFound, nil, []byte("<Error><Code>NoSuchKey</Code></Error>")), nil
+		}
+		sum := md5.Sum(b) // #nosec G401
+		h := http.Header{"Etag": {`"` + hex.EncodeToString(sum[:]) + `"`}}
+		if rg := r.Header.Get("Range"); rg != "" {
+			rng, err := parseRangeHeader(rg, int64(len(b)))
+			if err != nil {
+				return answer(http.StatusRequestedRangeNotSatisfiable, nil, nil), nil
+			}
+			part := b[rng.start : rng.end+1]
+			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.start, rng.end, len(b)))
+			h.Set("Content-Length", fmt.Sprint(len(part)))
+			return answer(http.StatusPartialContent, h, part), nil
+		}
+		h.Set("Content-Length", fmt.Sprint(len(b)))
+		return answer(http.StatusOK, h, b), nil
+	}
+	return answer(http.StatusMethodNotAllowed, nil, nil), nil
 }
 
 func (f *edgeFixture) call(path string, body any, token string) *httptest.ResponseRecorder {

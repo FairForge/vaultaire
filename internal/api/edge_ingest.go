@@ -58,6 +58,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -105,146 +106,28 @@ func init() {
 	egressWouldThrottle.WithLabelValues(edgeHost)
 }
 
-// edgeAdmitRequest is what the Worker describes.
-type edgeAdmitRequest struct {
-	Op        string            `json:"op"`
-	Method    string            `json:"method"`
-	Host      string            `json:"host"`
-	Path      string            `json:"path"`
-	Query     string            `json:"query"`
-	Headers   map[string]string `json:"headers"`
-	ClientIP  string            `json:"client_ip"`
-	RequestID string            `json:"request_id"`
-	// Features the Worker reads (0.4.0: "window"): an answer a Worker does
-	// not know is never given — a 0.3.0 Worker would GET a windowed link
-	// whole and fall back, charging the backend's breaker.
-	Features []string `json:"features,omitempty"`
-}
+// The wire types of the edge calls live in internal/dataplane (WP-EDGE-3:
+// the Worker, a data node and the origin's own data path speak them);
+// these aliases keep the handlers' names.
+type (
+	// edgeAdmitRequest is what the host describes.
+	edgeAdmitRequest = dataplane.AdmitRequest
+	// edgeExpect tells the host what the backend will enforce.
+	edgeExpect = dataplane.Expect
+	// edgeAdmitResponse is the decision.
+	edgeAdmitResponse = dataplane.AdmitResponse
+	// edgeWindow is a windowed read's shape (D-EDGE-32).
+	edgeWindow = dataplane.Window
+	// edgeCodecGrant is a codec admit's public key and numbers.
+	edgeCodecGrant = dataplane.CodecGrant
+	// edgeCommitRequest is what the host reports.
+	edgeCommitRequest = dataplane.CommitRequest
+	// edgeCommitChunk is one chunk of a codec commit.
+	edgeCommitChunk = dataplane.CommitChunk
+)
 
-// edgeFeatureWindow: the Worker reads a windowed answer (D-EDGE-32).
-const edgeFeatureWindow = "window"
-
-// has says whether the Worker named the feature.
-func (r edgeAdmitRequest) has(feature string) bool {
-	for _, f := range r.Features {
-		if f == feature {
-			return true
-		}
-	}
-	return false
-}
-
-// edgeExpect tells the Worker what the backend will enforce.
-type edgeExpect struct {
-	MD5 bool `json:"md5"` // the link signs Content-MD5: the backend enforces it
-}
-
-// edgeAdmitResponse is the decision.
-type edgeAdmitResponse struct {
-	Edge        bool              `json:"edge"`
-	Reason      string            `json:"reason,omitempty"` // why not (a pass-through), for the Worker's log line
-	Refusal     *edgeRelay        `json:"refusal,omitempty"`
-	AdmitID     string            `json:"admit_id,omitempty"`
-	URL         string            `json:"url,omitempty"`
-	Method      string            `json:"method,omitempty"`
-	SendHeaders map[string]string `json:"send_headers,omitempty"`
-	Backend     string            `json:"backend,omitempty"`
-	StorageKey  string            `json:"storage_key,omitempty"`
-	Expect      *edgeExpect       `json:"expect,omitempty"`
-	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
-	// A GET (Part B): the status the backend must answer (206 — every link
-	// names a Range, the whole object's for a whole read), the status the
-	// CLIENT gets (200, or 206 for the client's own Range), the ORIGIN's
-	// response headers the Worker serves in place of the backend's
-	// (object_headers.go's set), and the admitted span in bytes — the
-	// backend's Content-Length must equal it or the Worker falls back to the
-	// origin, whose integrity path decides (RP66-2).
-	ExpectStatus    int               `json:"expect_status,omitempty"`
-	Status          int               `json:"status,omitempty"`
-	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
-	ContentLength   int64             `json:"content_length,omitempty"`
-	// Window (WP-EDGE-2 Part C, D-EDGE-32): a read of at least 64 MiB is
-	// the Worker's windowed reader's — 16 MiB ranges, at most 6 in flight,
-	// from Start over ContentLength bytes, each written in order; the link
-	// signs no range.
-	Window *edgeWindow `json:"window,omitempty"`
-	// An aws-chunked write (WP-EDGE-2 Part C): StreamingTrailer is the
-	// trailer the body's framing ends in (the codec decodes the framing and
-	// VERIFIES it — D-EDGE-31), ContentLength the DECODED length. The mover
-	// gets Headers instead of a presigned link: a HEADER-signed backend
-	// request (lower-cased, authorization included) to send to URL with the
-	// client's body untouched (D-EDGE-30, D-EDGE-33).
-	StreamingTrailer string            `json:"streaming_trailer,omitempty"`
-	Headers          map[string]string `json:"headers,omitempty"`
-	// unverified: an admitted write whose bytes nothing checks — an
-	// aws-chunked write to a backend that does not verify the trailer, with
-	// no Content-MD5 the commit could compare (the metric's
-	// admitted_unverified; never on the wire).
-	unverified bool
-	// Codec (WP-EDGE-2): the write is the HOST's to chunk, hash and seal —
-	// no presigned PUT for the body; the host asks /api/v1/edge/index per
-	// batch of chunk hashes, uploads the misses as 0x06 blobs and commits
-	// the chunk list.
-	Codec *edgeCodecGrant `json:"codec,omitempty"`
-}
-
-// edgeWindow is a windowed read's shape: the range size, the most ranges
-// in flight (a Worker's connection limit), the span's first byte.
-type edgeWindow struct {
-	RangeBytes int64 `json:"range_bytes"`
-	InFlight   int   `json:"in_flight"`
-	Start      int64 `json:"start"`
-}
-
-// edgeCodecGrant is what a codec admit hands the data-plane host: the
-// tenant's codec PUBLIC key (X-Wing, base64 in JSON) and its key version,
-// and the two numbers the pipeline needs. Nothing here is a secret
-// (contract line 4: nothing of the hierarchy travels but a public key).
-type edgeCodecGrant struct {
-	Version        int    `json:"version"`
-	KEMPublicKey   []byte `json:"kem_public_key"`
-	ChunkThreshold int64  `json:"chunk_threshold"`
-	SegmentSize    int    `json:"segment_size"`
-}
-
-// edgeCommitRequest is what the Worker reports: the backend's answer. No
-// digest and no byte count for a moved write — the Worker is not in the
-// byte path there. A CODEC write reverses that on purpose (WP-EDGE-2): the
-// host read every byte to chunk it, so it reports the chunk list and the
-// whole body's MD5 (the digest is free once the bytes were read).
-type edgeCommitRequest struct {
-	AdmitID       string `json:"admit_id"`
-	Outcome       string `json:"outcome"` // a write: ok | backend_error | edge_error; a GET: served | fallback | error
-	BackendStatus int    `json:"backend_status"`
-	BackendCode   string `json:"backend_code"` // the backend's XML <Code>, when it answered an error; the subrequest's error otherwise
-	BackendETag   string `json:"backend_etag"`
-	DurationMS    int64  `json:"duration_ms"`
-	// A GET: the Content-Length the backend answered at its headers — what
-	// is metered (the Worker cannot see the end of a stream it does not
-	// touch; edge_get.go).
-	BackendContentLength int64 `json:"backend_content_length,omitempty"`
-	// A windowed GET (D-EDGE-32): the bytes the Worker wrote to the client,
-	// reported when its stream ended — the sum of its ranges, or what went
-	// out before a range failed and the body was cut.
-	BytesSent int64 `json:"bytes_sent,omitempty"`
-	// A codec write (WP-EDGE-2): the ordered chunk list and the body's MD5
-	// (hex) — a PUT's ETag, a part's part digest.
-	Chunks  []edgeCommitChunk `json:"chunks,omitempty"`
-	BodyMD5 string            `json:"body_md5,omitempty"`
-}
-
-// edgeCommitChunk is one chunk of a codec commit, in body order: the PLAIN
-// sha256 (hex; over the service-token channel for the duration of the call,
-// never stored or logged — D-EDGE-16), its plaintext and sealed sizes, the
-// backend's MD5 ETag of the sealed bytes for a chunk this host stored, and
-// whether it was stored or a dedup hit.
-type edgeCommitChunk struct {
-	Hash        string `json:"hash"`
-	Size        int64  `json:"size"`
-	SealedSize  int64  `json:"sealed_size,omitempty"`
-	BackendETag string `json:"backend_etag,omitempty"`
-	Status      string `json:"status"` // stored | hit
-}
+// edgeFeatureWindow: the host reads a windowed answer (D-EDGE-32).
+const edgeFeatureWindow = dataplane.FeatureWindow
 
 // edgeAdmitAttrs is what the row keeps of the client's request for the
 // commit: the object's attributes and the Object Lock headers.
@@ -377,25 +260,32 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, status := s.edgeAdmit(r.Context(), req)
-	switch {
-	case status != http.StatusOK:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "error").Inc()
-	case resp.Refusal != nil:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "refused").Inc()
-	case resp.Edge && resp.unverified:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "admitted_unverified").Inc()
-	case resp.Edge:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "admitted").Inc()
-	case resp.Reason == edgeReasonSmall:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "pass_through_small").Inc()
-	default:
-		dataPlaneAdmits.WithLabelValues(edgeHost, req.Op, "pass_through").Inc()
+	countEdgeAdmit(edgeHost, req.Op, resp, status)
+	if status == http.StatusOK && resp.Refusal == nil && !resp.Edge {
 		// Why the origin took it — the one trace of a pass-through (Debug:
 		// one line per declined request; the counter is the signal).
 		s.logger.Debug("edge admit: pass-through", zap.String("op", req.Op), zap.String("reason", resp.Reason),
 			zap.String("path", req.Path), zap.String("request_id", req.RequestID))
 	}
 	writeEdgeJSON(w, status, resp)
+}
+
+// countEdgeAdmit counts one admit decision for the host that asked.
+func countEdgeAdmit(host, op string, resp edgeAdmitResponse, status int) {
+	switch {
+	case status != http.StatusOK:
+		dataPlaneAdmits.WithLabelValues(host, op, "error").Inc()
+	case resp.Refusal != nil:
+		dataPlaneAdmits.WithLabelValues(host, op, "refused").Inc()
+	case resp.Edge && resp.Unverified:
+		dataPlaneAdmits.WithLabelValues(host, op, "admitted_unverified").Inc()
+	case resp.Edge:
+		dataPlaneAdmits.WithLabelValues(host, op, "admitted").Inc()
+	case resp.Reason == edgeReasonSmall:
+		dataPlaneAdmits.WithLabelValues(host, op, "pass_through_small").Inc()
+	default:
+		dataPlaneAdmits.WithLabelValues(host, op, "pass_through").Inc()
+	}
 }
 
 // passThrough is the {edge:false} answer with its reason.
@@ -908,7 +798,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		}
 		return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
 			Headers: streamHeaders, StreamingTrailer: stream.Trailer, ContentLength: size, Backend: backend,
-			Expect: &edgeExpect{MD5: contentMD5 != ""}, unverified: !streamProps.VerifiesTrailer && contentMD5 == ""})
+			Expect: &edgeExpect{MD5: contentMD5 != ""}, Unverified: !streamProps.VerifiesTrailer && contentMD5 == ""})
 	}
 	// The owner's 2026-10-25 finding can never regress: a link that does
 	// not sign the size (and the checksum, when the client sent one) is

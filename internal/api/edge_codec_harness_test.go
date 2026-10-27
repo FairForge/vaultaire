@@ -158,22 +158,22 @@ func (f *codecFixture) storeMissesWith(grant *edgeCodecGrant, chunks []crypto.Ch
 	return out
 }
 
-// uploadCodec runs the whole host pipeline for one PUT and returns the
-// commit's relay and the index response.
+// uploadCodec runs the whole host pipeline for one PUT — internal/dataplane's
+// Host.Write (WP-EDGE-3: the harness's pipeline, lifted into the package
+// every Go host runs) over the in-process control plane and the fake
+// backend's transport — and returns the commit's relay, the index's
+// answers (every batch's, merged) and the admit.
 func (f *codecFixture) uploadCodec(key string, body []byte) (*edgeRelay, edgeIndexResponse, edgeAdmitResponse) {
 	f.t.Helper()
-	resp := f.admit(f.signed("/"+f.bucket+"/"+key, nil, body, nil, ""))
+	res, err := f.dataHost().Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/"+key, nil, body, nil),
+		bytes.NewReader(body), int64(len(body)))
+	require.NoError(f.t, err)
+	resp := res.Admit
 	require.True(f.t, resp.Edge, "%+v", resp)
 	require.NotNil(f.t, resp.Codec, "a codec admit")
 	require.Empty(f.t, resp.URL, "no presigned body PUT: the host chunks and seals")
-	chunks := f.chunksOf(body)
-	idx := f.index(resp.AdmitID, chunks)
-	entries := f.storeMisses(resp.Codec, chunks, idx)
-	sum := md5.Sum(body) // #nosec G401
-	relay, code := f.commit(edgeCommitRequest{AdmitID: resp.AdmitID, Outcome: edgeOutcomeOK,
-		Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
-	require.Equal(f.t, http.StatusOK, code)
-	return relay, idx, resp
+	require.NotNil(f.t, res.Relay, "the commit's answer")
+	return res.Relay, res.Index, resp
 }
 
 func (f *codecFixture) chunksOf(body []byte) []crypto.Chunk {

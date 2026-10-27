@@ -250,7 +250,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	rangeValue := fmt.Sprintf("bytes=%d-%d", start, end)
 	presign := engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL}
 	wantSigned := []string{"range"}
-	if length >= edgeWindowMin && req.has(edgeFeatureWindow) {
+	if length >= edgeWindowMin && req.Has(edgeFeatureWindow) {
 		window = &edgeWindow{RangeBytes: edgeWindowRange, InFlight: edgeWindowInFlight, Start: start}
 		presign.Range, presign.Window, rangeValue, wantSigned = "", true, "", nil
 	}
