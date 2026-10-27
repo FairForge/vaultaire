@@ -121,6 +121,9 @@ export function describe(request, op, requestId) {
     headers,
     client_ip: request.headers.get("cf-connecting-ip") || "",
     request_id: requestId,
+    // What this Worker reads (0.4.0): the control plane never answers a
+    // shape an older Worker would misread (a windowed GET).
+    features: ["window"],
   };
 }
 

@@ -115,6 +115,23 @@ type edgeAdmitRequest struct {
 	Headers   map[string]string `json:"headers"`
 	ClientIP  string            `json:"client_ip"`
 	RequestID string            `json:"request_id"`
+	// Features the Worker reads (0.4.0: "window"): an answer a Worker does
+	// not know is never given — a 0.3.0 Worker would GET a windowed link
+	// whole and fall back, charging the backend's breaker.
+	Features []string `json:"features,omitempty"`
+}
+
+// edgeFeatureWindow: the Worker reads a windowed answer (D-EDGE-32).
+const edgeFeatureWindow = "window"
+
+// has says whether the Worker named the feature.
+func (r edgeAdmitRequest) has(feature string) bool {
+	for _, f := range r.Features {
+		if f == feature {
+			return true
+		}
+	}
+	return false
 }
 
 // edgeExpect tells the Worker what the backend will enforce.

@@ -241,15 +241,15 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		start, end = rng.start, rng.end
 	}
 	// A read of at least edgeWindowMin is the windowed reader's (D-EDGE-32:
-	// the bench § 4 doubled both backends at 16 MiB × 6): the link signs no
-	// range — the Worker names each one inside the admitted span — and
-	// if-match where provable; under it the exact span is signed
-	// (D-EDGE-11).
+	// the bench § 4 doubled both backends at 16 MiB × 6) when the Worker
+	// says it reads one: the link signs no range — the Worker names each one
+	// inside the admitted span — and if-match where provable; under it, or
+	// for an older Worker, the exact span is signed (D-EDGE-11).
 	var window *edgeWindow
 	rangeValue := fmt.Sprintf("bytes=%d-%d", start, end)
 	presign := engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL}
 	wantSigned := []string{"range"}
-	if length >= edgeWindowMin {
+	if length >= edgeWindowMin && req.has(edgeFeatureWindow) {
 		window = &edgeWindow{RangeBytes: edgeWindowRange, InFlight: edgeWindowInFlight, Start: start}
 		presign.Range, presign.Window, rangeValue, wantSigned = "", true, "", nil
 	}

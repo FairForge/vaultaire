@@ -78,3 +78,8 @@ test("backendErrorCode reads the backend's <Code>", () => {
   assert.equal(backendErrorCode(""), "");
   assert.equal(backendErrorCode("<html>413</html>"), "");
 });
+
+test("describe announces what this Worker reads: a windowed GET answer (0.4.0)", () => {
+  const d = describe(new Request("https://s3.stored.cloud/b/k", { method: "GET", headers: { Authorization: sig } }), "get", "r-1");
+  assert.deepEqual(d.features, ["window"], "the control plane answers a window only to a Worker that reads one");
+});
