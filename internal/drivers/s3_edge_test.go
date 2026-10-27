@@ -86,12 +86,15 @@ func TestEdgeSignPut_HeaderSignedStreamingTrailer(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.props, tc.ew.EdgeStreaming(), "Step 0.3 + the bench: what the backend does with it")
-			headers, u, err := tc.ew.SignPut(ctx, "tenant-edge_bkt", "k@00000000000000000000000000", 268435456, "x-amz-checksum-crc64nvme")
+			// A blob address: `@`, a slash and a space — S3 signs the path
+			// as sent, never escaped twice (the SDK's S3 signer sets
+			// DisableURIPathEscaping; the lab's 403 SignatureDoesNotMatch).
+			headers, u, err := tc.ew.SignPut(ctx, "tenant-edge_bkt", "dir/a b@00000000000000000000000000", 268435456, "x-amz-checksum-crc64nvme")
 			require.NoError(t, err)
 			parsed, err := url.Parse(u)
 			require.NoError(t, err)
 			assert.Empty(t, parsed.Query().Get("X-Amz-Signature"), "the plain object URL, never a presigned one")
-			assert.Contains(t, parsed.EscapedPath(), "/t-tenant-edge/tenant-edge_bkt/k%4000000000000000000000000000", "the driver's own key rule")
+			assert.Contains(t, parsed.EscapedPath(), "/t-tenant-edge/tenant-edge_bkt/dir/a%20b%4000000000000000000000000000", "the driver's own key rule")
 			for name, want := range map[string]string{
 				"x-amz-content-sha256":         "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
 				"content-encoding":             "aws-chunked",
@@ -120,9 +123,9 @@ func TestEdgeSignPut_HeaderSignedStreamingTrailer(t *testing.T) {
 					r.Header.Set(k, v)
 				}
 			}
-			require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{AccessKeyID: "AKIAFAKE", SecretAccessKey: "fakesecret"},
-				r, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "s3", tc.region, at))
-			assert.Equal(t, r.Header.Get("Authorization"), auth)
+			require.NoError(t, v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true }).SignHTTP(context.Background(),
+				aws.Credentials{AccessKeyID: "AKIAFAKE", SecretAccessKey: "fakesecret"}, r, "STREAMING-UNSIGNED-PAYLOAD-TRAILER", "s3", tc.region, at))
+			assert.Equal(t, r.Header.Get("Authorization"), auth, "S3's canonical URI: the path as sent")
 
 			// An UploadPart the same way, under its upload id and part number.
 			ph, pu, err := tc.ew.SignUploadPart(ctx, "tenant-edge_bkt", "k", "upload-1", 3, 8388608, "x-amz-checksum-crc32")

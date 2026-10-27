@@ -357,6 +357,83 @@ print(max((x.get("peak_in_flight_bytes",0) for x in v), default=0)>>20, "MiB pea
 	done
 }
 
+# --- Prompt 46c PR A: aws-cli's DEFAULT upload at the edge (WP-EDGE-2C.md § The lab) ---
+
+default_cfg() { # aws-cli's defaults: no request_checksum_calculation line (aws-chunked + CRC64NVME)
+	printf '[default]\n' >"$AWS_CONFIG_FILE"
+}
+when_required_cfg() {
+	printf '[default]\nrequest_checksum_calculation = when_required\nresponse_checksum_validation = when_required\n' >"$AWS_CONFIG_FILE"
+}
+flag_codec() { # flag_codec on|off: the lab tenant's edge_codec row (the flags cache is ~15 s)
+	local v=true
+	[ "$1" = off ] && v=false
+	sql "UPDATE feature_flags SET enabled = $v WHERE flag_key = 'edge_codec' AND tenant_id = '$(tenant)'"
+	sql "UPDATE buckets SET sse_enabled = $([ "$1" = off ] && echo false || echo true) WHERE name = '$BUCKET' AND tenant_id = '$(tenant)'"
+	sleep 20
+}
+creds() { # the lab tenant's pair in the environment (awschunkedput.go)
+	AWS_ACCESS_KEY_ID=$(awk -F' = ' '/aws_access_key_id/ {print $2}' "$AWS_SHARED_CREDENTIALS_FILE")
+	AWS_SECRET_ACCESS_KEY=$(awk -F' = ' '/aws_secret_access_key/ {print $2}' "$AWS_SHARED_CREDENTIALS_FILE")
+	export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+}
+
+chunked_upload() { # chunked_upload <file> <key>: aws-cli's TLS shape (aws-chunked, CRC64NVME trailer, 8 MiB × 10) through the Worker
+	creds
+	(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT \
+		-bucket $BUCKET -key "$2" -file "$1" -multipart)
+}
+
+case_pa_mover() { # 100 MiB in aws-cli's aws-chunked shape, edge_codec OFF: every part header-signed to the backend, none through the origin, MD5-equal
+	flag_codec off
+	golden 46401 104857600 "$LAB/pa100.dat"
+	local adm pass unv
+	adm=$(admitted part admitted); unv=$(admitted part admitted_unverified); pass=$(admitted part pass_through)
+	echo "pa_mover: $(chunked_upload "$LAB/pa100.dat" pa/mover100.dat 2>&1 | grep -v '^goroutine\|^[[:space:]]' | head -3)"
+	echo "pa_mover: parts admitted +$(( $(admitted part admitted) - adm )), admitted_unverified +$(( $(admitted part admitted_unverified) - unv )), pass_through +$(( $(admitted part pass_through) - pass ))"
+	echo "pa_mover: parts staged on the origin: $(sql "SELECT COUNT(*) FROM multipart_parts p JOIN multipart_uploads u ON u.upload_id = p.upload_id WHERE u.tenant_id = '$(tenant)' AND u.object_key = 'pa/mover100.dat' AND p.backend_etag IS NULL"), edge parts: $(sql "SELECT COUNT(*) FROM multipart_parts p JOIN multipart_uploads u ON u.upload_id = p.upload_id WHERE u.tenant_id = '$(tenant)' AND u.object_key = 'pa/mover100.dat' AND p.backend_etag IS NOT NULL")"
+	echo "pa_mover: header-signed admits $(grep -c '"aws_chunked":true' "$LAB/origin.log")"
+	aws_origin s3 cp "s3://$BUCKET/pa/mover100.dat" "$LAB/pa-mover.back" --no-progress >/dev/null
+	echo "pa_mover: $(md5of "$LAB/pa100.dat") / $(md5of "$LAB/pa-mover.back")"
+	sql "SELECT 'pa_mover: row ' || backend_name || ' ' || etag || ' ' || size_bytes FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key = 'pa/mover100.dat'"
+	# aws-cli itself with its DEFAULT config over the lab's plain HTTP: a header checksum, no trailer (botocore uses trailers over TLS only).
+	default_cfg
+	adm=$(admitted part admitted)
+	aws_lab s3 cp "$LAB/pa100.dat" "s3://$BUCKET/pa/awscli100.dat" --no-progress --debug 2>"$LAB/pa-awscli.log" >/dev/null
+	echo "pa_mover aws-cli default over http: parts admitted +$(( $(admitted part admitted) - adm )); its payload hashes: $(grep -o "'x-amz-content-sha256': b'[A-Z-]*" "$LAB/pa-awscli.log" | sort | uniq -c | tr -s ' ' | tr '\n' ' ') trailer headers $(grep -c "'x-amz-trailer'" "$LAB/pa-awscli.log")"
+	when_required_cfg
+	flag_codec on
+}
+
+case_pa_codec() { # 100 MiB in aws-cli's aws-chunked shape, edge_codec ON: the codec decodes and verifies the trailer, MD5-equal
+	golden 46402 104857600 "$LAB/pa100c.dat"
+	local adm mark
+	adm=$(admitted part admitted)
+	mark=$(wc -l <"$LAB/worker.log")
+	echo "pa_codec: $(chunked_upload "$LAB/pa100c.dat" pa/codec100.dat 2>&1 | grep -v '^goroutine\|^[[:space:]]' | head -3)"
+	echo "pa_codec: parts admitted +$(( $(admitted part admitted) - adm )); codec requests $(tail -n +"$((mark + 1))" "$LAB/worker.log" | grep -c '"edge":"codec"'), checksum mismatches $(tail -n +"$((mark + 1))" "$LAB/worker.log" | grep -c codec_checksum_mismatch)"
+	aws_origin s3 cp "s3://$BUCKET/pa/codec100.dat" "$LAB/pa-codec.back" --no-progress >/dev/null
+	echo "pa_codec: $(md5of "$LAB/pa100c.dat") / $(md5of "$LAB/pa-codec.back")"
+	sql "SELECT 'pa_codec: row ' || backend_name || ' ' || COALESCE(encryption_algorithm, '') || ' ' || etag || ' ' || size_bytes FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key = 'pa/codec100.dat'"
+}
+
+case_pa_trailer() { # a corrupted trailer, the body's length right: 400 on the client — the codec's decoder (a PUT) and the backend's (a part, edge_codec OFF)
+	creds
+	golden 46403 6291456 "$LAB/pa6.dat"
+	echo "pa_trailer codec PutObject, corrupted: $(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT -bucket $BUCKET -key pa/bad-put.bin -file "$LAB/pa6.dat" -corrupt)"
+	echo "pa_trailer codec PutObject, intact:    $(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT -bucket $BUCKET -key pa/good-put.bin -file "$LAB/pa6.dat")"
+	echo "pa_trailer rows: bad $(sql "SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key = 'pa/bad-put.bin'"), good $(sql "SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key = 'pa/good-put.bin'")"
+	flag_codec off
+	local up
+	up=$(aws_origin s3api create-multipart-upload --bucket $BUCKET --key pa/bad-part.bin --query UploadId --output text)
+	echo "pa_trailer mover UploadPart, corrupted: $(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT -bucket $BUCKET -key pa/bad-part.bin -file "$LAB/pa6.dat" -upload-id "$up" -part 1 -corrupt)"
+	echo "pa_trailer mover UploadPart, intact:    $(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT -bucket $BUCKET -key pa/bad-part.bin -file "$LAB/pa6.dat" -upload-id "$up" -part 1)"
+	aws_origin s3api abort-multipart-upload --bucket $BUCKET --key pa/bad-part.bin --upload-id "$up"
+	echo "pa_trailer mover PutObject on iDrive (D-EDGE-33): $(cd "$repo" && go run ./edge/s3-ingest/lab/awschunkedput.go -endpoint http://127.0.0.1:$ORIGIN_PORT -proxy http://127.0.0.1:$WORKER_PORT -bucket $BUCKET -key pa/origin-put.bin -file "$LAB/pa6.dat")"
+	grep '"reason":"aws_chunked_unbounded"' "$LAB/worker.log" | tail -1 | cut -c1-200
+	flag_codec on
+}
+
 down() {
 	stop_worker
 	if [ -f "$LAB/origin.pid" ]; then kill "$(cat "$LAB/origin.pid")" 2>/dev/null || true; rm -f "$LAB/origin.pid"; fi
@@ -373,5 +450,5 @@ origin) start_origin; echo "origin up" ;;
 worker) stop_worker; start_worker "${TAMPER:-}"; echo "worker up" ;;
 run) "case_$1" "${@:2}" ;;
 down) down "$@" ;;
-*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off|p0_parts|p0_bytes> | down" >&2; exit 2 ;;
+*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off|p0_parts|p0_bytes|pa_mover|pa_codec|pa_trailer> | down" >&2; exit 2 ;;
 esac

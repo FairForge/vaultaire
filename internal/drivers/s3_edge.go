@@ -135,8 +135,9 @@ const streamingPayload = "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
 // (engine.EdgeWriter.SignPut, WP-EDGE-2 Part C): the object's address is
 // the presign client's own (the driver's addressing style and escaping,
 // the upload id and part number for a part), its X-Amz-* query dropped;
-// then aws-sdk-go-v2's signer over the aws-chunked headers with the
-// streaming payload hash, at now. ContentLength stays 0 so no
+// then aws-sdk-go-v2's signer, with S3's rule of an unescaped canonical
+// path, over the aws-chunked headers with the streaming payload hash, at
+// now. ContentLength stays 0 so no
 // content-length is signed: the client's framing decides the encoded
 // length (aws-cli sends Transfer-Encoding: chunked).
 func (t s3EdgeTarget) signStreaming(ctx context.Context, uploadID string, partNumber int, decoded int64, trailer string) (map[string]string, string, error) {
@@ -189,7 +190,11 @@ func (t s3EdgeTarget) signStreaming(ctx context.Context, uploadID string, partNu
 	req.Header.Set("X-Amz-Content-Sha256", streamingPayload)
 	req.Header.Set("X-Amz-Decoded-Content-Length", strconv.FormatInt(decoded, 10))
 	req.Header.Set("X-Amz-Trailer", trailer)
-	if err := v4.NewSigner().SignHTTP(ctx, creds, req, streamingPayload, "s3", opts.Region, time.Now().UTC()); err != nil {
+	// S3 signs the path as sent — never escaped a second time (the SDK's S3
+	// client sets DisableURIPathEscaping; a blob address's `@` became %2540
+	// and every lab part was 403 SignatureDoesNotMatch without it).
+	signer := v4.NewSigner(func(o *v4.SignerOptions) { o.DisableURIPathEscaping = true })
+	if err := signer.SignHTTP(ctx, creds, req, streamingPayload, "s3", opts.Region, time.Now().UTC()); err != nil {
 		return nil, "", fmt.Errorf("%s sign put %s: %w", t.name, t.key, err)
 	}
 	headers := map[string]string{"host": req.URL.Host}
