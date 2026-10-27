@@ -215,9 +215,27 @@ case_f() { # aws-cli killed at ~50 %: the reaper drops the claims after the admi
 	echo "f: the reaper's run after 25 min: lab/codec-proof.sh run f2"
 }
 
+case_f_host() { # the HOST dies mid-upload (the Worker killed): its admits stay pending, the reaper drops their claims after the expiry
+	golden 46208 209715200 "$LAB/hostkill200.dat"
+	aws configure set default.s3.multipart_threshold 8MB
+	aws configure set default.s3.multipart_chunksize 8MB
+	aws_lab s3 cp "$LAB/hostkill200.dat" "s3://$BUCKET/f/hostkill200.dat" --no-progress >/dev/null 2>&1 &
+	local pid=$! n=0
+	for _ in $(seq 600); do
+		n=$(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND object_key = 'f/hostkill200.dat' AND state = 'committed'")
+		[ "${n:-0}" -ge 8 ] && break
+		sleep 0.2
+	done
+	stop_worker
+	kill -9 $pid 2>/dev/null || true
+	echo "f_host: the Worker killed after $n committed parts at $(date -u +%H:%M:%S); pending admits $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND object_key = 'f/hostkill200.dat' AND state = 'pending'"), pending claims $(sql "SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = '$(tenant)' AND state = 'pending'")"
+	start_worker ""
+	echo "f_host: run f2 after the expiry (20 min) and one reaper run (5 min)"
+}
+
 case_f2() {
-	echo "f2: pending admits $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND state = 'pending'"), expired $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND state = 'expired'")"
-	sql "SELECT 'f2: job ' || outcome || ' ' || COALESCE(result::text, '') FROM job_runs WHERE job_name = 'edge_admit_reaper'"
+	echo "f2: pending admits $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND state = 'pending'"), expired $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND state = 'expired'") (codec: $(sql "SELECT COUNT(*) FROM edge_admits WHERE tenant_id = '$(tenant)' AND state = 'expired' AND codec"))"
+	sql "SELECT 'f2: job ' || last_outcome || ' at ' || last_finished_at || ' ' || COALESCE(result::text, '') FROM job_runs WHERE job = 'edge_admit_reaper'"
 	metric 'vaultaire_edge_admit_reaper_total'
 	echo "f2: claims left pending: $(sql "SELECT COUNT(*) FROM global_content_index WHERE dedup_scope = '$(tenant)' AND state = 'pending'")"
 }
