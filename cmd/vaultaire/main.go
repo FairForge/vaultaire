@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/database"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/node"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"go.uber.org/zap"
 )
@@ -107,7 +109,20 @@ func (n *nilQuotaManager) GetUsageHistory(ctx context.Context, tenantID string, 
 	return []map[string]interface{}{}, nil
 }
 
+// isNodeRole says whether this process is a data node (WP-EDGE-3:
+// VAULTAIRE_ROLE=node — no database, no engine, no jobs; internal/node).
+func isNodeRole(getenv func(string) string) bool {
+	return strings.TrimSpace(getenv(node.RoleEnv)) == node.RoleNode
+}
+
 func main() {
+	// A data node opens nothing of the origin's: it is decided before any
+	// driver, database or job exists.
+	if isNodeRole(os.Getenv) {
+		node.Main(api.BuildSHA)
+		return
+	}
+
 	// Create logger
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
