@@ -126,11 +126,16 @@ func reserveEdgePart(ctx context.Context, db *sql.DB, tenantID, uploadID, object
 		return edgePartReservation{}, errUploadCodec
 	}
 	if !up.Edge {
-		var staged int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM multipart_parts WHERE upload_id = $1`, uploadID).Scan(&staged); err != nil {
-			return edgePartReservation{}, fmt.Errorf("count the upload's parts: %w", err)
+		// A staged part installed, or one IN FLIGHT (its reservation is on
+		// the upload row and no row exists yet — the stager installs after
+		// the body): either makes this a staged upload. Read under the
+		// upload's lock, the stager's own (one upload is one path, the lab's
+		// mixed upload of Prompt 46b step 12 d).
+		staged, sErr := uploadHasStagedParts(ctx, tx, uploadID)
+		if sErr != nil {
+			return edgePartReservation{}, sErr
 		}
-		if staged > 0 {
+		if staged {
 			return edgePartReservation{}, errUploadStaged
 		}
 		if up.StorageKey == "" {

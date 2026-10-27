@@ -72,6 +72,31 @@ func lockActiveUpload(ctx context.Context, tx *sql.Tx, tenantID, uploadID string
 	return floor, partBytes, edge, nil
 }
 
+// uploadIsCodec reads the upload's codec mark inside the caller's
+// transaction, which holds the upload row's lock (lockActiveUpload).
+func uploadIsCodec(ctx context.Context, tx *sql.Tx, uploadID string) (bool, error) {
+	var codec bool
+	if err := tx.QueryRowContext(ctx, `SELECT codec FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(&codec); err != nil {
+		return false, fmt.Errorf("read upload %s codec: %w", uploadID, err)
+	}
+	return codec, nil
+}
+
+// uploadHasStagedParts reports, inside the caller's transaction (which holds
+// the upload row's lock), whether a not-yet-edge upload has a staged part:
+// a part row, or a staged reservation in flight (reserved_bytes on the row
+// before the part's install writes it — only reserveUploadPart holds bytes
+// on an upload that is neither edge nor codec).
+func uploadHasStagedParts(ctx context.Context, tx *sql.Tx, uploadID string) (bool, error) {
+	var parts int
+	var reserved int64
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM multipart_parts WHERE upload_id = $1), COALESCE(reserved_bytes, 0)
+		FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(&parts, &reserved); err != nil {
+		return false, fmt.Errorf("count the upload's parts: %w", err)
+	}
+	return parts > 0 || reserved > 0, nil
+}
+
 // uploadHoldingFloorSQL is the floor an upload's holding is on, over the
 // alias u (usage.UploadHoldingFloor: downstairs for an upload created before
 // 091, which holds nothing).
@@ -93,6 +118,11 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 	}
 	if edge {
 		return 0, errUploadEdge // a staged part on an edge upload (WP-EDGE-1): one upload is one path
+	}
+	if codec, cErr := uploadIsCodec(ctx, tx, uploadID); cErr != nil {
+		return 0, cErr
+	} else if codec {
+		return 0, errUploadCodec // a staged part on a codec upload (WP-EDGE-2): one upload is one path
 	}
 	up := declared - held
 	if up <= 0 {
@@ -142,6 +172,24 @@ func settleUploadPartWith(ctx context.Context, db *sql.DB, tenantID, uploadID st
 	}
 	if edge != viaEdge {
 		return releaseMismatchedPart(ctx, tx, tenantID, uploadID, floor, reserved, edge)
+	}
+	if !viaEdge {
+		// The upload became codec while this part staged (the pre-check in
+		// stageUploadPart is not under the lock): refused here, its
+		// reservation given back — never a staged part beside chunk lists.
+		codec, cErr := uploadIsCodec(ctx, tx, uploadID)
+		if cErr != nil {
+			return cErr
+		}
+		if codec {
+			if err := giveBackPart(ctx, tx, tenantID, uploadID, floor, reserved); err != nil {
+				return err
+			}
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit the part's release: %w", err)
+			}
+			return errUploadCodec
+		}
 	}
 	delta := measured - held - reserved
 	if delta > 0 {
