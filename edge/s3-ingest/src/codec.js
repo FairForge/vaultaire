@@ -10,19 +10,31 @@
 // hashes only (D-EDGE-16); this file holds no key but the admit's public
 // one and the per-chunk keys it makes.
 //
-// Back-pressure: at most CODEC_IN_FLIGHT chunks are held between their hash
-// and their PUT (a counting semaphore the reader awaits before it cuts the
-// next chunk — the body is read no faster than the chunks leave). An index
-// batch goes out at 64 chunks, at the end of the body, or when the reader is
-// about to wait on the bound (D-EDGE-22: a batch can never hold more chunks
-// than the bound lets exist — waiting for 64 would deadlock).
+// Back-pressure: at most CODEC_IN_FLIGHT_BYTES (48 MiB) of chunk PLAINTEXT is
+// held between a chunk's cut and the moment its last segment is sealed (a
+// byte semaphore the reader awaits before it takes the next chunk — the body
+// is read no faster than the chunks leave; RP70-1: the bound was 4 CHUNKS,
+// and four 16 MiB chunks plus their whole sealed copies were the isolate).
+// A chunk is held as its 1 MiB SEGMENTS, each its own buffer: the PUT body
+// is a stream that seals a segment when the backend reads it, drops its
+// plaintext and releases its bytes, so no sealed copy of a chunk exists
+// whole and the plaintext goes as it is sent. An index batch goes out at 64
+// chunks, at the end of the body, or when the reader is about to wait on the
+// bound (D-EDGE-22: a batch can never hold more than the bound lets exist —
+// waiting for 64 would deadlock).
 //
 // The 503 rule: once the body has been read from, the request can never be
 // passed to the origin (its body is gone). Any failure is a commit
 // {outcome: "edge_error"} (the control plane gives back the reservation and
 // drops the claims) and a 503 SlowDown + Retry-After 30 to the client.
 
-import { sealChunk } from "./seal.js";
+import { SEGMENT_SIZE, sealChunkStream } from "./seal.js";
+
+/** s3ErrorXML renders the S3 error document the origin's writer would. */
+export function s3ErrorXML(code, message, path, requestId) {
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${esc(code)}</Code><Message>${esc(message)}</Message><Resource>${esc(path)}</Resource><RequestId>${esc(requestId)}</RequestId></Error>`;
+}
 
 // --- MD5 (RFC 1321) ---------------------------------------------------------
 
@@ -107,34 +119,52 @@ export class MD5 {
 
 // --- the pipeline -----------------------------------------------------------
 
-export const CODEC_IN_FLIGHT = 4;
+export const CODEC_IN_FLIGHT_BYTES = 48 << 20;
 export const INDEX_BATCH = 64;
 
-/** Semaphore: a counting semaphore that records its peak (the tests read it). */
+/**
+ * Semaphore is a byte semaphore (RP70-1): acquire(n) waits until n bytes fit
+ * under the bound, FIFO — a small waiter never overtakes a large one; a
+ * waiter larger than the bound proceeds alone when nothing is held (a chunk
+ * is never refused: no deadlock). It records its peak in bytes (the tests
+ * and the codec log line read it).
+ */
 export class Semaphore {
-  constructor(n) {
-    this.free = n;
-    this.n = n;
+  constructor(bound) {
+    this.bound = bound;
+    this.used = 0;
     this.waiters = [];
     this.peak = 0;
   }
   get held() {
-    return this.n - this.free;
+    return this.used;
   }
-  acquire() {
-    if (this.free > 0) {
-      this.free--;
-      this.peak = Math.max(this.peak, this.held);
+  /** wouldAdmit says whether acquire(n) would not wait. */
+  wouldAdmit(n) {
+    return this.waiters.length === 0 && this.fits(n);
+  }
+  fits(n) {
+    return this.used === 0 || this.used + n <= this.bound;
+  }
+  take(n) {
+    this.used += n;
+    this.peak = Math.max(this.peak, this.used);
+  }
+  acquire(n) {
+    if (this.wouldAdmit(n)) {
+      this.take(n);
       return Promise.resolve();
     }
-    return new Promise((res) => this.waiters.push(res));
+    return new Promise((res) => this.waiters.push({ n, res }));
   }
-  release() {
-    const next = this.waiters.shift();
-    if (next) {
-      this.peak = Math.max(this.peak, this.held);
-      next();
-    } else this.free++;
+  release(n) {
+    this.used -= n;
+    if (this.used < 0) throw new Error(`edge codec: released ${-this.used} bytes more than were held`);
+    while (this.waiters.length > 0 && this.fits(this.waiters[0].n)) {
+      const w = this.waiters.shift();
+      this.take(w.n);
+      w.res();
+    }
   }
 }
 
@@ -162,21 +192,67 @@ class Pending {
     this.pieces.push(p);
     this.len += p.length;
   }
+  /** cut takes the next n bytes as a chunk {length, segments}: its 1 MiB
+   * segments, each its own buffer (so each is freed when it is sealed). */
   cut(n) {
     if (n > this.len) throw new Error(`edge codec: the chunker cut ${n} bytes, ${this.len} are held`);
-    const out = new Uint8Array(n);
-    let w = 0;
-    while (w < n) {
-      const p = this.pieces[0];
-      const take = Math.min(p.length, n - w);
-      out.set(p.subarray(0, take), w);
-      w += take;
-      if (take === p.length) this.pieces.shift();
-      else this.pieces[0] = p.subarray(take);
+    const segments = [];
+    for (let left = n; left > 0; ) {
+      const seg = new Uint8Array(Math.min(SEGMENT_SIZE, left));
+      let w = 0;
+      while (w < seg.length) {
+        const p = this.pieces[0];
+        const take = Math.min(p.length, seg.length - w);
+        seg.set(p.subarray(0, take), w);
+        w += take;
+        if (take === p.length) this.pieces.shift();
+        else this.pieces[0] = p.subarray(take);
+      }
+      segments.push(seg);
+      left -= seg.length;
     }
     this.len -= n;
-    return out;
+    return { length: n, segments };
   }
+}
+
+/** sha256Hex hashes a chunk's segments: crypto.DigestStream where the
+ * runtime has it (workerd — no contiguous copy), else one buffer. */
+async function sha256Hex(segments) {
+  if (typeof crypto.DigestStream === "function") {
+    const ds = new crypto.DigestStream("SHA-256");
+    const w = ds.getWriter();
+    for (const seg of segments) await w.write(seg);
+    await w.close();
+    return hex(await ds.digest);
+  }
+  if (segments.length === 1) return hex(await crypto.subtle.digest("SHA-256", segments[0]));
+  let total = 0;
+  for (const seg of segments) total += seg.length;
+  const all = new Uint8Array(total);
+  let o = 0;
+  for (const seg of segments) {
+    all.set(seg, o);
+    o += seg.length;
+  }
+  return hex(await crypto.subtle.digest("SHA-256", all));
+}
+
+/**
+ * chunkPutInit is a chunk PUT's fetch init over the streamed seal: in
+ * workerd the body goes through a FixedLengthStream of the sealed length
+ * (the subrequest's Content-Length is the signed one, and a body of any
+ * other length fails the PUT); a runtime without one (node: the tests)
+ * sends the signed content-length header with the stream.
+ */
+export function chunkPutInit(headers, sealed) {
+  const h = { ...headers };
+  if (typeof globalThis.FixedLengthStream === "function") {
+    delete h["content-length"];
+    return { method: "PUT", headers: h, body: sealed.stream.pipeThrough(new globalThis.FixedLengthStream(sealed.length)), duplex: "half" };
+  }
+  h["content-length"] = String(sealed.length);
+  return { method: "PUT", headers: h, body: sealed.stream, duplex: "half" };
 }
 
 function val(r, what) {
@@ -224,7 +300,7 @@ export async function runCodec(request, admit, env, ctx, deps) {
   const doFetch = deps.fetch || fetch;
   const cp = deps.controlPlane;
   const log = deps.log || (() => {});
-  const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT);
+  const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT_BYTES);
   const tamper = deps.tamper || "";
   const started = Date.now();
   const declared = Number(request.headers.get("content-length"));
@@ -245,27 +321,47 @@ export async function runCodec(request, admit, env, ctx, deps) {
 
   const storeBatch = async (items) => {
     const t = Date.now();
-    const r = await cp("/api/v1/edge/index", { admit_id: admit.admit_id, chunks: items.map((it) => ({ hash: it.hash, size: it.size })) });
-    if (r.status !== 200) throw new Error(`index answered ${r.status}`);
-    const idx = await r.json();
+    let idx;
+    try {
+      const r = await cp("/api/v1/edge/index", { admit_id: admit.admit_id, chunks: items.map((it) => ({ hash: it.hash, size: it.size })) });
+      if (r.status !== 200) throw new Error(`index answered ${r.status}`);
+      idx = await r.json();
+    } catch (e) {
+      for (const it of items) {
+        it.chunk = null;
+        sem.release(it.size);
+      }
+      throw e;
+    }
     stats.index_ms.push(Date.now() - t);
     log({ edge: "codec_index", request_id: deps.requestId, chunks: items.length, misses: (idx.misses || []).length, ms: Date.now() - t });
     const misses = new Map((idx.misses || []).map((m) => [m.hash, m]));
     await Promise.all(items.map(async (it) => {
+      // The chunk's plaintext bytes this item still holds of the semaphore:
+      // a hit gives them back at once (RP70-6), a miss segment by segment
+      // as its PUT reads the sealed stream (RP70-1), and whatever is left
+      // when the item ends — a failure — in the finally.
+      let held = it.size;
+      const give = (n) => {
+        const k = Math.min(n, held);
+        held -= k;
+        if (k > 0) sem.release(k);
+      };
       try {
         const m = misses.get(it.hash);
         const e = entries[it.idx];
         if (!m) {
+          it.chunk = null;
+          give(held);
           e.status = "hit";
           stats.hits++;
           return;
         }
-        let sealed = await sealChunk(e2ee, pub, version, it.data);
-        it.data = null; // the plaintext goes; the sealed bytes travel
+        const segments = it.chunk.segments;
+        it.chunk = null; // the segments now live in the sealing stream only
+        const sealed = await sealChunkStream(e2ee, pub, version, segments, { onSegment: give });
         if (sealed.length !== m.sealed_length) throw new Error(`edge codec: sealed ${sealed.length} bytes, the link signs ${m.sealed_length}`);
-        const headers = { ...(m.send_headers || {}) };
-        delete headers["content-length"]; // the body's own length, which is the signed one
-        const resp = await doFetch(m.url, { method: "PUT", headers, body: sealed });
+        const resp = await doFetch(m.url, chunkPutInit(m.send_headers || {}, sealed));
         const etag = resp.headers.get("etag") || "";
         await resp.body?.cancel();
         if (!resp.ok) throw new Error(`chunk PUT answered ${resp.status}`);
@@ -274,9 +370,8 @@ export async function runCodec(request, admit, env, ctx, deps) {
         e.backend_etag = tamper === "etag" ? `"${"ab".repeat(16)}"` : etag; // TEST ONLY
         stats.misses++;
         stats.sealed += sealed.length;
-        sealed = null;
       } finally {
-        sem.release();
+        give(held);
       }
     }));
   };
@@ -292,13 +387,13 @@ export async function runCodec(request, admit, env, ctx, deps) {
 
   const emit = async (chunk) => {
     if (failure) throw failure;
-    if (sem.free === 0) flush(); // the batch goes out before the reader waits on the bound
-    await sem.acquire();
+    if (!sem.wouldAdmit(chunk.length)) flush(); // the batch goes out before the reader waits on the bound
+    await sem.acquire(chunk.length);
     if (failure) {
-      sem.release();
+      sem.release(chunk.length);
       throw failure;
     }
-    const hash = hex(await crypto.subtle.digest("SHA-256", chunk));
+    const hash = await sha256Hex(chunk.segments);
     const idx = entries.length;
     entries.push({ hash, size: chunk.length });
     stats.chunks++;
@@ -307,11 +402,12 @@ export async function runCodec(request, admit, env, ctx, deps) {
       // Asked already: the commit settles it as a hit after the first
       // occurrence (stored or hit) is settled — the commit runs in order.
       entries[idx].status = "hit";
-      sem.release();
+      chunk.segments = null;
+      sem.release(chunk.length);
       return;
     }
     seen.add(hash);
-    batch.push({ idx, hash, size: chunk.length, data: chunk });
+    batch.push({ idx, hash, size: chunk.length, chunk });
     if (batch.length >= INDEX_BATCH) flush();
   };
 
@@ -319,7 +415,10 @@ export async function runCodec(request, admit, env, ctx, deps) {
   try {
     // The awaited write is the back-pressure: the cutter is read no faster
     // than emit admits chunks under the bound.
-    await request.body.pipeThrough(cutter.stream).pipeTo(new WritableStream({ write: (chunk) => emit(chunk) }));
+    // An empty body (an empty last part, D-EDGE-29) has no stream: the
+    // chunker's finish cuts nothing and the commit names no chunk.
+    const source = request.body || new ReadableStream({ start: (c) => c.close() });
+    await source.pipeThrough(cutter.stream).pipeTo(new WritableStream({ write: (chunk) => emit(chunk) }));
     flush();
     await Promise.all(work);
     if (failure) throw failure;
@@ -336,8 +435,16 @@ export async function runCodec(request, admit, env, ctx, deps) {
   const sorted = [...stats.index_ms].sort((a, b) => a - b);
   const pct = (p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length))] : 0);
   log({ edge: "codec", request_id: deps.requestId, chunks: stats.chunks, misses: stats.misses, hits: stats.hits, bytes: stats.plaintext, sealed: stats.sealed,
-    index_calls: sorted.length, index_p50_ms: pct(50), index_p95_ms: pct(95), peak_in_flight: sem.peak, ms: Date.now() - started });
-  return commitOK(cp, body, log, deps.requestId);
+    index_calls: sorted.length, index_p50_ms: pct(50), index_p95_ms: pct(95), peak_in_flight_bytes: sem.peak, ms: Date.now() - started });
+  return commitOK(cp, body, log, deps.requestId, requestPath(request));
+}
+
+function requestPath(request) {
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return "";
+  }
 }
 
 async function commitEdgeError(cp, admit, log, requestId) {
@@ -349,15 +456,36 @@ async function commitEdgeError(cp, admit, log, requestId) {
   }
 }
 
-/** commitOK commits; a lost answer is retried once (the commit is idempotent on the admit id). null = no answer. */
-async function commitOK(cp, body, log, requestId) {
+/**
+ * commitOK commits; a lost answer is retried once (the commit is idempotent
+ * on the admit id). A 200 is the client's answer, relayed whatever status it
+ * carries (a commit the control plane refused with an S3 400 included). A
+ * 4xx of the control plane's OWN (its JSON error: the commit itself was
+ * malformed) is the client's 400 InvalidRequest naming that error — the same
+ * upload would fail the same way, so never a 503 to retry (RP70-7). null =
+ * no answer (the caller's 503).
+ */
+async function commitOK(cp, body, log, requestId, path) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await new Promise((res) => setTimeout(res, 2000));
     try {
       const r = await cp("/api/v1/edge/commit", body);
       if (r.status === 200) return await r.json();
+      if (r.status === 404 || r.status === 410) {
+        await r.body?.cancel();
+        return null;
+      }
+      if (r.status >= 400 && r.status < 500) {
+        const j = await r.json().catch(() => ({}));
+        const why = (j && j.error) || `HTTP ${r.status}`;
+        log({ edge: "commit_refused", op: "codec", status: r.status, error: why, request_id: requestId });
+        return {
+          status: 400,
+          headers: { "content-type": "application/xml", "x-amz-request-id": requestId || "" },
+          body: s3ErrorXML("InvalidRequest", `Your request was invalid. The edge could not commit this upload (${why}); retrying it unchanged will fail the same way.`, path, requestId || ""),
+        };
+      }
       await r.body?.cancel();
-      if (r.status === 404 || r.status === 410) return null;
     } catch (e) {
       log({ edge: "commit_failed", op: "codec", attempt, error: String(e && e.message ? e.message : e), request_id: requestId });
     }

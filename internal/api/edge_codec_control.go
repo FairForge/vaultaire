@@ -42,6 +42,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -291,8 +292,11 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("the chunk store's backend cannot be asked: %w", err)
 	}
 
-	resp := &edgeIndexResponse{Hits: []string{}, Misses: []edgeIndexMiss{}}
-	claims := map[string]time.Time{}
+	// Every chunk validated and keyed first (no database work), then ONE
+	// transaction claims them all (RP70-4), then the links are presigned
+	// (no database work). A link that cannot be made drops every claim this
+	// call took: the host's call fails whole, as it did per chunk.
+	items := make([]edgeIndexItem, 0, len(req.Chunks))
 	for _, c := range req.Chunks {
 		if c.Size < 1 || c.Size > crypto.ChunkMaxSize {
 			return nil, http.StatusBadRequest, fmt.Errorf("a chunk is 1..%d bytes", crypto.ChunkMaxSize)
@@ -305,26 +309,39 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 		if kErr != nil {
 			return nil, http.StatusInternalServerError, kErr
 		}
-		hit, since, cErr := s.claimEdgeChunk(ctx, row.TenantID, keyed, version, c.Size)
-		if cErr != nil {
-			return nil, http.StatusInternalServerError, fmt.Errorf("claim: %w", cErr)
+		items = append(items, edgeIndexItem{hash: c.Hash, keyed: keyed, size: c.Size})
+	}
+	if err := s.claimEdgeChunks(ctx, req.AdmitID, row.TenantID, version, items); err != nil {
+		if errors.Is(err, errEdgeAdmitExpired) || errors.Is(err, errEdgeAdmitUnknown) {
+			return nil, edgeAdmitErrStatus(err), err
 		}
-		if hit {
-			resp.Hits = append(resp.Hits, c.Hash)
+		return nil, http.StatusInternalServerError, fmt.Errorf("claim: %w", err)
+	}
+	dropAll := func() {
+		for _, it := range items {
+			if !it.hit {
+				s.dropEdgeChunkClaim(ctx, row.TenantID, it.keyed, it.since)
+			}
+		}
+	}
+
+	resp := &edgeIndexResponse{Hits: []string{}, Misses: []edgeIndexMiss{}}
+	for _, it := range items {
+		if it.hit {
+			resp.Hits = append(resp.Hits, it.hash)
 			edgeCodecChunks.WithLabelValues("hit").Inc()
 			continue
 		}
-		claims[keyed] = since
-		sealedLen := crypto.WrappedChunkSealedLength(c.Size)
-		blobKey := edgeCodecChunkKey(row.TenantID, keyed, version)
+		sealedLen := crypto.WrappedChunkSealedLength(it.size)
+		blobKey := edgeCodecChunkKey(row.TenantID, it.keyed, version)
 		presigned, signed, pErr := ew.PresignPut(engine.ChunkContext(ctx), engine.ChunkContainer, blobKey,
 			engine.EdgePresign{ContentLength: sealedLen, TTL: edgeAdmitTTL})
 		if pErr != nil {
-			s.dropEdgeChunkClaim(ctx, row.TenantID, keyed, since)
+			dropAll()
 			return nil, http.StatusInternalServerError, fmt.Errorf("presign chunk link: %w", pErr)
 		}
 		if cErr := edgePresignSigns(presigned, "content-length"); cErr != nil {
-			s.dropEdgeChunkClaim(ctx, row.TenantID, keyed, since)
+			dropAll()
 			return nil, http.StatusInternalServerError, fmt.Errorf("the chunk link does not sign its length: %w", cErr)
 		}
 		sendHeaders := map[string]string{"content-length": strconv.FormatInt(sealedLen, 10)}
@@ -332,20 +349,12 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 			switch name {
 			case "host", "content-length":
 			default:
-				s.dropEdgeChunkClaim(ctx, row.TenantID, keyed, since)
+				dropAll()
 				return nil, http.StatusInternalServerError, fmt.Errorf("the chunk link signs a header the host does not send: %s", name)
 			}
 		}
-		resp.Misses = append(resp.Misses, edgeIndexMiss{Hash: c.Hash, URL: presigned, SendHeaders: sendHeaders, SealedLength: sealedLen})
+		resp.Misses = append(resp.Misses, edgeIndexMiss{Hash: it.hash, URL: presigned, SendHeaders: sendHeaders, SealedLength: sealedLen})
 		edgeCodecChunks.WithLabelValues("miss").Inc()
-	}
-	if len(claims) > 0 {
-		if err := recordEdgeCodecClaims(ctx, s.db, req.AdmitID, claims); err != nil {
-			// The claims stand either way (the takeover window and the chunk
-			// orphan sweep cover an unrecorded one); the expiry just cannot
-			// drop them early.
-			s.logger.Warn("edge index: claims not recorded on the admit", zap.Error(err), zap.String("admit_id", req.AdmitID))
-		}
 	}
 	return resp, http.StatusOK, nil
 }
@@ -386,96 +395,125 @@ func edgeAdmitErrStatus(err error) int {
 	}
 }
 
-// recordEdgeCodecClaims appends claims to the admit's attrs under the row's
-// lock, so the expiry can drop them (expireEdgeAdmit).
-func recordEdgeCodecClaims(ctx context.Context, db *sql.DB, id string, claims map[string]time.Time) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	row, err := lockEdgeAdmit(ctx, tx, id)
-	if err != nil {
-		return err
-	}
-	if row.Attrs.CodecClaims == nil {
-		row.Attrs.CodecClaims = map[string]time.Time{}
-	}
-	for k, v := range claims {
-		row.Attrs.CodecClaims[k] = v
-	}
-	attrs, err := json.Marshal(row.Attrs)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE edge_admits SET attrs = $2 WHERE id = $1`, id, attrs); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // edgeCodecTakeover is how old an edge chunk claim must be before another
 // writer may take it over: the admit's whole life — a chunk link lives 15
 // minutes and may still write the one address (file comment).
 const edgeCodecTakeover = edgeAdmitExpiry
 
-// claimEdgeChunk is chunk_claim.go's claim for a codec chunk (file comment:
-// the two differences). hit = reference at commit; otherwise the claim is
-// this admit's, since identifying it.
-func (s *Server) claimEdgeChunk(ctx context.Context, tenantID, keyed string, version int, size int64) (hit bool, since time.Time, err error) {
+// edgeIndexItem is one chunk of an index call: its plain hash (hex, for the
+// answer only), its keyed hash, its size — and what the claim decided: hit
+// (reference at commit) or a claim of this admit, since identifying it.
+type edgeIndexItem struct {
+	hash  string
+	keyed string
+	size  int64
+	hit   bool
+	since time.Time
+}
+
+// claimEdgeChunks is chunk_claim.go's claim for every chunk of one index
+// call (file comment: the two differences), in ONE transaction (RP70-4):
+// the admit row locked FOR UPDATE (it must still be pending; concurrent
+// calls of one admit merge their claims one after the other), then per
+// chunk IN KEYED-HASH ORDER — two calls sharing chunks take their locks in
+// the same order and can never deadlock — the chunk's advisory lock, its
+// row FOR UPDATE, and the claim (an insert, or the takeover of an abandoned
+// one); then the claims recorded on the admit (the expiry drops them), one
+// commit. items[i].hit / .since are filled in.
+func (s *Server) claimEdgeChunks(ctx context.Context, admitID, tenantID string, version int, items []edgeIndexItem) error {
+	order := make([]int, len(items))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return items[order[a]].keyed < items[order[b]].keyed })
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, time.Time{}, err
+		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, tenantID, keyed); err != nil {
-		return false, time.Time{}, err
-	}
-	var state string
-	var abandoned bool
-	err = tx.QueryRowContext(ctx, `
-		SELECT state, state = 'pending' AND pending_since < clock_timestamp() - make_interval(secs => $3)
-		  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2 FOR UPDATE`,
-		tenantID, keyed, edgeCodecTakeover.Seconds()).Scan(&state, &abandoned)
-	found := err == nil
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, time.Time{}, err
-	}
-	blobKey := edgeCodecChunkKey(tenantID, keyed, version)
-	switch {
-	case found && state == "ready":
-		return true, time.Time{}, tx.Commit()
-	case found && !abandoned:
-		// A young claim: another host is storing it right now. Answered as a
-		// hit; the commit's IncrementRef is the check (0 rows = retry).
-		return true, time.Time{}, tx.Commit()
-	case found:
-		// Abandoned (its admit expired): taken over with this write's shape.
-		err = tx.QueryRowContext(ctx, `
-			UPDATE global_content_index
-			   SET backend_id = $4, storage_key = $5, size_bytes = $6, compressed_size = NULL, compression_algo = NULL,
-			       encrypted = TRUE, encryption_algo = $7, ciphertext_hash = NULL, encryption_key_version = $8,
-			       keyed_hash = $3, pending_since = clock_timestamp(), marked_for_deletion = FALSE, marked_at = NULL
-			 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'pending'
-			RETURNING pending_since`,
-			tenantID, keyed, keyed, s.writeAdapter().primaryName(), blobKey, size, crypto.EdgeChunkEncryptionAlgo, version).Scan(&since)
-	default:
-		err = tx.QueryRowContext(ctx, `
-			INSERT INTO global_content_index
-			  (dedup_scope, plaintext_hash, keyed_hash, backend_id, storage_key, size_bytes,
-			   encrypted, encryption_algo, encryption_key_version, ref_count, state, pending_since)
-			VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, $8, 0, 'pending', clock_timestamp())
-			RETURNING pending_since`,
-			tenantID, keyed, keyed, s.writeAdapter().primaryName(), blobKey, size, crypto.EdgeChunkEncryptionAlgo, version).Scan(&since)
+	admit, err := lockEdgeAdmit(ctx, tx, admitID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errEdgeAdmitUnknown
 	}
 	if err != nil {
-		return false, time.Time{}, err
+		return err
+	}
+	if admit.State != "pending" || time.Now().After(admit.ExpiresAt) {
+		return errEdgeAdmitExpired
+	}
+	primary := s.writeAdapter().primaryName()
+	var claimed []string
+	for _, i := range order {
+		it := &items[i]
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, tenantID, it.keyed); err != nil {
+			return err
+		}
+		var state string
+		var abandoned bool
+		err := tx.QueryRowContext(ctx, `
+			SELECT state, state = 'pending' AND pending_since < clock_timestamp() - make_interval(secs => $3)
+			  FROM global_content_index WHERE dedup_scope = $1 AND plaintext_hash = $2 FOR UPDATE`,
+			tenantID, it.keyed, edgeCodecTakeover.Seconds()).Scan(&state, &abandoned)
+		found := err == nil
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		blobKey := edgeCodecChunkKey(tenantID, it.keyed, version)
+		switch {
+		case found && state == "ready":
+			it.hit = true
+			continue
+		case found && !abandoned:
+			// A young claim: another host is storing it right now (or this
+			// call named the chunk twice). Answered as a hit; the commit's
+			// IncrementRef is the check (0 rows = retry).
+			it.hit = true
+			continue
+		case found:
+			// Abandoned (its admit expired): taken over with this write's shape.
+			err = tx.QueryRowContext(ctx, `
+				UPDATE global_content_index
+				   SET backend_id = $4, storage_key = $5, size_bytes = $6, compressed_size = NULL, compression_algo = NULL,
+				       encrypted = TRUE, encryption_algo = $7, ciphertext_hash = NULL, encryption_key_version = $8,
+				       keyed_hash = $3, pending_since = clock_timestamp(), marked_for_deletion = FALSE, marked_at = NULL
+				 WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'pending'
+				RETURNING pending_since`,
+				tenantID, it.keyed, it.keyed, primary, blobKey, it.size, crypto.EdgeChunkEncryptionAlgo, version).Scan(&it.since)
+		default:
+			err = tx.QueryRowContext(ctx, `
+				INSERT INTO global_content_index
+				  (dedup_scope, plaintext_hash, keyed_hash, backend_id, storage_key, size_bytes,
+				   encrypted, encryption_algo, encryption_key_version, ref_count, state, pending_since)
+				VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, $8, 0, 'pending', clock_timestamp())
+				RETURNING pending_since`,
+				tenantID, it.keyed, it.keyed, primary, blobKey, it.size, crypto.EdgeChunkEncryptionAlgo, version).Scan(&it.since)
+		}
+		if err != nil {
+			return err
+		}
+		if admit.Attrs.CodecClaims == nil {
+			admit.Attrs.CodecClaims = map[string]time.Time{}
+		}
+		admit.Attrs.CodecClaims[it.keyed] = it.since
+		claimed = append(claimed, it.keyed)
+	}
+	if len(claimed) > 0 {
+		attrs, err := json.Marshal(admit.Attrs)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE edge_admits SET attrs = $2 WHERE id = $1`, admitID, attrs); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
-		return false, time.Time{}, err
+		return err
 	}
-	s.gci.InvalidateCache(tenantID, keyed)
-	return false, since, nil
+	for _, keyed := range claimed {
+		s.gci.InvalidateCache(tenantID, keyed)
+	}
+	return nil
 }
 
 // dropEdgeChunkClaim removes this admit's claim (ref 0, ours by
@@ -571,10 +609,17 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			if !isOurs {
 				return fail(errors.New("a stored chunk this admit never claimed"))
 			}
-			// RP68-3: the host's word for the blob is checked against the
-			// backend on a sample — the first stored chunk of the commit and
-			// every edgeCodecHeadEvery-th after it — before the claim flips.
-			if stored%edgeCodecHeadEvery == 0 {
+			// The host's word for the blob is checked against the backend
+			// before the claim flips: the FIRST stored chunk of the commit is
+			// OPENED — its header and first segment, under the tenant's codec
+			// seed (RP70-3: a wrong-key blob has an ETag and size of its own)
+			// — and every edgeCodecHeadEvery-th after it is HEADed (RP68-3).
+			switch {
+			case stored == 0:
+				if oErr := s.openEdgeChunkPrefix(ctx, row.TenantID, keyed, version, since, etag, c.SealedSize); oErr != nil {
+					return fail(oErr)
+				}
+			case stored%edgeCodecHeadEvery == 0:
 				if hErr := s.headEdgeChunk(ctx, row.TenantID, keyed, version, since, etag, c.SealedSize); hErr != nil {
 					return fail(hErr)
 				}
@@ -692,6 +737,57 @@ func (s *Server) headEdgeChunk(ctx context.Context, tenantID, keyed string, vers
 	}
 	if strings.ToLower(strings.Trim(info.ETag, `"`)) != etag || info.Size != sealedSize {
 		return fmt.Errorf("%w: the backend answers ETag %s, %d bytes", errEdgeChunkHeadMismatch, info.ETag, info.Size)
+	}
+	return nil
+}
+
+// openEdgeChunkPrefix reads a stored chunk's header and FIRST SEGMENT from
+// the backend its claim names (one ranged read: at most
+// WrappedChunkSealedLength(one segment) + the opener's one look-ahead byte,
+// ~1.05 MiB whatever the part size) and opens them under the codec private
+// seed of the admit's key version: OpenWrappedChunk's prime unwraps the
+// chunk key and verifies the first segment's tag. It proves the host sealed
+// under the tenant's key and the stream is well-formed; the keyed-hash
+// binding of the whole plaintext stays with the read path and routing_truth
+// (RP70-3). The backend's ETag and the blob's size are compared too, so the
+// read also covers what the HEAD sample covers. A blob of other bytes, of
+// another size or that does not open is errEdgeChunkHeadMismatch (the
+// commit's 400); a backend that cannot be asked is errEdgeChunkUnverified.
+func (s *Server) openEdgeChunkPrefix(ctx context.Context, tenantID, keyed string, version int, since time.Time, etag string, sealedSize int64) error {
+	var backend string
+	if err := s.db.QueryRowContext(ctx, `SELECT backend_id FROM global_content_index
+		WHERE dedup_scope = $1 AND plaintext_hash = $2 AND state = 'pending' AND pending_since = $3`,
+		tenantID, keyed, since).Scan(&backend); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil // not ours any more: the flip below finds that and references what stands
+		}
+		return fmt.Errorf("%w: %w", errEdgeChunkUnverified, err)
+	}
+	length := min(sealedSize, crypto.WrappedChunkSealedLength(crypto.StreamSegmentSize)+1)
+	rctx, cancel := context.WithTimeout(ctx, edgeBackendCallTimeout)
+	defer cancel()
+	rc, info, err := s.writeAdapter().chunks().getRange(rctx, chunkAddr{scope: tenantID, hash: keyed, backend: backend,
+		key: edgeCodecChunkKey(tenantID, keyed, version)}, 0, length)
+	if err != nil {
+		if isObjectMissingErr(err) {
+			return fmt.Errorf("%w: the backend holds no blob at the chunk's address", errEdgeChunkHeadMismatch)
+		}
+		return fmt.Errorf("%w: %w", errEdgeChunkUnverified, err)
+	}
+	defer func() { _ = rc.Close() }()
+	if strings.ToLower(strings.Trim(info.ETag, `"`)) != etag || info.Size != sealedSize {
+		return fmt.Errorf("%w: the backend answers ETag %s, %d bytes", errEdgeChunkHeadMismatch, info.ETag, info.Size)
+	}
+	priv, err := s.tenantKeys.EdgeCodecPrivateKey(ctx, tenantID, version)
+	if err != nil {
+		return fmt.Errorf("%w: the codec key of version %d: %w", errEdgeChunkUnverified, version, err)
+	}
+	defer clear(priv)
+	if _, _, err := crypto.OpenWrappedChunk(priv, io.LimitReader(rc, length)); err != nil {
+		if errors.Is(err, crypto.ErrStreamCorrupt) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("%w: the first stored chunk does not open under the tenant's codec key: %w", errEdgeChunkHeadMismatch, err)
+		}
+		return fmt.Errorf("%w: %w", errEdgeChunkUnverified, err)
 	}
 	return nil
 }

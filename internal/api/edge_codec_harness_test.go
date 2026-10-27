@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/sdk/go/e2ee"
 )
 
 // codecTestMaster is the LAB master key of the harness (the prompt's rule:
@@ -112,6 +114,14 @@ func (f *codecFixture) index(admitID string, chunks []crypto.Chunk) edgeIndexRes
 // backend); returns the commit entries for every chunk in body order.
 func (f *codecFixture) storeMisses(grant *edgeCodecGrant, chunks []crypto.Chunk, idx edgeIndexResponse) []edgeCommitChunk {
 	f.t.Helper()
+	return f.storeMissesWith(grant, chunks, idx, func(int) []byte { return grant.KEMPublicKey })
+}
+
+// storeMissesWith is storeMisses with the public key each stored chunk is
+// sealed under chosen by its position among the stored ones (n = 0 is the
+// first stored chunk) — a host that seals under the wrong key (RP70-3).
+func (f *codecFixture) storeMissesWith(grant *edgeCodecGrant, chunks []crypto.Chunk, idx edgeIndexResponse, pubFor func(n int) []byte) []edgeCommitChunk {
+	f.t.Helper()
 	missURL := map[string]edgeIndexMiss{}
 	for _, m := range idx.Misses {
 		missURL[m.Hash] = m
@@ -129,7 +139,7 @@ func (f *codecFixture) storeMisses(grant *edgeCodecGrant, chunks []crypto.Chunk,
 			out = append(out, edgeCommitChunk{Hash: c.Hash, Size: int64(c.Size), Status: "hit"})
 			continue
 		}
-		sealer, err := crypto.SealWrappedChunk(grant.KEMPublicKey, grant.Version, bytes.NewReader(c.Data), int64(c.Size))
+		sealer, err := crypto.SealWrappedChunk(pubFor(len(stored)), grant.Version, bytes.NewReader(c.Data), int64(c.Size))
 		require.NoError(f.t, err)
 		var sealed bytes.Buffer
 		_, err = sealed.ReadFrom(sealer)
@@ -797,9 +807,20 @@ func TestEdgeCodecCommit_HeadSampleOfStoredChunks(t *testing.T) {
 	entries := f.storeMisses(a.Codec, chunks, idx)
 	f.drv.heads.Store(0)
 	sum := md5.Sum(body) // #nosec G401
+	f.drv.ranges.Store(0)
+	f.drv.mu.Lock()
+	f.drv.rangeLens = nil
+	f.drv.mu.Unlock()
 	relay, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
 	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
-	assert.Equal(t, int32(2), f.drv.heads.Load(), "the first stored chunk and the 33rd")
+	// RP70-3: the FIRST stored chunk is opened (one ranged read of its
+	// header and first segment — these 1 MiB chunks are one segment each),
+	// the 33rd is HEADed.
+	assert.Equal(t, int32(1), f.drv.ranges.Load(), "one ranged read: the first stored chunk's prefix")
+	f.drv.mu.Lock()
+	assert.Equal(t, []int64{int64(crypto.StreamHeaderWrapped) + 1<<20 + 16}, f.drv.rangeLens, "the header and the first segment")
+	f.drv.mu.Unlock()
+	assert.Equal(t, int32(1), f.drv.heads.Load(), "the 33rd stored chunk is HEADed")
 
 	// A host that reports another ETag than the backend holds.
 	body2 := crypto.GoldenBody(1602, 3<<20)
@@ -945,4 +966,137 @@ func TestStagedPart_RefusedUnderTheLockOnceTheUploadIsCodec(t *testing.T) {
 	w := f.s3(http.MethodPut, "/"+f.bucket+"/mixed.zip?uploadId="+uploadID+"&partNumber=3", testBytes(4096), nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "edge codec")
+}
+
+// --- Prompt 46c Part 0: the RP70 fixes ---
+
+// RP70-2 / D-EDGE-29: every UploadPart of an edge tenant is the edge's
+// whatever its size — EDGE_MIN_BYTES gates PutObject only. A 2 MiB first
+// part of a NEW upload (no part has marked it yet: the small-tail race of
+// every ≤ 10-part aws-cli upload) is admitted codec, and an EMPTY last part
+// (S3 allows one; RB3-5) is admitted and commits with an empty chunk list.
+func TestEdgeCodecMultipart_EveryPartIsTheEdges(t *testing.T) {
+	f := setupCodecFixture(t)
+	f.srv.chunkingThreshold = 64 << 20
+	f.srv.edge.minBytes = 4 << 20
+	uploadID := f.createUpload("small-first.zip")
+	part1 := crypto.GoldenBody(2901, 2<<20)
+
+	q1 := url.Values{"uploadId": {uploadID}, "partNumber": {"1"}}
+	p1 := f.admit(f.signed("/"+f.bucket+"/small-first.zip", q1, part1, nil, ""))
+	require.True(t, p1.Edge, "a 2 MiB part of a new upload is the edge's (D-EDGE-29): %+v", p1)
+	require.NotNil(t, p1.Codec, "admitted codec: %+v", p1)
+	r1 := f.codecCommit(p1, part1, f.chunksOf(part1))
+	require.Equal(t, http.StatusOK, r1.Status, r1.Body)
+
+	q2 := url.Values{"uploadId": {uploadID}, "partNumber": {"2"}}
+	p2 := f.admit(f.signed("/"+f.bucket+"/small-first.zip", q2, nil, nil, ""))
+	require.True(t, p2.Edge, "an empty part of a codec upload is the edge's: %+v", p2)
+	require.NotNil(t, p2.Codec, "%+v", p2)
+	empty := md5.Sum(nil) // #nosec G401
+	r2, code := f.commit(edgeCommitRequest{AdmitID: p2.AdmitID, Outcome: edgeOutcomeOK, Chunks: []edgeCommitChunk{}, BodyMD5: hex.EncodeToString(empty[:])})
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, http.StatusOK, r2.Status, r2.Body)
+	var list string
+	var size int64
+	require.NoError(t, f.db.QueryRow(`SELECT part_chunks::text, size_bytes FROM multipart_parts WHERE upload_id = $1 AND part_number = 2`, uploadID).Scan(&list, &size))
+	assert.Equal(t, "[]", list, "an empty part records an empty chunk list")
+	assert.Zero(t, size)
+
+	completeXML := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`,
+		r1.Headers["Etag"], r2.Headers["Etag"])
+	wc := f.s3(http.MethodPost, "/"+f.bucket+"/small-first.zip?uploadId="+uploadID, []byte(completeXML), nil)
+	require.Equal(t, http.StatusOK, wc.Code, wc.Body.String())
+	rb := f.originGet("small-first.zip", nil)
+	require.Equal(t, http.StatusOK, rb.Code, rb.Body.String())
+	assert.True(t, bytes.Equal(part1, rb.Body.Bytes()), "read back: part 1 then nothing")
+
+	// A PutObject under EDGE_MIN_BYTES stays the origin's.
+	small := f.admit(f.signed("/"+f.bucket+"/small.bin", nil, part1, nil, ""))
+	assert.False(t, small.Edge)
+	assert.Equal(t, edgeReasonSmall, small.Reason)
+}
+
+// RP70-3: a host that sealed the first stored chunk under ANOTHER public key
+// passes a HEAD sample (the wrong-key blob has an ETag and size of its own)
+// — the commit OPENS that chunk's header and first segment under the
+// tenant's codec seed and refuses it (head_mismatch, everything given back).
+// A well-formed commit reads exactly one prefix: the header, one segment
+// and the opener's one look-ahead byte when the chunk has more segments.
+func TestEdgeCodecCommit_FirstStoredChunkIsOpened(t *testing.T) {
+	f := setupCodecFixture(t)
+	body := crypto.GoldenBody(2911, 3<<20+77)
+	chunks := fixedChunks(body, 3<<19) // 1.5 MiB chunks: two segments each
+	sum := md5.Sum(body)               // #nosec G401
+	bodyMD5 := hex.EncodeToString(sum[:])
+
+	other, err := e2ee.PublicKey(bytes.Repeat([]byte{9}, 32))
+	require.NoError(t, err)
+	a := f.admit(f.signed("/"+f.bucket+"/wrongkey.bin", nil, body, nil, ""))
+	require.NotNil(t, a.Codec, "%+v", a)
+	idx := f.index(a.AdmitID, chunks)
+	entries := f.storeMissesWith(a.Codec, chunks, idx, func(n int) []byte {
+		if n == 0 {
+			return other
+		}
+		return a.Codec.KEMPublicKey
+	})
+	before := promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("head_mismatch"))
+	usedBefore := f.used()
+	relay, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: bodyMD5})
+	assert.Equal(t, http.StatusBadRequest, relay.Status, relay.Body)
+	assert.Contains(t, relay.Body, "head_mismatch")
+	assert.Equal(t, before+1, promtestutil.ToFloat64(edgeCodecChunks.WithLabelValues("head_mismatch")))
+	assert.Less(t, f.used(), usedBefore, "the reservation given back")
+	_, ok := f.head("wrongkey.bin")
+	assert.False(t, ok, "nothing committed")
+
+	// The same bytes from an honest host: one ranged read of the prefix.
+	f.drv.ranges.Store(0)
+	f.drv.mu.Lock()
+	f.drv.rangeLens = nil
+	f.drv.mu.Unlock()
+	a2 := f.admit(f.signed("/"+f.bucket+"/rightkey.bin", nil, body, nil, ""))
+	require.NotNil(t, a2.Codec)
+	r2 := f.codecCommit(a2, body, chunks)
+	require.Equal(t, http.StatusOK, r2.Status, r2.Body)
+	assert.Equal(t, int32(1), f.drv.ranges.Load())
+	f.drv.mu.Lock()
+	assert.Equal(t, []int64{int64(crypto.StreamHeaderWrapped) + 1<<20 + 16 + 1}, f.drv.rangeLens,
+		"the header, the first segment and the opener's look-ahead byte (the chunk has a second segment)")
+	f.drv.mu.Unlock()
+	w := f.originGet("rightkey.bin", nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, bytes.Equal(body, w.Body.Bytes()))
+}
+
+// RP70-4: an index call's claims are ONE transaction — the admit row
+// locked, then one advisory lock per chunk taken in keyed-hash order (two
+// calls sharing chunks can never deadlock), the claims and their record on
+// the admit row, one commit; the links are presigned after it (no database
+// work). Was: a transaction per chunk plus one to record the claims.
+func TestEdgeIndex_OneTransactionPerCall(t *testing.T) {
+	f := setupCodecFixture(t)
+	db, log := openCountingDB(t)
+	body := crypto.GoldenBody(2921, 64*(64<<10))
+	chunks := fixedChunks(body, 64<<10)
+	require.Len(t, chunks, 64)
+	a := f.admit(f.signed("/"+f.bucket+"/sixtyfour.bin", nil, body, nil, ""))
+	require.NotNil(t, a.Codec, "%+v", a)
+
+	f.srv.db = db // the index call alone through the counting driver
+	log.reset()
+	idx := f.index(a.AdmitID, chunks)
+	f.srv.db = f.db
+	require.Len(t, idx.Misses, 64)
+	assert.Equal(t, 1, log.beginCount(), "one transaction for the call's 64 claims")
+	locks := log.advisoryLockArgs()
+	require.Len(t, locks, 64, "one advisory lock per chunk")
+	assert.True(t, sort.StringsAreSorted(locks), "taken in keyed-hash order")
+
+	// The claims are recorded on the admit: the commit flips them.
+	entries := f.storeMisses(a.Codec, chunks, idx)
+	sum := md5.Sum(body) // #nosec G401
+	r, _ := f.commit(edgeCommitRequest{AdmitID: a.AdmitID, Outcome: edgeOutcomeOK, Chunks: entries, BodyMD5: hex.EncodeToString(sum[:])})
+	assert.Equal(t, http.StatusOK, r.Status, r.Body)
 }

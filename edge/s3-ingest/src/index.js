@@ -12,8 +12,9 @@
 // backend's body is the client's response body, under the ORIGIN's
 // headers the control plane answered. Everything else, and anything the
 // control plane declines, passes through to the origin untouched
-// (`fetch(request)`: the route's origin is SLC, the Host stays, the SigV4
-// signature still verifies there).
+// (`passThrough(request)` — `fetch(request, {cache: "no-store"})`: the
+// route's origin is SLC, the Host stays, the SigV4 signature still verifies
+// there).
 //
 // What this file is NOT: a privacy feature (it moves Standard plaintext and
 // Private ciphertext alike and holds no key — contract lines 1, 4, 8), a
@@ -38,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { runCodec } from "./codec.js";
+import { runCodec, s3ErrorXML } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -124,11 +125,9 @@ export function relayResponse(relay) {
   return new Response(body, { status: relay.status, headers });
 }
 
-/** s3ErrorXML renders the S3 error document the origin's writer would. */
-export function s3ErrorXML(code, message, path, requestId) {
-  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${esc(code)}</Code><Message>${esc(message)}</Message><Resource>${esc(path)}</Resource><RequestId>${esc(requestId)}</RequestId></Error>`;
-}
+// s3ErrorXML (src/codec.js) renders the S3 error document the origin's
+// writer would; re-exported here for the tests and the relay.
+export { s3ErrorXML };
 
 /** backendErrorCode reads <Code> off an S3 error body ("" when none). */
 export function backendErrorCode(xml) {
@@ -261,7 +260,7 @@ async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
     } catch {
       // the reaper settles the admit at its expiry
     }
-    return fetch(request);
+    return passThrough(request);
   }
   let commit;
   try {
@@ -275,6 +274,19 @@ async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
 }
 
 // --- the Worker ------------------------------------------------------------
+
+/**
+ * passThrough hands the client's request to the origin untouched, NEVER
+ * through Cloudflare's cache layer (RP70-5): the first pass-through after a
+ * content deploy reached the origin without the client's signed `range` and
+ * `if-none-match` — the cache layer answers a conditional or ranged GET
+ * itself and strips them from its origin fetch — and the origin answered
+ * 403 SignatureDoesNotMatch (RB-9, captured at the 0.3.0 deploy). Every
+ * request the Worker passes on goes through here.
+ */
+export function passThrough(request) {
+  return fetch(request, { cache: "no-store" });
+}
 
 function slowDown(path, requestId) {
   return new Response(s3ErrorXML("SlowDown", "Please reduce your request rate: the edge could not report your upload to the control plane. Retry.", path, requestId), {
@@ -346,7 +358,7 @@ async function commitRead(env, body, requestId) {
  * client under the origin's headers, the commit at the backend's headers
  * (served), or the origin's own serve when the backend did not answer as
  * expected (fallback / error): a GET has no request body, so
- * `fetch(request)` is always possible.
+ * passThrough(request) is always possible.
  */
 async function serveRead(request, env, ctx, admit, requestId) {
   const started = Date.now();
@@ -362,7 +374,7 @@ async function serveRead(request, env, ctx, admit, requestId) {
   console.log(JSON.stringify({ edge: "get", request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, bytes: commit.backend_content_length, ms: commit.duration_ms }));
   if (commit.outcome !== "served") {
     if (backend) await backend.body?.cancel();
-    return fetch(request);
+    return passThrough(request);
   }
   return readResponse(backend, admit);
 }
@@ -370,14 +382,14 @@ async function serveRead(request, env, ctx, admit, requestId) {
 export default {
   async fetch(request, env, ctx) {
     const kind = classify(request);
-    if (kind.kind === "pass") return fetch(request);
-    if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return fetch(request);
+    if (kind.kind === "pass") return passThrough(request);
+    if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return passThrough(request);
     let tamper;
     try {
       tamper = codecTamper(env);
     } catch (e) {
       console.log(JSON.stringify({ edge: "refused", error: e.message }));
-      return fetch(request);
+      return passThrough(request);
     }
 
     const requestId = crypto.randomUUID();
@@ -389,17 +401,17 @@ export default {
       const r = await controlPlane(env, "/api/v1/edge/admit", description, ORIGIN_TIMEOUT_MS);
       if (r.status !== 200) {
         console.log(JSON.stringify({ edge: "admit_unavailable", status: r.status, request_id: requestId }));
-        return fetch(request);
+        return passThrough(request);
       }
       admit = await r.json();
     } catch (e) {
       console.log(JSON.stringify({ edge: "admit_failed", error: String(e && e.message ? e.message : e), request_id: requestId }));
-      return fetch(request);
+      return passThrough(request);
     }
     if (admit.refusal) return relayResponse(admit.refusal);
     if (!admit.edge) {
       console.log(JSON.stringify({ edge: "pass", op: kind.kind, reason: admit.reason || "", request_id: requestId }));
-      return fetch(request);
+      return passThrough(request);
     }
 
     if (kind.kind === "get") return serveRead(request, env, ctx, admit, requestId);

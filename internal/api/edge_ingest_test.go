@@ -58,6 +58,8 @@ type edgeFakeDriver struct {
 	uploads     map[string]map[int]string
 	presigns    atomic.Int32
 	heads       atomic.Int32 // HeadObject calls (RP68-3's sample)
+	ranges      atomic.Int32 // GetRangeInfo calls (RP70-3's first-segment open)
+	rangeLens   []int64      // the length each GetRangeInfo asked for
 	creates     atomic.Int32
 	aborts      atomic.Int32
 	deletes     []string
@@ -164,6 +166,30 @@ func (d *edgeFakeDriver) HeadObject(ctx context.Context, container, artifact str
 	}
 	sum := md5.Sum(b) // #nosec G401
 	return engine.RangeInfo{ETag: hex.EncodeToString(sum[:]), Size: int64(len(b))}, nil
+}
+
+// GetRangeInfo serves [offset, offset+length) of a blob with its MD5 ETag
+// and whole size (engine.VersionedRangeGetter): the codec commit's open of
+// the first stored chunk's first segment (RP70-3).
+func (d *edgeFakeDriver) GetRangeInfo(ctx context.Context, container, artifact string, offset, length int64) (io.ReadCloser, engine.RangeInfo, error) {
+	d.ranges.Add(1)
+	k, err := d.key(ctx, container, artifact)
+	if err != nil {
+		return nil, engine.RangeInfo{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.rangeLens = append(d.rangeLens, length)
+	b, ok := d.objects[k]
+	if !ok {
+		return nil, engine.RangeInfo{}, &engine.NotFoundError{Container: container, Artifact: artifact}
+	}
+	if offset < 0 || offset >= int64(len(b)) || length <= 0 {
+		return nil, engine.RangeInfo{}, fmt.Errorf("InvalidRange (fake): %d+%d of %d", offset, length, len(b))
+	}
+	end := min(offset+length, int64(len(b)))
+	sum := md5.Sum(b) // #nosec G401
+	return io.NopCloser(bytes.NewReader(bytes.Clone(b[offset:end]))), engine.RangeInfo{ETag: hex.EncodeToString(sum[:]), Size: int64(len(b))}, nil
 }
 
 func (d *edgeFakeDriver) presign(key string, p engine.EdgePresign, query string) (string, []string, error) {
@@ -765,10 +791,11 @@ func TestEdgeAdmit_SmallBodiesPassThrough(t *testing.T) {
 	assert.Zero(t, f.used())
 	resp = f.admit(f.signed("/"+f.bucket+"/exact.bin", nil, testBytes(4096), nil, ""))
 	assert.True(t, resp.Edge, "at the threshold the edge takes it: %+v", resp)
-	// A part below it is the origin's too.
+	// A part below it is the edge's (D-EDGE-29): EDGE_MIN_BYTES gates
+	// PutObject only — a part is never alone, its upload is the unit.
 	id := f.createUpload("small.zip")
 	resp = f.admit(f.signed("/"+f.bucket+"/small.zip", url.Values{"uploadId": {id}, "partNumber": {"1"}}, testBytes(100), nil, ""))
-	assert.Equal(t, edgeReasonSmall, resp.Reason)
+	assert.True(t, resp.Edge, "a small part is the edge's: %+v", resp)
 
 	logger := zap.NewNop()
 	env := func(v string) func(string) string { return func(string) string { return v } }

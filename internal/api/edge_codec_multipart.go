@@ -265,7 +265,9 @@ func (s *Server) commitEdgeCodecPart(ctx context.Context, row edgeAdmitRow, req 
 	for _, c := range req.Chunks {
 		total += c.Size
 	}
-	if total != row.ContentLength || len(req.Chunks) == 0 {
+	// An empty part (S3 allows an empty last part; D-EDGE-29) commits with
+	// an empty chunk list; any other part names at least one chunk.
+	if total != row.ContentLength || (len(req.Chunks) == 0 && row.ContentLength != 0) {
 		return fail(ErrIncompleteBody)
 	}
 	refs, err := s.settleEdgeCodecChunks(cctx, row, req.Chunks)

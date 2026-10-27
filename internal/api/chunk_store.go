@@ -263,6 +263,30 @@ func (c *chunkStore) head(ctx context.Context, a chunkAddr) (engine.RangeInfo, e
 	return h.HeadObject(engine.ChunkContext(ctx), chunkContainer, a.key)
 }
 
+// getRange reads [offset, offset+length) of a chunk blob at its one address
+// on the backend its row names, with the backend's ETag and the blob's whole
+// size (engine.VersionedRangeGetter — every edge writer has one): the edge
+// codec's commit opens the first stored chunk's header and first segment
+// with it (RP70-3). Never the legacy address: no codec chunk was written
+// there.
+func (c *chunkStore) getRange(ctx context.Context, a chunkAddr, offset, length int64) (io.ReadCloser, engine.RangeInfo, error) {
+	g, ok := c.eng.(interface {
+		GetDriver(name string) (engine.Driver, bool)
+	})
+	if !ok || a.backend == "" {
+		return nil, engine.RangeInfo{}, errors.New("chunk range: the engine cannot address a single backend")
+	}
+	drv, ok := g.GetDriver(a.backend)
+	if !ok {
+		return nil, engine.RangeInfo{}, fmt.Errorf("chunk range: %w: %q", engine.ErrBackendNotRegistered, a.backend)
+	}
+	rg, ok := drv.(engine.VersionedRangeGetter)
+	if !ok {
+		return nil, engine.RangeInfo{}, fmt.Errorf("chunk range: backend %q has no ranged read", a.backend)
+	}
+	return rg.GetRangeInfo(engine.ChunkContext(ctx), chunkContainer, a.key, offset, length)
+}
+
 // legacyCopyExists reports whether a copy of the blob is still at a legacy
 // address (dedup GC asks before it deletes the row of a chunk that is not at
 // the one address: the row is what the chunk move works from).
