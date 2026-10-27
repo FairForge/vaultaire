@@ -431,6 +431,36 @@ deleted and the backends swept. The `account.erased` audit row counts them as
   - Another slot's process memory: unwrapped keys are cached there for at most
     an hour and are not reachable through the API (no row routes to them).
 
+## The edge codec's derivations (WP-EDGE-2, plan 40.10 slice 2)
+
+Per tenant key version, two more derivations of the version's stored random
+chunk key — no new stored key, no new column; deleting the version's row
+(the crypto-shred) takes both with the chunks and the SSE blobs:
+
+- **the index key** = HKDF-SHA256(chunk key, `stored/index/v1`): a codec
+  chunk's dedup identity is HMAC-SHA256(index key, sha256(chunk)) — the
+  index stores the keyed hash only (contract line 6), computed by the
+  CONTROL PLANE in memory per index call (the data-plane host sends the
+  plain sha256 over the service-token channel and holds the plaintext
+  anyway; D-EDGE-16);
+- **the codec key pair** = an X-Wing (ML-KEM-768 + X25519) seed
+  HKDF-SHA256(chunk key, `stored/edge-codec/v1`): the PUBLIC key goes to
+  the data-plane host in the admit answer; a chunk is sealed as one **0x06**
+  blob — a random 32-byte key per chunk, the 0x04 construction's 1 MiB
+  segments under HKDF(chunk key, info ‖ header), the key wrapped to the
+  codec public key with HPKE (sdk/go/e2ee's sealed box, RFC 9180). The
+  origin opens it under the RECORDED version's seed
+  (`TenantKeys.EdgeCodecPrivateKey`) and binds the plaintext by its keyed
+  hash. The encryption name on the rows is `AES256-EW`.
+
+A rotation is a new index key AND a new codec pair: old codec chunks stay
+readable under their recorded version and stop deduplicating new uploads;
+their re-home onto the new version is a pass of its own (the `key_reencrypt`
+chunk pass skips `AES256-EW` rows — a re-home changes the index identity).
+On a process without a master key none of this exists: the edge admit
+answers the whole-PUT shape (`no_key`), never a plaintext chunked write at
+the edge. Design and proofs: `docs/reviews/WP-EDGE-2A.md`.
+
 ## Client-side keys (Private mode, the SDK key core)
 
 Everything above is **Standard** mode: keys we hold. **Private** mode is the other hierarchy (keystone K2, `sdk/go/e2ee`, plan 10.0, F-12): every key below is made on the customer's device, and the server stores only what is wrapped under keys it does not have. It is one Go package compiled unchanged to WebAssembly (`sdk/wasm`, `sdk/js/e2ee`); no surface makes a key, a wrap or a derivation of its own. Nothing here runs on the server for customer data. It is built and tested (K2b, 2026-10-22, `docs/reviews/WP-P31.md`) and used by no surface yet.

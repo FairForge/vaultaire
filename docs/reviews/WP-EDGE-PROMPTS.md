@@ -945,6 +945,127 @@ Architecture notes
 ultrathink
 ```
 
+## Stage 1a Prompt 46b: WP-EDGE-2 Part B — the Worker 0.3.0 pipeline, the lab proof, dedup-measure (Part 0: RP68's findings)
+
+Continue from WP-EDGE-2 Part A (2026-10-27: #994 Part 0 + the Worker 0.2.1,
+#995 the codec, #997 the control plane + migration 111; note
+docs/reviews/WP-EDGE-2A.md — read § Decisions D-EDGE-16…21 and § Residuals
+RB2-1…5 + RB-9) and from its post-merge review RP68
+(docs/reviews/WP-EDGE-2A-REVIEW.md once written — its findings are THIS
+prompt's Part 0; if RP68 has not run yet, run it first as its own session).
+Most recent merged PR and open PRs: `git log origin/main`, `gh pr list`.
+
+Read first: docs/reviews/WP-EDGE-2A.md (the harness
+internal/api/edge_codec_harness_test.go is THE ORACLE: the Worker must
+produce the same rows — the harness's admit → index → seal → PUT → commit
+sequence is exactly the Worker's pipeline, and its tests say what each
+answer looks like); internal/crypto/edge_codec.go (SealWrappedChunk is the
+Go reference of what the Worker must produce byte-compatibly: the 0x06
+header, HKDF(chunk key, "stored/edge-codec/stream-v1" ‖ header) → AES-256-GCM
+1 MiB segments with the 0x04 nonce/last-flag layout, the chunk key wrapped
+with sdk/wasm's sealTo under info "stored/edge-codec/chunk-key/v1");
+sdk/chunkerwasm (the chunker's WASM API: create/push/finish/free);
+edge/s3-ingest/src/index.js and README; bench-results/EDGE-RELAY-2026-10-26.md
+(JS in the byte path halves a stream — slice 2 puts WASM in it ON PURPOSE;
+this prompt measures what it costs); contract lines 4, 5, 6 (cite in the PR
+body).
+
+Lane: Engine. No migration expected (next: 112 — claim it only if RP68
+forces one). PRs: (0) RP68's fixes; (A) the Worker 0.3.0 + its node tests;
+(B) cmd/tools/dedup-measure; (C) the docs PR (WP-EDGE-2B.md, STATUS, plan
+40.10, CLAUDE.md rows, Prompt 47's text refreshed in this file).
+
+What to build
+1. PART 0: RP68's findings, each exactly as its fix column says.
+2. THE WORKER 0.3.0 (edge/s3-ingest): a codec admit (admit.codec set) runs
+   the pipeline instead of moveBody — the request body through a
+   TransformStream into the WASM chunker (chunker.wasm + wasm_exec.js
+   shipped as additional modules beside index.js; `no_bundle` keeps them
+   separate files — probe in Step 0 how a multi-module Worker's
+   client_build row is computed: the manifest row should cover index.js AND
+   chunker.wasm, likely as two rows or a combined digest — decide and say
+   so), sha256 per chunk (WebCrypto digest), the index call per 64 chunks
+   (one /index call per batch; the LAST batch may be smaller), per miss:
+   seal (WebCrypto AES-GCM per 1 MiB segment under a random key from
+   crypto.getRandomValues; HKDF via WebCrypto deriveBits with the info =
+   "stored/edge-codec/stream-v1" ‖ header; the nonce layout stream.go's;
+   the wrap via sdk/wasm's sealTo — load e2ee.wasm too, or extract the
+   HPKE seal into a smaller module — measure both, Step 0) and PUT to the
+   link with Content-Length = sealed_length; back-pressure: at most N
+   chunks buffered (the Workers memory limit is 128 MB — N ≤ 4 of 16 MiB
+   worst-case, measure), the body read paced by the PUTs; then the commit
+   with the ordered chunk list + body_md5 (MD5 in WASM or JS — the ETag;
+   measure its cost). A pipeline failure ANYWHERE falls back: the admit is
+   failed via commit (outcome edge_error) and the ORIGIN takes the request
+   — but the body is partially consumed: a codec admit CANNOT fall back to
+   fetch(request) once a byte is read; answer the client 503 SlowDown +
+   Retry-After (the client retries; the commit releases everything) — say
+   so in the README and the note.
+3. THE LAB PROOF through wrangler dev (the D-EDGE-7 topology: aws-cli →
+   wrangler dev as HTTP proxy → the lab origin with
+   ENCRYPTION_MASTER_KEY_FILE): a 100 MiB `aws s3 cp` admitted codec,
+   chunked by the WASM chunker at the GOLDEN boundaries, sealed, stored,
+   committed; the origin reads it back MD5-equal; a re-upload = 100 % hits
+   and 0 chunk PUTs; the rows equal the HARNESS's for the same body (the
+   oracle — compare manifests row by row in SQL); a multipart upload with
+   ≥ 64 MiB parts; a mid-body cut (kill aws-cli) → the claims dropped by
+   the commit/reaper; the per-stream RATE measured against Part A's
+   pass-through baseline (the whole point of the bench caveat) and the
+   isolate's memory watched (`wrangler dev` reports it).
+4. CMD/TOOLS/DEDUP-MEASURE (F-3): the number the owner decides F-37 with.
+   A read-only tool against a lab corpus (a directory tree, or a bucket via
+   the S3 API with a provided key): chunk every file with the frozen
+   chunker, hash, and report the dedup fraction WITHIN one tenant and
+   ACROSS N simulated tenants (the corpus split by top-level directory =
+   one "tenant" each): total bytes, unique bytes, the cross-tenant-only
+   fraction (what a global index would save beyond per-tenant dedup — the
+   number contract line 5's refusal is weighed against). Table in
+   cmd/tools/README.md. Never writes; never touches prod.
+5. Worker 0.3.0's client_build row(s) + wrangler deploy on the production
+   account — WITH RB-9's capture armed FIRST (Step 0.1): this is the next
+   CONTENT-changing deploy, the one that reproduces the first-request 403.
+
+Step 0 — probes, answers into WP-EDGE-2B.md: 0.1 RB-9's capture — arm
+tcpdump on the box (`tcpdump -i lo -s0 -w /tmp/rb9.pcap tcp port <active>`;
+sudo via the Keychain) BEFORE the 0.3.0 deploy, fire the signed
+pass-through probe (the Part A recipe: If-None-Match + Range, the bench
+key, a nonexistent bucket) within 15 s, diff the failing request's headers
+against a succeeding one in the pcap; the probe writes nothing. 0.2 the
+multi-module no_bundle deploy: does `wrangler deploy` with extra modules
+keep each file byte-identical and downloadable (`…/content/v2` parts)? How
+does the manifest row cover them — decide. 0.3 WebCrypto AES-GCM segment
+rate in workerd (`wrangler dev`) and the e2ee.wasm load cost per isolate;
+0.4 the chunker's rate in workerd (node was 123 MB/s); 0.5
+`encodeBody: "manual"` + an un-decoded subrequest for RP66-1's residual
+(both backends): would stored-Content-Encoding objects be servable at the
+edge? Probe only; the fix is a later part.
+
+Tests (red first): the pipeline's node tests with a FAKE control plane and
+backend (the index/commit shapes from the harness's JSON); the golden
+boundaries THROUGH the Worker's TransformStream path; a sealed chunk from
+the Worker OPENS with crypto.OpenWrappedChunk (export a test vector from
+the node test, open it in a Go test — the cross-implementation pin, as
+TestE2EE_WASMMatchesNative does); the 503 on a mid-pipeline failure (never
+a silent fallback with a consumed body); the batch split at 64 chunks; the
+back-pressure bound. Structural: the client manifest rows; `make
+test-edge` carries everything.
+
+Architecture notes
+- Contract lines 4, 5, 6 cited in every PR body. The Worker holds the
+  public key and per-chunk keys for the request only; sha256(chunk) goes
+  only to the control plane over the service token; nothing new is stored.
+- On prod: deployed DARK (edge_codec OFF everywhere; without a master key
+  the admit answers the whole PUT anyway). The flag stays OFF; the owner's
+  post-F-14 session flips it (the chain's last bullet).
+- Closeout: write Prompt 47's text refreshed (WP-EDGE-3, the data node —
+  the chain's summary + current line numbers) into this file; WP-EDGE-2B.md
+  with Step 0 / decisions / residuals; STATUS; plan 40.10; the ledger row.
+  The post-merge review is RP70.
+- Commit: feat(edge,tools): WP-EDGE-2 Part B — … [WP-EDGE-2]; merge with
+  `gh pr merge --auto` (merge queue; never --admin).
+
+ultrathink
+
 ## The chain (owner 2026-10-26: "build everything now") — each closeout writes the next prompt here
 
 Serial, one deep code lane; each prompt's Part 0 is the previous prompt's
@@ -972,8 +1093,8 @@ current line numbers (the /next conventions).
   passes through; the access-log row; a lost commit still meters (the reaper
   reads the admit's size). Live proof: the Lightroom zip back through
   s3.stored.cloud with MD5 equal, the origin's access log bytes_out 0.
-- **Prompt 46 — WP-EDGE-2 Part A, slice 2 against the LAB master key: the codec and the control plane** (rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
-- **Prompt 46b — WP-EDGE-2 Part B** (written by Prompt 46's closeout): the Worker 0.3.0 pipeline (the WASM chunker, sha256, the index call per 64 chunks, WebCrypto AES-GCM segments + the HPKE wrap from sdk/wasm, a PUT per miss, the commit; back-pressure; the per-stream rate measured — the baseline says JavaScript in the byte path halves a stream), the lab proof through wrangler dev against the harness's rows, `cmd/tools/dedup-measure` (F-3: the cross-tenant fraction of a lab corpus, the number the owner decides F-37 with), `encodeBody: "manual"` probed for RP66-1's residual. On prod the two switches that wait for F-14 stay: `edge_codec` ON and Prompt 48's `standard_sealed_default`.
+- **Prompt 46 — WP-EDGE-2 Part A — DONE 2026-10-27** (`docs/reviews/WP-EDGE-2A.md`; #994 Part 0 + the Worker 0.2.1 deployed with RB-9 reproduced and narrowed, #995 the codec, #997 the control plane + migration 111; the post-merge review is RP68). As rewritten 2026-10-27 by the RP66 review; the 2026-10-26 text asked one session for Part A and Part B together and had two design errors — RP66-8). Built and proven with `ENCRYPTION_MASTER_KEY_FILE` in the lab; deployed to prod DARK (flag `edge_codec`, per tenant; without a master key the admit answers Part A's whole PUT). (a) The frozen chunker (WP-R8-4) compiled to WASM from the Go module (client `edge-chunker`), pinned to golden boundaries in Go and node. (b) The dual key: the tenant's ML-KEM-768 public key handed out by admit, a random key per chunk, the chunk sealed in the current (0x04) stream layout under it, the key wrapped with HPKE (X-Wing, sdk/go/e2ee) — a NEW format byte **0x06** (0x05 is the SSE-C multipart header), opened on the control plane under the tenant private seed. (c) The keyed index: the data-plane host sends sha256(chunk); the CONTROL PLANE applies the tenant index key (HKDF of the key version's chunk key, label `stored/index/v1`) in memory — the index stores the keyed hash only (`TestIndexHoldsNoPlainHash`), dedup per tenant by construction; misses get presigned PUTs into `_global` under a claim (chunk_claim.go's takeover window), the manifest is written at commit as storeChunkedObject writes it. Part A's data-plane host is a Go harness. Part 0 = RP66-1/2/3/5/6/7. Contract lines 4, 5, 6 cited.
+- **Prompt 46b — WP-EDGE-2 Part B** (ISSUED — the full text is the `## Stage 1a Prompt 46b` section above; summary): the Worker 0.3.0 pipeline (the WASM chunker, sha256, the index call per 64 chunks, WebCrypto AES-GCM segments + the HPKE wrap from sdk/wasm, a PUT per miss, the commit; back-pressure; the per-stream rate measured — the baseline says JavaScript in the byte path halves a stream), the lab proof through wrangler dev against the harness's rows, `cmd/tools/dedup-measure` (F-3: the cross-tenant fraction of a lab corpus, the number the owner decides F-37 with), `encodeBody: "manual"` probed for RP66-1's residual. On prod the two switches that wait for F-14 stay: `edge_codec` ON and Prompt 48's `standard_sealed_default`.
 - **Prompt 47 — WP-EDGE-3, the data node.** The binary in node mode
   (`VAULTAIRE_ROLE=node`: no DB, no routes but the mover's, the same admit/
   commit protocol over the service token, the Worker's chunked decoder and
