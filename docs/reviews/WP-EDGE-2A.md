@@ -215,6 +215,7 @@ same rows.
   data-plane host's (the harness, then the WASM/Worker). Linking
   sdk/go/e2ee into the binary also makes deadcode list that package's other
   functions; informational.
+- **RB2-6 (P4, fixed in #1000) — the codec metrics were declared, pre-created and never REGISTERED.** The prod scrape after #997's deploy showed 0 `vaultaire_edge_codec` series: the `init()` pre-creation fills the vec, but only `reg.MustRegister` exports it. One line + `TestMetricsEndpoint_KeepsLegacySeries` now pins the three families' presence (presence, not value: the vecs are process globals the package's harness tests bump on CI). The lesson for every new metric: the pre-creation test must read the ENDPOINT, not the vec.
 - **RB-9 — refined, still open** (Step 0.5 above): one 403 per
   content-changing Worker deploy, first request only, admit reached, the
   pass-through's signature refused; the headers capture is armed before the
