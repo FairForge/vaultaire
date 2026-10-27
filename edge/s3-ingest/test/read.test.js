@@ -110,3 +110,147 @@ test("a backend Content-Length that is not the admitted span is a fallback (RP66
   assert.equal(readSucceeded(new Response(null, { status: 206 }), admit), true);
   assert.equal(readSucceeded(short, { expect_status: 206 }), true);
 });
+
+// --- 0.4.0: the windowed reader (D-EDGE-32) ---
+
+import worker from "../src/index.js";
+import { createHash } from "node:crypto";
+
+const env = { VAULTAIRE_ORIGIN: "https://origin.test", VAULTAIRE_EDGE_TOKEN: "tok" };
+
+/** windowFakes installs a fake fetch: the admit answers `admit`, the backend
+ * serves ranges of `object` (failing range index `failAt` with a 500, after
+ * `delayMs`), commits are recorded, a pass-through is recorded. */
+function windowFakes({ object, admit, failAt = -1, delayMs = 5, firstStatus = 206 }) {
+  const st = { inFlight: 0, peak: 0, ranges: [], commits: [], passes: 0 };
+  const real = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    if (input instanceof Request) {
+      st.passes++;
+      return new Response("origin", { status: 200 });
+    }
+    const url = String(input);
+    if (url.endsWith("/api/v1/edge/admit")) return new Response(JSON.stringify(admit), { status: 200 });
+    if (url.endsWith("/api/v1/edge/commit")) {
+      st.commits.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200 });
+    }
+    st.inFlight++;
+    st.peak = Math.max(st.peak, st.inFlight);
+    try {
+      const m = /^bytes=(\d+)-(\d+)$/.exec(new Headers(init.headers).get("range") || "");
+      assert.ok(m, "every range names its span");
+      assert.equal(init.cache, "no-store");
+      assert.equal(new Headers(init.headers).get("if-match"), admit.send_headers["if-match"], "the signed if-match on every range");
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      const idx = st.ranges.length;
+      st.ranges.push([a, b]);
+      await new Promise((r) => setTimeout(r, delayMs));
+      if (idx === 0 && firstStatus !== 206) return new Response("x", { status: firstStatus });
+      if (a === failAt * admit.window.range_bytes + admit.window.start) return new Response("<Error><Code>InternalError</Code></Error>", { status: 500 });
+      const body = object.subarray(a, b + 1);
+      return new Response(body, { status: 206, headers: { "content-length": String(body.length), "content-range": `bytes ${a}-${b}/${object.length}`, etag: '"obj-3"' } });
+    } finally {
+      st.inFlight--;
+    }
+  };
+  return { st, restore: () => { globalThis.fetch = real; } };
+}
+
+function windowAdmit(size, start = 0) {
+  return {
+    edge: true, admit_id: "w-1", url: "https://backend.test/stored/t-x/obj", method: "GET",
+    send_headers: { "if-match": '"obj-3"' }, expect_status: 206, status: 200, content_length: size,
+    response_headers: { "Content-Length": String(size), ETag: '"obj-3"' },
+    window: { range_bytes: 1 << 20, in_flight: 6, start },
+  };
+}
+
+function getReq() {
+  return new Request("https://s3.stored.cloud/b/obj", { method: "GET", headers: { authorization: sig } });
+}
+
+async function runWindow(f) {
+  const waits = [];
+  const resp = await worker.fetch(getReq(), env, { waitUntil: (p) => waits.push(p) });
+  return { resp, settle: () => Promise.all(waits) };
+}
+
+test("the windowed reader: ranges of range_bytes, at most in_flight at once, written in order — the client gets the exact bytes, the commit meters the sum", async () => {
+  const object = new Uint8Array(20 * (1 << 20) + 12345).map((_, i) => (i * 13 + 5) & 255);
+  const f = windowFakes({ object, admit: windowAdmit(object.length) });
+  try {
+    const { resp, settle } = await runWindow(f);
+    assert.equal(resp.status, 200);
+    assert.equal(resp.headers.get("etag"), '"obj-3"', "the origin's headers");
+    const got = new Uint8Array(await resp.arrayBuffer());
+    await settle();
+    assert.equal(got.length, object.length);
+    assert.equal(createHash("md5").update(got).digest("hex"), createHash("md5").update(object).digest("hex"));
+    assert.equal(f.st.ranges.length, 21, "20 full ranges and the tail");
+    assert.ok(f.st.peak <= 6, `peak ${f.st.peak} ranges in flight`);
+    assert.ok(f.st.peak >= 4, `the window is used: peak ${f.st.peak}`);
+    assert.equal(f.st.commits.length, 1);
+    assert.equal(f.st.commits[0].outcome, "served");
+    assert.equal(f.st.commits[0].bytes_sent, object.length);
+    assert.equal(f.st.commits[0].backend_content_length, object.length);
+    assert.equal(f.st.passes, 0);
+  } finally {
+    f.restore();
+  }
+});
+
+test("the windowed reader from a client Range's start: every range inside the admitted span", async () => {
+  const object = new Uint8Array(12 * (1 << 20)).map((_, i) => i & 255);
+  const start = 3 * (1 << 20) + 7;
+  const span = object.length - start;
+  const admit = windowAdmit(span, start);
+  admit.status = 206;
+  const f = windowFakes({ object, admit });
+  try {
+    const { resp, settle } = await runWindow(f);
+    assert.equal(resp.status, 206);
+    const got = new Uint8Array(await resp.arrayBuffer());
+    await settle();
+    assert.deepEqual(Buffer.from(got), Buffer.from(object.subarray(start)));
+    assert.ok(f.st.ranges.every(([a, b]) => a >= start && b < object.length));
+  } finally {
+    f.restore();
+  }
+});
+
+test("a range that fails after bytes went out cuts the body (never a clean short end); the commit reports error with the bytes sent", async () => {
+  const object = new Uint8Array(20 * (1 << 20)).map((_, i) => (i * 7) & 255);
+  const f = windowFakes({ object, admit: windowAdmit(object.length), failAt: 9 });
+  try {
+    const { resp, settle } = await runWindow(f);
+    assert.equal(resp.status, 200);
+    await assert.rejects(resp.arrayBuffer(), "the client's body errors");
+    await settle();
+    assert.equal(f.st.commits.length, 1);
+    const c = f.st.commits[0];
+    assert.equal(c.outcome, "error");
+    assert.equal(c.backend_status, 500);
+    assert.equal(c.bytes_sent, 9 * (1 << 20), "ranges 0–8 reached the client");
+    assert.equal(f.st.passes, 0, "the body had started: never the origin");
+  } finally {
+    f.restore();
+  }
+});
+
+test("a first range the backend does not serve is the origin's (fallback), nothing sent from the edge", async () => {
+  const object = new Uint8Array(8 * (1 << 20));
+  const f = windowFakes({ object, admit: windowAdmit(object.length), firstStatus: 412 });
+  try {
+    const { resp, settle } = await runWindow(f);
+    assert.equal(await resp.text(), "origin");
+    await settle();
+    assert.equal(f.st.passes, 1);
+    assert.equal(f.st.commits[0].outcome, "fallback");
+    assert.equal(f.st.commits[0].backend_status, 412);
+    assert.ok(!f.st.commits[0].bytes_sent);
+  } finally {
+    f.restore();
+  }
+});

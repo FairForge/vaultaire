@@ -96,8 +96,11 @@ func (t s3EdgeTarget) presignPut(ctx context.Context, p engine.EdgePresign) (str
 // place — which no Vaultaire write does since WP-R2-1 Part C — answers 412
 // instead of other bytes). A link signing neither is never made.
 func (t s3EdgeTarget) presignGet(ctx context.Context, p engine.EdgePresign) (string, []string, error) {
-	if p.Range == "" && p.IfMatch == "" {
+	if p.Range == "" && p.IfMatch == "" && !p.Window {
 		return "", nil, fmt.Errorf("%s presign get %s: neither a Range nor an If-Match to sign", t.name, t.key)
+	}
+	if p.Window && p.Range != "" {
+		return "", nil, fmt.Errorf("%s presign get %s: a windowed read's link signs no range", t.name, t.key)
 	}
 	in := &s3.GetObjectInput{Bucket: aws.String(t.bucket), Key: aws.String(t.key)}
 	if p.IfMatch != "" {

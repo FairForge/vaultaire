@@ -434,6 +434,34 @@ case_pa_trailer() { # a corrupted trailer, the body's length right: 400 on the c
 	flag_codec on
 }
 
+# --- Prompt 46c PR B: the windowed reader (WP-EDGE-2C.md § The lab) ---
+
+workerd_cpu() { # the workerd processes' CPU seconds so far (ps cputime, summed)
+	ps -ax -o time=,comm= | awk '/workerd/ {n = split($1, t, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + t[i]; c += s} END {printf "%.2f", c}'
+}
+
+case_pb_put() { # a 2 GiB object through the mover (edge_codec OFF): an edge multipart, -N ETag (if-match provable)
+	flag_codec off
+	when_required_cfg
+	aws configure set default.s3.multipart_threshold 8MB
+	aws configure set default.s3.multipart_chunksize 64MB
+	golden 46501 2147483648 "$LAB/pb2g.dat"
+	aws_lab s3 cp "$LAB/pb2g.dat" "s3://$BUCKET/pb/two.dat" --no-progress >/dev/null
+	sql "SELECT 'pb_put: row ' || backend_name || ' ' || etag || ' ' || size_bytes FROM object_head_cache WHERE tenant_id = '$(tenant)' AND object_key = 'pb/two.dat'"
+	flag_codec on
+}
+
+case_pb_get() { # pb_get <label>: the 2 GiB object read through the Worker (one GetObject, aws-cli's own ranged GETs off), MB/s, workerd CPU s/GiB, MD5
+	local label=${1:-window} s e c0 c1
+	c0=$(workerd_cpu)
+	s=$(date +%s.%N)
+	aws_lab s3api get-object --bucket $BUCKET --key pb/two.dat "$LAB/pb2g.back" >/dev/null
+	e=$(date +%s.%N)
+	c1=$(workerd_cpu)
+	echo "pb_get $label: $(python3 -c "print(round(2147.483648/($e-$s),1))") MB/s ($(python3 -c "print(round($e-$s,1))") s), workerd CPU $(python3 -c "print(round(($c1-$c0)/2,2))") s/GiB; $(md5of "$LAB/pb2g.dat") / $(md5of "$LAB/pb2g.back")"
+	grep '"edge":"get"' "$LAB/worker.log" | tail -1 | cut -c1-240
+}
+
 down() {
 	stop_worker
 	if [ -f "$LAB/origin.pid" ]; then kill "$(cat "$LAB/origin.pid")" 2>/dev/null || true; rm -f "$LAB/origin.pid"; fi
@@ -450,5 +478,5 @@ origin) start_origin; echo "origin up" ;;
 worker) stop_worker; start_worker "${TAMPER:-}"; echo "worker up" ;;
 run) "case_$1" "${@:2}" ;;
 down) down "$@" ;;
-*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off|p0_parts|p0_bytes|pa_mover|pa_codec|pa_trailer> | down" >&2; exit 2 ;;
+*) echo "usage: $0 up | origin | run <a|b|c|d|e|f|f2|g etag|g key|h|h_off|p0_parts|p0_bytes|pa_mover|pa_codec|pa_trailer|pb_put|pb_get [label]> | down" >&2; exit 2 ;;
 esac

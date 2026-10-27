@@ -403,6 +403,116 @@ async function serveRead(request, env, ctx, admit, requestId) {
   return readResponse(backend, admit);
 }
 
+// --- the windowed reader (0.4.0, D-EDGE-32) -----------------------------------
+
+/** fixedLength is a FixedLengthStream of n bytes where the runtime has one
+ * (workerd: the client's Content-Length is the stream's, a short body an
+ * error), an identity TransformStream elsewhere (node: the tests). */
+function fixedLength(n) {
+  return typeof globalThis.FixedLengthStream === "function" ? new globalThis.FixedLengthStream(n) : new TransformStream();
+}
+
+/** windowRange is range i of a windowed read: [first byte, last byte]. */
+export function windowRange(admit, i) {
+  const w = admit.window;
+  const a = w.start + i * w.range_bytes;
+  return [a, Math.min(w.start + admit.content_length, a + w.range_bytes) - 1];
+}
+
+/**
+ * serveWindow streams an admitted read of ≥ 64 MiB as the windowed reader
+ * (the SPEED bench § 4: 16 MiB ranges, ≤ 6 in flight, doubled both
+ * backends): each range is its own GET on the admit's link (which signs no
+ * range — the Worker names each inside the admitted span — and the
+ * if-match where provable), read whole (`arrayBuffer()`: ~1 s of CPU per
+ * GiB) and written IN ORDER to a FixedLengthStream of the span. The FIRST
+ * range decides, as Part B's single GET: anything but a 206 of the expected
+ * length is the origin's (fallback — no byte has left the edge). After it,
+ * a range that fails — another status, another length, another ETag than
+ * the first's — CUTS the client's body (an aborted stream, never a clean
+ * short end). The commit is made when the stream ends: served with the
+ * bytes sent, or error with the bytes sent before the cut (the control
+ * plane meters what the client received).
+ */
+async function serveWindow(request, env, ctx, admit, requestId) {
+  const started = Date.now();
+  const w = admit.window;
+  const n = Math.ceil(admit.content_length / w.range_bytes);
+  const lengthOf = (i) => {
+    const [a, b] = windowRange(admit, i);
+    return b - a + 1;
+  };
+  const get = (i) => {
+    const [a, b] = windowRange(admit, i);
+    return fetch(admit.url, { method: "GET", headers: { ...(admit.send_headers || {}), range: `bytes=${a}-${b}` }, cache: "no-store" });
+  };
+  let first = null;
+  let error = null;
+  try {
+    first = await get(0);
+  } catch (e) {
+    error = e;
+  }
+  const firstLength = first ? first.headers.get("content-length") : null;
+  if (!first || first.status !== 206 || (firstLength !== null && Number(firstLength) !== lengthOf(0))) {
+    const commit = readCommit(admit, first, error, started);
+    if (commit.outcome === "served") commit.outcome = "fallback"; // a 206 of another length
+    ctx.waitUntil(commitRead(env, commit, requestId));
+    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, ms: commit.duration_ms }));
+    if (first) await first.body?.cancel();
+    return passThrough(request);
+  }
+  const etag = first.headers.get("etag");
+  const { readable, writable } = fixedLength(admit.content_length);
+  const writer = writable.getWriter();
+
+  const pump = async () => {
+    let sent = 0;
+    let failure = null;
+    const pending = new Map();
+    const fetchRange = async (i) => {
+      const r = i === 0 ? first : await get(i);
+      const len = r.headers.get("content-length");
+      if (r.status !== 206 || (len !== null && Number(len) !== lengthOf(i)) || (etag && r.headers.get("etag") !== etag)) {
+        const code = backendErrorCode(await r.text().catch(() => ""));
+        throw Object.assign(new Error(`range ${i}: ${r.status}`), { status: r.status, code: code || (r.status === 206 ? "range_mismatch" : "") });
+      }
+      return new Uint8Array(await r.arrayBuffer());
+    };
+    let next = 0;
+    const launch = () => {
+      while (next < n && pending.size < w.in_flight) {
+        const p = fetchRange(next);
+        p.catch(() => {}); // awaited in order below; a rejection ahead of its turn is not unhandled
+        pending.set(next, p);
+        next++;
+      }
+    };
+    try {
+      launch();
+      for (let i = 0; i < n; i++) {
+        const buf = await pending.get(i);
+        pending.delete(i);
+        launch();
+        await writer.write(buf);
+        sent += buf.length;
+      }
+      await writer.close();
+    } catch (e) {
+      failure = e;
+      await writer.abort(e).catch(() => {});
+      for (const p of pending.values()) p.then((b) => void b, () => {});
+    }
+    const commit = { admit_id: admit.admit_id, outcome: failure ? "error" : "served", backend_status: failure ? failure.status || 0 : 206,
+      backend_code: failure ? String(failure.code || failure.message || failure).slice(0, 120) : "", backend_content_length: sent, bytes_sent: sent,
+      duration_ms: Date.now() - started };
+    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, ranges: n, outcome: commit.outcome, backend_status: commit.backend_status, bytes: sent, ms: commit.duration_ms }));
+    await commitRead(env, commit, requestId);
+  };
+  ctx.waitUntil(pump());
+  return new Response(readable, { status: admit.status || admit.expect_status, headers: admit.response_headers || {} });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const kind = classify(request);
@@ -438,7 +548,7 @@ export default {
       return passThrough(request);
     }
 
-    if (kind.kind === "get") return serveRead(request, env, ctx, admit, requestId);
+    if (kind.kind === "get") return admit.window ? serveWindow(request, env, ctx, admit, requestId) : serveRead(request, env, ctx, admit, requestId);
     if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
 
     const moved = await moveBody(request, admit);
