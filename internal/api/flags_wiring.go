@@ -144,6 +144,12 @@ const (
 	// falls back to the mirror before the origin. Default OFF, per tenant.
 	flagEdgeMirror = "edge_mirror"
 
+	// flagRequestLog writes every S3 request of the tenant to the request
+	// log (WP-LOG-1, request_log.go: the Developers page, GET
+	// /api/v1/manage/requests, 7 days). Default ON; a global OFF row is the
+	// switch for a write path that misbehaves; per tenant.
+	flagRequestLog = "request_log"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -178,6 +184,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEdgeCodec, false)
 	fl.Register(flagDataPlaneSLC, false)
 	fl.Register(flagEdgeMirror, false)
+	fl.Register(flagRequestLog, true)
 	fl.Register(flagEdgeRS, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)

@@ -62,6 +62,7 @@ type retentionPolicy struct {
 // service; an account deletion removes the subject's rows (WP-R10-3).
 const (
 	retentionAccessLog    = 30 * 24 * time.Hour
+	retentionRequestLog   = 7 * 24 * time.Hour // the Developers page (WP-LOG-1)
 	retentionEvents       = 90 * 24 * time.Hour
 	retentionQuotaEvents  = 90 * 24 * time.Hour
 	retentionStripeEvents = 90 * 24 * time.Hour
@@ -74,6 +75,7 @@ const (
 func defaultRetentionPolicies() []retentionPolicy {
 	return []retentionPolicy{
 		{Table: "s3_access_log", Column: "logged_at", MaxAge: retentionAccessLog},
+		{Table: "request_log", Column: "logged_at", MaxAge: retentionRequestLog},
 		{Table: "events", Column: "created_at", MaxAge: retentionEvents},
 		{Table: "quota_usage_events", Column: `"timestamp"`, MaxAge: retentionQuotaEvents},
 		{Table: "stripe_events", Column: "processed_at", MaxAge: retentionStripeEvents},

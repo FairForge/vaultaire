@@ -57,6 +57,7 @@ func (s *Server) registerManagementRoutes() {
 		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
 
 		r.Get("/usage", s.handleMgmtGetUsage)
+		r.Get("/requests", s.handleMgmtRequests) // WP-LOG-1: the request log
 
 		r.Post("/account/export", s.handleMgmtExportData)
 		r.Get("/account/export/{id}", s.handleMgmtGetExport)

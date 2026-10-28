@@ -1088,6 +1088,24 @@ func generateManagementPaths() map[string]*PathItem {
 				},
 			}),
 		},
+		"/api/v1/manage/requests": {
+			Get: mgmt(withParams(jsonOp("Management", "List the request log", "ManageListRequests",
+				"The developers' request log (WP-LOG-1): every S3 request of the JWT's tenant in the last 7 days, newest first — operation, bucket, key, status, "+
+					"the S3 error code and its suggestion, the request id the client was answered (search by it: the id a support ticket quotes), bytes in and out, "+
+					"and the host that served it (`origin`, or the edge host). Never a body, a header, an IP address, a user agent or any secret. "+
+					"Keyset paged: pass the previous page's `next_cursor` as `cursor`. `total_count` is always 0.",
+				map[string]Response{
+					"200": jsonResp("Requests", listSchema("", ref("RequestLogEntry"))),
+					"400": errResp("`invalid_parameter`"),
+					"500": errResp("`internal_error`"),
+				}),
+				queryParam("key", "Only requests signed with this access key id", &Schema{Type: "string"}),
+				queryParam("since", "Only requests at or after this time (RFC 3339)", &Schema{Type: "string", Format: "date-time"}),
+				queryParam("status", "An exact status (`403`), a class (`4xx`, `5xx`) or `error` (every status from 400)", &Schema{Type: "string"}),
+				queryParam("request_id", "Only the request answered with this request id", &Schema{Type: "string"}),
+				queryParam("cursor", "The previous page's `next_cursor`", &Schema{Type: "string"}),
+				queryParam("limit", "Rows per page, 1-200 (default 50)", &Schema{Type: "integer"}))),
+		},
 		"/api/v1/manage/usage": {
 			Get: mgmt(jsonOp("Management", "Get tenant usage", "ManageGetUsage",
 				"Storage used and limit for the JWT's tenant plus the plan tier.",
@@ -2115,6 +2133,21 @@ func generateJSONSchemas() map[string]Schema {
 			"temporary":    boolean("true for an STS token"),
 			"request_id":   str(""),
 		}, "object", "tenant_id", "key_id", "key_type", "key_name", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "temporary", "request_id"),
+		"RequestLogEntry": object("One S3 request of the request log (GET /api/v1/manage/requests)", map[string]*Schema{
+			"id":         integer("Row id"),
+			"logged_at":  {Type: "string", Format: "date-time", Description: "When it was answered"},
+			"key_id":     str("The access key id that signed it (never the secret)"),
+			"op":         str("The S3 operation (PutObject, GetObject, …)"),
+			"bucket":     str(""),
+			"key":        str("The object key ('' when none)"),
+			"status":     integer("The HTTP status answered"),
+			"error_code": str("The S3 error code answered (absent on success)"),
+			"suggestion": str("What to do about that error code"),
+			"request_id": str("The request id the client was answered"),
+			"bytes_in":   integer("Body bytes received"),
+			"bytes_out":  integer("Body bytes sent"),
+			"host":       str("What served it: origin, or the edge host"),
+		}, "id", "logged_at", "key_id", "op", "bucket", "key", "status", "request_id", "bytes_in", "bytes_out", "host"),
 		"Usage": object("", map[string]*Schema{
 			"object":        strEnum("", "usage"),
 			"tenant_id":     str(""),

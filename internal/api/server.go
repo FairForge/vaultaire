@@ -478,6 +478,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.accessLogTracker = NewS3AccessLogTracker(s.db)
 	s.accessLogTracker.SetLogger(logger)
 	s.accessLogTracker.SetWriter(reportWriter)
+	if s.flags != nil {
+		// The request log (WP-LOG-1): every tenant's requests, behind the flag.
+		s.accessLogTracker.SetRequestLog(func(tenantID string) bool { return s.flags.Enabled(flagRequestLog, tenantID) })
+	}
 	s.accessLogTracker.StartFlusher(context.Background(), 5*time.Second)
 
 	// Inventory report runner — CSV inventory reports, daily (jobs below).
