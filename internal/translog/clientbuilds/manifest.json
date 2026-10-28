@@ -143,6 +143,38 @@
       "sha256": "f4073c6b41588c0dc74b4a3f01707d12188002adb9e772060bcbe4b049e993ef",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-ingest",
+      "version": "0.5.0",
+      "source_commit": "eb9e20e1988f69f13bf5e3065f97d29e27a0095a",
+      "sha256": "bf3c6ea5c99c6501de4e8b8f13bc367900e49bf879e73c63bc11041be9d7bd04",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-codec",
+      "version": "0.5.0",
+      "source_commit": "eb9e20e1988f69f13bf5e3065f97d29e27a0095a",
+      "sha256": "301d89b8e32ed0ac9df553775c5d1a3efd661ffe901d9af9cf41ccf08b8a9593",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "sdk-wasm",
+      "version": "0.3.0",
+      "source_commit": "eb9e20e1988f69f13bf5e3065f97d29e27a0095a",
+      "sha256": "4d2d94d82d50f2b0b9affb18f90ca65f541d8936edd6f12d3b9e3f149ef194f5",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-chunker",
+      "version": "0.1.1",
+      "source_commit": "eb9e20e1988f69f13bf5e3065f97d29e27a0095a",
+      "sha256": "c48b60cac24e89c28e22fedf3132ec5a2f0b64406da6ac7bfb20bb4aa6161359",
+      "toolchain": "go1.26.10",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }

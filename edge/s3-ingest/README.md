@@ -85,6 +85,14 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.5.0 — the mirror and the public catalogue (Stage 1a Prompt 48, WP-EDGE-4; folds 0.4.1)
+
+- **The mirror** (`edge_mirror`): an admit with `urls: [placement, leg]` (and a codec miss with two `urls`) sends the body to both with the runtime's own `tee()` — no JavaScript reads the bytes; workerd paces the fast branch to the slow one (Step 0.1: 1 GiB teed to a 20 MB/s leg held ≤ 44 MiB). The primary decides the write; the mirror is aborted past 30 s + the body at 2 MiB/s, or when the primary fails, and its failure is only a missing ETag (`backend_etags` on the commit; the copy is then the control plane's `blob_copies` job's). `src/codec.js` `putTwo`.
+- **The read's mirror fallback**: a read the primary does not answer as admitted tries `urls[1]` (with `mirror_send_headers`) before the origin; the commit says `served_url: 1`.
+- **The public catalogue** (plan 10.3): with `CATALOGUE_URL` set (a `[vars]` entry: where the control plane's `catalogue_filter` job publishes `latest` and `<version>.bloom`), the filter is loaded once per isolate (`e2ee.wasm` `catalogueLoad`; refreshed hourly; unreachable = no filter, never a failed write) and a chunk whose plain hash it holds is sent `public: true`. Unset on prod.
+- RS k+m is never the Worker's (D-EDGE-51): `ec.wasm` (`make ec-wasm`, client `edge-ec`) is for SDK clients — **remove `src/wasm/ec.wasm` before a deploy** (the module rules would upload it).
+- Manifest rows at `eb9e20e1`: `edge-ingest` 0.5.0, `edge-codec` 0.5.0, `sdk-wasm` 0.3.0 (e2ee.wasm with the catalogue exports), `edge-chunker` 0.1.1 (the same code; its bytes moved with the module's dependency set since 0.1.0); `edge-seal`, `edge-awschunked` and `edge-wasm-exec` are byte-identical to their rows. 0.4.1's changes ship here (it was never deployed).
+
 ## 0.4.1 — the RP72 fixes (Stage 1a Prompt 47 Part 0, #1018)
 
 - A control plane's 401/403 at a codec commit is the Worker's 503 SlowDown (the service channel's, transient), not the client's 400 (RP72-3).
