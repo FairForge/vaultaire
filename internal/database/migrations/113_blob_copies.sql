@@ -21,6 +21,11 @@
 --                | stale (the primary is gone: the job deletes the copy,
 --                  then the row)
 --   etag, size   the leg's answer (a mirror: the primary's MD5 too)
+--   rs_k, rs_m, rs_stripe   a shard's stripe geometry (internal/ec: K data
+--                + M parity shards of Stripe-byte pieces; 0 for a mirror).
+--                A shard's blob is at <storage_key>.s<shard_index> on its
+--                leg; storage_key is the object's address, so the row is
+--                named exactly while the object is (blobNamedBy)
 --   attempts, last_error   the job's repair bookkeeping
 -- Tenant data: erased with the account (account.EraseRows), excluded from
 -- the export (copies of the customer's own objects — the export lists the
@@ -37,6 +42,9 @@ CREATE TABLE IF NOT EXISTS blob_copies (
     state          TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'ready', 'stale')),
     etag           TEXT NOT NULL DEFAULT '',
     size           BIGINT NOT NULL DEFAULT 0,
+    rs_k           INTEGER NOT NULL DEFAULT 0,
+    rs_m           INTEGER NOT NULL DEFAULT 0,
+    rs_stripe      INTEGER NOT NULL DEFAULT 0,
     attempts       INTEGER NOT NULL DEFAULT 0,
     last_error     TEXT,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
