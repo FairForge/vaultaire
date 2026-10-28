@@ -10,7 +10,7 @@ package dataplane
 
 import (
 	"context"
-	"crypto/md5" // #nosec G401 -- the S3 ETag of the body
+	"crypto/md5" // #nosec G501 -- the S3 ETag of the body
 	"encoding/hex"
 	"fmt"
 	"io"
