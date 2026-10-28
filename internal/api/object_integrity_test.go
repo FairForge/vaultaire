@@ -394,8 +394,8 @@ func (r repeatReader) Read(p []byte) (int, error) { return copy(p, r.b), nil }
 // failure — proven with `promtool test rules` on the box (WP-P13 post-merge
 // review, RP14-9). Every path × reason series exists at 0 from boot.
 func TestObjectIntegrity_EverySeriesExistsBeforeTheFirstFailure(t *testing.T) {
-	assert.Equal(t, 5*2, promtest.CollectAndCount(objectIntegrityFailures),
-		"failures: five paths × md5|size, all at 0 before any failure")
+	assert.Equal(t, 6*2, promtest.CollectAndCount(objectIntegrityFailures),
+		"failures: five paths and the edge (host=slc verifies, RP74-4) × md5|size, all at 0 before any failure")
 	assert.Equal(t, 5*3+1, promtest.CollectAndCount(objectIntegrityUnverified),
 		"unverified: five paths × range|multipart|etag, plus the edge path's one reason (RP66-2)")
 }

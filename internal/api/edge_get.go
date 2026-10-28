@@ -331,9 +331,15 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	s.logger.Info("edge admit", zap.String("op", edgeOpGet), zap.String("tenant_id", tenantID), zap.String("bucket", bucket),
 		zap.String("key", key), zap.String("backend", row.backend), zap.Int64("size", length), zap.String("range", rangeValue),
 		zap.String("admit_id", admit.ID), zap.String("request_id", req.RequestID))
+	// The row's whole digest when a reader can check it (RP74-4: host=slc
+	// verifies a whole read; the Worker ignores the field).
+	bodyMD5 := integrityDigest(row.bodyMD5, row.etag)
+	if unverifiedReason(bodyMD5) != "" {
+		bodyMD5 = ""
+	}
 	return edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
 		ExpectStatus: http.StatusPartialContent, Status: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob,
-		ContentLength: length, Window: window, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+		ContentLength: length, BodyMD5: bodyMD5, Window: window, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
 }
 
 // The windowed reader (D-EDGE-32, the SPEED bench § 4): a read of at least
@@ -438,8 +444,12 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 		}
 		// The edge serves bytes the origin's integrity reader never sees:
 		// beyond the Worker's length check the body is unverified by design,
-		// and the counter says so, once per served read (RP66-2).
-		objectIntegrityUnverified.WithLabelValues(integrityPathEdge, "unverified").Inc()
+		// and the counter says so, once per served read (RP66-2) — except
+		// host=slc's whole read, which runs the integrity reader itself
+		// (RP74-4; no other host is trusted to say so).
+		if !(req.Verified && row.Host == dataplane.HostSLC) {
+			objectIntegrityUnverified.WithLabelValues(integrityPathEdge, "unverified").Inc()
+		}
 		// The origin refreshes last_accessed on every cache hit (the
 		// smart_demotion job reads it): an edge read is a read (RP66-3).
 		// Fire-and-forget, as the origin's own touch.

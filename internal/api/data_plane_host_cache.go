@@ -46,6 +46,9 @@ type dataPlaneHostCache struct {
 	m   map[string]*list.Element // of *dataPlaneHostCacheEntry
 	lru *list.List               // front = most recently used
 	now func() time.Time
+	// names caches rows read by host name (the slc row, RP74-7): a handful
+	// of platform names, never a caller's input.
+	names map[string]cachedDataPlaneHost
 
 	lookups atomic.Int64 // database reads (the RP74-2 test counts them)
 }
@@ -65,6 +68,7 @@ func (c *dataPlaneHostCache) invalidate() {
 	c.mu.Lock()
 	c.m = map[string]*list.Element{}
 	c.lru.Init()
+	c.names = nil
 	c.gen++
 	c.mu.Unlock()
 }
@@ -116,6 +120,64 @@ func (c *dataPlaneHostCache) putLocked(hash string, e cachedDataPlaneHost) {
 		delete(c.m, el.Value.(*dataPlaneHostCacheEntry).hash)
 	}
 	c.m[hash] = c.lru.PushFront(&dataPlaneHostCacheEntry{hash: hash, e: e})
+}
+
+// touch updates the cached row under hash after its heartbeat (RP74-11:
+// a heartbeat changes no token, so nothing is flushed); an entry not
+// cached is left to the next lookup.
+func (c *dataPlaneHostCache) touch(hash, health string, seen time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	el, ok := c.m[hash]
+	if !ok {
+		return
+	}
+	ent := el.Value.(*dataPlaneHostCacheEntry)
+	if !ent.e.ok {
+		return
+	}
+	ent.e.host.Health = health
+	ent.e.host.LastSeen = &seen
+}
+
+// putName caches the row of a platform host name (ok false: no row).
+func (c *dataPlaneHostCache) putName(name string, h dataPlaneHost, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.names == nil {
+		c.names = map[string]cachedDataPlaneHost{}
+	}
+	c.names[name] = cachedDataPlaneHost{host: h, ok: ok, at: c.now()}
+}
+
+// byName is the row of a platform host (slc, the Worker's), through the
+// same 15 s cache (ok false: no row).
+func (c *dataPlaneHostCache) byName(ctx context.Context, name string) (dataPlaneHost, bool, error) {
+	c.mu.Lock()
+	e, hit := c.names[name]
+	gen := c.gen
+	c.mu.Unlock()
+	if hit && c.now().Sub(e.at) < dataPlaneHostCacheTTL {
+		return e.host, e.ok, nil
+	}
+	if c.db == nil {
+		return dataPlaneHost{}, false, nil
+	}
+	c.lookups.Add(1)
+	h, err := readDataPlaneHost(ctx, c.db, name)
+	ok := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return dataPlaneHost{}, false, err
+	}
+	c.mu.Lock()
+	if c.gen == gen {
+		if c.names == nil {
+			c.names = map[string]cachedDataPlaneHost{}
+		}
+		c.names[name] = cachedDataPlaneHost{host: h, ok: ok, at: c.now()}
+	}
+	c.mu.Unlock()
+	return h, ok, nil
 }
 
 // byTokenHash is the row whose token_hash is hash (ok false: none).

@@ -105,6 +105,11 @@ type AdmitResponse struct {
 	Status          int               `json:"status,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	ContentLength   int64             `json:"content_length,omitempty"`
+	// BodyMD5 (a GET, RP74-4): the whole object's MD5 (hex) the row
+	// records — "" when it records none a reader can check (a -N ETag with
+	// no body_md5, a chunked row). A host that verifies (host=slc) checks a
+	// whole read against it; the Worker and a node ignore it.
+	BodyMD5 string `json:"body_md5,omitempty"`
 	// Window (WP-EDGE-2 Part C, D-EDGE-32): a read of at least 64 MiB is
 	// the windowed reader's — 16 MiB ranges, at most 6 in flight, from
 	// Start over ContentLength bytes, each written in order; the link signs
@@ -178,6 +183,10 @@ type CommitRequest struct {
 	// (hex) — a PUT's ETag, a part's part digest.
 	Chunks  []CommitChunk `json:"chunks,omitempty"`
 	BodyMD5 string        `json:"body_md5,omitempty"`
+	// Verified (a GET, RP74-4): the host checks the whole body against the
+	// admit's body_md5 as it streams — counted verified only for host=slc,
+	// the one host the control plane trusts to say so.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // The outcomes a host reports.

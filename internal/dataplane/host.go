@@ -79,11 +79,29 @@ type Host struct {
 	// Features this host reads (a node reads no window: none).
 	Features []string
 	Logger   *zap.Logger
+	// Verify is what a host that touches every byte checks beyond the
+	// backend (RP74-4: host=slc runs the origin's own checks); nil on a
+	// node and on the Worker's path.
+	Verify    *Verify
+	freshOnce sync.Once
+	fresh     *http.Client
 	// Budget bounds the chunk plaintext codec writes hold (RP74-6): a
 	// write takes min(codecBatchBytes, its declared length) before it
 	// reads a byte and gives it back at its end; ErrBusy = the client's
 	// 503. nil = no bound (the tests' hosts).
 	Budget Budget
+}
+
+// Verify is an integrity-checking host's hooks.
+type Verify struct {
+	// WholeRead wraps a whole read's body against the admit's body_md5 (hex)
+	// and the object's size: a body that is not the row's must fail its
+	// read before the last byte (the origin's integrity reader).
+	WholeRead func(body io.ReadCloser, md5Hex string, size int64) io.ReadCloser
+	// Trailer: an aws-chunked move's body is decoded beside the backend's
+	// PUT and its trailer verified; a mismatch is committed
+	// checksum_mismatch (the client's 400, the blob removed).
+	Trailer bool
 }
 
 // Result is a write's outcome: the S3 answer to relay, or a pass-through
@@ -221,6 +239,10 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 	if method == "" {
 		method = http.MethodPut
 	}
+	var trailerCheck func() error
+	if h.Verify != nil && h.Verify.Trailer && admit.StreamingTrailer != "" {
+		body, trailerCheck = teeTrailerCheck(body, admit.StreamingTrailer, admit.ContentLength)
+	}
 	breq, err := http.NewRequestWithContext(ctx, method, admit.URL, body)
 	if err == nil {
 		if admit.Headers != nil {
@@ -261,10 +283,54 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 	if err != nil {
 		commit.BackendCode = truncate(err.Error(), 120)
 	}
+	if trailerCheck != nil {
+		if terr := trailerCheck(); errors.Is(terr, ErrChecksumMismatch) && commit.Outcome == OutcomeOK {
+			// The backend took bytes whose trailer is not theirs: the
+			// client's 400, the blob removed by the commit.
+			commit.Outcome = OutcomeChecksumMismatch
+		}
+	}
 	commit.DurationMS = time.Since(started).Milliseconds()
 	res.Relay = h.commitWrite(ctx, commit, desc)
 	h.log().Info("data plane: move", zap.String("op", desc.Op), zap.String("admit_id", admit.AdmitID), zap.Int64("size", size),
 		zap.String("outcome", commit.Outcome), zap.Int("backend_status", commit.BackendStatus), zap.Int64("ms", commit.DurationMS))
+}
+
+// teeTrailerCheck tees body into an AWSChunkedDecoder as the backend reads
+// it; check (after the backend's answer) is the decoder's verdict:
+// ErrChecksumMismatch when the trailer is not the body's. A decoder that
+// stops early keeps draining, so the backend's read never blocks.
+func teeTrailerCheck(body io.Reader, trailer string, declared int64) (io.Reader, func() error) {
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		dec, err := NewAWSChunkedDecoder(pr, trailer, declared)
+		if err == nil {
+			_, err = io.Copy(io.Discard, dec)
+		}
+		_, _ = io.Copy(io.Discard, pr)
+		done <- err
+	}()
+	tee := &closingTee{r: io.TeeReader(body, pw), pw: pw}
+	return tee, func() error {
+		_ = pw.Close()
+		return <-done
+	}
+}
+
+// closingTee closes the pipe at the body's end (or error), so the decoder
+// sees EOF as soon as the backend has read everything.
+type closingTee struct {
+	r  io.Reader
+	pw *io.PipeWriter
+}
+
+func (t *closingTee) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err != nil {
+		_ = t.pw.CloseWithError(err)
+	}
+	return n, err
 }
 
 // ContentLengthOf is the body length the presigned link signs (its
@@ -455,19 +521,37 @@ func (h *Host) storeBatch(ctx context.Context, admit AdmitResponse, batch []code
 
 // SealAndStore seals one chunk as a 0x06 blob under the grant's public key
 // and PUTs it on its miss link; it returns the backend's ETag and the
-// sealed length.
+// sealed length. A PUT that gets NO answer (the connection dropped, the
+// answer deadline passed) is sealed and sent once more on a fresh
+// connection — the chunk's plaintext is in memory, so the request is
+// replayable (D-EDGE-45, the drivers' FIXED_BUCKET_PUT_TIMEOUT rule); a
+// backend's answer, whatever its status, is never retried.
 func (h *Host) SealAndStore(ctx context.Context, grant *CodecGrant, c crypto.Chunk, m IndexMiss) (string, int64, error) {
+	etag, n, answered, err := h.sealAndPut(ctx, h.client(), grant, c, m)
+	if err == nil || answered || ctx.Err() != nil {
+		return etag, n, err
+	}
+	h.log().Warn("data plane: a chunk PUT got no answer — retrying once on a fresh connection", zap.Error(err))
+	etag, n, _, rerr := h.sealAndPut(ctx, h.freshClient(), grant, c, m)
+	if rerr != nil {
+		return "", 0, fmt.Errorf("after one retry on a fresh connection: %w", rerr)
+	}
+	return etag, n, nil
+}
+
+// sealAndPut is one attempt; answered says the backend answered (a status).
+func (h *Host) sealAndPut(ctx context.Context, client *http.Client, grant *CodecGrant, c crypto.Chunk, m IndexMiss) (string, int64, bool, error) {
 	sealed, err := crypto.SealWrappedChunk(grant.KEMPublicKey, grant.Version, bytes.NewReader(c.Data), int64(c.Size))
 	if err != nil {
-		return "", 0, fmt.Errorf("seal: %w", err)
+		return "", 0, true, fmt.Errorf("seal: %w", err)
 	}
 	n := crypto.WrappedChunkSealedLength(int64(c.Size))
 	if m.SealedLength != 0 && m.SealedLength != n {
-		return "", 0, fmt.Errorf("sealed %d bytes, the link signs %d", n, m.SealedLength)
+		return "", 0, true, fmt.Errorf("sealed %d bytes, the link signs %d", n, m.SealedLength)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, m.URL, sealed)
 	if err != nil {
-		return "", 0, err
+		return "", 0, true, err
 	}
 	for k, v := range m.SendHeaders {
 		if k != "content-length" {
@@ -475,16 +559,32 @@ func (h *Host) SealAndStore(ctx context.Context, grant *CodecGrant, c crypto.Chu
 		}
 	}
 	req.ContentLength = n
-	resp, err := h.client().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("chunk PUT: %w", err)
+		return "", 0, false, fmt.Errorf("chunk PUT: %w", err)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, fmt.Errorf("chunk PUT answered %d", resp.StatusCode)
+		return "", 0, true, fmt.Errorf("chunk PUT answered %d", resp.StatusCode)
 	}
-	return resp.Header.Get("ETag"), n, nil
+	return resp.Header.Get("ETag"), n, true, nil
+}
+
+// freshClient never reuses a connection (the retry's): the host's
+// transport cloned with keep-alives off, built once.
+func (h *Host) freshClient() *http.Client {
+	h.freshOnce.Do(func() {
+		base := h.client()
+		if t, ok := base.Transport.(*http.Transport); ok {
+			ft := t.Clone()
+			ft.DisableKeepAlives = true
+			h.fresh = &http.Client{Transport: ft}
+			return
+		}
+		h.fresh = base // a test's RoundTripper: no pool to avoid
+	})
+	return h.fresh
 }
 
 // commitWrite commits on its own clock; a lost answer is retried once.
@@ -568,6 +668,9 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 			commit.Outcome = OutcomeServed
 		}
 	}
+	verify := h.Verify != nil && h.Verify.WholeRead != nil && admit.BodyMD5 != "" && admit.ContentLength > 0 &&
+		(admit.Status == http.StatusOK || admit.Status == 0 && admit.ExpectStatus == http.StatusOK)
+	commit.Verified = verify && commit.Outcome == OutcomeServed
 	commit.DurationMS = time.Since(started).Milliseconds()
 	// The commit at the backend's headers (served meters the backend's
 	// Content-Length; fallback and error meter nothing — the caller serves).
@@ -591,6 +694,9 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 	}
 	res.Headers = admit.ResponseHeaders
 	res.Body = resp.Body
+	if verify {
+		res.Body = h.Verify.WholeRead(resp.Body, admit.BodyMD5, admit.ContentLength)
+	}
 	return res, nil
 }
 

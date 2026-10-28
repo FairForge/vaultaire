@@ -11,6 +11,8 @@ import (
 	"encoding/hex"
 	"math/big"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -98,4 +100,33 @@ func TestDataPlaneHostCache_LRUEvictsTheLeastRecentlyUsedAndExpiredEntries(t *te
 	now = now.Add(dataPlaneHostCacheTTL + time.Second)
 	c.put("aaaa", cachedDataPlaneHost{at: now})
 	assert.Equal(t, 1, c.size(), "expired entries go on insert")
+}
+
+// RP74-11: a heartbeat changes no token — it updates its own cached row in
+// place (health, last_seen) instead of flushing every node's entry.
+func TestEdgeHeartbeat_UpdatesItsCachedRowAndFlushesNothing(t *testing.T) {
+	f := setupEdgeFixture(t)
+	_, tokA := f.registerNode("198.51.100.101", "", "down")
+	_, tokB := f.registerNode("198.51.100.102", "", "up")
+	cache := f.srv.dataPlaneHosts()
+	req := f.signed("/"+f.bucket+"/hb.bin", nil, testBytes(10), nil, "")
+
+	w := f.callFrom("/api/v1/edge/admit", req, tokB, "198.51.100.102:1")
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = f.callFrom("/api/v1/edge/admit", req, tokA, "198.51.100.101:1")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "A is down until its heartbeat")
+	lookups := cache.lookups.Load()
+
+	hb := httptest.NewRequest(http.MethodPost, "/api/v1/edge/heartbeat", strings.NewReader(`{"version":"t"}`))
+	hb.RemoteAddr = "198.51.100.101:1"
+	hb.Header.Set(edgeTokenHeader, tokA)
+	hw := httptest.NewRecorder()
+	f.srv.handleEdgeHeartbeat(hw, hb)
+	require.Equal(t, http.StatusOK, hw.Code, hw.Body.String())
+
+	w = f.callFrom("/api/v1/edge/admit", req, tokA, "198.51.100.101:1")
+	assert.Equal(t, http.StatusOK, w.Code, "up from its cached row at once")
+	w = f.callFrom("/api/v1/edge/admit", req, tokB, "198.51.100.102:1")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, lookups, cache.lookups.Load(), "no registry read after a heartbeat")
 }

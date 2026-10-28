@@ -165,6 +165,11 @@ func (s *Server) handlePutDataPlaneHost(w http.ResponseWriter, r *http.Request) 
 	case in.Weight != nil && *in.Weight < 0:
 		bad("weight must be >= 0")
 		return
+	case in.Weight != nil && *in.Weight != 0 && in.Kind != dataplane.KindNode:
+		// RP74-7: nothing reads the Worker's or this box's weight yet — a
+		// value set there would claim a steering that does not exist.
+		bad("weight_unused")
+		return
 	case in.Health != nil && *in.Health != "up" && *in.Health != "down" && *in.Health != "draining":
 		bad("health is up, down or draining")
 		return

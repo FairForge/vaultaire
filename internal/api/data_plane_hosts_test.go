@@ -97,6 +97,12 @@ func TestDataPlaneHosts_Validation(t *testing.T) {
 		w, _ := f.call(t, f.adminID, http.MethodPut, path, body)
 		assert.Equal(t, http.StatusBadRequest, w.Code, "%s: %s", name, w.Body.String())
 	}
+	// RP74-7: nothing reads a weight on the Worker's or this box's row yet.
+	for _, kind := range []string{"edge", "slc"} {
+		w, _ := f.call(t, f.adminID, http.MethodPut, path, map[string]any{"kind": kind, "weight": 1})
+		assert.Equal(t, http.StatusBadRequest, w.Code, kind)
+		assert.Contains(t, w.Body.String(), "weight_unused", kind)
+	}
 	// A tenant-scoped host names a tenant that exists.
 	w, _ := f.call(t, f.adminID, http.MethodPut, path, map[string]any{"kind": "node", "address": "198.51.100.7", "tenant_id": "no-such-tenant-" + uuid.New().String()[:6]})
 	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())

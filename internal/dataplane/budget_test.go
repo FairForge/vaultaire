@@ -55,11 +55,20 @@ func TestByteBudget_FIFOLargerThanTheBoundAloneAndTheWait(t *testing.T) {
 			r()
 		}
 	}()
+	// The 10 would fit beside the held 60, yet it queues behind the
+	// waiting 60: first come, first served.
 	require.Eventually(t, func() bool { return b.Waiting() == 2 }, time.Second, time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, 2, b.Waiting(), "never served past the head of the line")
+	assert.Equal(t, int64(60), b.InUse())
 	rel1()
 	wg.Wait()
-	assert.Equal(t, 60, <-order, "the first in line first")
-	assert.Equal(t, 10, <-order)
+	close(order)
+	got := map[int]bool{}
+	for v := range order {
+		got[v] = true
+	}
+	assert.Equal(t, map[int]bool{60: true, 10: true}, got, "both served once the head fits")
 	assert.Zero(t, b.InUse())
 
 	// Larger than the bound: admitted alone (when nothing else holds).
