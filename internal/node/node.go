@@ -196,6 +196,10 @@ func Build(getenv func(string) string, readFile func(string) ([]byte, error), ve
 // Router is the node's HTTP surface.
 func (n *Node) Router() chi.Router { return n.router }
 
+// SetBackendTransport replaces the transport the node reaches the
+// backends' links with (the tests' fake backend).
+func (n *Node) SetBackendTransport(rt http.RoundTripper) { n.host.Client = &http.Client{Transport: rt} }
+
 // routes: PutObject/UploadPart and GetObject on /{bucket}/*, /health,
 // /metrics; every other request is a 404, or — a SIGNED S3 request — the
 // origin's (handed on untouched).

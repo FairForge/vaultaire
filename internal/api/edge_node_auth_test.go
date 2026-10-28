@@ -231,3 +231,35 @@ func TestEdgeAdmitRow_CarriesItsHost(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, dataplane.HostSLC, hostOf(res.Admit.AdmitID), "the origin in-process")
 }
+
+// The heartbeat (POST /api/v1/edge/heartbeat): a node's call from its
+// address sets last_seen and version and brings a DOWN node up — never a
+// draining one (the operator's) — and is accepted whatever the health.
+func TestEdgeHeartbeat_BringsADownNodeUp(t *testing.T) {
+	f := setupEdgeFixture(t)
+	host, token := f.registerNode("198.51.100.80", "", "down")
+	hb := dataplane.Heartbeat{Version: "abc1234", BuildSHA: "abc1234", InFlight: 2}
+	call := func(peer string) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(hb)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/edge/heartbeat", bytes.NewReader(b))
+		r.RemoteAddr = peer
+		r.Header.Set(edgeTokenHeader, token)
+		w := httptest.NewRecorder()
+		f.srv.handleEdgeHeartbeat(w, r)
+		return w
+	}
+	assert.Equal(t, http.StatusNotFound, call("198.51.100.81:1").Code, "from another address")
+	require.Equal(t, http.StatusOK, call("198.51.100.80:1").Code)
+	var health, version string
+	var seen bool
+	require.NoError(t, f.db.QueryRow(`SELECT health, COALESCE(version, ''), last_seen IS NOT NULL FROM data_plane_hosts WHERE host = $1`, host).Scan(&health, &version, &seen))
+	assert.Equal(t, "up", health)
+	assert.Equal(t, "abc1234", version)
+	assert.True(t, seen)
+
+	f.exec(`UPDATE data_plane_hosts SET health = 'draining' WHERE host = $1`, host)
+	f.srv.dataPlaneHosts().invalidate()
+	require.Equal(t, http.StatusOK, call("198.51.100.80:1").Code)
+	require.NoError(t, f.db.QueryRow(`SELECT health FROM data_plane_hosts WHERE host = $1`, host).Scan(&health))
+	assert.Equal(t, "draining", health, "a draining node stays draining")
+}

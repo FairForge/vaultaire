@@ -206,7 +206,8 @@ func (s *Server) registerEdgeRoutes() {
 	s.router.Post("/api/v1/edge/admit", s.handleEdgeAdmit)
 	s.router.Post("/api/v1/edge/commit", s.handleEdgeCommit)
 	s.router.Post("/api/v1/edge/index", s.handleEdgeIndex)
-	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index")
+	s.router.Post("/api/v1/edge/heartbeat", s.handleEdgeHeartbeat)
+	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index, /api/v1/edge/heartbeat")
 }
 
 // edgeNotFound answers a call that is not the Worker's: the route does not
