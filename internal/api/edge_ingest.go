@@ -1211,7 +1211,9 @@ func (s *Server) releaseEdgeAdmit(ctx context.Context, row edgeAdmitRow) {
 func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitRow) {
 	switch row.Op {
 	case edgeOpGet:
-		s.recordEdgeEgress(ctx, row.TenantID, row.Backend, row.ContentLength)
+		if row.Host != dataplane.HostSLC { // host=slc: the origin metered what it streamed
+			s.recordEdgeEgress(ctx, row.TenantID, row.Backend, row.ContentLength)
+		}
 		s.logger.Info("edge get admit expired without a commit — the admitted size is metered",
 			zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket), zap.String("key", row.Key),
 			zap.Int64("bytes", row.ContentLength), zap.String("admit_id", row.ID))
@@ -1493,7 +1495,8 @@ func (s *Server) commitEdgePart(ctx context.Context, row edgeAdmitRow, req edgeC
 // the admit's description, RP64-11), the bytes in (a write) or out (a
 // GET), the status.
 func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOut int64) {
-	if s.accessLogTracker == nil {
+	if s.accessLogTracker == nil || row.Host == dataplane.HostSLC {
+		// host=slc: the origin's own dispatch writes the request's row.
 		return
 	}
 	op := auth.OpPutObject

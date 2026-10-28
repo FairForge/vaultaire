@@ -199,6 +199,9 @@ type Server struct {
 	// gate (data_plane_host_cache.go; made on first use).
 	dpHosts     *dataPlaneHostCache
 	dpHostsOnce sync.Once
+	// dataPlaneTransport, when set, is the transport host=slc reaches the
+	// backends' links with (the tests' fake backend); nil = the default.
+	dataPlaneTransport http.RoundTripper
 	// edgeReaper is the edge_admit_reaper job (edge_reaper.go).
 	edgeReaper *EdgeAdmitReaper
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
