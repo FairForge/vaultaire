@@ -36,8 +36,20 @@ function readAll(req) {
 }
 
 /** fakes starts the backend and the control plane; known = hashes the index holds as ready. */
-async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set(), commit = null } = {}) {
-  const st = { puts: [], indexCalls: [], commits: [], stored: new Map(), inFlightPuts: 0, peakPuts: 0 };
+async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set(), commit = null, mirror = null } = {}) {
+  const st = { puts: [], indexCalls: [], commits: [], stored: new Map(), inFlightPuts: 0, peakPuts: 0, mirrorStored: new Map() };
+  // WP-EDGE-4: a mirror leg answering mirror.status (200 stores the bytes).
+  const mirrorBackend = mirror ? await listen(async (req, res) => {
+    const body = await readAll(req);
+    if (mirror.status !== 200) {
+      res.writeHead(mirror.status);
+      return res.end();
+    }
+    const etag = createHash("md5").update(body).digest("hex");
+    st.mirrorStored.set(req.url, { etag, length: body.length, body });
+    res.writeHead(200, { ETag: `"${etag}"` });
+    res.end();
+  }) : null;
   const backend = await listen(async (req, res) => {
     const body = await readAll(req);
     st.inFlightPuts++;
@@ -62,7 +74,12 @@ async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set(), commi
       const misses = [];
       for (const c of body.chunks) {
         if (known.has(c.hash)) hits.push(c.hash);
-        else misses.push({ hash: c.hash, url: `${backend.url}/vaultaire/t-_global/_global/_chunks/t/${c.hash}.k1`, send_headers: { "content-length": String(sealedLength(c.size)) }, sealed_length: sealedLength(c.size) });
+        else {
+          const url = `${backend.url}/vaultaire/t-_global/_global/_chunks/t/${c.hash}.k1`;
+          const m = { hash: c.hash, url, send_headers: { "content-length": String(sealedLength(c.size)) }, sealed_length: sealedLength(c.size) };
+          if (mirrorBackend) m.urls = [url, `${mirrorBackend.url}/vaultaire/t-_global/_global/_chunks/t/${c.hash}.k1`];
+          misses.push(m);
+        }
       }
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ hits, misses }));
@@ -77,7 +94,7 @@ async function fakes({ putDelayMs = 0, putStatus = 200, known = new Set(), commi
     res.end(JSON.stringify({ status: body.outcome === "ok" ? 200 : 503, headers: { ETag: `"${body.body_md5 || ""}"` }, body: "" }));
   });
   const cp = (path, b) => fetch(`${control.url}${path}`, { method: "POST", headers: { "content-type": "application/json", "x-vaultaire-edge-token": "tok" }, body: JSON.stringify(b) });
-  return { st, backend, control, cp, close: () => { backend.s.close(); control.s.close(); } };
+  return { st, backend, control, cp, close: () => { backend.s.close(); control.s.close(); mirrorBackend?.s.close(); } };
 }
 
 function bodyRequest(bytes, piece = 1 << 20) {
@@ -462,5 +479,38 @@ test("a codec write waits on the isolate budget a window holds", { skip: noWasm 
   } finally {
     f.close();
     restore();
+  }
+});
+
+test("runCodec mirrored (WP-EDGE-4): every stored chunk's sealed bytes on both legs, two ETags per chunk", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ mirror: { status: 200 } });
+  try {
+    const body = deps.chunker.goldenBody(4621, 12 << 20).value;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    assert.equal(relay.status, 200);
+    const stored = f.st.commits[0].chunks.filter((c) => c.status === "stored");
+    assert.ok(stored.length > 0);
+    for (const c of stored) {
+      assert.equal(c.backend_etags.length, 2, "the primary's and the mirror's");
+      assert.equal(c.backend_etags[0], c.backend_etag);
+      assert.equal(c.backend_etags[1], c.backend_etag, "the same sealed bytes: the same MD5");
+    }
+    assert.equal(f.st.mirrorStored.size, stored.length);
+  } finally {
+    f.close();
+  }
+});
+
+test("runCodec mirrored: a mirror leg that fails never fails the write — its ETag is omitted", { skip: noWasm }, async () => {
+  const deps = await codecDeps();
+  const f = await fakes({ mirror: { status: 503 } });
+  try {
+    const body = deps.chunker.goldenBody(4622, 6 << 20).value;
+    const relay = await runCodec(bodyRequest(body), admitFor(deps.e2ee), {}, {}, { ...deps, controlPlane: f.cp });
+    assert.equal(relay.status, 200);
+    for (const c of f.st.commits[0].chunks.filter((x) => x.status === "stored")) assert.deepEqual(c.backend_etags, [c.backend_etag]);
+  } finally {
+    f.close();
   }
 });
