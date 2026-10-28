@@ -79,6 +79,11 @@ type Host struct {
 	// Features this host reads (a node reads no window: none).
 	Features []string
 	Logger   *zap.Logger
+	// Budget bounds the chunk plaintext codec writes hold (RP74-6): a
+	// write takes min(codecBatchBytes, its declared length) before it
+	// reads a byte and gives it back at its end; ErrBusy = the client's
+	// 503. nil = no bound (the tests' hosts).
+	Budget Budget
 }
 
 // Result is a write's outcome: the S3 answer to relay, or a pass-through
@@ -298,6 +303,20 @@ func (h *Host) codec(ctx context.Context, req *http.Request, body io.Reader, siz
 	sum := md5.New() // #nosec G401
 	src = io.TeeReader(src, sum)
 
+	if h.Budget != nil {
+		want := int64(codecBatchBytes)
+		if declared >= 0 {
+			want = min(want, declared)
+		}
+		release, err := h.Budget.Acquire(ctx, want)
+		if err != nil {
+			h.log().Warn("data plane: the host's budget is spent — the client's 503", zap.String("admit_id", admit.AdmitID))
+			h.commitWrite(ctx, CommitRequest{AdmitID: admit.AdmitID, Outcome: OutcomeEdgeError}, desc)
+			res.Relay = slowDown(req.URL.Path, desc.RequestID, "the data plane is busy. Retry.")
+			return
+		}
+		defer release()
+	}
 	entries, idx, n, err := h.codecStore(ctx, admit, src)
 	res.Index = idx
 	switch {

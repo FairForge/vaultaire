@@ -16,9 +16,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/FairForge/vaultaire/internal/dataplane"
 )
 
 // originSigned sends a signed client request through the origin's S3
@@ -128,4 +132,37 @@ func TestDataPlaneSLC_FlagOffIsTheHandlerAsToday(t *testing.T) {
 	h, ok := f.head("off.bin")
 	require.True(t, ok)
 	assert.Equal(t, int64(len(body)), h.size)
+}
+
+// RP74-5: one slc host per Server — one *http.Client and one Transport, so
+// connections to the backends are reused and no idle pool outlives a
+// request.
+func TestDataPlaneSLC_TwoWritesShareOneClient(t *testing.T) {
+	s := &Server{}
+	a, b := s.slcHost(), s.slcHost()
+	require.Same(t, a, b, "built once")
+	assert.Same(t, a.Client, b.Client)
+	assert.NotNil(t, a.Client.Transport)
+}
+
+// RP74-6: host=slc's codec writes take their bytes from the origin's own
+// chunk budget (CHUNK_PUT_BUDGET_BYTES): the same gauge moves.
+func TestDataPlaneSLC_TheHostsBudgetIsTheOriginsChunkBudget(t *testing.T) {
+	s := &Server{chunkPutBudget: newChunkPutBudget(256 << 20)}
+	h := s.slcHost()
+	require.NotNil(t, h.Budget)
+	release, err := h.Budget.Acquire(context.Background(), chunkPutReserveBytes)
+	require.NoError(t, err)
+	assert.Equal(t, chunkPutReserveBytes, s.chunkPutBudget.inUse())
+	assert.Equal(t, float64(chunkPutReserveBytes), promtestutil.ToFloat64(chunkPutBudgetInUse))
+	release()
+	assert.Zero(t, s.chunkPutBudget.inUse())
+	assert.Zero(t, promtestutil.ToFloat64(chunkPutBudgetInUse))
+
+	// Spent: the host's ErrBusy (the client's 503).
+	hold, err := s.chunkPutBudget.reserve(context.Background(), 256<<20, time.Second)
+	require.NoError(t, err)
+	defer hold.close()
+	_, err = h.Budget.Acquire(context.Background(), 1<<20)
+	assert.ErrorIs(t, err, dataplane.ErrBusy)
 }

@@ -31,6 +31,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+
+	"github.com/FairForge/vaultaire/internal/dataplane"
 )
 
 func labEnv(extra map[string]string) func(string) string {
@@ -168,4 +170,23 @@ func TestNode_MetricsAreNotOnThePublicPort(t *testing.T) {
 	cfg, _, err := ConfigFromEnv(labEnv(map[string]string{"NODE_METRICS_ADDR": "off"}), os.ReadFile)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.MetricsAddr)
+}
+
+// RP74-6: a node's codec writes hold their plaintext inside its byte
+// budget — NODE_CODEC_BUDGET_BYTES, default GOMEMLIMIT/4, else 1 GiB.
+func TestNode_CodecBudget(t *testing.T) {
+	n, err := Build(labEnv(nil), os.ReadFile, "test", zap.NewNop())
+	require.NoError(t, err)
+	b, ok := n.host.Budget.(*dataplane.ByteBudget)
+	require.True(t, ok)
+	assert.Equal(t, int64(1<<30), b.Limit(), "no GOMEMLIMIT in the test: 1 GiB")
+	assert.Equal(t, int64(6<<30)/4, codecBudgetDefault(6<<30), "the unit's GOMEMLIMIT=6GiB: 1.5 GiB")
+
+	cfg, _, err := ConfigFromEnv(labEnv(map[string]string{"NODE_CODEC_BUDGET_BYTES": "512MiB"}), os.ReadFile)
+	require.NoError(t, err)
+	assert.Equal(t, int64(512<<20), cfg.CodecBudgetBytes)
+	for _, bad := range []string{"lots", "1MiB", "-5"} {
+		_, _, err = ConfigFromEnv(labEnv(map[string]string{"NODE_CODEC_BUDGET_BYTES": bad}), os.ReadFile)
+		assert.Error(t, err, bad)
+	}
 }

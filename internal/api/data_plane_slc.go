@@ -17,21 +17,45 @@ package api
 // (settleEdgeGet, recordEdgeAccess, the reaper's expired-read meter).
 
 import (
+	"context"
 	"io"
 	"net/http"
+	"sync"
 
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/dataplane"
 )
 
-// slcHost is the origin's data-plane host over its in-process control plane.
+// slcHost is the origin's data-plane host over its in-process control
+// plane, built once per Server (RP74-5: one client, one pool of backend
+// connections; tests set dataPlaneTransport before the first use).
 func (s *Server) slcHost() *dataplane.Host {
-	client := dataplane.NewBackendClient(dataplane.BackendAnswerTimeout)
-	if s.dataPlaneTransport != nil {
-		client.Transport = s.dataPlaneTransport
+	s.slcHostOnce.Do(func() {
+		client := dataplane.NewBackendClient(dataplane.BackendAnswerTimeout)
+		if s.dataPlaneTransport != nil {
+			client.Transport = s.dataPlaneTransport
+		}
+		s.slcHostV = &dataplane.Host{CP: s.DataPlane(), Client: client, ClientIP: extractClientIP, Logger: s.logger}
+		if s.chunkPutBudget != nil {
+			s.slcHostV.Budget = slcBudget{s.chunkPutBudget}
+		}
+	})
+	return s.slcHostV
+}
+
+// slcBudget is host=slc's byte budget: the origin's own chunk budget
+// (CHUNK_PUT_BUDGET_BYTES, RP74-6) — a codec write reserves its bytes
+// there before its first byte, as storeChunkedObject does, and the
+// vaultaire_chunk_put_budget_* gauges count it.
+type slcBudget struct{ b *chunkPutBudget }
+
+func (sb slcBudget) Acquire(ctx context.Context, n int64) (func(), error) {
+	hold, err := sb.b.reserve(ctx, n, chunkPutBudgetWait)
+	if err != nil {
+		return nil, dataplane.ErrBusy
 	}
-	return &dataplane.Host{CP: s.DataPlane(), Client: client, ClientIP: extractClientIP, Logger: s.logger}
+	return sync.OnceFunc(hold.close), nil
 }
 
 // slcEnabled says whether host=slc takes this tenant's requests.

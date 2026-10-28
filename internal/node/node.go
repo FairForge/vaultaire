@@ -32,6 +32,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -99,6 +100,10 @@ type Config struct {
 	// StateDir is where the ACME cache lives (NODE_STATE_DIR, else systemd's
 	// $STATE_DIRECTORY, else /var/lib/vaultaire-node).
 	StateDir string
+	// CodecBudgetBytes bounds the chunk plaintext the node's codec writes
+	// hold at once (NODE_CODEC_BUDGET_BYTES; default GOMEMLIMIT/4, else
+	// 1 GiB — RP74-6).
+	CodecBudgetBytes int64
 	// MetricsAddr serves /metrics (NODE_METRICS_ADDR, default
 	// 127.0.0.1:9100; "off" = none) — never the public port (RP74-10).
 	MetricsAddr string
@@ -182,6 +187,14 @@ func ConfigFromEnv(getenv func(string) string, readFile func(string) ([]byte, er
 		}
 		cfg.MetricsAddr = m
 	}
+	cfg.CodecBudgetBytes = codecBudgetDefault(debug.SetMemoryLimit(-1))
+	if v := strings.TrimSpace(getenv("NODE_CODEC_BUDGET_BYTES")); v != "" {
+		b, err := parseSize(v)
+		if err != nil || b < codecBudgetMin {
+			return cfg, nil, fmt.Errorf("NODE_CODEC_BUDGET_BYTES %q: a size of at least 64MiB (512MiB, 2GiB, or bytes)", v)
+		}
+		cfg.CodecBudgetBytes = b
+	}
 	var ignored []string
 	for _, k := range ignoredInRole {
 		if getenv(k) != "" {
@@ -189,6 +202,37 @@ func ConfigFromEnv(getenv func(string) string, readFile func(string) ([]byte, er
 		}
 	}
 	return cfg, ignored, nil
+}
+
+// codecBudgetMin: below one codec batch every write would wait alone.
+const codecBudgetMin = 64 << 20
+
+// codecBudgetDefault is a quarter of memLimit (GOMEMLIMIT) when one is
+// set, else 1 GiB.
+func codecBudgetDefault(memLimit int64) int64 {
+	if memLimit > 0 && memLimit < 1<<62 {
+		return max(memLimit/4, codecBudgetMin)
+	}
+	return 1 << 30
+}
+
+// parseSize reads "512MiB", "2GiB" or bytes.
+func parseSize(s string) (int64, error) {
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
+		if num, ok := strings.CutSuffix(s, u.suffix); ok {
+			s, mult = strings.TrimSpace(num), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("size %q", s)
+	}
+	return n * mult, nil
 }
 
 func checkURL(name, v string) error {
@@ -244,7 +288,8 @@ func Build(getenv func(string) string, readFile func(string) ([]byte, error), ve
 	origin, _ := url.Parse(cfg.OriginURL)
 	n := &Node{cfg: cfg, logger: logger, version: version, reg: prometheus.NewRegistry()}
 	n.cp = dataplane.NewHTTPControlPlane(cfg.ControlPlaneURL, cfg.Token, nil)
-	n.host = &dataplane.Host{CP: n.cp, Client: dataplane.NewBackendClient(dataplane.BackendAnswerTimeout), ClientIP: peerIP, Logger: logger}
+	n.host = &dataplane.Host{CP: n.cp, Client: dataplane.NewBackendClient(dataplane.BackendAnswerTimeout), ClientIP: peerIP, Logger: logger,
+		Budget: dataplane.NewByteBudget(cfg.CodecBudgetBytes)}
 	// The origin answers what the node does not take: the request as the
 	// client sent it — its Host kept, so its signature verifies there.
 	n.proxy = &httputil.ReverseProxy{
