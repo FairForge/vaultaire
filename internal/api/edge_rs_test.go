@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -168,4 +169,36 @@ func TestEdgeRS_OnlyWhereItCanHold(t *testing.T) {
 	require.NoError(t, f.fl.Set(context.Background(), flagEdgeRS, f.tenantID, false, "test"))
 	require.NoError(t, f.fl.Refresh(context.Background()))
 	assert.Nil(t, admitOf(host, "off.bin", big).RS, "the flag off")
+}
+
+// lyingShard answers one shard's PUT 200 with a plausible ETag and stores
+// nothing — a host (or backend) whose word is wrong.
+type lyingShard struct {
+	next   http.RoundTripper
+	suffix string
+}
+
+func (l lyingShard) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPut && strings.HasSuffix(strings.SplitN(r.URL.Path, "?", 2)[0], l.suffix) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		h := http.Header{}
+		h.Set("ETag", `"`+strings.Repeat("ab", 16)+`"`)
+		return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}
+	return l.next.RoundTrip(r)
+}
+
+// RP76-5: the commit HEADs every shard on its leg — a shard that is not
+// there at its size and ETag fails the write (503); no head row.
+func TestEdgeRS_TheCommitHeadsEveryShard(t *testing.T) {
+	f, _, host := rsFixture(t)
+	host.Client = &http.Client{Transport: lyingShard{next: host.Client.Transport, suffix: ".s2"}}
+	body := crypto.GoldenBody(4849, 9<<20)
+	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/lie.bin", nil, body, nil), bytes.NewReader(body), int64(len(body)))
+	require.NoError(t, err)
+	require.NotNil(t, res.Admit.RS)
+	assert.Equal(t, http.StatusServiceUnavailable, res.Relay.Status, res.Relay.Body)
+	_, ok := f.head("lie.bin")
+	assert.False(t, ok, "no head row for an object a shard of which is missing")
 }

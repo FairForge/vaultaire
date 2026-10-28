@@ -291,7 +291,8 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	// own backend's); a windowed read keeps one link.
 	var mirrorURL, mirrorLeg string
 	var mirrorHeaders map[string]string
-	if window == nil {
+	// Asked only for a mirrored tenant (RP76-8: no query for the rest).
+	if window == nil && s.flags != nil && s.flags.Enabled(flagEdgeMirror, tenantID) {
 		mirrorURL, mirrorLeg, mirrorHeaders = s.edgeMirrorReadLink(sctx, tenantID, container, blob, rangeValue)
 	}
 

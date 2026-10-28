@@ -222,6 +222,9 @@ type CommitRequest struct {
 	// primary, 1 the mirror).
 	BackendETags []string `json:"backend_etags,omitempty"`
 	ServedURL    int      `json:"served_url,omitempty"`
+	// MirrorCut (RP76-2): the mirror leg fell behind the primary by its
+	// buffer, or did not answer in time after it, and was cut loose.
+	MirrorCut bool `json:"mirror_cut,omitempty"`
 	// ShardETags (an RS write): each shard's backend ETag, in shard order;
 	// "" for a shard that did not land. BodyMD5 is the body's.
 	ShardETags []string `json:"shard_etags,omitempty"`
@@ -255,7 +258,8 @@ type CommitChunk struct {
 	// BackendETags (WP-EDGE-4): one per link of a mirrored miss, in the
 	// links' order; a failed mirror PUT's is omitted.
 	BackendETags []string `json:"backend_etags,omitempty"`
-	Status       string   `json:"status"` // stored | hit
+	MirrorCut    bool     `json:"mirror_cut,omitempty"` // RP76-2, as CommitRequest's
+	Status       string   `json:"status"`               // stored | hit
 }
 
 // IndexRequest is one batch of the host's chunk hashes.

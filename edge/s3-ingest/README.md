@@ -85,6 +85,12 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.5.1 — the mirror never slows the write (Stage 1a Prompt 49 Part 0, RP76-2)
+
+- `putTwo` still tees with the runtime's `tee()`, but the mirror's branch goes through a 16 MiB + 2 MiB byte-length buffer (`TransformStream` + `ByteLengthQueuingStrategy`) and the bytes each fetch takes are counted: the mirror is cut (its fetch aborted, its branch cancelled — the tee then feeds the primary alone) when the primary leads it by more than `MIRROR_MAX_LAG` (16 MiB), or when the primary has answered and the mirror has not within `MIRROR_AFTER_MS` (5 s). The 30 s + body at 2 MiB/s deadline stays the outer bound. A mirrored write runs at the primary's pace (0.5.0 ran at the slower leg's until the deadline — RP76-2). The check runs on every counted read of the primary's branch (the lag changes only there), not on a timer.
+- A cut mirror rides the commit as `mirror_cut: true` (a whole PUT's, and each mirrored codec chunk's); the control plane counts it in `vaultaire_blob_copies_total{outcome="cut"}` and the copy is owed (`pending`, the job's).
+- `test/mirror.test.js` holds both shapes: Node's tee (buffers the slower branch) and a workerd-style paced tee (`pacedTee`, the faster branch waits) — a mirror that never answers returns within 5 s of the primary's answer, a mirror at a tenth of the pace is cut at 16 MiB of lag with the primary at its own pace.
+
 ## 0.5.0 — the mirror and the public catalogue (Stage 1a Prompt 48, WP-EDGE-4; folds 0.4.1)
 
 - **The mirror** (`edge_mirror`): an admit with `urls: [placement, leg]` (and a codec miss with two `urls`) sends the body to both with the runtime's own `tee()` — no JavaScript reads the bytes; workerd paces the fast branch to the slow one (Step 0.1: 1 GiB teed to a 20 MB/s leg held ≤ 44 MiB). The primary decides the write; the mirror is aborted past 30 s + the body at 2 MiB/s, or when the primary fails, and its failure is only a missing ETag (`backend_etags` on the commit; the copy is then the control plane's `blob_copies` job's). `src/codec.js` `putTwo`.

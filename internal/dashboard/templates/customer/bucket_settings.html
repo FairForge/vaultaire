@@ -29,6 +29,9 @@
     <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.5rem;">
         Region is set at bucket creation and cannot be changed. All objects in this bucket are stored in this region.
     </p>
+    {{if .IsEURegion}}<p class="text-muted" style="font-size: 0.8rem;">
+        Objects in an EU bucket are never copied outside the EU. Where Stored keeps a second copy of an object with a second provider, an EU bucket gets none until that provider has an EU location: today each object here is a single copy.
+    </p>{{end}}
 </div>
 
 <form method="POST" action="/dashboard/buckets/{{.BucketName}}/settings">

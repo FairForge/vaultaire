@@ -290,47 +290,100 @@ export function chunkPutInit(headers, sealed) {
 
 // --- the mirror (0.5.0, WP-EDGE-4) ----------------------------------------------
 
-/** The mirror's pace: it is cut loose when it has not answered within
+/** The mirror's outer bound: it is cut loose when it has not answered within
  * MIRROR_GRACE_MS plus the body at MIRROR_MIN_RATE (D-EDGE-46). */
 const MIRROR_GRACE_MS = 30_000;
 const MIRROR_MIN_RATE = 2 << 20;
+
+/** RP76-2: the mirror may trail the primary by at most MIRROR_MAX_LAG bytes
+ * while both run, and may answer at most MIRROR_AFTER_MS after the primary
+ * did; past either it is cut and the primary goes on alone. */
+export const MIRROR_MAX_LAG = 16 << 20;
+export const MIRROR_AFTER_MS = 5_000;
 
 /** mirrorDeadlineMs is how long a mirror PUT of n bytes may take. */
 export function mirrorDeadlineMs(n) {
   return MIRROR_GRACE_MS + Math.ceil((n / MIRROR_MIN_RATE) * 1000);
 }
 
+/** counted wraps a stream in one that counts the bytes its reader took. */
+function counted(src, onBytes) {
+  const reader = src.getReader();
+  return new ReadableStream({
+    async pull(c) {
+      const { done, value } = await reader.read();
+      if (done) {
+        c.close();
+        return;
+      }
+      onBytes(value.byteLength);
+      c.enqueue(value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  }, { highWaterMark: 0 });
+}
+
 /**
  * putTwo sends one body to two links — the placement's (urls[0]) and the
  * mirror leg's (urls[1]) — with the runtime's own tee(): no JavaScript
- * reads the bytes, and workerd paces the faster branch to the slower one
- * (Step 0.1: a 1 GiB body teed to a 20 MB/s leg held ≤ 44 MiB). The
- * primary decides the write; the mirror is aborted past its deadline (its
- * branch cancelled, the primary goes on alone) or when the primary fails,
- * and its failure is only a missing ETag — the copy is then the
- * blob_copies job's. → {resp (the primary's), mirrorETag ("" = not stored)}
+ * copies the bytes. workerd paces the faster branch to the slower one
+ * (Step 0.1), so the mirror's branch is given a MIRROR_MAX_LAG buffer
+ * (a byte-counting TransformStream) and the bytes each fetch took are
+ * counted: when the primary's lead passes MIRROR_MAX_LAG, or the primary
+ * has answered and the mirror has not within MIRROR_AFTER_MS, the mirror
+ * is cut (its fetch aborted, its branch cancelled — the tee then feeds the
+ * primary alone). RP76-2: a mirrored write runs at the primary's pace.
+ * The primary decides the write; the mirror's failure is only a missing
+ * ETag — the copy is then the blob_copies job's.
+ * → {resp (the primary's), mirrorETag ("" = not stored), mirrorCut}
  */
-export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadlineMs(n)) {
-  const [a, b] = init.body.tee();
+export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadlineMs(n), opts = {}) {
+  const [a, b] = opts.tee ? opts.tee(init.body) : init.body.tee();
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new Error("the mirror leg fell behind")), deadlineMs);
-  const mirror = doFetch(urls[1], { ...init, body: b, signal: ac.signal }).then(async (r) => {
-    const etag = r.ok ? r.headers.get("etag") || "" : "";
+  let primaryBytes = 0;
+  let mirrorBytes = 0;
+  let cut = false;
+  let mirrorBody = null;
+  const cutMirror = (why) => {
+    if (cut) return;
+    cut = true;
+    ac.abort(new Error(why));
+    mirrorBody?.cancel(why).catch(() => {});
+  };
+  const watch = () => {
+    if (primaryBytes - mirrorBytes > MIRROR_MAX_LAG) cutMirror("the mirror leg fell 16 MiB behind");
+  };
+  // The buffer that lets the mirror trail: the tee hands the branch its
+  // bytes while the buffer has room, so the primary is not paced until the
+  // lag is past MIRROR_MAX_LAG — where the mirror is cut.
+  const buffered = b.pipeThrough(new TransformStream({}, undefined,
+    new ByteLengthQueuingStrategy({ highWaterMark: MIRROR_MAX_LAG + (2 << 20) })));
+  mirrorBody = counted(buffered, (k) => { mirrorBytes += k; });
+  const primaryBody = counted(a, (k) => { primaryBytes += k; watch(); });
+  const timer = setTimeout(() => cutMirror("the mirror leg passed its deadline"), deadlineMs);
+  const mirror = doFetch(urls[1], { ...init, body: mirrorBody, signal: ac.signal }).then(async (r) => {
+    const etag = r.ok && !cut ? r.headers.get("etag") || "" : "";
     await r.body?.cancel();
     return etag;
   }, async () => {
-    await b.cancel().catch(() => {});
+    await mirrorBody.cancel().catch(() => {});
     return "";
   });
+  let after;
   try {
-    const resp = await doFetch(urls[0], { ...init, body: a });
-    return { resp, mirrorETag: await mirror };
+    const resp = await doFetch(urls[0], { ...init, body: primaryBody });
+    after = setTimeout(() => cutMirror("the mirror leg did not answer after the primary"), MIRROR_AFTER_MS);
+    const mirrorETag = await mirror;
+    return { resp, mirrorETag: cut ? "" : mirrorETag, mirrorCut: cut };
   } catch (e) {
     ac.abort(e);
     await mirror;
     throw e;
   } finally {
     clearTimeout(timer);
+    clearTimeout(after);
   }
 }
 
@@ -503,9 +556,10 @@ export async function runCodec(request, admit, env, ctx, deps) {
         if (sealed.length !== m.sealed_length) throw new Error(`edge codec: sealed ${sealed.length} bytes, the link signs ${m.sealed_length}`);
         let resp;
         let mirrorETag = "";
+        let mirrorCut = false;
         if (Array.isArray(m.urls) && m.urls.length === 2) {
           // WP-EDGE-4: the same sealed bytes to the mirror leg too.
-          ({ resp, mirrorETag } = await putTwo(doFetch, m.urls, chunkPutInit(m.send_headers || {}, sealed), sealed.length));
+          ({ resp, mirrorETag, mirrorCut } = await putTwo(doFetch, m.urls, chunkPutInit(m.send_headers || {}, sealed), sealed.length));
         } else {
           resp = await doFetch(m.url, chunkPutInit(m.send_headers || {}, sealed));
         }
@@ -516,6 +570,7 @@ export async function runCodec(request, admit, env, ctx, deps) {
         e.sealed_size = sealed.length;
         e.backend_etag = tamper === "etag" ? `"${"ab".repeat(16)}"` : etag; // TEST ONLY
         if (Array.isArray(m.urls) && m.urls.length === 2) e.backend_etags = mirrorETag ? [e.backend_etag, mirrorETag] : [e.backend_etag];
+        if (mirrorCut) e.mirror_cut = true;
         stats.misses++;
         stats.sealed += sealed.length;
       } finally {

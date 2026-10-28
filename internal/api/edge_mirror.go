@@ -17,10 +17,15 @@ package api
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"regexp"
 	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // defaultMirrorLegs is MIRROR_LEGS' default: the two fast legs.
@@ -60,13 +65,91 @@ func mirrorLegsFromEnv(getenv func(string) string, logger *zap.Logger) []string 
 	return legs
 }
 
-// mirrorLegFor is the leg a blob placed on placement is mirrored to: the
-// first leg of MIRROR_LEGS that is a registered EdgeWriter, is not the
-// placement's backend, and whose breaker is closed — "" when none is (no
-// mirror this write; never a refusal).
-func (s *Server) mirrorLegFor(placement string) string {
+// bucketScope is what of a bucket its mirror leg must satisfy (RP76-1):
+// the region it is pinned to ("" or the default region = unpinned) and its
+// tier preference.
+type bucketScope struct {
+	Region, Tier string
+}
+
+// pinned reports whether the bucket names a region other than the default
+// (whose buckets the primary serves).
+func (b bucketScope) pinned() bool {
+	return b.Region != "" && b.Region != drivers.IDriveDefaultRegion(os.Getenv)
+}
+
+// bucketScopeOf reads a bucket's scope; a bucket that cannot be read is
+// unpinned with no tier (the placement read the same row before).
+func (s *Server) bucketScopeOf(ctx context.Context, tenantID, bucket string) bucketScope {
+	var b bucketScope
+	if s.db == nil {
+		return b
+	}
+	var region, tier sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT region, tier_preference FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, bucket).Scan(&region, &tier); err == nil {
+		b.Region, b.Tier = region.String, tier.String
+	}
+	return b
+}
+
+// allows reports whether a leg storing in region may hold the bucket's
+// copy: a leg of the bucket's jurisdiction (an unpinned bucket's is the
+// default region's — a US bucket is never mirrored to the EU), or, for an
+// unpinned bucket only, a leg of no known region.
+func (b bucketScope) allows(region string) bool {
+	if region == "" {
+		return !b.pinned()
+	}
+	home := b.Region
+	if !b.pinned() {
+		home = drivers.IDriveDefaultRegion(os.Getenv)
+	}
+	return jurisdiction(region) == jurisdiction(home)
+}
+
+// jurisdiction is a region's jurisdiction: its first segment (us, eu, ap).
+func jurisdiction(region string) string {
+	j, _, _ := strings.Cut(region, "-")
+	return j
+}
+
+// legRegion is the region a mirror leg stores in: an idrive-<region>
+// driver's region, the primary idrive's IDRIVE_REGION, lyve's LYVE_REGION
+// (us-west-1 by default); "" when unknown — never a pinned bucket's leg.
+func legRegion(leg string) string {
+	switch {
+	case leg == "idrive":
+		return drivers.IDriveDefaultRegion(os.Getenv)
+	case strings.HasPrefix(leg, "idrive-"):
+		if r := strings.TrimPrefix(leg, "idrive-"); drivers.IsValidRegion(r) {
+			return r
+		}
+	case leg == "lyve":
+		if r := strings.TrimSpace(os.Getenv("LYVE_REGION")); r != "" {
+			return r
+		}
+		return "us-west-1"
+	}
+	return ""
+}
+
+// mirrorLegFor is the leg a blob placed on placement in a bucket of scope b
+// is mirrored to: the first leg of MIRROR_LEGS that is a registered
+// EdgeWriter, is not the placement's backend, and satisfies the bucket — a
+// leg of the bucket's jurisdiction (bucketScope.allows; RP76-1: an EU
+// bucket with no EU leg is a single copy); "" when none is (no mirror this write;
+// never a refusal). A strict-target tier or placement and an rs object
+// are never mirrored (RP76-1, RP76-6).
+func (s *Server) mirrorLegFor(placement string, b bucketScope) string {
+	if placement == rsBackendSentinel || engine.IsStrictTarget(placement) || engine.IsStrictTarget(b.Tier) {
+		return ""
+	}
 	for _, leg := range s.mirrorLegs {
 		if leg == placement {
+			continue
+		}
+		if !b.allows(legRegion(leg)) {
 			continue
 		}
 		if _, err := s.edgeWriterFor(leg); err == nil {
@@ -76,13 +159,14 @@ func (s *Server) mirrorLegFor(placement string) string {
 	return ""
 }
 
-// mirrorFor is the leg of a tenant's write placed on placement, "" when
-// the tenant is not mirrored or no leg is available.
-func (s *Server) mirrorFor(tenantID, placement string) string {
+// mirrorFor is the leg of a tenant's write into bucket placed on
+// placement, "" when the tenant is not mirrored or no leg satisfies the
+// bucket. The bucket is read only for a mirrored tenant.
+func (s *Server) mirrorFor(ctx context.Context, tenantID, bucket, placement string) string {
 	if s.flags == nil || !s.flags.Enabled(flagEdgeMirror, tenantID) {
 		return ""
 	}
-	return s.mirrorLegFor(placement)
+	return s.mirrorLegFor(placement, s.bucketScopeOf(ctx, tenantID, bucket))
 }
 
 // blobCopy is one blob_copies row.

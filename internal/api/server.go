@@ -667,6 +667,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
 	s.chunkPutBudget = newChunkPutBudget(chunkPutBudgetFromEnv(os.Getenv, debug.SetMemoryLimit(-1), logger))
 	s.mirrorLegs = mirrorLegsFromEnv(os.Getenv, logger)
+	if s.chunkOrphans != nil {
+		s.chunkOrphans.MirrorLegs = s.mirrorLegs // RP76-3: the legs are walked too
+	}
 	chunkPutBudgetSize.Set(float64(s.chunkPutBudget.limit()))
 
 	// Retention (Review R13-14): nightly prune of the log tables; started in

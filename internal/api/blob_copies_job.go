@@ -15,7 +15,10 @@ package api
 //     own commit has had its chance) is written from the primary — the
 //     blob streamed from its recorded backend into the leg through the
 //     drivers, its MD5 and size checked against the row — at most
-//     blobCopiesMaxBytesPerRun a run. This is the 2× lane (the bytes cross
+//     blobCopiesMaxBytesPerRun a run, batch after batch while time remains
+//     (RP76-4), and never past a source's free egress this UTC month
+//     (egressLedger: backend_plans' multiple × the stored total, the
+//     month's spend carried in job_runs.result). This is the 2× lane (the bytes cross
 //     SLC twice), rare by construction: the edge writes the copy when the
 //     leg answers. A failure is the row's attempts and last_error; after
 //     blobCopiesMaxAttempts it waits for the operator (a note).
@@ -34,9 +37,11 @@ import (
 	"crypto/md5" // #nosec G501 -- the S3 ETag of the copied bytes
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -82,12 +87,13 @@ const (
 	blobCopyOrphaned = "orphaned" // the blob is named by nothing: made stale
 	blobCopyDeleted  = "deleted"  // a stale copy removed from its leg, row gone
 	blobCopySkipped  = "skipped"  // a leg or source unregistered or its breaker open
+	blobCopyCut      = "cut"      // a host cut a mirror that fell behind the primary (RP76-2)
 )
 
 var (
 	blobCopiesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_total",
-		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open).",
+		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open) | cut (a host cut a mirrored write's mirror leg loose for falling 16 MiB behind the primary or not answering 5 s after it — RP76-2; the copy is then owed).",
 	}, []string{"outcome"})
 	blobCopiesReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_reads_total",
@@ -100,7 +106,7 @@ var (
 )
 
 func init() {
-	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped} {
+	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped, blobCopyCut} {
 		blobCopiesTotal.WithLabelValues(o)
 	}
 	blobCopiesReads.WithLabelValues("served_mirror")
@@ -115,6 +121,11 @@ type BlobCopiesJob struct {
 	onlyTenant string
 	now        func() time.Time
 	maxBytes   int64
+	// copyBatch is the pending rows one copy pass reads (blobCopiesCopyBatch);
+	// capacityJob the backend_capacity run whose stored totals size the
+	// egress budget (tests use their own).
+	copyBatch   int
+	capacityJob string
 }
 
 // newBlobCopiesJob is the job of s; nil without a database or an engine.
@@ -122,7 +133,8 @@ func newBlobCopiesJob(s *Server) *BlobCopiesJob {
 	if s.db == nil || s.engine == nil {
 		return nil
 	}
-	return &BlobCopiesJob{s: s, JobName: blobCopiesJobName, now: time.Now, maxBytes: blobCopiesMaxBytesPerRun}
+	return &BlobCopiesJob{s: s, JobName: blobCopiesJobName, now: time.Now, maxBytes: blobCopiesMaxBytesPerRun,
+		copyBatch: blobCopiesCopyBatch, capacityJob: backendCapacityJobName}
 }
 
 func (j *BlobCopiesJob) spec() jobSpec {
@@ -134,11 +146,14 @@ func (j *BlobCopiesJob) spec() jobSpec {
 				zap.Int("deleted", res.Deleted), zap.Int("skipped", res.Skipped), zap.Error(err))
 			rep := jobReport{Rows: int64(res.Copied + res.Deleted), Result: res}
 			if res.Failed > 0 || res.Skipped > 0 || res.GaveUp > 0 {
-				rep.Note = fmt.Sprintf("%d copy attempt(s) failed, %d skipped (unregistered or breaker open), %d past %d attempts — they wait",
+				rep.Note = fmt.Sprintf("%d copy attempt(s) failed, %d skipped (unregistered, breaker open or the source's free egress spent), %d past %d attempts — they wait",
 					res.Failed, res.Skipped, res.GaveUp, blobCopiesMaxAttempts)
 			}
 			if res.Stopped != "" {
 				rep.Note = strings.TrimPrefix(rep.Note+"; "+res.Stopped, "; ")
+			}
+			if res.EgressNote != "" {
+				rep.Note = strings.TrimPrefix(rep.Note+"; "+res.EgressNote, "; ")
 			}
 			return rep, err
 		}}
@@ -158,6 +173,17 @@ type BlobCopiesResult struct {
 	// Stopped: the run's time ran out; what is left is the next run's.
 	Stopped string   `json:"stopped,omitempty"`
 	Errors  []string `json:"errors,omitempty"`
+	// Egress is what the copy pass read from each source this UTC month
+	// (RP76-4), carried from run to run in job_runs.result; EgressNote
+	// names the sources whose free egress stopped it.
+	Egress     *blobCopyEgress `json:"egress,omitempty"`
+	EgressNote string          `json:"egress_note,omitempty"`
+}
+
+// blobCopyEgress is the copy pass's egress this UTC month, per source.
+type blobCopyEgress struct {
+	Month string           `json:"month"` // 2006-01, UTC
+	Spent map[string]int64 `json:"spent"`
 }
 
 func (r *BlobCopiesResult) note(err error) {
@@ -170,23 +196,54 @@ func (r *BlobCopiesResult) note(err error) {
 // is — a note (Stopped), never a failed run: the next run goes on.
 func (j *BlobCopiesJob) RunOnce(ctx context.Context) (BlobCopiesResult, error) {
 	var res BlobCopiesResult
-	passes := []struct {
+	run := &copyRun{egress: j.egressLedger(ctx, &res)}
+	stopped := func(name, where string) {
+		res.Stopped = "the run's time ran out " + where + " the " + name + " pass; the next run goes on"
+	}
+	// Backfill and copy, batch after batch, while rows are pending and the
+	// run's time remains (RP76-4, RB6-10); then the orphan and stale passes.
+	for {
+		if ctx.Err() != nil {
+			stopped("backfill", "before")
+			return res, nil
+		}
+		enqueued := res.Enqueued
+		if err := j.backfill(ctx, &res); err != nil {
+			if ctx.Err() != nil {
+				stopped("backfill", "in")
+				return res, nil
+			}
+			return res, fmt.Errorf("blob copies backfill: %w", err)
+		}
+		more, err := j.copyPending(ctx, &res, run)
+		if err != nil {
+			if ctx.Err() != nil {
+				stopped("copy", "in")
+				return res, nil
+			}
+			return res, fmt.Errorf("blob copies copy: %w", err)
+		}
+		if run.stop || (!more && res.Enqueued == enqueued) {
+			break
+		}
+	}
+	for _, p := range []struct {
 		name string
 		run  func(context.Context, *BlobCopiesResult) error
-	}{{"backfill", j.backfill}, {"copy", j.copyPending}, {"orphans", j.findOrphans}, {"stale", j.deleteStale}}
-	for _, p := range passes {
+	}{{"orphans", j.findOrphans}, {"stale", j.deleteStale}} {
 		if ctx.Err() != nil {
-			res.Stopped = "the run's time ran out before the " + p.name + " pass; the next run goes on"
+			stopped(p.name, "before")
 			return res, nil
 		}
 		if err := p.run(ctx, &res); err != nil {
 			if ctx.Err() != nil {
-				res.Stopped = "the run's time ran out in the " + p.name + " pass; the next run goes on"
+				stopped(p.name, "in")
 				return res, nil
 			}
 			return res, fmt.Errorf("blob copies %s: %w", p.name, err)
 		}
 	}
+	res.EgressNote = run.egress.note()
 	if err := j.s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blob_copies WHERE state = 'pending'`).Scan(&res.Pending); err == nil {
 		blobCopiesPending.Set(float64(res.Pending))
 	}
@@ -233,10 +290,12 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 	}
 	rows, err := j.s.db.QueryContext(ctx, `
 		SELECT h.tenant_id, h.bucket, h.object_key, COALESCE(h.storage_key, h.object_key), h.backend_name, h.size_bytes,
-		       COALESCE(NULLIF(h.body_md5, ''), h.etag)
+		       COALESCE(NULLIF(h.body_md5, ''), h.etag), COALESCE(b.region, ''), COALESCE(b.tier_preference, '')
 		FROM object_head_cache h
+		LEFT JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 		WHERE ($1 OR h.tenant_id = ANY($2)) AND NOT h.is_chunked AND h.floor <> 'vault'
-		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`')
+		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`', 'sync', 'blomp', 'sia')
+		  AND COALESCE(b.tier_preference, '') NOT IN ('sync', 'blomp', 'sia')
 		  AND h.size_bytes > 0
 		  AND NOT EXISTS (SELECT 1 FROM blob_copies c WHERE c.tenant_id = h.tenant_id
 		                  AND c.storage_key = COALESCE(h.storage_key, h.object_key) AND c.kind = 'mirror')
@@ -246,33 +305,41 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		return err
 	}
 	type cand struct {
-		c   blobCopy
-		md5 string
+		c     blobCopy
+		md5   string
+		scope bucketScope
 	}
 	var cands []cand
 	for rows.Next() {
 		var c blobCopy
 		var digest string
-		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest); err != nil {
+		var scope bucketScope
+		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest, &scope.Region, &scope.Tier); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		cands = append(cands, cand{c: c, md5: digest})
+		cands = append(cands, cand{c: c, md5: digest, scope: scope})
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	legFor := map[string]string{}
+	type legKey struct {
+		source string
+		scope  bucketScope
+	}
+	legFor := map[legKey]string{}
 	for _, cd := range cands {
 		c := cd.c
 		if !j.s.flags.Enabled(flagEdgeMirror, c.TenantID) {
 			continue
 		}
-		leg, ok := legFor[c.Source]
+		// The leg must satisfy the bucket (RP76-1): its region and tier.
+		lk := legKey{c.Source, cd.scope}
+		leg, ok := legFor[lk]
 		if !ok {
-			leg = j.s.mirrorLegFor(c.Source)
-			legFor[c.Source] = leg
+			leg = j.s.mirrorLegFor(c.Source, cd.scope)
+			legFor[lk] = leg
 		}
 		if leg == "" {
 			continue
@@ -317,18 +384,57 @@ func scanCopies(rows *sql.Rows) ([]copyRec, error) {
 
 const copyColumns = `tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts, kind, shard_index`
 
-// copyPending writes owed copies from the primary.
-func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) error {
-	rows, err := j.s.db.QueryContext(ctx, `SELECT `+copyColumns+` FROM blob_copies
+// copyRun is one run's copy state across its batches: the bytes copied
+// (against maxBytes), the keyset cursor past the rows already tried (a row
+// that failed is the next run's), the egress ledger.
+type copyRun struct {
+	spent  int64
+	after  copyCursor
+	egress *egressLedger
+	// stop: the copy pass stopped for the run's time or byte budget —
+	// the loop ends.
+	stop bool
+}
+
+type copyCursor struct {
+	at               time.Time
+	tenant, key, leg string
+	index            int
+	set              bool
+}
+
+// copyPending writes owed copies from the primary: one batch past the
+// run's cursor; more = a full batch was read and the run may go on.
+func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult, run *copyRun) (bool, error) {
+	batch := j.copyBatch
+	if batch <= 0 {
+		batch = blobCopiesCopyBatch
+	}
+	c0 := run.after
+	rows, err := j.s.db.QueryContext(ctx, `SELECT `+copyColumns+`, created_at FROM blob_copies
 		WHERE state = 'pending' AND kind = 'mirror' AND created_at <= $1 AND ($2 = '' OR tenant_id = $2)
-		ORDER BY created_at LIMIT $3`, j.now().Add(-blobCopiesPendingAge), j.onlyTenant, blobCopiesCopyBatch)
+		  AND (NOT $4 OR (created_at, tenant_id, storage_key, leg, shard_index) > ($5, $6, $7, $8, $9))
+		ORDER BY created_at, tenant_id, storage_key, leg, shard_index LIMIT $3`,
+		j.now().Add(-blobCopiesPendingAge), j.onlyTenant, batch, c0.set, c0.at, c0.tenant, c0.key, c0.leg, c0.index)
 	if err != nil {
-		return err
+		return false, err
 	}
-	due, err := scanCopies(rows)
-	if err != nil {
-		return err
+	var due []copyRec
+	for rows.Next() {
+		var c copyRec
+		var at time.Time
+		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Leg, &c.State, &c.ETag, &c.Size, &c.attempts, &c.Kind, &c.Index, &at); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		due = append(due, c)
+		run.after = copyCursor{at: at, tenant: c.TenantID, key: c.StorageKey, leg: c.Leg, index: c.Index, set: true}
 	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	more := len(due) == batch
 	stopAt := time.Time{}
 	if dl, ok := ctx.Deadline(); ok {
 		stopAt = dl.Add(-blobCopiesTailReserve)
@@ -337,11 +443,10 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 	// or more takes every slot (its upload holds the driver's part buffers).
 	sem := semaphore.NewWeighted(blobCopiesConcurrency)
 	var mu sync.Mutex
-	var spent int64
 	var wg sync.WaitGroup
 	for _, c := range due {
 		mu.Lock()
-		over := spent >= j.maxBytes
+		over := run.spent >= j.maxBytes
 		mu.Unlock()
 		late := !stopAt.IsZero() && !j.now().Before(stopAt)
 		if ctx.Err() != nil || over || late {
@@ -352,6 +457,7 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 				}
 				mu.Unlock()
 			}
+			more, run.stop = false, true
 			break
 		}
 		if c.attempts >= blobCopiesMaxAttempts {
@@ -360,15 +466,26 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 			mu.Unlock()
 			continue
 		}
+		// The source's free egress this month (RP76-4): a copy that would
+		// pass it waits for the next month, skipped with the reason.
+		if !run.egress.take(c.Source, c.Size) {
+			mu.Lock()
+			res.Skipped++
+			mu.Unlock()
+			blobCopiesTotal.WithLabelValues(blobCopySkipped).Inc()
+			continue
+		}
 		weight := int64(1)
 		if c.Size >= blobCopiesLargeBytes {
 			weight = blobCopiesConcurrency
 		}
 		if err := sem.Acquire(ctx, weight); err != nil {
+			run.egress.give(c.Source, c.Size)
+			more = false
 			break
 		}
 		mu.Lock()
-		spent += c.Size
+		run.spent += c.Size
 		mu.Unlock()
 		wg.Add(1)
 		go func(c copyRec, weight int64) {
@@ -376,14 +493,16 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 			defer sem.Release(weight)
 			ok := j.copyRow(ctx, c, res, &mu)
 			if !ok {
+				run.egress.give(c.Source, c.Size)
 				mu.Lock()
-				spent -= c.Size
+				run.spent -= c.Size
 				mu.Unlock()
 			}
 		}(c, weight)
 	}
 	wg.Wait()
-	return nil
+	run.egress.record(res)
+	return more, nil
 }
 
 // copyRow handles one pending row (res under mu); true = its bytes were
@@ -397,6 +516,17 @@ func (j *BlobCopiesJob) copyRow(ctx context.Context, c copyRec, res *BlobCopiesR
 		return false
 	}
 	if !named {
+		j.setState(ctx, c.blobCopy, copyStale, "")
+		mu.Lock()
+		res.Orphaned++
+		mu.Unlock()
+		blobCopiesTotal.WithLabelValues(blobCopyOrphaned).Inc()
+		return false
+	}
+	if j.unmirrorable(c.blobCopy) {
+		// RP76-6: a source no copy can be read from (an rs object's
+		// sentinel, a strict target the backfill once enqueued) is no
+		// mirror's: stale, never skipped for ever.
 		j.setState(ctx, c.blobCopy, copyStale, "")
 		mu.Lock()
 		res.Orphaned++
@@ -434,6 +564,138 @@ func truncateErr(err error) string {
 		s = s[:300]
 	}
 	return s
+}
+
+// unmirrorable reports whether c is a mirror copy whose source no copy may
+// be read from: an rs object's sentinel, the chunked sentinel, or a strict
+// target, which is never mirrored (RP76-1, RP76-6).
+func (j *BlobCopiesJob) unmirrorable(c blobCopy) bool {
+	if c.Kind != "" && c.Kind != "mirror" {
+		return false
+	}
+	return c.Source == rsBackendSentinel || c.Source == chunkedBackendSentinel || engine.IsStrictTarget(c.Source)
+}
+
+// egressLedger is the copy pass's egress budget per source for one run
+// (RP76-4): a source whose plan row (backend_plans) names an
+// egress_free_multiple may give the pass, this UTC month, at most that
+// multiple of what the last backend_capacity run counted stored on it,
+// less what is already spent — the vendor's own month-to-date where it
+// reports one, else (and at least) what this job read from it this month.
+// A source with no plan row or a NULL multiple is unmetered. A metered
+// source with no capacity run yet gets nothing (unknown = no egress).
+type egressLedger struct {
+	mu      sync.Mutex
+	month   string
+	spent   map[string]int64 // this month, through this run (the job's own)
+	limit   map[string]int64 // remaining at the run's start; absent = unmetered
+	took    map[string]int64 // this run, reserved or copied
+	stopped map[string]bool  // sources a copy was refused for
+}
+
+// egressLedger reads the plans, the capacity run and this job's previous
+// result; res.Egress carries the month on.
+func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult) *egressLedger {
+	l := &egressLedger{month: j.now().UTC().Format("2006-01"), spent: map[string]int64{}, limit: map[string]int64{},
+		took: map[string]int64{}, stopped: map[string]bool{}}
+	var prev BlobCopiesResult
+	var raw []byte
+	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.JobName).Scan(&raw); err == nil && len(raw) > 0 {
+		_ = json.Unmarshal(raw, &prev)
+	}
+	if prev.Egress != nil && prev.Egress.Month == l.month {
+		for k, v := range prev.Egress.Spent {
+			l.spent[k] = v
+		}
+	}
+	var capRes BackendCapacityResult
+	haveCap := false
+	raw = nil
+	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.capacityJob).Scan(&raw); err == nil && len(raw) > 0 {
+		haveCap = json.Unmarshal(raw, &capRes) == nil
+	}
+	rows, err := j.s.db.QueryContext(ctx, `SELECT backend, egress_free_multiple FROM backend_plans WHERE egress_free_multiple IS NOT NULL`)
+	if err != nil {
+		res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
+		l.limit = nil // nil = every source refused (below)
+	} else {
+		for rows.Next() {
+			var backend string
+			var mult float64
+			if rows.Scan(&backend, &mult) != nil {
+				continue
+			}
+			var stored, used int64
+			if haveCap {
+				if b := capRes.Backends[backend]; b != nil {
+					stored = b.Total
+				}
+				if v, ok := capRes.Vendor[backend]; ok && !v.EgressUnmetered {
+					used = v.EgressMonthBytes
+				}
+			}
+			used = max(used, l.spent[backend])
+			l.limit[backend] = max(0, int64(mult*float64(stored))-used)
+		}
+		if err := rows.Err(); err != nil {
+			res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
+			l.limit = nil
+		}
+		_ = rows.Close()
+	}
+	res.Egress = &blobCopyEgress{Month: l.month, Spent: map[string]int64{}}
+	for k, v := range l.spent {
+		res.Egress.Spent[k] = v
+	}
+	return l
+}
+
+// take reserves n bytes of source's budget; false = it would pass it.
+func (l *egressLedger) take(source string, n int64) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.limit == nil {
+		l.stopped[source] = true
+		return false
+	}
+	rem, metered := l.limit[source]
+	if metered && l.took[source]+n > rem {
+		l.stopped[source] = true
+		return false
+	}
+	l.took[source] += n
+	return true
+}
+
+// give returns a reservation whose copy did not happen.
+func (l *egressLedger) give(source string, n int64) {
+	l.mu.Lock()
+	l.took[source] -= n
+	l.mu.Unlock()
+}
+
+// record writes the month's spend (the job's own) into res.
+func (l *egressLedger) record(res *BlobCopiesResult) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, v := range l.took {
+		res.Egress.Spent[k] = l.spent[k] + v
+	}
+}
+
+// note names the sources whose budget refused a copy ("" = none).
+func (l *egressLedger) note() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.stopped) == 0 {
+		return ""
+	}
+	var names []string
+	for k := range l.stopped {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " (backend_plans × stored); the rest waits for next month"
 }
 
 // errCopySkipped: a leg or the source cannot be asked now.
@@ -566,7 +828,7 @@ func (j *BlobCopiesJob) deleteStale(ctx context.Context, res *BlobCopiesResult) 
 		return err
 	}
 	for _, c := range rs {
-		if named, err := j.named(ctx, c.blobCopy); err == nil && named {
+		if named, err := j.named(ctx, c.blobCopy); err == nil && named && !j.unmirrorable(c.blobCopy) {
 			j.setState(ctx, c.blobCopy, copyPending, "")
 			continue
 		}
