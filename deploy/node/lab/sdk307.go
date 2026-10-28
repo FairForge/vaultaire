@@ -17,7 +17,7 @@ import (
 
 func main() {
 	c := s3.New(s3.Options{Region: "us-east-1", BaseEndpoint: aws.String("http://127.0.0.1:8099"), UsePathStyle: true,
-		Credentials: credentials.NewStaticCredentialsProvider("AKIALAB307PROBE00000", "lab307probesecretkey000000000000000000000", "")})
+		Credentials: credentials.NewStaticCredentialsProvider("LAB307PROBE-ACCESS-KEY", "lab-307-probe-not-a-secret", "")})
 	body := bytes.Repeat([]byte("x"), 1<<20)
 	_, err := c.PutObject(context.Background(), &s3.PutObjectInput{Bucket: aws.String("lab"), Key: aws.String("sdk.bin"), Body: bytes.NewReader(body)})
 	fmt.Println("sdk PutObject:", err)

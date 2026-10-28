@@ -31,7 +31,7 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 )
 
-const ak, sk = "AKIALAB307PROBE00000", "lab307probesecretkey000000000000000000000"
+const ak, sk = "LAB307PROBE-ACCESS-KEY", "lab-307-probe-not-a-secret"
 
 var (
 	mu       sync.Mutex
