@@ -85,6 +85,9 @@ func (s *Server) registerJobs() {
 	if s.backendCapacity != nil {
 		s.jobs.Register(s.backendCapacity.spec())
 	}
+	if s.catalogueFilter != nil {
+		s.jobs.Register(s.catalogueFilter.spec())
+	}
 	if s.smartDemotion != nil {
 		// The job needs both backends. Without them (a local or CI build, a
 		// deployment with no archive) it is not a job of this process: it

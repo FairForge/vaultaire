@@ -222,6 +222,8 @@ type Server struct {
 	// backendCapacity is the backend_capacity job (WP-CAP-1,
 	// backend_capacity.go); nil without a database.
 	backendCapacity *BackendCapacityRunner
+	// catalogueFilter is the catalogue_filter job (WP-EDGE-4 PR D).
+	catalogueFilter *CatalogueFilterJob
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -543,6 +545,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The reseller key is read like the master key (credential, _FILE, env;
 	// set-but-unusable = a refused boot, never "vendor view off").
 	s.backendCapacity = NewBackendCapacityRunner(s.db, s.engine, logger)
+	s.catalogueFilter = newCatalogueFilterJob(s)
 	if s.backendCapacity != nil {
 		key, err := idrive.LoadResellerKey(os.Getenv, os.ReadFile)
 		if err != nil {
