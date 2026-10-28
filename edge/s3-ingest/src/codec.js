@@ -359,7 +359,8 @@ export async function catalogueFilter(env, e2ee, doFetch = fetch, now = Date.now
   if (!env || !env.CATALOGUE_URL || !e2ee) return null;
   if (catalogue && now - catalogue.at < CATALOGUE_TTL_MS) return catalogue;
   try {
-    const base = String(env.CATALOGUE_URL).replace(/\/+$/, "");
+    let base = String(env.CATALOGUE_URL);
+    while (base.endsWith("/")) base = base.slice(0, -1);
     const lr = await doFetch(`${base}/latest`, { cache: "no-store" });
     if (!lr.ok) throw new Error(`catalogue latest answered ${lr.status}`);
     const version = (await lr.text()).trim();
