@@ -870,6 +870,19 @@ tenant's edge-eligible PutObject / UploadPart / GetObject through the same
 package on this box (registry row `slc`, weight 0) — the bytes still cross
 SLC and are metered by the origin's own writer; the rows are the one shape.
 
+## The second copy (`edge_mirror`) and the catalogue
+
+**The mirror** (WP-EDGE-4, `docs/reviews/WP-EDGE-4.md`): `edge_mirror` ON for a tenant gives every blob it writes at the edge (the Worker, a node, host=slc) a copy on a `MIRROR_LEGS` leg (default `lyve,idrive`: an object on Lyve is copied to iDrive and the reverse) at the same address, recorded in `blob_copies`. Turning it on is also the **backfill**: the `blob_copies` job (every 10 min) enqueues a `pending` copy for every whole non-vault object of the tenant (1,000 a run) and copies at most 50 GiB a run from the primary through this box (the 2× lane). Set it for one tenant with the admin API (`PUT /api/v1/admin/flags/edge_mirror {"enabled":true,"tenant_id":"…"}`) — or, without the owner's TOTP, a `feature_flags` row plus its `flag.set` `audit_logs` row (event_type and result set), as `data_plane_slc` was. Watch it:
+
+```sql
+SELECT state, COUNT(*), pg_size_pretty(SUM(size)) FROM blob_copies WHERE tenant_id = '<tenant>' GROUP BY state;
+SELECT last_outcome, result FROM job_runs WHERE job = 'blob_copies';
+```
+
+and `vaultaire_blob_copies_total{outcome}`, `vaultaire_blob_copies_pending`, `vaultaire_blob_copies_reads_total{outcome="served_mirror"}` (a read the primary did not serve). A row stuck `pending` past 20 attempts is the job's note; its `last_error` says why. `edge_rs` (RS 4+2) stays OFF until a third fast leg exists.
+
+**The catalogue** (plan 10.3): seed a public artefact with `cmd/tools/catalogue-seed` (operator-run; `DATABASE_URL` and the blob backend's S3 pair in the environment, never a flag); the daily `catalogue_filter` job publishes the filter on `r2` (`t-_catalogue/catalogue/catalogue/<version>.bloom`, `…/latest`); the Worker reads `CATALOGUE_URL` (a `[vars]` entry: the public URL that serves those two files) — unset on prod until a public URL and the first artefacts are chosen.
+
 ## Monitoring
 
 ```
