@@ -113,6 +113,8 @@ func (s *Server) initMetrics() {
 		// The edge mirror's copies (WP-EDGE-4): the blob_copies job's
 		// outcomes and the copies owed.
 		reg.MustRegister(blobCopiesTotal, blobCopiesPending, blobCopiesReads)
+		// The public catalogue's filter (WP-EDGE-4 PR D).
+		reg.MustRegister(catalogueFilterVersion, catalogueFilterChunks)
 		// Hydrate-before-serve of large Sia objects (sia_promotion.go).
 		reg.MustRegister(siaPromotions, siaPromotionSeconds, newSiaPromotedBytesCollector(s.db, s.log()))
 		if s.tenantKeys != nil {

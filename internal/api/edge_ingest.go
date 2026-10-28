@@ -156,6 +156,10 @@ type edgeAdmitAttrs struct {
 	// once at the admit — the index's second links and the commit's copy
 	// rows name it. "" = not mirrored.
 	MirrorLeg string `json:"mirror_leg,omitempty"`
+	// CodecPublic (WP-EDGE-4 PR D): the plain hashes this admit's index
+	// answered as hits on the public catalogue's `_public` copy — the only
+	// "hit" the commit may reference there.
+	CodecPublic map[string]bool `json:"codec_public,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.

@@ -184,7 +184,8 @@ func (g *DedupGCRunner) sweep(ctx context.Context) (deleted, failed, pending int
 		  AND ref_count = 0
 		  AND state = 'ready'
 		  AND marked_at < NOW() - make_interval(secs => $1)
-	`, graceSecs)
+		  AND dedup_scope <> $2 -- the public catalogue's seeded chunks are never collected (WP-EDGE-4 PR D)
+	`, graceSecs, crypto.PublicDedupScope)
 	if err != nil {
 		return 0, 0, 0, 0, nil, fmt.Errorf("sweep query: %w", err)
 	}
@@ -452,6 +453,7 @@ func (g *DedupGCRunner) sweepOne(ctx context.Context, scope, hash, backendID, ke
 		  AND ref_count = 0
 		  AND marked_for_deletion = TRUE
 		  AND state = 'ready'
+		  AND dedup_scope <> '`+crypto.PublicDedupScope+`'
 	`, scope, hash)
 	if err != nil {
 		return sweepKept, fmt.Errorf("delete gci row: %w", err)

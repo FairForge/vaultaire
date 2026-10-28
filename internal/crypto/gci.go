@@ -16,6 +16,13 @@ import (
 // key is never handed to another tenant. See migration 054.
 const GlobalDedupScope = "_global"
 
+// PublicDedupScope is the public catalogue's scope (WP-EDGE-4 PR D, plan
+// 10.3; migration 114): chunks of PUBLIC artefacts the operator seeded,
+// stored once, plaintext (public content), referenced by any tenant whose
+// upload holds the same chunk. The only cross-tenant scope (contract line
+// 5): nothing a tenant uploads enters it, and dedup GC never collects it.
+const PublicDedupScope = "_public"
+
 // GCIEntry represents an entry in the Global Content Index
 type GCIEntry struct {
 	DedupScope      string  `json:"dedup_scope"`

@@ -239,6 +239,10 @@ type IndexRequest struct {
 type IndexChunk struct {
 	Hash string `json:"hash"` // plain sha256, hex — for the duration of this call
 	Size int64  `json:"size"`
+	// Public (WP-EDGE-4 PR D): the host's catalogue filter holds the hash —
+	// the control plane checks public_chunks and answers a hit on the one
+	// `_public` copy, or a miss (a false positive) as for any chunk.
+	Public bool `json:"public,omitempty"`
 }
 
 // IndexMiss is a chunk the host must store: one presigned PUT at the

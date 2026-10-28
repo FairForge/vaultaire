@@ -18,7 +18,16 @@ import (
 	"fmt"
 	"syscall/js"
 
+	"github.com/FairForge/vaultaire/internal/catalogue"
 	"github.com/FairForge/vaultaire/sdk/go/e2ee"
+)
+
+// catalogues are the loaded public-catalogue filters (WP-EDGE-4 PR D),
+// by handle: a filter of ten million chunks is ~12 MB, loaded once per
+// isolate and asked per chunk without copying it again.
+var (
+	catalogues    = map[int]*catalogue.Filter{}
+	nextCatalogue int
 )
 
 func bytesArg(args []js.Value, i int) []byte {
@@ -300,6 +309,30 @@ func main() {
 		}),
 		"openChunkAt": fn(func(a []js.Value) (any, error) {
 			return value(manifestOf(a[0]).OpenChunkAt(int(uintOf(a[1], "index")), b(a, 2)))
+		}),
+
+		// The public catalogue's filter (internal/catalogue, the same Go
+		// code as the control plane's job): load once, ask per chunk.
+		"catalogueLoad": fn(func(a []js.Value) (any, error) {
+			f, err := catalogue.Unmarshal(b(a, 0))
+			if err != nil {
+				return nil, err
+			}
+			nextCatalogue++
+			h := nextCatalogue
+			catalogues[h] = f
+			return map[string]any{"handle": h, "version": float64(f.Version())}, nil
+		}),
+		"catalogueFree": fn(func(a []js.Value) (any, error) {
+			delete(catalogues, int(uintOf(a[0], "handle")))
+			return true, nil
+		}),
+		"catalogueContains": fn(func(a []js.Value) (any, error) {
+			f, ok := catalogues[int(uintOf(a[0], "handle"))]
+			if !ok {
+				return nil, fmt.Errorf("no catalogue filter with that handle")
+			}
+			return f.Contains(stringArg(a, 1))
 		}),
 	}
 	js.Global().Set("storedE2EE", js.ValueOf(api))

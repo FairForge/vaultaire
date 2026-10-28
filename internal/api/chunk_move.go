@@ -245,8 +245,9 @@ func (r *chunkMoveRun) rowBatch(ctx context.Context, afterScope, afterHash strin
 		SELECT dedup_scope, plaintext_hash, storage_key
 		  FROM global_content_index
 		 WHERE backend_id = $1 AND state = 'ready' AND (dedup_scope, plaintext_hash) > ($2, $3)
+		   AND dedup_scope <> $5 -- the public catalogue's chunks were seeded at their one address (WP-EDGE-4 PR D)
 		 ORDER BY dedup_scope, plaintext_hash
-		 LIMIT $4`, r.opts.Backend, afterScope, afterHash, r.m.BatchSize)
+		 LIMIT $4`, r.opts.Backend, afterScope, afterHash, r.m.BatchSize, crypto.PublicDedupScope)
 	if err != nil {
 		return nil, fmt.Errorf("read index rows: %w", err)
 	}

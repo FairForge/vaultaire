@@ -31,6 +31,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/sdk/go/e2ee"
 )
 
@@ -92,10 +93,7 @@ func (f *codecFixture) index(admitID string, chunks []crypto.Chunk) edgeIndexRes
 			continue // one ask per distinct hash, as the pipeline would
 		}
 		seen[c.Hash] = true
-		req.Chunks = append(req.Chunks, struct {
-			Hash string `json:"hash"`
-			Size int64  `json:"size"`
-		}{Hash: c.Hash, Size: int64(c.Size)})
+		req.Chunks = append(req.Chunks, dataplane.IndexChunk{Hash: c.Hash, Size: int64(c.Size)})
 	}
 	b, err := json.Marshal(req)
 	require.NoError(f.t, err)
