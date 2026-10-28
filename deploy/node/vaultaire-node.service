@@ -1,0 +1,49 @@
+# A Stored data node (WP-EDGE-3, docs/DEPLOY.md "Data nodes"): this binary
+# with VAULTAIRE_ROLE=node on a VPS — no database, no engine, no jobs, no
+# key of the hierarchy. It moves customer bytes between S3 clients and the
+# backends on the links the control plane (the origin) mints, and asks the
+# control plane for every decision with its own token.
+#
+# Install: deploy/node/install.sh (verifies the signed release first), which
+# writes /etc/systemd/system/vaultaire-node.service and
+# /etc/vaultaire/node.env. The token is minted once by the registry
+# (PUT /api/v1/admin/data-plane-hosts/<host>) and lives ONLY in
+# /etc/vaultaire/node_token (0600 root), handed to this service as a
+# systemd credential — never in node.env, never on a command line.
+[Unit]
+Description=Stored data node (vaultaire, VAULTAIRE_ROLE=node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+Environment=VAULTAIRE_ROLE=node
+# NODE_CONTROL_PLANE_URL, NODE_PUBLIC_HOST, PORT (and NODE_ORIGIN_URL when
+# pass-throughs go elsewhere than the control plane's origin).
+EnvironmentFile=/etc/vaultaire/node.env
+LoadCredential=node_token:/etc/vaultaire/node_token
+ExecStart=/opt/vaultaire/bin/vaultaire-node
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+# A node holds at most a codec write's 48 MiB of plaintext per request and
+# the presigned streams; nothing stays on disk.
+Environment=GOMEMLIMIT=6GiB
+MemoryHigh=7G
+MemoryMax=8G
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# The node drains HTTP for 30 s on SIGTERM.
+TimeoutStopSec=45
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

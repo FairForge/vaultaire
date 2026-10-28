@@ -39,6 +39,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -250,7 +251,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	rangeValue := fmt.Sprintf("bytes=%d-%d", start, end)
 	presign := engine.EdgePresign{Range: rangeValue, IfMatch: ifMatch, TTL: edgeAdmitTTL}
 	wantSigned := []string{"range"}
-	if length >= edgeWindowMin && req.has(edgeFeatureWindow) {
+	if length >= edgeWindowMin && req.Has(edgeFeatureWindow) {
 		window = &edgeWindow{RangeBytes: edgeWindowRange, InFlight: edgeWindowInFlight, Start: start}
 		presign.Range, presign.Window, rangeValue, wantSigned = "", true, "", nil
 	}
@@ -429,6 +430,12 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 				zap.Int64("backend_content_length", req.BackendContentLength), zap.Int64("admitted", row.ContentLength), zap.String("admit_id", row.ID))
 			n = row.ContentLength
 		}
+		if h, ok := dataplane.HostFrom(ctx); ok && h.TenantScoped() {
+			// A customer-run (BYO) host's reports are never trusted for
+			// METERING (the 2026-10-26 COGS rule): its read is metered at the
+			// span the control plane admitted, whatever it says it served.
+			n = row.ContentLength
+		}
 		// The edge serves bytes the origin's integrity reader never sees:
 		// beyond the Worker's length check the body is unverified by design,
 		// and the counter says so, once per served read (RP66-2).
@@ -454,13 +461,24 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 			s.engine.RecordReadOutcome(row.Backend, nil)
 		}
 		s.logger.Info("artifact retrieved", zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
-			zap.String("backend", row.Backend), zap.Int64("bytes", n), zap.String("host", edgeHost))
+			zap.String("backend", row.Backend), zap.Int64("bytes", n), zap.String("host", row.Host))
 		emitEvent(cctx, s.db, s.logger, "object.downloaded", row.TenantID, map[string]interface{}{
 			"bucket": row.Bucket, "key": row.Key, "size": n,
 		})
 		rec.WriteHeader(http.StatusOK)
 		return "committed", n
 	case edgeGetError, edgeGetFallback:
+		if h, ok := dataplane.HostFrom(ctx); ok && h.TenantScoped() {
+			// A BYO host holds the presigned link whatever it reports: its
+			// read is metered at the admitted span (the COGS rule) — a
+			// fallback the origin really served is then metered twice, the
+			// trade for never trusting a customer-run host's report.
+			s.recordEdgeEgress(cctx, row.TenantID, row.Backend, row.ContentLength)
+			if req.BytesSent <= 0 {
+				state, _ := s.settleEdgeGetFallback(row, req, rec)
+				return state, row.ContentLength
+			}
+		}
 		if req.BytesSent <= 0 {
 			return s.settleEdgeGetFallback(row, req, rec)
 		}
@@ -469,6 +487,9 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 		// What was sent is metered — the client has it — and the backend's
 		// answer charges its breaker; the origin served nothing.
 		n := min(req.BytesSent, row.ContentLength)
+		if h, ok := dataplane.HostFrom(ctx); ok && h.TenantScoped() {
+			n = 0 // metered above at the admitted span
+		}
 		s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
 		s.recordEdgeAccess(row, http.StatusInternalServerError, 0, n)
 		if s.engine != nil {

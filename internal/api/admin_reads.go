@@ -106,6 +106,7 @@ var apiAdminReads = map[string]adminReadRule{
 	"/api/v1/admin/flags":                                {resolve: fixedScope(translog.ScopeFlagList)}, // the tenants a flag is set for
 	"/api/v1/admin/routing-truth":                        {exempt: "counts of rows per (table, backend) and the job's counts: no tenant, bucket or key"},
 	"/api/v1/admin/backends/{backend}/plan":              {exempt: "what we bought from a storage vendor: no customer in it"},
+	"/api/v1/admin/data-plane-hosts/{host}":              {resolve: dataPlaneHostScope}, // a tenant-scoped host's row is that tenant's (D-EDGE-34)
 	"/api/v1/admin/breaches":                             {exempt: "the operator's breach register: no tenant or user column"},
 	"/api/compliance/breach":                             {exempt: "the operator's breach register: no tenant or user column"},
 	"/api/compliance/breach/{id}":                        {exempt: "one breach-register record: no tenant or user column"},
@@ -152,6 +153,8 @@ var apiAdminWrites = map[string]string{
 	"POST /api/v1/admin/breach":                                    "mutation: the operator's breach register; no customer",
 	"PATCH /api/v1/admin/breach/{id}":                              "mutation: the operator's breach register; no customer",
 	"PUT /api/v1/admin/backends/{backend}/plan":                    "mutation: the vendor plan row; no customer",
+	"PUT /api/v1/admin/data-plane-hosts/{host}":                    "mutation: a data-plane host row (WP-EDGE-3); answers the row written and, on a node's first PUT, its token once",
+	"DELETE /api/v1/admin/data-plane-hosts/{host}":                 "mutation: removes a data-plane host row; answers the host name",
 	"PUT /api/v1/admin/flags/{key}":                                "mutation: writes a flag row (a translog_* row is a log_policy entry first); answers the flag and the one row written, never the others",
 	"DELETE /api/v1/admin/flags/{key}":                             "mutation: removes a flag row (a translog_* row is a log_policy entry first); answers the flag, never the other tenants' rows",
 	"POST /api/compliance/breach":                                  "mutation: the operator's breach register; no customer",
@@ -192,7 +195,10 @@ func (s *Server) adminRead(pattern string, h http.HandlerFunc) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		actor, _ := r.Context().Value(userIDKey).(string)
 		scope, tenantID, err := rule.resolve(r, s.db)
-		if err == nil {
+		// A resolver may answer no scope: THIS request's answer names no
+		// customer (a platform data-plane host's row, D-EDGE-34) — nothing to
+		// record. An error still refuses the read.
+		if err == nil && scope != "" {
 			record := s.RecordAdminRead
 			if s.adminReadHook != nil {
 				record = s.adminReadHook

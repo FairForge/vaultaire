@@ -1431,6 +1431,38 @@ func generateAdminPaths() map[string]*PathItem {
 					"404": textResp("`backend %q is not registered`"),
 				}), jsonBody("The plan row (backend and updated_by come from the path and the session)", ref("BackendPlan")))),
 		},
+		"/api/v1/admin/data-plane-hosts/{host}": {
+			Parameters: []Parameter{pathParam("host", "The host's registry name: its public hostname, or `slc` for the origin itself")},
+			Get: admin(jsonOp("Admin", "A data-plane host's registry row", "AdminGetDataPlaneHost",
+				"The data_plane_hosts row (WP-EDGE-3): kind (`edge` the Worker, `node` a data node, `slc` the origin), the address a node's token is accepted from, "+
+					"the tenant of a tenant-scoped (BYO) host, weight, health, the last heartbeat and version. Never the token or its hash. The read of a "+
+					"tenant-scoped host's row is an admin read of that tenant (transparency log, D-EDGE-34).",
+				map[string]Response{
+					"200": jsonResp("The row", ref("DataPlaneHost")),
+					"404": jsonResp("`not_found`", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+				})),
+			Put: admin(withBody(jsonOp("Admin", "Register or change a data-plane host", "AdminPutDataPlaneHost",
+				"Upserts the row. A node's token is minted on its FIRST PUT (32 random bytes, hex), stored as its sha256 and answered in that response only "+
+					"(`token`); a lost token is a DELETE and a new PUT. Validated: kind `edge`|`node`|`slc`, a node's `address` is an IP, only a node has an "+
+					"address or a tenant, health `up`|`down`|`draining`, weight >= 0, the tenant exists. Audited `data_plane.host_set`.",
+				map[string]Response{
+					"200": jsonResp("The stored row (and `token`, once)", ref("DataPlaneHost")),
+					"400": jsonResp("`invalid_kind`, `invalid_host`, a node without an IP, …", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+					"404": jsonResp("`tenant_not_found`", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+				}), jsonBody("The host", objectPtr("", map[string]*Schema{
+				"kind":      strEnum("", "edge", "node", "slc"),
+				"address":   str("A node's IP: its token is accepted only from it"),
+				"tenant_id": str("Set = a tenant-scoped (BYO) host: it admits only this tenant, and nothing it reports is trusted for integrity or metering"),
+				"weight":    integer("Steering weight (0 = never steered to)"),
+				"health":    strEnum("", "up", "down", "draining"),
+			}, "kind")))),
+			Delete: admin(jsonOp("Admin", "Remove a data-plane host", "AdminDeleteDataPlaneHost",
+				"Deletes the row (its token stops working within the 15 s cache). Audited `data_plane.host_deleted`.",
+				map[string]Response{
+					"200": jsonResp("Deleted", objectPtr("", map[string]*Schema{"deleted": str("")}, "deleted")),
+					"404": jsonResp("`not_found`", objectPtr("", map[string]*Schema{"error": str("")}, "error")),
+				})),
+		},
 		"/api/v1/admin/tenants/{tenant_id}/payments": {
 			Parameters: []Parameter{pathParam("tenant_id", "Tenant id")},
 			Get: admin(jsonOp("Admin", "A tenant's entitlement and payment ledger", "AdminTenantPayments",
@@ -2337,6 +2369,16 @@ func generateJSONSchemas() map[string]Schema {
 			"auto_renew": {Type: "boolean"}, "payment_on_file": {Type: "boolean", Description: "BackendPlanNoPayment pages near term_end without one"},
 			"invoice_ref": str(""), "note": str(""), "updated_at": dateTime(""), "updated_by": str("The admin who last wrote the row"),
 		}, "backend", "capacity_bytes", "term_start", "term_end"),
+		"DataPlaneHost": object("A data-plane host (WP-EDGE-3): a host that moves customer bytes for the control plane", map[string]*Schema{
+			"host": str("The registry name: the public hostname, or `slc`"), "kind": strEnum("", "edge", "node", "slc"),
+			"address":   str("A node's IP: its token is accepted only from it"),
+			"tenant_id": str("Set = a tenant-scoped (BYO) host"),
+			"weight":    {Type: "integer"}, "health": strEnum("", "up", "down", "draining"),
+			"last_seen":  dateTime("The last heartbeat (a node unseen 90 s is marked down)"),
+			"version":    str("The build the node reported"),
+			"created_at": dateTime(""),
+			"token":      str("A node's token: in the response to its FIRST PUT only, never again"),
+		}, "host", "kind", "weight", "health", "created_at"),
 		"Entitlement": object("The entitlement record (WP-PAY-1): what the tenant bought and until when", map[string]*Schema{
 			"tenant_id": str(""), "std_tb": {Type: "integer"}, "vault_tb": {Type: "integer"}, "pin_hot_tb": {Type: "integer"},
 			"period": strEnum("", "annual", "monthly"), "paid_through": dateTime("Grace is added at read time"),

@@ -195,6 +195,10 @@ type Server struct {
 	// edge is the edge ingest's service token and lab switch (WP-EDGE-1
 	// Part A, edge_token.go); a zero token = the routes are not mounted.
 	edge edgeConfig
+	// dpHosts caches data_plane_hosts rows by token hash for the edge-call
+	// gate (data_plane_host_cache.go; made on first use).
+	dpHosts     *dataPlaneHostCache
+	dpHostsOnce sync.Once
 	// edgeReaper is the edge_admit_reaper job (edge_reaper.go).
 	edgeReaper *EdgeAdmitReaper
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a
@@ -1309,6 +1313,7 @@ func (s *Server) registerComplianceRoutes() {
 		// call audited with the actor and a required reason.
 		s.registerAdminPaymentRoutes(r)
 		s.registerAdminBackendPlanRoutes(r)
+		s.registerAdminDataPlaneHostRoutes(r)
 		// The transparency log's ceremony entries (K4): admin + a fresh TOTP.
 		s.registerTranslogAdminRoutes(r)
 	})
