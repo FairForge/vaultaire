@@ -38,7 +38,7 @@ require (
 )
 
 require (
-	filippo.io/edwards25519 v1.1.0
+	filippo.io/edwards25519 v1.2.0
 	filippo.io/mldsa v0.0.0-20260215214346-43d0283efc3e
 	github.com/gtank/ristretto255 v0.2.0
 	github.com/nbd-wtf/opentimestamps v0.4.0
