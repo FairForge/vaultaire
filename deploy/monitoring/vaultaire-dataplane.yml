@@ -1,0 +1,30 @@
+# Data-plane hosts — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (WP-EDGE-3, internal/api/data_plane_health.go;
+# read from the data_plane_hosts registry on scrape, 15 s cache):
+#   vaultaire_data_plane_host_up{host,kind}   1 = the host's registry health is up and, for a
+#                                             node, its last heartbeat (every 30 s) is within 90 s;
+#                                             kind = edge (the Worker) | node | slc (the origin)
+#   vaultaire_data_plane_admits_total{host,op,outcome}, vaultaire_data_plane_bytes_total{host,op}
+#                                             what each host was admitted and moved
+#
+# A node unseen for 90 s is refused new admits at once (503 host_down, Retry-After 30 —
+# its clients' requests go to the origin through their retry or their endpoint's
+# fallback) and the edge_admit_reaper marks it down (5 min). Its commits are always
+# accepted. A node set `draining` on /api/v1/admin/data-plane-hosts/{host} reads 0 too.
+#
+# Triage when DataPlaneHostDown fires: GET /api/v1/admin/data-plane-hosts/<host>
+# (last_seen, version); on the node, `systemctl status vaultaire-node` and
+# `journalctl -u vaultaire-node` (its heartbeat line names the control plane's answer).
+# A node gone for good: DELETE its row (its token dies within 15 s).
+groups:
+  - name: vaultaire-dataplane
+    rules:
+      - alert: DataPlaneHostDown
+        expr: vaultaire_data_plane_host_up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Data-plane host {{ $labels.host }} ({{ $labels.kind }}) is down"
+          description: "The host's registry health is not up, or a node sent no heartbeat for 90 s. Its admits are refused (503 host_down); the origin serves its clients. GET /api/v1/admin/data-plane-hosts/{{ $labels.host }}; on a node: systemctl status vaultaire-node."

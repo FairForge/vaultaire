@@ -56,6 +56,9 @@ type EdgeAdmitReapResult struct {
 	MeteredBytes  int64 `json:"metered_bytes"`  // their admitted sizes, metered as egress
 	Deleted       int64 `json:"deleted"`
 	Failed        int   `json:"failed"`
+	// HostsMarkedDown: data nodes up but unseen for 90 s, marked down
+	// (WP-EDGE-3; never a draining one, never the Worker or the origin).
+	HostsMarkedDown int `json:"hosts_marked_down,omitempty"`
 }
 
 // EdgeAdmitReaper is the job.
@@ -146,6 +149,13 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 	}
 	res.Deleted, _ = del.RowsAffected()
 	edgeAdmitReaperTotal.WithLabelValues("deleted").Add(float64(res.Deleted))
+	if res.HostsMarkedDown, err = sweepUnseenDataPlaneHosts(ctx, r.s.db); err != nil {
+		return res, fmt.Errorf("sweep the data-plane hosts: %w", err)
+	}
+	if res.HostsMarkedDown > 0 {
+		r.s.dataPlaneHosts().invalidate()
+		r.s.log().Warn("edge admit reaper: data nodes unseen for 90 s marked down", zap.Int("hosts", res.HostsMarkedDown))
+	}
 	return res, nil
 }
 

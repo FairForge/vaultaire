@@ -161,5 +161,11 @@ func (s *Server) edgeCaller(r *http.Request) (h dataplane.HostInfo, health strin
 	if peer == nil || !peer.Equal(net.ParseIP(row.Address)) {
 		return h, "", false
 	}
-	return dataplane.HostInfo{Name: row.Host, Kind: row.Kind, TenantID: row.TenantID}, row.Health, true
+	health = row.Health
+	if health == "up" && (row.LastSeen == nil || time.Since(*row.LastSeen) > dataPlaneHostStaleAfter) {
+		// Up in the registry but no heartbeat for 90 s: down at the gate
+		// now, whatever the next sweep writes.
+		health = "down"
+	}
+	return dataplane.HostInfo{Name: row.Host, Kind: row.Kind, TenantID: row.TenantID}, health, true
 }

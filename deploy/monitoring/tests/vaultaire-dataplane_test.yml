@@ -1,0 +1,33 @@
+# promtool unit test of vaultaire-dataplane.yml.
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-dataplane.yml deploy/monitoring/tests/vaultaire-dataplane_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-dataplane_test.yml'
+rule_files:
+  - vaultaire-dataplane.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A node down for 6 minutes fires; a node up and a blip of 3 minutes do not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_data_plane_host_up{host="node-1.lab.test",kind="node"}'
+        values: '1 0 0 0 0 0 0 0'
+      - series: 'vaultaire_data_plane_host_up{host="node-2.lab.test",kind="node"}'
+        values: '1 0 0 0 1 1 1 1'
+      - series: 'vaultaire_data_plane_host_up{host="s3.stored.cloud",kind="edge"}'
+        values: '1x8'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: DataPlaneHostDown
+        exp_alerts:
+          - exp_labels:
+              host: node-1.lab.test
+              kind: node
+              severity: warning
+            exp_annotations:
+              summary: "Data-plane host node-1.lab.test (node) is down"
+              description: "The host's registry health is not up, or a node sent no heartbeat for 90 s. Its admits are refused (503 host_down); the origin serves its clients. GET /api/v1/admin/data-plane-hosts/node-1.lab.test; on a node: systemctl status vaultaire-node."
+      - eval_time: 3m
+        alertname: DataPlaneHostDown
+        exp_alerts: []
