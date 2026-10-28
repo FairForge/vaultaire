@@ -79,6 +79,8 @@ type edgeFakeDriver struct {
 	name, urlHost string
 	// putFails, when set, answers every PUT on a link 503 (a mirror leg down).
 	putFails atomic.Bool
+	// putHook, when set, runs around every driver Put (tests count overlap).
+	putHook func() func()
 }
 
 func newEdgeFakeDriver() *edgeFakeDriver {
@@ -108,6 +110,9 @@ func (d *edgeFakeDriver) Get(ctx context.Context, container, artifact string) (i
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 func (d *edgeFakeDriver) Put(ctx context.Context, container, artifact string, data io.Reader, opts ...engine.PutOption) error {
+	if d.putHook != nil {
+		defer d.putHook()()
+	}
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return err

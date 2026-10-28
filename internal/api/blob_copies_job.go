@@ -38,11 +38,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -56,6 +58,12 @@ const (
 	blobCopiesBackfillBatch  = 1000
 	blobCopiesOrphanBatch    = 500
 	blobCopiesBatch          = 500
+	// blobCopiesCopyBatch, blobCopiesConcurrency, blobCopiesLargeBytes: the
+	// copy pass reads up to 2,000 pending rows a run and copies 8 at once;
+	// a blob of 1 GiB or more is copied alone.
+	blobCopiesCopyBatch   = 2000
+	blobCopiesConcurrency = 8
+	blobCopiesLargeBytes  = int64(1) << 30
 	// blobCopiesOrphanRecheck: a row is asked whether its blob is still
 	// named at most this often.
 	blobCopiesOrphanRecheck = time.Hour
@@ -313,7 +321,7 @@ const copyColumns = `tenant_id, bucket, object_key, storage_key, source_backend,
 func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) error {
 	rows, err := j.s.db.QueryContext(ctx, `SELECT `+copyColumns+` FROM blob_copies
 		WHERE state = 'pending' AND kind = 'mirror' AND created_at <= $1 AND ($2 = '' OR tenant_id = $2)
-		ORDER BY created_at LIMIT $3`, j.now().Add(-blobCopiesPendingAge), j.onlyTenant, blobCopiesBatch)
+		ORDER BY created_at LIMIT $3`, j.now().Add(-blobCopiesPendingAge), j.onlyTenant, blobCopiesCopyBatch)
 	if err != nil {
 		return err
 	}
@@ -321,54 +329,103 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 	if err != nil {
 		return err
 	}
-	var spent int64
 	stopAt := time.Time{}
 	if dl, ok := ctx.Deadline(); ok {
 		stopAt = dl.Add(-blobCopiesTailReserve)
 	}
+	// blobCopiesConcurrency copies at once; a blob of blobCopiesLargeBytes
+	// or more takes every slot (its upload holds the driver's part buffers).
+	sem := semaphore.NewWeighted(blobCopiesConcurrency)
+	var mu sync.Mutex
+	var spent int64
+	var wg sync.WaitGroup
 	for _, c := range due {
-		if ctx.Err() != nil || spent >= j.maxBytes || (!stopAt.IsZero() && !j.now().Before(stopAt)) {
-			if !stopAt.IsZero() && !j.now().Before(stopAt) && res.Stopped == "" {
-				res.Stopped = "the copy pass left the rest to the next run (its time is the orphan and stale passes')"
+		mu.Lock()
+		over := spent >= j.maxBytes
+		mu.Unlock()
+		late := !stopAt.IsZero() && !j.now().Before(stopAt)
+		if ctx.Err() != nil || over || late {
+			if late {
+				mu.Lock()
+				if res.Stopped == "" {
+					res.Stopped = "the copy pass left the rest to the next run (its time is the orphan and stale passes')"
+				}
+				mu.Unlock()
 			}
-			return nil
+			break
 		}
 		if c.attempts >= blobCopiesMaxAttempts {
+			mu.Lock()
 			res.GaveUp++
+			mu.Unlock()
 			continue
 		}
-		named, err := j.named(ctx, c.blobCopy)
-		if err != nil {
-			res.note(err)
-			continue
+		weight := int64(1)
+		if c.Size >= blobCopiesLargeBytes {
+			weight = blobCopiesConcurrency
 		}
-		if !named {
-			j.setState(ctx, c.blobCopy, copyStale, "")
-			res.Orphaned++
-			blobCopiesTotal.WithLabelValues(blobCopyOrphaned).Inc()
-			continue
+		if err := sem.Acquire(ctx, weight); err != nil {
+			break
 		}
-		etag, cErr := j.copyOne(ctx, c.blobCopy)
-		switch {
-		case errors.Is(cErr, errCopySkipped):
-			res.Skipped++
-			blobCopiesTotal.WithLabelValues(blobCopySkipped).Inc()
-		case cErr != nil:
-			res.Failed++
-			res.note(cErr)
-			blobCopiesTotal.WithLabelValues(blobCopyFailed).Inc()
-			_, _ = j.s.db.ExecContext(ctx, `UPDATE blob_copies SET attempts = attempts + 1, last_error = $3, updated_at = NOW()
-				WHERE tenant_id = $1 AND storage_key = $2 AND leg = $4 AND kind = 'mirror'`, c.TenantID, c.StorageKey, truncateErr(cErr), c.Leg)
-		default:
-			spent += c.Size
-			res.Copied++
-			res.CopiedBytes += c.Size
-			blobCopiesTotal.WithLabelValues(blobCopyCopied).Inc()
-			_, _ = j.s.db.ExecContext(ctx, `UPDATE blob_copies SET state = 'ready', etag = $3, last_error = NULL, updated_at = NOW()
-				WHERE tenant_id = $1 AND storage_key = $2 AND leg = $4 AND kind = 'mirror' AND state = 'pending'`, c.TenantID, c.StorageKey, etag, c.Leg)
-		}
+		mu.Lock()
+		spent += c.Size
+		mu.Unlock()
+		wg.Add(1)
+		go func(c copyRec, weight int64) {
+			defer wg.Done()
+			defer sem.Release(weight)
+			ok := j.copyRow(ctx, c, res, &mu)
+			if !ok {
+				mu.Lock()
+				spent -= c.Size
+				mu.Unlock()
+			}
+		}(c, weight)
 	}
+	wg.Wait()
 	return nil
+}
+
+// copyRow handles one pending row (res under mu); true = its bytes were
+// copied.
+func (j *BlobCopiesJob) copyRow(ctx context.Context, c copyRec, res *BlobCopiesResult, mu *sync.Mutex) bool {
+	named, err := j.named(ctx, c.blobCopy)
+	if err != nil {
+		mu.Lock()
+		res.note(err)
+		mu.Unlock()
+		return false
+	}
+	if !named {
+		j.setState(ctx, c.blobCopy, copyStale, "")
+		mu.Lock()
+		res.Orphaned++
+		mu.Unlock()
+		blobCopiesTotal.WithLabelValues(blobCopyOrphaned).Inc()
+		return false
+	}
+	etag, cErr := j.copyOne(ctx, c.blobCopy)
+	mu.Lock()
+	defer mu.Unlock()
+	switch {
+	case errors.Is(cErr, errCopySkipped):
+		res.Skipped++
+		blobCopiesTotal.WithLabelValues(blobCopySkipped).Inc()
+		return false
+	case cErr != nil:
+		res.Failed++
+		res.note(cErr)
+		blobCopiesTotal.WithLabelValues(blobCopyFailed).Inc()
+		_, _ = j.s.db.ExecContext(context.WithoutCancel(ctx), `UPDATE blob_copies SET attempts = attempts + 1, last_error = $3, updated_at = NOW()
+			WHERE tenant_id = $1 AND storage_key = $2 AND leg = $4 AND kind = 'mirror'`, c.TenantID, c.StorageKey, truncateErr(cErr), c.Leg)
+		return false
+	}
+	res.Copied++
+	res.CopiedBytes += c.Size
+	blobCopiesTotal.WithLabelValues(blobCopyCopied).Inc()
+	_, _ = j.s.db.ExecContext(context.WithoutCancel(ctx), `UPDATE blob_copies SET state = 'ready', etag = $3, last_error = NULL, updated_at = NOW()
+		WHERE tenant_id = $1 AND storage_key = $2 AND leg = $4 AND kind = 'mirror' AND state = 'pending'`, c.TenantID, c.StorageKey, etag, c.Leg)
+	return true
 }
 
 func truncateErr(err error) string {

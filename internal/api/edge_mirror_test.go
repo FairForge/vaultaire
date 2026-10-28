@@ -17,7 +17,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -438,4 +440,36 @@ func TestBlobCopiesJob_ARunOutOfTimeIsANoteNotAFailure(t *testing.T) {
 	res, err = f.copiesJob().RunOnce(done)
 	require.NoError(t, err)
 	assert.NotEmpty(t, res.Stopped, "the run says it stopped")
+}
+
+// The copy pass copies several blobs at once (prod's backfill ran one at a
+// time: ~250 small Lightroom files per 9-minute run).
+func TestBlobCopiesJob_CopiesSeveralAtOnce(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(5000)
+	for i := range 12 {
+		resp := f.admit(f.signed(fmt.Sprintf("/%s/many-%d.bin", f.bucket, i), nil, body, nil, ""))
+		a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+		relay, _ := f.commit(okCommit(resp.AdmitID, body, a))
+		require.Equal(t, http.StatusOK, relay.Status)
+	}
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+	var inFlight, peak atomic.Int32
+	m.putHook = func() func() {
+		n := inFlight.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		return func() { inFlight.Add(-1) }
+	}
+	res, err := f.copiesJob().RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 12, res.Copied)
+	assert.Greater(t, peak.Load(), int32(1), "copies overlap")
+	assert.LessOrEqual(t, peak.Load(), int32(blobCopiesConcurrency))
 }
