@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -31,7 +32,10 @@ import (
 func (f *edgeFixture) registerNode(address, tenantID, health string) (string, string) {
 	f.t.Helper()
 	host := "node-" + uuid.New().String()[:8] + ".lab.test"
-	token := "node-token-" + uuid.New().String()
+	// The registry mints 64 lower-case hex characters (RP74-2: any other
+	// shape is the 404 before a lookup).
+	raw := sha256.Sum256([]byte(uuid.New().String()))
+	token := hex.EncodeToString(raw[:])
 	sum := sha256.Sum256([]byte(token))
 	// A node registered up has just sent its heartbeat (a node up but
 	// unseen for 90 s is down at the gate — step 13).
@@ -71,7 +75,7 @@ func TestEdgeCalls_ANodeTokenFromItsRegisteredAddress(t *testing.T) {
 
 	w := f.callFrom("/api/v1/edge/admit", req, token, "198.51.100.21:4000")
 	assert.Equal(t, http.StatusNotFound, w.Code, "a node's token from another address: the route does not exist")
-	w = f.callFrom("/api/v1/edge/admit", req, "node-token-unknown", "198.51.100.20:4000")
+	w = f.callFrom("/api/v1/edge/admit", req, strings.Repeat("ab", 32), "198.51.100.20:4000")
 	assert.Equal(t, http.StatusNotFound, w.Code, "an unknown token")
 	w = f.callFrom("/api/v1/edge/admit", req, edgeTestToken, "198.51.100.20:4000")
 	assert.Equal(t, http.StatusNotFound, w.Code, "the service token from a peer that is not Cloudflare")
