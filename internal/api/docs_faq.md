@@ -28,6 +28,8 @@ the secret is shown once; copy it then.
 | Performance | $6.99/TB/mo — launches after Oct 31, not for sale on day one | Always-hot, ~24 ms reads |
 | Vault (archive) | **$2.00/TB/mo** (annual, prepaid) / $2.55 (monthly) | Tape-backed archive, any size |
 
+Every price, period and add-on, the calculator and a dated comparison: [the pricing page](/pricing).
+
 **Every tier is sold as a quota.** You pick a size in whole TB (any size), pay the
 flat per-TB rate, and resize up or down whenever you like (prorated). The quota is a
 hard cap — a write past it returns a clear quota error until you resize — so the

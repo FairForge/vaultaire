@@ -259,6 +259,8 @@ type Server struct {
 	hosts       hosts.Hosts // the one host source (WP-DOMAIN-1), installed with hosts.Set at boot
 	landing     [2][]byte   // the landing page rendered with hosts: [closed, open] (landing.go)
 	landingOnce sync.Once
+	pricing     [2][]byte // /pricing rendered the same way (pricing.go, WP-PRICE-1)
+	pricingOnce sync.Once
 	docsPages   map[string][]byte // /docs pages rendered with hosts (docs_pages.go)
 	docsOnce    sync.Once
 	startTime   time.Time

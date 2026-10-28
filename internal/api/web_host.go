@@ -39,7 +39,7 @@ func (s *Server) serveWebNotFound(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // webRedirect 301s a web page view to target (the paths a launch reader
-// types: /signup, /pricing); any other request is the S3 API's — a bucket
+// types: /signup, /pricing/); any other request is the S3 API's — a bucket
 // may be named "signup" or "pricing".
 func (s *Server) webRedirect(target string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -65,16 +65,20 @@ func (s *Server) webOnly(page http.Handler) http.HandlerFunc {
 }
 
 // registerWebPages mounts, before the S3 catch-all, the launch paths and the
-// dark legal pages — for a web page view only. /pricing goes to the
-// landing's pricing section: prices.json feeds it, so it is the one place
-// the prices are (TestWebHost_SignupAndPricingRedirect). /legal/refunds and
-// /legal/dmca are behind legal_draft_pages (OFF = the 404 page).
+// dark legal pages — for a web page view only. /pricing is the pricing page
+// (pricing.go, WP-PRICE-1), generated from prices.json like the landing;
+// /pricing/ 301s to it (TestPricingPage_ServedOnTheWebHostsOnly).
+// /legal/refunds and /legal/dmca are behind legal_draft_pages (OFF = the
+// 404 page).
 func (s *Server) registerWebPages() {
-	for path, target := range map[string]string{"/signup": "/register", "/pricing": "/#pricing", "/pricing/": "/#pricing"} {
+	for path, target := range map[string]string{"/signup": "/register", "/pricing/": "/pricing"} {
 		h := s.webRedirect(target)
 		s.router.Get(path, h)
 		s.router.Head(path, h)
 	}
+	pricing := s.webOnly(http.HandlerFunc(s.handlePricing))
+	s.router.Get("/pricing", pricing)
+	s.router.Head("/pricing", pricing)
 	s.registerWebFiles()
 	drafts := dashboard.NewLegalDraft(s.flags)
 	for _, path := range drafts.Paths() {

@@ -19,6 +19,7 @@
     "aws_s3": 23.00,
     "backblaze_b2": 6.95,
     "wasabi": 7.99,
-    "cloudflare_r2": 15.00
+    "cloudflare_r2": 15.00,
+    "egress_per_gb": { "aws_s3": 0.09, "backblaze_b2": 0.01 }
   }
 }

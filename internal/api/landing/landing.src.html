@@ -33,7 +33,7 @@ __SPRITES__
         <nav aria-label="Main">
             <ul class="topnav">
                 <li class="hide-sm"><a href="#build">Build yours</a></li>
-                <li class="hide-sm"><a href="#pricing">Pricing</a></li>
+                <li class="hide-sm"><a href="/pricing">Pricing</a></li>
                 <li class="hide-sm"><a href="/docs">Docs</a></li>
                 <li class="hide-sm"><a href="/changelog">Changelog</a></li>
                 <li class="hide-sm"><a href="/status">Status</a></li>
@@ -649,7 +649,7 @@ aws s3 presign s3://downloads/build.zip \
                 <tbody>
                     <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
                     <tr><th scope="row">API/request fees</th><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
-                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, __EGRESS_PAST__</td><td>3× free, then $0.01/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$0.09/GB</td></tr>
+                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, __EGRESS_PAST__</td><td>3× free, then $__PRICE_B2_EGRESS__/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$__PRICE_AWS_EGRESS__/GB</td></tr>
                     <tr><th scope="row">Billing</th><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
                     <tr><th scope="row">Min storage duration</th><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
                     <tr><th scope="row">Archive tier</th><td class="us">$__PRICE_VAULT__/TB (tape)</td><td>, </td><td>, </td><td>, </td><td>Glacier (retrieval fees)</td></tr>
@@ -658,6 +658,7 @@ aws s3 presign s3://downloads/build.zip \
             </table>
             <p class="fine">Competitor pricing as published on their pricing pages, __PRICES_ASOF__, Backblaze and Wasabi both raised prices earlier this year. Wasabi's free egress is subject to their fair-use ratio policy.</p>
         </div>
+        <p class="includes"><a class="arrow-link" href="/pricing">every price, the calculator and what is never charged</a></p>
     </div>
 </section>
 
@@ -726,7 +727,7 @@ aws s3 presign s3://downloads/build.zip \
             <div>
                 <h3>Product</h3>
                 <ul class="footer-links">
-                    <li><a href="#pricing">Pricing</a></li>
+                    <li><a href="/pricing">Pricing</a></li>
                     <li><a href="/docs">Docs</a></li>
                     <li><a href="/changelog">Changelog</a></li>
                     <li><a href="/status">Status</a></li>

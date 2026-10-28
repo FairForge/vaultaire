@@ -71,7 +71,7 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 	writeWebFile(w, r, "text/plain; charset=utf-8", "public, max-age=3600", []byte(b.String()))
 }
 
-// sitemapPaths are the live pages, in order: the landing, the guides and the
+// sitemapPaths are the live pages, in order: the landing, the pricing page, the guides and the
 // API reference, the status page, the changelog, then every legal page the
 // canonical origin serves now (dashboard.LiveLegalPaths: a dark page never).
 // No <lastmod>: nothing here knows when a page last changed (the build's
@@ -83,7 +83,7 @@ func (s *Server) sitemapPaths() []string {
 	}
 	docs = append(docs, "/docs/api")
 	sort.Strings(docs)
-	out := append([]string{"/"}, docs...)
+	out := append([]string{"/", "/pricing"}, docs...)
 	out = append(out, "/status", "/changelog")
 	return append(out, dashboard.LiveLegalPaths(s.flags)...)
 }
