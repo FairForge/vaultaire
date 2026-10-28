@@ -19,9 +19,9 @@ package node
 
 import (
 	"context"
-	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -341,13 +341,9 @@ func writeS3Error(w http.ResponseWriter, status int, code, msg, path string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("Retry-After", "30")
 	w.WriteHeader(status)
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n<Error><Code>")
-	for _, part := range []struct{ v, close string }{{code, "</Code><Message>"}, {msg, "</Message><Resource>"}, {path, "</Resource></Error>"}} {
-		_ = xml.EscapeText(&b, []byte(part.v)) // the request's path is the client's text
-		b.WriteString(part.close)
-	}
-	_, _ = io.WriteString(w, b.String())
+	// The request's path is the client's text: escaped.
+	_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>`+"\n<Error><Code>"+html.EscapeString(code)+"</Code><Message>"+
+		html.EscapeString(msg)+"</Message><Resource>"+html.EscapeString(path)+"</Resource></Error>")
 }
 
 // heartbeat tells the control plane the node is up, every 30 s until ctx

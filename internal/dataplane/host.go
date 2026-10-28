@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strconv"
@@ -579,6 +580,10 @@ func WriteRelay(w http.ResponseWriter, r *Relay) {
 	for k, v := range r.Headers {
 		w.Header().Set(k, v)
 	}
+	if r.Body != "" && w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/xml")
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	status := r.Status
 	if status == 0 {
 		status = http.StatusOK
@@ -597,9 +602,9 @@ func slowDown(path, requestID, why string) *Relay {
 
 // s3ErrorXML renders the S3 error document the origin's writer would.
 func s3ErrorXML(code, message, path, requestID string) string {
-	esc := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-	return `<?xml version="1.0" encoding="UTF-8"?>` + "\n<Error><Code>" + esc.Replace(code) + "</Code><Message>" + esc.Replace(message) +
-		"</Message><Resource>" + esc.Replace(path) + "</Resource><RequestId>" + esc.Replace(requestID) + "</RequestId></Error>"
+	esc := html.EscapeString // & < > " ' — valid XML escaping of the client's path
+	return `<?xml version="1.0" encoding="UTF-8"?>` + "\n<Error><Code>" + esc(code) + "</Code><Message>" + esc(message) +
+		"</Message><Resource>" + esc(path) + "</Resource><RequestId>" + esc(requestID) + "</RequestId></Error>"
 }
 
 // backendErrorCode reads <Code> off an S3 error body ("" when none).
