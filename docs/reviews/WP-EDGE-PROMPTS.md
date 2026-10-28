@@ -2166,15 +2166,42 @@ proven on prod for tenant zero; the ledger row; Prompt 48 refreshed.
 - **No node is deployed**: `install.sh` needs the release key (RB5-3). "RS on the node" means RS in `internal/dataplane` proven in the lab and on host=slc; a real node is an owner purchase.
 - **The Go host's PUT is not retried** (RB5-5): a mirror leg that stalls ends at `BackendAnswerTimeout` (60 s) — the async `blob_copies` job, not the request, is the retry.
 - **The Worker is 0.4.1 in the manifest, 0.4.0 on prod** (RB5-1): deploy 0.4.1 (RP72-3/5/6) before 0.5.0's mirror changes `index.js` again, or fold both.
+- **A node's control-plane URL is a DNS-only origin** (RP74-1: the token is accepted only from the node's own address as HAProxy sees it; through Cloudflare the peer is Cloudflare) — `s3.stored.ge` today; and a node has no TLS until Part 0 (RP74-3): the mirror's node leg is lab-only until both land.
+- **Part 0 changes `dataplane.Host` before the mirror touches it** (RP74-5 one slc host, RP74-6 the byte budget — the mirror's second body doubles what a write holds —, RP74-4 the slc `Verify` hook): build the tee on top of those, not beside them.
 
 *Draft written 2026-10-27 by RP68; Prompt 47's closeout refreshes it. Two
 editions; paste one.*
 
 **SPEED bench inputs (2026-10-27, `bench-results/SPEED-2026-10-27.md`):** the second copy at the edge is a **tee** (44 MB/s per stream = the pass-through, 1 ms of CPU per 64 MiB); RS 4+2 and 8+4 go to the **node or the async mover** (26–29 MB/s per stream and 0.75–0.92 s of CPU per 64 MiB at the edge, Rust-SIMD and Go alike), so `edge_rs` stays dark and its encoder lives off the Worker; RaptorQ: no, F-11 stands; **GLACIER-class writes are not sealed whole at the edge.** Vail does enforce a presign (bench 11), but a sealed 0x06 stream with RS 4+4 computed as it streams is JS on every byte (< 30 MB/s), and a Worker → Vail stream is 12–16 MB/s. So they stay at the origin (the node after Prompt 47), sealed with their parity there.
 
+**Part 0 (RP74, `docs/reviews/WP-EDGE-3-REVIEW.md` — HOLDS at P2), in this
+order, before PR A — RP74-2 first and deployed alone:** RP74-2 the edge-call
+gate costs an unauthenticated caller a database query and an unbounded
+cache entry (live on prod) — a token that is not 64 lower-case hex is the
+404 before any lookup, the token cache bounded (an LRU of 1,024, negative
+entries included), a 10,000-random-token test on the map's size and the
+query count; RP74-1 a node pointed at `https://stored.ge` never
+authenticates (Cloudflare is the trusted peer, not the node) — the
+control-plane URL must be a DNS-only origin (`s3.stored.ge` today), said in
+DEPLOY.md and `install.sh` (which refuses a host that resolves into a
+Cloudflare range), the node's Error line after two 404 heartbeats, the gate
+test on an `s3.` host; RP74-3 the node has no TLS — autocert for
+`NODE_PUBLIC_HOST` on :443 (or `NODE_TLS_CERT`/`NODE_TLS_KEY`),
+`StateDirectory` + `CAP_NET_BIND_SERVICE` in the unit, a public bind
+without TLS refused at boot (the lab binds loopback); RP74-5 one slc host per
+Server, never a Transport per request; RP74-6 a byte semaphore in
+`dataplane.Host` (the Worker's isolate rule in Go; on slc reserved from the
+origin's chunk budget) — the mirror doubles what a write holds, so this
+comes before PR A; RP74-4 the slc `Verify` hook (the integrity reader on a
+whole read, the aws-chunked trailer verified on a move, `checksum_mismatch`
+at the end); RP74-7 `slcEnabled` requires the `slc` row up and the PUT
+refuses `weight` until it has a reader; RP74-8…11 one line each; D-EDGE-45:
+a sealed chunk's PUT retried once on a fresh connection (replayable), a
+mover's never (the client's 503, RB5-5 answered).
+
 Continue from WP-EDGE-3 (docs/reviews/WP-EDGE-3.md, § Residuals RB5-n) and
-its review RP74 (docs/reviews/WP-EDGE-3-REVIEW.md — Part 0; run it first
-if it has not). `git log origin/main`, `gh pr list`.
+its review RP74 (docs/reviews/WP-EDGE-3-REVIEW.md — Part 0 above, written
+2026-10-28). `git log origin/main`, `gh pr list`.
 
 Read first: plan § 40.10 "Slice 3" and "The invariant and the order" (the
 trap: sealing Standard by default sends every Standard byte through SLC
@@ -2300,8 +2327,35 @@ ultrathink
 - **No node is deployed**: `install.sh` needs the release key (RB5-3). "RS on the node" means RS in `internal/dataplane` proven in the lab and on host=slc; a real node is an owner purchase.
 - **The Go host's PUT is not retried** (RB5-5): a mirror leg that stalls ends at `BackendAnswerTimeout` (60 s) — the async `blob_copies` job, not the request, is the retry.
 - **The Worker is 0.4.1 in the manifest, 0.4.0 on prod** (RB5-1): deploy 0.4.1 (RP72-3/5/6) before 0.5.0's mirror changes `index.js` again, or fold both.
+- **A node's control-plane URL is a DNS-only origin** (RP74-1: the token is accepted only from the node's own address as HAProxy sees it; through Cloudflare the peer is Cloudflare) — `s3.stored.ge` today; and a node has no TLS until Part 0 (RP74-3): the mirror's node leg is lab-only until both land.
+- **Part 0 changes `dataplane.Host` before the mirror touches it** (RP74-5 one slc host, RP74-6 the byte budget — the mirror's second body doubles what a write holds —, RP74-4 the slc `Verify` hook): build the tee on top of those, not beside them.
 
 **SPEED bench inputs (2026-10-27, `bench-results/SPEED-2026-10-27.md`):** the second copy at the edge is a **tee** (44 MB/s per stream = the pass-through, 1 ms of CPU per 64 MiB); RS 4+2 and 8+4 go to the **node or the async mover** (26–29 MB/s per stream and 0.75–0.92 s of CPU per 64 MiB at the edge, Rust-SIMD and Go alike), so `edge_rs` stays dark and its encoder lives off the Worker; RaptorQ: no, F-11 stands; **GLACIER-class writes are not sealed whole at the edge.** Vail does enforce a presign (bench 11), but a sealed 0x06 stream with RS 4+4 computed as it streams is JS on every byte (< 30 MB/s), and a Worker → Vail stream is 12–16 MB/s. So they stay at the origin (the node after Prompt 47), sealed with their parity there.
+
+**Part 0 (RP74, `docs/reviews/WP-EDGE-3-REVIEW.md` — HOLDS at P2), in this
+order, before PR A — RP74-2 first and deployed alone:** RP74-2 the edge-call
+gate costs an unauthenticated caller a database query and an unbounded
+cache entry (live on prod) — a token that is not 64 lower-case hex is the
+404 before any lookup, the token cache bounded (an LRU of 1,024, negative
+entries included), a 10,000-random-token test on the map's size and the
+query count; RP74-1 a node pointed at `https://stored.ge` never
+authenticates (Cloudflare is the trusted peer, not the node) — the
+control-plane URL must be a DNS-only origin (`s3.stored.ge` today), said in
+DEPLOY.md and `install.sh` (which refuses a host that resolves into a
+Cloudflare range), the node's Error line after two 404 heartbeats, the gate
+test on an `s3.` host; RP74-3 the node has no TLS — autocert for
+`NODE_PUBLIC_HOST` on :443 (or `NODE_TLS_CERT`/`NODE_TLS_KEY`),
+`StateDirectory` + `CAP_NET_BIND_SERVICE` in the unit, a public bind
+without TLS refused at boot (the lab binds loopback); RP74-5 one slc host per
+Server, never a Transport per request; RP74-6 a byte semaphore in
+`dataplane.Host` (the Worker's isolate rule in Go; on slc reserved from the
+origin's chunk budget) — the mirror doubles what a write holds, so this
+comes before PR A; RP74-4 the slc `Verify` hook (the integrity reader on a
+whole read, the aws-chunked trailer verified on a move, `checksum_mismatch`
+at the end); RP74-7 `slcEnabled` requires the `slc` row up and the PUT
+refuses `weight` until it has a reader; RP74-8…11 one line each; D-EDGE-45:
+a sealed chunk's PUT retried once on a fresh connection (replayable), a
+mover's never (the client's 503, RB5-5 answered).
 
 You are building WP-EDGE-4 (slice 3 of plan § 40.10) in the Vaultaire
 repository: the second copy at the edge, the dark seal-by-default flag,
@@ -2320,7 +2374,80 @@ admin_flags.go (`flagCredentialPlaintextDrop`'s 409 guard); internal/api/
 landing/modes.json + internal/modes; docs/BACKEND_ENCRYPTION.md;
 internal/dataplane (Prompt 47's package); edge/s3-ingest/src/codec.js.
 
-PR 0 — RP74's fixes. Branch `stage1a-p48-part0`.
+PR 0 — RP74's fixes (`docs/reviews/WP-EDGE-3-REVIEW.md` § Findings). Two
+branches: `stage1a-p48-part0-gate` (step 0a alone, merged and DEPLOYED
+first — it is live on prod) and `stage1a-p48-part0` (the rest).
+0a. RP74-2, test first: `TestEdgeCaller_AnUnknownTokenCostsNoQueryAndNoEntry`
+    — 10,000 POSTs to `/api/v1/edge/admit` with random 20–200-byte tokens:
+    the registry cache's map stays under its cap and the DB query counter
+    (wrap `s.db` with a counting driver, or count through the cache's
+    `now`/hook) stays 0 for non-hex tokens and ≤ cap for 64-hex ones. Then
+    `edgeCaller`: a header that is not exactly 64 lower-case hex characters
+    is the 404 before any lookup (the registry mints exactly that;
+    `isNodeTokenShape`); `dataPlaneHostCache`: an LRU bounded at 1,024
+    entries (`container/list` + the map; negative entries included; expired
+    entries dropped on insert). Verify: `go test ./internal/api -run
+    'EdgeCaller|DataPlaneHost|EdgeCalls' -race`. Commit, PR, `gh pr merge
+    --auto`, watch the Deploy, then `curl -s -o /dev/null -w '%{http_code}'
+    -X POST https://stored.ge/api/v1/edge/admit -H 'X-Vaultaire-Edge-Token:
+    nope'` → 404 (it was 404 before too; the difference is the query count,
+    read `pg_stat_statements` on the box for the SELECT before and after).
+0b. RP74-1: `docs/DEPLOY.md` § Data nodes and `deploy/node/install.sh` name
+    the rule — the control-plane URL is a DNS-only origin (`s3.stored.ge`
+    today; `https://stored.ge` is proxied and the token is accepted only
+    from the node's own address as HAProxy sees it); `install.sh` resolves
+    the control-plane host and refuses one inside a Cloudflare range
+    (`internal/clientip`'s table, exposed through a tiny `cmd/tools/cf-range`
+    or by shelling `dig` + a bundled list — the simplest that is testable);
+    `internal/node`: two consecutive 404 heartbeats log ONE Error line
+    "the control plane answers 404 to this node: is NODE_CONTROL_PLANE_URL
+    a proxied host, or the registry address not this box's?"; a test in
+    `internal/api` that the four edge routes answer on an `s3.` Host (the
+    S3 gate never captures them — extend `TestEdgeRoutes_NeverCapturedByTheS3Gate`).
+0c. RP74-3: `internal/node`: `NODE_TLS_CERT` + `NODE_TLS_KEY` (both or
+    neither) else `NODE_ACME_EMAIL` → `golang.org/x/crypto/acme/autocert`
+    for `NODE_PUBLIC_HOST` with `DirCache(NODE_STATE_DIR)` (`$STATE_DIRECTORY`
+    when set), `:443` + the `:80` HTTP-01 handler; a listen address that is
+    not loopback without either → boot refused naming the setting. Unit:
+    `StateDirectory=vaultaire-node`, `AmbientCapabilities=CAP_NET_BIND_SERVICE`,
+    `PORT=443`. `lab-proof.sh` keeps `127.0.0.1:8100` plain. Tests:
+    `TestNodeRole_RefusesAPublicBindWithoutTLS`, the cert pair served
+    (`httptest.NewUnstartedServer` with the node's TLS config). DEPLOY.md
+    gains the two recipes.
+0d. RP74-5: `slcHost` built once (`sync.Once` on the Server;
+    `dataPlaneTransport` read at first use — `TestDataPlaneSLC_*` inject it
+    before). Assert with a test that two slc writes share one `*http.Client`.
+0e. RP74-6: `dataplane.Host.Budget` (a FIFO byte semaphore, `internal/
+    dataplane/budget.go`: a request larger than the bound proceeds alone;
+    a wait past 2 s is the client's 503 SlowDown + Retry-After 30);
+    `codecStore` takes each batch's bytes from it and gives them back after
+    the batch's PUTs; a node sizes it `NODE_CODEC_BUDGET_BYTES` (default
+    GOMEMLIMIT/4, else 1 GiB); on slc the host's budget IS the origin's
+    chunk budget (`chunkPutBudget.reserve` of one worker's 48 MiB before the
+    first byte, released at the end — the same gauge). Tests: two 48 MiB
+    codec writes under a 64 MiB budget serialise; the slc write moves
+    `vaultaire_chunk_put_budget_bytes_in_use`.
+0f. RP74-4: `dataplane.Host.Verify` (nil on a node): on slc, a whole read's
+    body through `newIntegrityReader` with the admit's digest (add
+    `body_md5` to `AdmitResponse` beside `response_headers`, "" when the
+    row has none — the Worker ignores an unknown field); an aws-chunked
+    move teed through `AWSChunkedDecoder` and, on `ErrChecksumMismatch` at
+    the end, the commit `checksum_mismatch` (the blob removed, everything
+    given back, the client's 400). `objectIntegrityUnverified{path="edge"}`
+    not counted for a verified slc read. Tests: the fake backend answers
+    tampered bytes → the slc whole read is cut; a wrong trailer on an slc
+    move → 400 `XAmzContentChecksumMismatch`, no row.
+0g. RP74-7: `slcEnabled` = flag AND the `slc` row's health up (through the
+    cache); PUT on `slc`/`edge` with `weight` → 400 `weight_unused` until a
+    reader exists; the System card's detail line says so.
+0h. RP74-8 (the DEPLOY.md sentence: an IP allow-list and a node do not
+    mix), RP74-9 (`reservedPath` by first segment from `bucket_reserved.go`'s
+    list), RP74-10 (`NODE_METRICS_ADDR`, loopback default), RP74-11 (the
+    heartbeat updates the cached row instead of flushing). D-EDGE-45 in the
+    note: `SealAndStore` retries a PUT with no answer once on a fresh
+    connection (the sealed bytes are in memory); `move` never (the client's
+    503). Test: a backend that drops the first chunk PUT connection → one
+    retry, one stored chunk.
 
 PR A — the mirror. Branch `stage1a-p48-mirror`.
 1. Migration 113 `113_blob_copies.sql`: the table as the chain prompt
@@ -2505,7 +2632,7 @@ current line numbers (the /next conventions).
   - RP70-1's premise corrected: zeros cut at 1 MiB, constant non-zero runs at 16 MiB.
   - The Worker 0.4.0 deploys after its rows (PR D) reach the server, with RB-9's capture armed.
   - The post-merge review is RP72.
-- **Prompt 47 — WP-EDGE-3, the data node — DONE 2026-10-28** (`docs/reviews/WP-EDGE-3.md`; #1018 Part 0 = RP72-1…6 + migration 112 whole, deployed; #1019 PR A `internal/dataplane` + the node role + the registry + per-host tokens; PR B host=slc + the 307 probe (no client re-signs a 307: steering by configuration) + health; PR C docs + the Worker 0.4.1 manifest rows (deploy owed, RB5-1). Lab: a node on :8100 took a 100 MiB codec upload with no upload byte at the control plane; host=slc proven on prod for tenant zero (the note's § The prod proof). The post-merge review is RP74.) (Was: DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 47` and its Opus edition; REFRESHED by Prompt 46c's closeout: the "From 46b and 46c" inputs, Part 0 = RP72's findings, its review RP74, its residuals RB5-n. **After the SPEED bench the node is not a speed project**: the Worker reaches 840–980 MB/s per client; the node's case is Cloudflare-independence (the undue-burden clause), RS and GLACIER writes off SLC, and tenant-scoped BYO hosts; summary): `internal/dataplane` = the harness's pipeline as a package with an HTTP and an in-process control plane; `VAULTAIRE_ROLE=node` boots the binary with no DB, no engine, the data-plane routes only, a heartbeat, `deploy/node/`; migration 112 `data_plane_hosts` (host, kind edge|node|slc, address, token_hash, tenant_id — a tenant-scoped BYO host admits one tenant and nothing it reports is trusted for integrity (RP68-3 at 100 %) or metering (its GET metered at the admitted span) —, weight, health, last_seen) with audited admin routes and per-host tokens accepted from the host's registered address; `host=slc` = the origin's own edge-eligible writes and reads through the same package in-process behind `data_plane_slc` (rows proven equal); steering by 307 behind `edge_redirect` only if Step 0.1 shows aws-cli, rclone and the SDKs re-sign on a 307, else by configuration; `vaultaire_data_plane_host_up`, `DataPlaneHostDown`. Proven with two processes in the lab and on prod as `host=slc` for tenant zero. A real node is an owner purchase. The post-merge review is RP74.
+- **Prompt 47 — WP-EDGE-3, the data node — DONE 2026-10-28** (`docs/reviews/WP-EDGE-3.md`; #1018 Part 0 = RP72-1…6 + migration 112 whole, deployed; #1019 PR A `internal/dataplane` + the node role + the registry + per-host tokens; PR B host=slc + the 307 probe (no client re-signs a 307: steering by configuration) + health; PR C docs + the Worker 0.4.1 manifest rows (deploy owed, RB5-1). Lab: a node on :8100 took a 100 MiB codec upload with no upload byte at the control plane; host=slc proven on prod for tenant zero (the note's § The prod proof). The post-merge review is RP74.) **Reviewed 2026-10-28, RP74 (`docs/reviews/WP-EDGE-3-REVIEW.md`): HOLDS at P2** — RP74-1 a node installed as DEPLOY.md says never authenticates (the peer rule meets Cloudflare: the control-plane URL must be DNS-only), RP74-2 the edge-call gate costs an unauthenticated caller a DB query and an unbounded cache entry (live on prod; the shape check + a bounded cache, first), RP74-3 the node has no TLS (autocert), RP74-4 host=slc skips the origin's integrity checks it could run, RP74-5 a Transport per slc request, RP74-6 no byte budget on a Go host, RP74-7 the `slc` row steers nothing, RP74-8…11; both open questions answered (D-EDGE-45: retry a sealed chunk's PUT, never a mover's; the BYO double meter stays, documented); all into Prompt 48 Part 0. (Was: DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 47` and its Opus edition; REFRESHED by Prompt 46c's closeout: the "From 46b and 46c" inputs, Part 0 = RP72's findings, its review RP74, its residuals RB5-n. **After the SPEED bench the node is not a speed project**: the Worker reaches 840–980 MB/s per client; the node's case is Cloudflare-independence (the undue-burden clause), RS and GLACIER writes off SLC, and tenant-scoped BYO hosts; summary): `internal/dataplane` = the harness's pipeline as a package with an HTTP and an in-process control plane; `VAULTAIRE_ROLE=node` boots the binary with no DB, no engine, the data-plane routes only, a heartbeat, `deploy/node/`; migration 112 `data_plane_hosts` (host, kind edge|node|slc, address, token_hash, tenant_id — a tenant-scoped BYO host admits one tenant and nothing it reports is trusted for integrity (RP68-3 at 100 %) or metering (its GET metered at the admitted span) —, weight, health, last_seen) with audited admin routes and per-host tokens accepted from the host's registered address; `host=slc` = the origin's own edge-eligible writes and reads through the same package in-process behind `data_plane_slc` (rows proven equal); steering by 307 behind `edge_redirect` only if Step 0.1 shows aws-cli, rclone and the SDKs re-sign on a 307, else by configuration; `vaultaire_data_plane_host_up`, `DataPlaneHostDown`. Proven with two processes in the lab and on prod as `host=slc` for tenant zero. A real node is an owner purchase. The post-merge review is RP74.
 - **Prompt 48 — slice 3 + the dark seal-by-default flag + the catalogue filter** (DRAFTED 2026-10-27 by RP68 in two editions above — `## Stage 1a Prompt 48` and its Opus edition; Prompt 47's closeout refreshes it; summary): (a) the second copy at the edge — migration 113 `blob_copies`; `edge_mirror` (per tenant): the admit answers two presigned PUTs (the placement's backend + the first registered leg of `MIRROR_LEGS` that is not it), the Worker tees (or PUTs sequentially — Step 0.1 decides on the isolate's memory), the commit records both, a failed mirror leg becomes a `pending` row the `blob_copies` job completes, reads fall back to the mirror before the origin, DELETE / the sweep / `retired_blobs` / `routing_truth` / capacity learn the copies; RS k+m with the WP-VAULT-1 codec in WASM (`sdk/ecwasm`) built and proven in the lab behind `edge_rs`, dark on prod (one fast leg); mirror first on prod — tenant zero's backups get their second copy on iDrive. (b) `standard_sealed_default` (global, default OFF, 409 without a master key or a tenant without a key version): ON = every Standard write placed sealed — the codec at the edge for every tenant, `placeWholeSealed` / chunk encryption at the origin — the switch that makes `modes.json`'s sentence true; built dark, flipped after F-14. (c) 10.3's catalogue filter: `public_artefacts` + `public_chunks` (migration 114) seeded in the lab by `cmd/tools/catalogue-seed`, a daily `catalogue_filter` job publishing a versioned Bloom filter to R2, the Worker and the SDK checking locally and marking `public: true`, the control plane referencing the one `_public` copy — the only cross-tenant scope (contract 5). The post-merge review is RP76 (Part 0 = RP74, the review of Prompt 47 — renumbered when Prompt 46c went before Prompt 47).
 - **After the ceremony (one session, owner present only for the ceremony
   itself):** `edge_codec` ON for tenant zero → the sealed-object proofs →
