@@ -112,28 +112,62 @@ func (c *countingCP) Index(_ context.Context, r IndexRequest) (IndexResponse, er
 	return out, nil
 }
 
+// holdCounter wraps a Budget and records the most writes holding it at once.
+type holdCounter struct {
+	Budget
+	in, max atomic.Int32
+}
+
+func (h *holdCounter) Acquire(ctx context.Context, n int64) (func(), error) {
+	rel, err := h.Budget.Acquire(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	k := h.in.Add(1)
+	for {
+		m := h.max.Load()
+		if k <= m || h.max.CompareAndSwap(m, k) {
+			break
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			h.in.Add(-1)
+			rel()
+		})
+	}, nil
+}
+
 func TestHost_TwoCodecWritesUnderOneBudgetSerialise(t *testing.T) {
 	const size = 48 << 20
 	body := make([]byte, size)
 	rand.New(rand.NewSource(48)).Read(body)
 
+	// Each write holds the budget from before its first byte to its commit
+	// (seconds of chunking): two writes started together overlap there
+	// unless the budget serialises them.
 	run := func(budget Budget) int32 {
+		hc := &holdCounter{Budget: budget}
 		cp := &countingCP{}
 		cp.admit = AdmitResponse{Edge: true, AdmitID: "A", Codec: &CodecGrant{}}
-		h := &Host{CP: cp, Budget: budget}
+		h := &Host{CP: cp, Budget: hc}
 		var wg sync.WaitGroup
+		start := make(chan struct{})
 		for range 2 {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				<-start
 				req := httptest.NewRequest(http.MethodPut, "https://s3.test/b/k", nil)
 				res, err := h.Write(context.Background(), req, bytes.NewReader(body), size)
 				assert.NoError(t, err)
 				assert.Equal(t, http.StatusOK, res.Relay.Status)
 			}()
 		}
+		close(start)
 		wg.Wait()
-		return cp.max.Load()
+		return hc.max.Load()
 	}
 	b := NewByteBudget(64 << 20)
 	b.Wait = time.Minute
