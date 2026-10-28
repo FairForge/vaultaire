@@ -797,22 +797,64 @@ curl -X PUT https://stored.ge/api/v1/admin/data-plane-hosts/node1.example.net \
 ```
 
 The token is accepted only from `address` (the node's IP as HAProxy sees
-it). **Install it** on the node, as root, from a SIGNED release:
+it). **The control-plane URL is therefore a DNS-only origin** (RP74-1):
+`https://s3.stored.ge` today — never `https://stored.ge`, which Cloudflare
+proxies, so HAProxy's peer would be a Cloudflare edge, never the node, and
+every admit, commit and heartbeat would be the route's 404 (the node then
+logs one Error line: "the control plane answers 404 to this node"). The
+four edge routes answer on every host and the S3 gate never captures them
+(`TestEdgeRoutes_NeverCapturedByTheS3Gate` pins the `s3.` host). Do not
+widen the gate to `CF-Connecting-IP`: a node behind the proxy would also
+meet the 100 MB body cap and lose the direct-peer rule that makes a stolen
+token useless off the registered box. **Install it** on the node, as root,
+from a SIGNED release:
 
 ```bash
-go build ./cmd/tools/release-sign          # from the release's tagged source
-RELEASE_VKEY_FILE=./release.vkey deploy/node/install.sh \
-  https://github.com/FairForge/vaultaire/releases/download/<tag> https://stored.ge node1.example.net
+go build ./cmd/tools/release-sign ./cmd/tools/cf-range   # from the release's tagged source
+RELEASE_VKEY_FILE=./release.vkey NODE_ACME_EMAIL=ops@example.net deploy/node/install.sh \
+  https://github.com/FairForge/vaultaire/releases/download/<tag> https://s3.stored.ge node1.example.net
 umask 077; printf %s "$TOKEN" > /etc/vaultaire/node_token   # the registry's token
 systemctl daemon-reload && systemctl enable --now vaultaire-node
 ```
+
+`install.sh` refuses a control-plane host that resolves into a Cloudflare
+range (`cf-range`, the origin's own `internal/clientip` table).
+
+**TLS** (RP74-3): the node terminates TLS itself on `:443`, one of two ways —
+the recipe is what `install.sh` writes into `node.env`:
+
+- **ACME** (Let's Encrypt): `NODE_ACME_EMAIL=ops@example.net` with
+  `NODE_PUBLIC_HOST=node1.example.net` (its A record pointing at the node,
+  DNS-only). The node answers the HTTP-01 challenge on `:80` and caches the
+  account and certificates under `NODE_STATE_DIR` (the unit's
+  `StateDirectory=vaultaire-node` → `/var/lib/vaultaire-node/acme`);
+  renewals are automatic.
+- **An operator's certificate:** `NODE_TLS_CERT=/etc/vaultaire/node.crt`
+  and `NODE_TLS_KEY=/etc/vaultaire/node.key` (both or neither; read once at
+  boot — restart after a renewal). Readable by the unit's dynamic user: put
+  them in `/etc/vaultaire` with mode 0644 / 0640 and `LoadCredential=` if you
+  prefer.
+
+A node with neither refuses to boot unless `NODE_BIND` is loopback
+(`127.0.0.1`: the lab, plain HTTP on 8100). `/metrics` is never on the
+public port: it listens on `NODE_METRICS_ADDR` (default `127.0.0.1:9100`,
+`off` = none; RP74-10).
+
+**A key's IP allow-list and a node do not mix** (RP74-8): a request a node
+hands on to the origin (HEAD, DELETE, a listing, Complete…) reaches HAProxy
+from the node, so the origin evaluates it — the key's allow-list, the
+per-IP limits, the access log's `client_ip` — under the NODE's address.
+Until the control plane trusts a registered node's `X-Forwarded-For` as one
+more hop, a tenant whose keys carry an IP allow-list must not be sent
+through a node.
 
 `install.sh` installs only what `release-sign verify` accepts under the
 release verifier key (none exists until the owner's key ceremony —
 docs/RELEASES.md — so no node can be installed before it). The unit
 (`deploy/node/vaultaire-node.service`) runs as a dynamic user with the token
 as the systemd credential `node_token`; `/etc/vaultaire/node.env` holds
-`NODE_CONTROL_PLANE_URL`, `NODE_PUBLIC_HOST`, `PORT` (8100). The origin must
+`NODE_CONTROL_PLANE_URL`, `NODE_PUBLIC_HOST`, `PORT` (443) and the TLS
+settings. The origin must
 also accept the node's hostname on pass-throughs (HAProxy, Cloudflare) —
 check with the first node.
 

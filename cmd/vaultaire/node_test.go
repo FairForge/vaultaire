@@ -25,6 +25,7 @@ func TestNodeRole_TheRouterIsTheDataPlaneOnly(t *testing.T) {
 	t.Setenv("NODE_TOKEN", strings.Repeat("x", 32))
 	t.Setenv("CREDENTIALS_DIRECTORY", "")
 	t.Setenv("NODE_TOKEN_FILE", "")
+	t.Setenv("NODE_BIND", "127.0.0.1")
 	assert.True(t, isNodeRole(os.Getenv))
 
 	n, err := node.Build(os.Getenv, os.ReadFile, "test-sha", zap.NewNop())
@@ -35,8 +36,8 @@ func TestNodeRole_TheRouterIsTheDataPlaneOnly(t *testing.T) {
 		return nil
 	}))
 	sort.Strings(routes)
-	assert.Equal(t, []string{"GET /health", "GET /metrics", "GET /{bucket}/*", "PUT /{bucket}/*"}, routes,
-		"PutObject/UploadPart, GetObject, /health, /metrics — nothing else")
+	assert.Equal(t, []string{"GET /health", "GET /{bucket}/*", "PUT /{bucket}/*"}, routes,
+		"PutObject/UploadPart, GetObject, /health — nothing else (/metrics is on NODE_METRICS_ADDR, RP74-10)")
 
 	for _, p := range []string{"/api/v1/admin/flags", "/api/v1/edge/admit", "/api/v1/manage/buckets", "/dashboard", "/dashboard/billing", "/translog/checkpoint", "/translog/tile/0/000"} {
 		for _, signed := range []bool{false, true} {
@@ -71,7 +72,7 @@ func TestNodeRole_TheRouterIsTheDataPlaneOnly(t *testing.T) {
 // is no token; what the role ignores (a database, a storage mode) is named.
 func TestNodeRole_Config(t *testing.T) {
 	env := map[string]string{"NODE_CONTROL_PLANE_URL": "https://stored.ge", "NODE_TOKEN": strings.Repeat("t", 32),
-		"STORAGE_MODE": "idrive", "DB_HOST": "db.internal"}
+		"STORAGE_MODE": "idrive", "DB_HOST": "db.internal", "NODE_BIND": "127.0.0.1"}
 	get := func(k string) string { return env[k] }
 	cfg, ignored, err := node.ConfigFromEnv(get, os.ReadFile)
 	require.NoError(t, err)

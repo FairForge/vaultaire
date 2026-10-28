@@ -146,7 +146,7 @@
             </tbody>
         </table>
     </div>
-    <div class="card-detail">The hosts that move customer bytes (WP-EDGE-3): the Worker (edge), this box (slc) and data nodes (node; up = a heartbeat within 90 s). A node unseen for 90 s takes no new admit. Rows: <code>GET/PUT/DELETE /api/v1/admin/data-plane-hosts/{host}</code>; rule <code>DataPlaneHostDown</code>.</div>
+    <div class="card-detail">The hosts that move customer bytes (WP-EDGE-3): the Worker (edge), this box (slc) and data nodes (node; up = a heartbeat within 90 s). A node unseen for 90 s takes no new admit. <em>Health</em> steers: slc draining or down turns host=slc off for every tenant (the origin's handlers serve as before); <em>weight</em> is read by nothing yet (refused on edge and slc). Rows: <code>GET/PUT/DELETE /api/v1/admin/data-plane-hosts/{host}</code>; rule <code>DataPlaneHostDown</code>.</div>
 </div>
 {{end}}
 

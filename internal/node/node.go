@@ -19,6 +19,7 @@ package node
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"html"
@@ -29,7 +30,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -41,6 +44,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/dataplane"
@@ -81,8 +85,40 @@ type Config struct {
 	Token []byte
 	// PublicHost is the node's own hostname (NODE_PUBLIC_HOST), for the logs.
 	PublicHost string
-	// Port is the listen port (PORT, default 8100).
+	// Port is the listen port (PORT, default 8100; 443 with TLS in the unit).
 	Port int
+	// Bind is the address the node listens on (NODE_BIND; empty = every
+	// interface). Plain HTTP only on a loopback bind (RP74-3: the lab).
+	Bind string
+	// TLSCertFile, TLSKeyFile are an operator's own certificate
+	// (NODE_TLS_CERT + NODE_TLS_KEY, both or neither).
+	TLSCertFile, TLSKeyFile string
+	// ACMEEmail turns on ACME (NODE_ACME_EMAIL) for PublicHost: a
+	// certificate from Let's Encrypt, the HTTP-01 answer on :80, cached
+	// under StateDir.
+	ACMEEmail string
+	// StateDir is where the ACME cache lives (NODE_STATE_DIR, else systemd's
+	// $STATE_DIRECTORY, else /var/lib/vaultaire-node).
+	StateDir string
+	// CodecBudgetBytes bounds the chunk plaintext the node's codec writes
+	// hold at once (NODE_CODEC_BUDGET_BYTES; default GOMEMLIMIT/4, else
+	// 1 GiB — RP74-6).
+	CodecBudgetBytes int64
+	// MetricsAddr serves /metrics (NODE_METRICS_ADDR, default
+	// 127.0.0.1:9100; "off" = none) — never the public port (RP74-10).
+	MetricsAddr string
+}
+
+// tlsEnabled: the node terminates TLS itself.
+func (c Config) tlsEnabled() bool { return c.TLSCertFile != "" || c.ACMEEmail != "" }
+
+// loopbackBind: the lab's bind, where plain HTTP is allowed.
+func loopbackBind(b string) bool {
+	if b == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(b)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ConfigFromEnv reads the node's configuration. err = a setting missing or
@@ -117,6 +153,48 @@ func ConfigFromEnv(getenv func(string) string, readFile func(string) ([]byte, er
 		}
 		cfg.Port = n
 	}
+	cfg.Bind = strings.TrimSpace(getenv("NODE_BIND"))
+	cfg.TLSCertFile = strings.TrimSpace(getenv("NODE_TLS_CERT"))
+	cfg.TLSKeyFile = strings.TrimSpace(getenv("NODE_TLS_KEY"))
+	cfg.ACMEEmail = strings.TrimSpace(getenv("NODE_ACME_EMAIL"))
+	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
+		return cfg, nil, errors.New("NODE_TLS_CERT and NODE_TLS_KEY: set both (an operator's certificate) or neither")
+	}
+	if cfg.TLSCertFile != "" {
+		cfg.ACMEEmail = "" // the operator's pair wins
+	}
+	if cfg.ACMEEmail != "" && cfg.PublicHost == "" {
+		return cfg, nil, errors.New("NODE_ACME_EMAIL: NODE_PUBLIC_HOST must name the host the certificate is for")
+	}
+	if !cfg.tlsEnabled() && !loopbackBind(cfg.Bind) {
+		return cfg, nil, fmt.Errorf("NODE_BIND %q is not loopback and the node has no TLS: set NODE_TLS_CERT + NODE_TLS_KEY, or NODE_ACME_EMAIL with NODE_PUBLIC_HOST (plain HTTP only on NODE_BIND=127.0.0.1, the lab)", cfg.Bind)
+	}
+	cfg.StateDir = strings.TrimSpace(getenv("NODE_STATE_DIR"))
+	if cfg.StateDir == "" {
+		// systemd's StateDirectory= may name several, separated by ':'.
+		cfg.StateDir = strings.SplitN(strings.TrimSpace(getenv("STATE_DIRECTORY")), ":", 2)[0]
+	}
+	if cfg.StateDir == "" {
+		cfg.StateDir = "/var/lib/vaultaire-node"
+	}
+	switch m := strings.TrimSpace(getenv("NODE_METRICS_ADDR")); m {
+	case "":
+		cfg.MetricsAddr = "127.0.0.1:9100"
+	case "off":
+	default:
+		if _, _, err := net.SplitHostPort(m); err != nil {
+			return cfg, nil, fmt.Errorf("NODE_METRICS_ADDR %q: not host:port (or off)", m)
+		}
+		cfg.MetricsAddr = m
+	}
+	cfg.CodecBudgetBytes = codecBudgetDefault(debug.SetMemoryLimit(-1))
+	if v := strings.TrimSpace(getenv("NODE_CODEC_BUDGET_BYTES")); v != "" {
+		b, err := parseSize(v)
+		if err != nil || b < codecBudgetMin {
+			return cfg, nil, fmt.Errorf("NODE_CODEC_BUDGET_BYTES %q: a size of at least 64MiB (512MiB, 2GiB, or bytes)", v)
+		}
+		cfg.CodecBudgetBytes = b
+	}
 	var ignored []string
 	for _, k := range ignoredInRole {
 		if getenv(k) != "" {
@@ -124,6 +202,37 @@ func ConfigFromEnv(getenv func(string) string, readFile func(string) ([]byte, er
 		}
 	}
 	return cfg, ignored, nil
+}
+
+// codecBudgetMin: below one codec batch every write would wait alone.
+const codecBudgetMin = 64 << 20
+
+// codecBudgetDefault is a quarter of memLimit (GOMEMLIMIT) when one is
+// set, else 1 GiB.
+func codecBudgetDefault(memLimit int64) int64 {
+	if memLimit > 0 && memLimit < 1<<62 {
+		return max(memLimit/4, codecBudgetMin)
+	}
+	return 1 << 30
+}
+
+// parseSize reads "512MiB", "2GiB" or bytes.
+func parseSize(s string) (int64, error) {
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
+		if num, ok := strings.CutSuffix(s, u.suffix); ok {
+			s, mult = strings.TrimSpace(num), u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("size %q", s)
+	}
+	return n * mult, nil
 }
 
 func checkURL(name, v string) error {
@@ -161,6 +270,10 @@ type Node struct {
 	logger   *zap.Logger
 	version  string
 	inFlight atomic.Int64
+
+	tlsConfig *tls.Config  // nil = plain HTTP (a loopback bind)
+	acmeHTTP  http.Handler // the HTTP-01 answer on :80 (ACME only)
+	not404s   int          // consecutive heartbeats answered 404 (heartbeat goroutine only)
 }
 
 // Build makes the node from the environment.
@@ -175,7 +288,8 @@ func Build(getenv func(string) string, readFile func(string) ([]byte, error), ve
 	origin, _ := url.Parse(cfg.OriginURL)
 	n := &Node{cfg: cfg, logger: logger, version: version, reg: prometheus.NewRegistry()}
 	n.cp = dataplane.NewHTTPControlPlane(cfg.ControlPlaneURL, cfg.Token, nil)
-	n.host = &dataplane.Host{CP: n.cp, Client: dataplane.NewBackendClient(dataplane.BackendAnswerTimeout), ClientIP: peerIP, Logger: logger}
+	n.host = &dataplane.Host{CP: n.cp, Client: dataplane.NewBackendClient(dataplane.BackendAnswerTimeout), ClientIP: peerIP, Logger: logger,
+		Budget: dataplane.NewByteBudget(cfg.CodecBudgetBytes)}
 	// The origin answers what the node does not take: the request as the
 	// client sent it — its Host kept, so its signature verifies there.
 	n.proxy = &httputil.ReverseProxy{
@@ -191,7 +305,32 @@ func Build(getenv func(string) string, readFile func(string) ([]byte, error), ve
 	}
 	n.reg.MustRegister(nodeRequests, nodeInFlight, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	n.router = n.routes()
+	switch {
+	case cfg.TLSCertFile != "":
+		pair, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("NODE_TLS_CERT/NODE_TLS_KEY: %w", err)
+		}
+		n.tlsConfig = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	case cfg.ACMEEmail != "":
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(cfg.PublicHost),
+			Cache:      autocert.DirCache(filepath.Join(cfg.StateDir, "acme")),
+			Email:      cfg.ACMEEmail,
+		}
+		n.tlsConfig = m.TLSConfig()
+		n.tlsConfig.MinVersion = tls.VersionTLS12
+		n.acmeHTTP = m.HTTPHandler(nil)
+	}
 	return n, nil
+}
+
+// MetricsHandler is the node's /metrics (served on MetricsAddr only).
+func (n *Node) MetricsHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", promhttp.HandlerFor(n.reg, promhttp.HandlerOpts{}))
+	return mux
 }
 
 // Router is the node's HTTP surface.
@@ -201,13 +340,12 @@ func (n *Node) Router() chi.Router { return n.router }
 // backends' links with (the tests' fake backend).
 func (n *Node) SetBackendTransport(rt http.RoundTripper) { n.host.Client = &http.Client{Transport: rt} }
 
-// routes: PutObject/UploadPart and GetObject on /{bucket}/*, /health,
-// /metrics; every other request is a 404, or — a SIGNED S3 request — the
+// routes: PutObject/UploadPart and GetObject on /{bucket}/*, /health;
+// every other request is a 404, or — a SIGNED S3 request — the
 // origin's (handed on untouched).
 func (n *Node) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/health", n.handleHealth)
-	r.Get("/metrics", promhttp.HandlerFor(n.reg, promhttp.HandlerOpts{}).ServeHTTP)
 	r.Put("/{bucket}/*", n.handlePut)
 	r.Get("/{bucket}/*", n.handleGet)
 	r.NotFound(n.handleOther)
@@ -215,15 +353,28 @@ func (n *Node) routes() chi.Router {
 	return r
 }
 
-// reservedPrefix are the origin's web and API paths: never served or
-// forwarded by a node, signed or not.
+// ReservedSegments are the first path segments of the origin's web and API
+// paths: never served or forwarded by a node, signed or not. It is the
+// origin router's own reserved-bucket list (internal/api bucket_reserved.go,
+// pinned equal by TestNodeReservedSegments_AreTheRoutersReservedNames) plus
+// the paths that are no bucket name or are mounted only with a setting.
+var ReservedSegments = map[string]bool{
+	// The router's list (docs/API.md § Reserved bucket names).
+	"abuse": true, "api": true, "auth": true, "cdn": true, "changelog": true, "compliance": true,
+	"dashboard": true, "docs": true, "favicon.ico": true, "forgot-password": true, "health": true,
+	"legal": true, "llms.txt": true, "login": true, "logout": true, "metrics": true, "og.png": true,
+	"openapi.json": true, "pricing": true, "ready": true, "register": true, "reset-password": true,
+	"robots.txt": true, "signup": true, "sitemap.xml": true, "static": true, "status": true,
+	"translog": true, "verify": true, "version": true,
+	// Beyond it.
+	"admin": true, "webhook": true, ".well-known": true,
+}
+
+// reservedPath: the path's FIRST segment is one of the origin's (RP74-9: a
+// bucket named docsarchive is a bucket, not /docs).
 func reservedPath(p string) bool {
-	for _, pre := range []string{"/api/", "/dashboard", "/translog/", "/admin", "/auth/", "/webhook/", "/cdn/", "/legal/", "/docs"} {
-		if p == strings.TrimSuffix(pre, "/") || strings.HasPrefix(p, pre) {
-			return true
-		}
-	}
-	return false
+	seg := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)[0]
+	return ReservedSegments[strings.ToLower(seg)]
 }
 
 // signedS3 is the origin's predicate (internal/api signedS3Request): an
@@ -346,16 +497,36 @@ func writeS3Error(w http.ResponseWriter, status int, code, msg, path string) {
 		html.EscapeString(msg)+"</Message><Resource>"+html.EscapeString(path)+"</Resource></Error>")
 }
 
+// beat sends one heartbeat. Two in a row answered 404 are ONE Error line
+// naming the likely cause (RP74-1): the gate is the route's 404 to a token
+// it does not take — a control plane reached through Cloudflare's proxy
+// (the gate sees Cloudflare, not this box), or a registry row whose
+// address is not this box's.
+func (n *Node) beat(ctx context.Context) {
+	hb := dataplane.Heartbeat{Version: n.version, BuildSHA: n.version, Load: float64(runtime.NumGoroutine()), InFlight: n.inFlight.Load()}
+	err := n.cp.Heartbeat(ctx, hb)
+	if err == nil {
+		n.not404s = 0
+		return
+	}
+	var se *dataplane.StatusError
+	if errors.As(err, &se) && se.Status == http.StatusNotFound {
+		n.not404s++
+		if n.not404s == 2 {
+			n.logger.Error("data node: the control plane answers 404 to this node: is NODE_CONTROL_PLANE_URL a proxied host, or the registry address not this box's?",
+				zap.String("control_plane", n.cfg.ControlPlaneURL))
+			return
+		}
+	} else {
+		n.not404s = 0
+	}
+	n.logger.Warn("data node: heartbeat not taken", zap.Error(err))
+}
+
 // heartbeat tells the control plane the node is up, every 30 s until ctx
 // ends.
 func (n *Node) heartbeat(ctx context.Context) {
-	beat := func() {
-		hb := dataplane.Heartbeat{Version: n.version, BuildSHA: n.version, Load: float64(runtime.NumGoroutine()), InFlight: n.inFlight.Load()}
-		if err := n.cp.Heartbeat(ctx, hb); err != nil {
-			n.logger.Warn("data node: heartbeat not taken", zap.Error(err))
-		}
-	}
-	beat()
+	n.beat(ctx)
 	t := time.NewTicker(heartbeatEvery)
 	defer t.Stop()
 	for {
@@ -363,20 +534,40 @@ func (n *Node) heartbeat(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			beat()
+			n.beat(ctx)
 		}
 	}
 }
 
 // Serve runs the node until ctx ends, then drains for up to 30 s.
 func (n *Node) Serve(ctx context.Context) error {
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", n.cfg.Port), Handler: n.router, ReadHeaderTimeout: 30 * time.Second}
+	srv := &http.Server{Addr: net.JoinHostPort(n.cfg.Bind, strconv.Itoa(n.cfg.Port)), Handler: n.router,
+		ReadHeaderTimeout: 30 * time.Second, TLSConfig: n.tlsConfig}
+	servers := []*http.Server{srv}
 	hctx, stop := context.WithCancel(ctx)
 	defer stop()
 	go n.heartbeat(hctx)
-	errc := make(chan error, 1)
-	go func() { errc <- srv.ListenAndServe() }()
-	n.logger.Info("data node: serving", zap.Int("port", n.cfg.Port), zap.String("public_host", n.cfg.PublicHost),
+	errc := make(chan error, 3)
+	go func() {
+		if n.tlsConfig != nil {
+			errc <- srv.ListenAndServeTLS("", "")
+			return
+		}
+		errc <- srv.ListenAndServe()
+	}()
+	if n.acmeHTTP != nil {
+		// The HTTP-01 answer (and a redirect to https for anything else).
+		acme := &http.Server{Addr: net.JoinHostPort(n.cfg.Bind, "80"), Handler: n.acmeHTTP, ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, acme)
+		go func() { errc <- acme.ListenAndServe() }()
+	}
+	if n.cfg.MetricsAddr != "" {
+		ms := &http.Server{Addr: n.cfg.MetricsAddr, Handler: n.MetricsHandler(), ReadHeaderTimeout: 10 * time.Second}
+		servers = append(servers, ms)
+		go func() { errc <- ms.ListenAndServe() }()
+	}
+	n.logger.Info("data node: serving", zap.Int("port", n.cfg.Port), zap.String("bind", n.cfg.Bind), zap.Bool("tls", n.tlsConfig != nil),
+		zap.Bool("acme", n.acmeHTTP != nil), zap.String("metrics", n.cfg.MetricsAddr), zap.String("public_host", n.cfg.PublicHost),
 		zap.String("control_plane", n.cfg.ControlPlaneURL), zap.String("version", n.version))
 	select {
 	case err := <-errc:
@@ -385,8 +576,10 @@ func (n *Node) Serve(ctx context.Context) error {
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	for _, s := range servers {
+		if err := s.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
 	}
 	return nil
 }

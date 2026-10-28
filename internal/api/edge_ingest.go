@@ -1289,6 +1289,15 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	deleteAfter := func() { s.edgeDeleteBlob(ctx, row) }
 	if req.Outcome != edgeOutcomeOK {
 		switch {
+		case req.Outcome == edgeOutcomeChecksumMismatch:
+			// The host decoded the aws-chunked body beside the backend and
+			// its trailer is not the body's (host=slc, RP74-4): the client's
+			// 400, the blob the backend took removed.
+			state, n, _ := fail(ErrXAmzContentChecksumMismatch)
+			if row.Op == edgeOpPut {
+				return state, n, deleteAfter
+			}
+			return state, n, nil
 		case req.Outcome == edgeOutcomeBackendError && req.BackendStatus == http.StatusBadRequest &&
 			(req.BackendCode == "BadDigest" || req.BackendCode == "InvalidDigest"):
 			// The client's own Content-MD5 did not match its body: the

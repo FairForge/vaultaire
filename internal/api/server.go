@@ -30,6 +30,7 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	dashmw "github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -202,6 +203,9 @@ type Server struct {
 	// dataPlaneTransport, when set, is the transport host=slc reaches the
 	// backends' links with (the tests' fake backend); nil = the default.
 	dataPlaneTransport http.RoundTripper
+	// slcHostV is host=slc's data-plane host, built once (slcHost).
+	slcHostV    *dataplane.Host
+	slcHostOnce sync.Once
 	// edgeReaper is the edge_admit_reaper job (edge_reaper.go).
 	edgeReaper *EdgeAdmitReaper
 	// s3Fallback replaces the S3 catch-all in tests of routes that hand a

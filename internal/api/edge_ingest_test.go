@@ -830,6 +830,23 @@ func TestEdgeRoutes_NeverCapturedByTheS3Gate(t *testing.T) {
 	w2 := serve(srv.httpServer.Handler, r2)
 	assert.Equal(t, http.StatusTeapot, w2.Code)
 	assert.Equal(t, []string{"POST stored.test/api/v1/edge/admit"}, *hits)
+
+	// RP74-1: a node's control-plane URL is a DNS-only origin — s3.stored.ge
+	// today — so the four edge routes must answer on an s3. host too, never
+	// captured by the S3 gate (which owns every other request there).
+	*hits = nil
+	for _, path := range []string{"/api/v1/edge/admit", "/api/v1/edge/commit", "/api/v1/edge/index", "/api/v1/edge/heartbeat"} {
+		rs := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		rs.Host = "s3.stored.test"
+		rs.Header.Set(edgeTokenHeader, edgeTestToken)
+		ws := serve(srv.httpServer.Handler, rs)
+		assert.NotEqual(t, http.StatusTeapot, ws.Code, path)
+		assert.Empty(t, *hits, "%s on the s3. host is the edge route's, never the S3 API's", path)
+	}
+	// And the gate still takes a signed call there.
+	rs := sigV4Signed(t, http.MethodPost, "s3.stored.test", "/api/v1/edge/admit")
+	rs.Header.Set(edgeTokenHeader, edgeTestToken)
+	assert.Equal(t, http.StatusTeapot, serve(srv.httpServer.Handler, rs).Code)
 }
 
 // --- the admit ---

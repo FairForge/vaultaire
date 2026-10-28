@@ -9,10 +9,13 @@ package api
 // token is acknowledged and changes nothing.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -51,6 +54,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeEdgeJSON(w, http.StatusInternalServerError, map[string]string{"error": "not_recorded"})
 		return
 	}
-	s.dataPlaneHosts().invalidate()
+	sum := sha256.Sum256([]byte(r.Header.Get(edgeTokenHeader)))
+	s.dataPlaneHosts().touch(hex.EncodeToString(sum[:]), health, time.Now())
 	writeEdgeJSON(w, http.StatusOK, map[string]string{"host": host.Name, "health": health})
 }

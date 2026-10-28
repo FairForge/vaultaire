@@ -74,6 +74,10 @@ func init() {
 		}
 	}
 	objectIntegrityUnverified.WithLabelValues(integrityPathEdge, "unverified")
+	// host=slc verifies a whole edge read (RP74-4): its failures too.
+	for _, r := range []string{"md5", "size"} {
+		objectIntegrityFailures.WithLabelValues(integrityPathEdge, r)
+	}
 }
 
 var (

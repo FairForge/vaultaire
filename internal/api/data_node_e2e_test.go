@@ -32,7 +32,7 @@ func TestDataNode_EndToEndThroughTheControlPlanesRoutes(t *testing.T) {
 	defer cp.Close()
 	host, token := f.registerNode("127.0.0.1", "", "down")
 
-	env := map[string]string{"NODE_CONTROL_PLANE_URL": cp.URL, "NODE_TOKEN": token, "NODE_PUBLIC_HOST": host}
+	env := map[string]string{"NODE_CONTROL_PLANE_URL": cp.URL, "NODE_TOKEN": token, "NODE_PUBLIC_HOST": host, "NODE_BIND": "127.0.0.1"}
 	n, err := node.Build(func(k string) string { return env[k] }, os.ReadFile, "e2e", zap.NewNop())
 	require.NoError(t, err)
 	n.SetBackendTransport(f.drv)
@@ -67,4 +67,14 @@ func TestDataNode_EndToEndThroughTheControlPlanesRoutes(t *testing.T) {
 	got, _ := io.ReadAll(w.Body)
 	assert.True(t, bytes.Equal(body, got), "the bytes, through the node")
 	assert.Equal(t, `"`+h.etag+`"`, w.Header().Get("ETag"), "under the origin's headers")
+}
+
+// RP74-9: the node 404s the origin's web and API paths by their FIRST
+// segment, from a list that must cover the router's reserved bucket names
+// (the router derives them; the node cannot build the router).
+func TestNodeReservedSegments_AreTheRoutersReservedNames(t *testing.T) {
+	srv, _ := gateServer(t, prodTodayHosts)
+	for _, name := range srv.reservedBucketNameList() {
+		assert.True(t, node.ReservedSegments[name], "the router reserves %q: the node must 404 it", name)
+	}
 }
