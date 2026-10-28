@@ -27,7 +27,7 @@ import (
 
 // slcHost is the origin's data-plane host over its in-process control plane.
 func (s *Server) slcHost() *dataplane.Host {
-	client := &http.Client{}
+	client := dataplane.NewBackendClient(dataplane.BackendAnswerTimeout)
 	if s.dataPlaneTransport != nil {
 		client.Transport = s.dataPlaneTransport
 	}
