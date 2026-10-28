@@ -203,6 +203,11 @@ type Server struct {
 	// dataPlaneTransport, when set, is the transport host=slc reaches the
 	// backends' links with (the tests' fake backend); nil = the default.
 	dataPlaneTransport http.RoundTripper
+	// blobCopies is the blob_copies job (WP-EDGE-4).
+	blobCopies *BlobCopiesJob
+	// mirrorLegs is MIRROR_LEGS (WP-EDGE-4): the edge mirror's legs in
+	// preference order.
+	mirrorLegs []string
 	// slcHostV is host=slc's data-plane host, built once (slcHost).
 	slcHostV    *dataplane.Host
 	slcHostOnce sync.Once
@@ -493,6 +498,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// The retired_blobs collector (WP-R2-1 Part C): the one deleter of
 	// displaced whole-object blobs.
 	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, s.gci, logger)
+	s.blobCopies = newBlobCopiesJob(s)
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
 	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,
@@ -657,6 +663,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
 	s.chunkPutBudget = newChunkPutBudget(chunkPutBudgetFromEnv(os.Getenv, debug.SetMemoryLimit(-1), logger))
+	s.mirrorLegs = mirrorLegsFromEnv(os.Getenv, logger)
 	chunkPutBudgetSize.Set(float64(s.chunkPutBudget.limit()))
 
 	// Retention (Review R13-14): nightly prune of the log tables; started in

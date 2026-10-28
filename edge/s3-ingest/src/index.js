@@ -39,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { ISOLATE_BYTES, isolateBudget, runCodec, s3ErrorXML, setIsolateBudget } from "./codec.js";
+import { ISOLATE_BYTES, isolateBudget, putTwo, runCodec, s3ErrorXML, setIsolateBudget } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -191,6 +191,13 @@ export function readFetchInit(admit) {
   return { method: "GET", headers: admit.send_headers || {}, cache: "no-store" };
 }
 
+/** mirrorReadInit is the read subrequest of the mirror leg's link (0.5.0,
+ * WP-EDGE-4): its own signed headers (no If-Match — the copy's ETag may be
+ * another backend's), never cached. */
+export function mirrorReadInit(admit) {
+  return { method: "GET", headers: admit.mirror_send_headers || admit.send_headers || {}, cache: "no-store" };
+}
+
 /**
  * readCommit is the commit body of a read, decided AT THE BACKEND'S
  * HEADERS: the Worker cannot see the end of a stream it does not touch, so
@@ -339,7 +346,20 @@ async function moveBody(request, admit) {
   const started = Date.now();
   const result = { outcome: "edge_error", backend_status: 0, backend_code: "", backend_etag: "" };
   try {
-    const resp = await fetch(admit.url, moveInit(request, admit));
+    let resp;
+    const mirrored = Array.isArray(admit.urls) && admit.urls.length === 2 && !admit.headers;
+    if (mirrored) {
+      // 0.5.0 (WP-EDGE-4): the body teed to the placement's link and the
+      // mirror leg's (the same signed headers); the mirror's ETag rides the
+      // commit, its failure only leaves the copy to the blob_copies job.
+      const n = Number(admit.send_headers?.["content-length"] || request.headers.get("content-length") || 0);
+      const two = await putTwo(fetch, admit.urls, moveInit(request, admit), n);
+      resp = two.resp;
+      result.backend_etags = [resp.headers.get("etag") || ""];
+      if (two.mirrorETag) result.backend_etags.push(two.mirrorETag);
+    } else {
+      resp = await fetch(admit.url, moveInit(request, admit));
+    }
     result.backend_status = resp.status;
     result.backend_etag = resp.headers.get("etag") || "";
     if (resp.ok) {
@@ -396,7 +416,28 @@ async function serveRead(request, env, ctx, admit, requestId) {
   } catch (e) {
     error = e;
   }
-  const commit = readCommit(admit, backend, error, started);
+  let commit = readCommit(admit, backend, error, started);
+  if (commit.outcome !== "served" && Array.isArray(admit.urls) && admit.urls.length === 2) {
+    // 0.5.0 (WP-EDGE-4): the primary did not answer as admitted — the
+    // mirror leg's copy before the origin.
+    if (backend) await backend.body?.cancel();
+    let second = null;
+    let err2 = null;
+    try {
+      second = await fetch(admit.urls[1], mirrorReadInit(admit));
+    } catch (e) {
+      err2 = e;
+    }
+    const c2 = readCommit(admit, second, err2, started);
+    if (c2.outcome === "served") {
+      c2.served_url = 1;
+      commit = c2;
+      backend = second;
+    } else if (second) {
+      await second.body?.cancel();
+      backend = null;
+    }
+  }
   ctx.waitUntil(commitRead(env, commit, requestId));
   console.log(JSON.stringify({ edge: "get", request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, bytes: commit.backend_content_length, ms: commit.duration_ms }));
   if (commit.outcome !== "served") {

@@ -288,6 +288,52 @@ export function chunkPutInit(headers, sealed) {
   return { method: "PUT", headers: h, body: sealed.stream, duplex: "half" };
 }
 
+// --- the mirror (0.5.0, WP-EDGE-4) ----------------------------------------------
+
+/** The mirror's pace: it is cut loose when it has not answered within
+ * MIRROR_GRACE_MS plus the body at MIRROR_MIN_RATE (D-EDGE-46). */
+const MIRROR_GRACE_MS = 30_000;
+const MIRROR_MIN_RATE = 2 << 20;
+
+/** mirrorDeadlineMs is how long a mirror PUT of n bytes may take. */
+export function mirrorDeadlineMs(n) {
+  return MIRROR_GRACE_MS + Math.ceil((n / MIRROR_MIN_RATE) * 1000);
+}
+
+/**
+ * putTwo sends one body to two links — the placement's (urls[0]) and the
+ * mirror leg's (urls[1]) — with the runtime's own tee(): no JavaScript
+ * reads the bytes, and workerd paces the faster branch to the slower one
+ * (Step 0.1: a 1 GiB body teed to a 20 MB/s leg held ≤ 44 MiB). The
+ * primary decides the write; the mirror is aborted past its deadline (its
+ * branch cancelled, the primary goes on alone) or when the primary fails,
+ * and its failure is only a missing ETag — the copy is then the
+ * blob_copies job's. → {resp (the primary's), mirrorETag ("" = not stored)}
+ */
+export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadlineMs(n)) {
+  const [a, b] = init.body.tee();
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error("the mirror leg fell behind")), deadlineMs);
+  const mirror = doFetch(urls[1], { ...init, body: b, signal: ac.signal }).then(async (r) => {
+    const etag = r.ok ? r.headers.get("etag") || "" : "";
+    await r.body?.cancel();
+    return etag;
+  }, async () => {
+    await b.cancel().catch(() => {});
+    return "";
+  });
+  try {
+    const resp = await doFetch(urls[0], { ...init, body: a });
+    return { resp, mirrorETag: await mirror };
+  } catch (e) {
+    ac.abort(e);
+    await mirror;
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function val(r, what) {
   if (r && r.error !== undefined) throw new Error(`${what}: ${r.error}`);
   return r.value;
@@ -398,13 +444,21 @@ export async function runCodec(request, admit, env, ctx, deps) {
         it.chunk = null; // the segments now live in the sealing stream only
         const sealed = await sealChunkStream(e2ee, pub, version, segments, { onSegment: give });
         if (sealed.length !== m.sealed_length) throw new Error(`edge codec: sealed ${sealed.length} bytes, the link signs ${m.sealed_length}`);
-        const resp = await doFetch(m.url, chunkPutInit(m.send_headers || {}, sealed));
+        let resp;
+        let mirrorETag = "";
+        if (Array.isArray(m.urls) && m.urls.length === 2) {
+          // WP-EDGE-4: the same sealed bytes to the mirror leg too.
+          ({ resp, mirrorETag } = await putTwo(doFetch, m.urls, chunkPutInit(m.send_headers || {}, sealed), sealed.length));
+        } else {
+          resp = await doFetch(m.url, chunkPutInit(m.send_headers || {}, sealed));
+        }
         const etag = resp.headers.get("etag") || "";
         await resp.body?.cancel();
         if (!resp.ok) throw new Error(`chunk PUT answered ${resp.status}`);
         e.status = "stored";
         e.sealed_size = sealed.length;
         e.backend_etag = tamper === "etag" ? `"${"ab".repeat(16)}"` : etag; // TEST ONLY
+        if (Array.isArray(m.urls) && m.urls.length === 2) e.backend_etags = mirrorETag ? [e.backend_etag, mirrorETag] : [e.backend_etag];
         stats.misses++;
         stats.sealed += sealed.length;
       } finally {

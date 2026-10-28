@@ -266,7 +266,24 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 			breq.Body = http.NoBody
 		}
 		var resp *http.Response
-		resp, err = h.client().Do(breq)
+		mirrored := len(admit.URLs) == 2 && admit.Headers == nil
+		if mirrored {
+			// WP-EDGE-4: the body teed into the placement's link and the
+			// mirror leg's (the same signed headers); the mirror's ETag rides
+			// the commit, its failure only makes the copy the job's.
+			var mirrorETag string
+			resp, mirrorETag, err = putTwo(ctx, h.client(), method,
+				[2]putPair{{URL: admit.URLs[0], Headers: admit.SendHeaders}, {URL: admit.URLs[1], Headers: admit.SendHeaders}},
+				breq.ContentLength, body)
+			if err == nil {
+				commit.BackendETags = []string{resp.Header.Get("ETag")}
+				if mirrorETag != "" {
+					commit.BackendETags = append(commit.BackendETags, mirrorETag)
+				}
+			}
+		} else {
+			resp, err = h.client().Do(breq)
+		}
 		if err == nil {
 			commit.BackendStatus = resp.StatusCode
 			commit.BackendETag = resp.Header.Get("ETag")
@@ -503,7 +520,7 @@ func (h *Host) storeBatch(ctx context.Context, admit AdmitResponse, batch []code
 		go func(it codecItem, m IndexMiss) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			etag, sealed, err := h.SealAndStore(ctx, admit.Codec, it.chunk, m)
+			etag, mirrorETag, sealed, err := h.SealAndStoreMirrored(ctx, admit.Codec, it.chunk, m)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -513,6 +530,12 @@ func (h *Host) storeBatch(ctx context.Context, admit AdmitResponse, batch []code
 				return
 			}
 			entries[it.idx].Status, entries[it.idx].SealedSize, entries[it.idx].BackendETag = "stored", sealed, etag
+			if len(m.URLs) == 2 {
+				entries[it.idx].BackendETags = []string{etag}
+				if mirrorETag != "" {
+					entries[it.idx].BackendETags = append(entries[it.idx].BackendETags, mirrorETag)
+				}
+			}
 		}(it, m)
 	}
 	wg.Wait()
@@ -527,48 +550,70 @@ func (h *Host) storeBatch(ctx context.Context, admit AdmitResponse, batch []code
 // replayable (D-EDGE-45, the drivers' FIXED_BUCKET_PUT_TIMEOUT rule); a
 // backend's answer, whatever its status, is never retried.
 func (h *Host) SealAndStore(ctx context.Context, grant *CodecGrant, c crypto.Chunk, m IndexMiss) (string, int64, error) {
-	etag, n, answered, err := h.sealAndPut(ctx, h.client(), grant, c, m)
-	if err == nil || answered || ctx.Err() != nil {
-		return etag, n, err
-	}
-	h.log().Warn("data plane: a chunk PUT got no answer — retrying once on a fresh connection", zap.Error(err))
-	etag, n, _, rerr := h.sealAndPut(ctx, h.freshClient(), grant, c, m)
-	if rerr != nil {
-		return "", 0, fmt.Errorf("after one retry on a fresh connection: %w", rerr)
-	}
-	return etag, n, nil
+	etag, _, n, err := h.SealAndStoreMirrored(ctx, grant, c, m)
+	return etag, n, err
 }
 
-// sealAndPut is one attempt; answered says the backend answered (a status).
-func (h *Host) sealAndPut(ctx context.Context, client *http.Client, grant *CodecGrant, c crypto.Chunk, m IndexMiss) (string, int64, bool, error) {
+// SealAndStoreMirrored is SealAndStore for a miss with a mirror link too
+// (WP-EDGE-4): the sealed bytes teed into both PUTs; mirrorETag is the
+// leg's answer ("" when it did not store them — the copy is the job's).
+// The retry on a fresh connection is the primary's alone.
+func (h *Host) SealAndStoreMirrored(ctx context.Context, grant *CodecGrant, c crypto.Chunk, m IndexMiss) (string, string, int64, error) {
+	mirror := ""
+	if len(m.URLs) == 2 {
+		mirror = m.URLs[1]
+	}
+	etag, mirrorETag, n, answered, err := h.sealAndPut(ctx, h.client(), grant, c, m, mirror)
+	if err == nil || answered || ctx.Err() != nil {
+		return etag, mirrorETag, n, err
+	}
+	h.log().Warn("data plane: a chunk PUT got no answer — retrying once on a fresh connection", zap.Error(err))
+	etag, _, n, _, rerr := h.sealAndPut(ctx, h.freshClient(), grant, c, m, "")
+	if rerr != nil {
+		return "", "", 0, fmt.Errorf("after one retry on a fresh connection: %w", rerr)
+	}
+	return etag, "", n, nil
+}
+
+// sealAndPut is one attempt (to mirror too when it is a link); answered
+// says the primary answered (a status).
+func (h *Host) sealAndPut(ctx context.Context, client *http.Client, grant *CodecGrant, c crypto.Chunk, m IndexMiss, mirror string) (string, string, int64, bool, error) {
 	sealed, err := crypto.SealWrappedChunk(grant.KEMPublicKey, grant.Version, bytes.NewReader(c.Data), int64(c.Size))
 	if err != nil {
-		return "", 0, true, fmt.Errorf("seal: %w", err)
+		return "", "", 0, true, fmt.Errorf("seal: %w", err)
 	}
 	n := crypto.WrappedChunkSealedLength(int64(c.Size))
 	if m.SealedLength != 0 && m.SealedLength != n {
-		return "", 0, true, fmt.Errorf("sealed %d bytes, the link signs %d", n, m.SealedLength)
+		return "", "", 0, true, fmt.Errorf("sealed %d bytes, the link signs %d", n, m.SealedLength)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, m.URL, sealed)
-	if err != nil {
-		return "", 0, true, err
-	}
-	for k, v := range m.SendHeaders {
-		if k != "content-length" {
-			req.Header.Set(k, v)
+	var resp *http.Response
+	mirrorETag := ""
+	if mirror != "" {
+		resp, mirrorETag, err = putTwo(ctx, client, http.MethodPut,
+			[2]putPair{{URL: m.URL, Headers: m.SendHeaders}, {URL: mirror, Headers: m.SendHeaders}}, n, sealed)
+	} else {
+		var req *http.Request
+		req, err = http.NewRequestWithContext(ctx, http.MethodPut, m.URL, sealed)
+		if err != nil {
+			return "", "", 0, true, err
 		}
+		for k, v := range m.SendHeaders {
+			if k != "content-length" {
+				req.Header.Set(k, v)
+			}
+		}
+		req.ContentLength = n
+		resp, err = client.Do(req)
 	}
-	req.ContentLength = n
-	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, false, fmt.Errorf("chunk PUT: %w", err)
+		return "", "", 0, false, fmt.Errorf("chunk PUT: %w", err)
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, true, fmt.Errorf("chunk PUT answered %d", resp.StatusCode)
+		return "", "", 0, true, fmt.Errorf("chunk PUT answered %d", resp.StatusCode)
 	}
-	return resp.Header.Get("ETag"), n, true, nil
+	return resp.Header.Get("ETag"), mirrorETag, n, true, nil
 }
 
 // freshClient never reuses a connection (the retry's): the host's
@@ -671,6 +716,32 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 	verify := h.Verify != nil && h.Verify.WholeRead != nil && admit.BodyMD5 != "" && admit.ContentLength > 0 &&
 		(admit.Status == http.StatusOK || admit.Status == 0 && admit.ExpectStatus == http.StatusOK)
 	commit.Verified = verify && commit.Outcome == OutcomeServed
+	if commit.Outcome != OutcomeServed && len(admit.URLs) == 2 {
+		// WP-EDGE-4: the primary did not answer as admitted — the mirror
+		// leg's copy before the origin.
+		if resp != nil {
+			_ = resp.Body.Close()
+			resp = nil
+		}
+		hdrs := admit.MirrorSendHeaders
+		if hdrs == nil {
+			hdrs = admit.SendHeaders
+		}
+		if mreq, mErr := http.NewRequestWithContext(ctx, http.MethodGet, admit.URLs[1], nil); mErr == nil {
+			for k, v := range hdrs {
+				mreq.Header.Set(k, v)
+			}
+			if mresp, mErr := h.client().Do(mreq); mErr == nil {
+				if mresp.StatusCode == admit.ExpectStatus && (mresp.ContentLength < 0 || admit.ContentLength <= 0 || mresp.ContentLength == admit.ContentLength) {
+					resp = mresp
+					commit.Outcome, commit.ServedURL, commit.BackendStatus = OutcomeServed, 1, mresp.StatusCode
+					commit.BackendContentLength = max(mresp.ContentLength, 0)
+				} else {
+					_ = mresp.Body.Close()
+				}
+			}
+		}
+	}
 	commit.DurationMS = time.Since(started).Milliseconds()
 	// The commit at the backend's headers (served meters the backend's
 	// Content-Length; fallback and error meter nothing — the caller serves).

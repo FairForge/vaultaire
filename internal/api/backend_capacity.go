@@ -65,7 +65,10 @@ type BackendBytes struct {
 	Parity int64 `json:"parity,omitempty"`
 	// Packs: live pack files (the pack store).
 	Packs int64 `json:"packs,omitempty"`
-	Total int64 `json:"total"`
+	// Copies: mirror copies on this leg (blob_copies ready or stale —
+	// WP-EDGE-4; a pending copy is owed, not held).
+	Copies int64 `json:"copies,omitempty"`
+	Total  int64 `json:"total"`
 }
 
 // VendorView is what the vendor's own API says: idrive through the Reseller
@@ -196,6 +199,8 @@ var backendCapacitySums = []kindSum{
 		       GROUP BY leg`},
 	{name: "packs", add: func(b *BackendBytes, v int64) { b.Packs = v },
 		sql: `SELECT backend, COALESCE(SUM(size), 0) FROM packs WHERE retired_at IS NULL GROUP BY backend`},
+	{name: "copies", add: func(b *BackendBytes, v int64) { b.Copies = v },
+		sql: `SELECT leg, COALESCE(SUM(size), 0) FROM blob_copies WHERE state IN ('ready', 'stale') GROUP BY leg`},
 }
 
 // multipartHoldingsSQL: active uploads' reserved bytes (091) — attributed
@@ -249,7 +254,7 @@ func (r *BackendCapacityRunner) RunOnce(ctx context.Context) (BackendCapacityRes
 		}
 	}
 	for _, b := range res.Backends {
-		b.Total = b.Objects + b.Versions + b.Chunks + b.Multipart + b.Parity + b.Packs
+		b.Total = b.Objects + b.Versions + b.Chunks + b.Multipart + b.Parity + b.Packs + b.Copies
 	}
 	rows, err := r.db.QueryContext(ctx, retiredBlobRowsSQL)
 	if err != nil {

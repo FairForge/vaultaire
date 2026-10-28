@@ -55,6 +55,7 @@ var exportExcludedTables = map[string]string{
 	"tenant_chunk_refs":    "chunk references of a deduplicated object; `objects` carries the object",
 	"smart_demotions":      "Smart-tier placement ledger; the class the customer sees is in `objects`",
 	"edge_admits":          "transient admission rows of writes streamed through the edge (109, WP-EDGE-1): the admit-to-commit bookkeeping of a request; the object itself is in `objects`",
+	"blob_copies":          "second copies of the customer's own blobs on a mirror leg (113, WP-EDGE-4): the export lists every object once, from its head row; a copy is the same bytes at the same address on another backend",
 	"data_plane_hosts":     "the registry of data-plane hosts (112, WP-EDGE-3): a tenant-scoped row is the hostname and IP of the customer's own node, which the customer gave us and holds; no object data, and its token is a hash (never exported)",
 	"sia_promotions":       "promoted copies of Sia objects on the primary (101): a cache of an object already in `objects`",
 	"vault_parity":         "the parity copy's placement ledger (WP-VAULT-1): where the engine keeps a second copy of an object already in `objects`",

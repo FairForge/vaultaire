@@ -133,6 +133,17 @@ const (
 	// while a tenant has no key version. Flipped after the F-14 ceremony.
 	flagStandardSealedDefault = "standard_sealed_default"
 
+	// flagEdgeMirror gives a tenant's edge writes a SECOND copy (WP-EDGE-4,
+	// plan 40.10 slice 3): the write admit answers two links — the
+	// placement's backend and the first registered leg of MIRROR_LEGS that
+	// is not it — the host sends the body to both, the commit records the
+	// copy in blob_copies (pending when the mirror PUT failed: the
+	// blob_copies job writes it); a codec write mirrors its stored chunks;
+	// the blob_copies job also copies the tenant's other objects (origin
+	// writes, multipart uploads, everything written before) and a read
+	// falls back to the mirror before the origin. Default OFF, per tenant.
+	flagEdgeMirror = "edge_mirror"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -166,6 +177,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEdgeIngest, false)
 	fl.Register(flagEdgeCodec, false)
 	fl.Register(flagDataPlaneSLC, false)
+	fl.Register(flagEdgeMirror, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")

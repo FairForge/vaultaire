@@ -285,6 +285,16 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		}
 	}
 
+	// WP-EDGE-4: a ready mirror copy of the blob is the second link — the
+	// host tries it when the primary does not answer as admitted, before
+	// the origin. The exact span, no If-Match (the copy's ETag may be its
+	// own backend's); a windowed read keeps one link.
+	var mirrorURL, mirrorLeg string
+	var mirrorHeaders map[string]string
+	if window == nil {
+		mirrorURL, mirrorLeg, mirrorHeaders = s.edgeMirrorReadLink(sctx, tenantID, container, blob, rangeValue)
+	}
+
 	// The ORIGIN's response headers (object_headers.go, the one writer),
 	// built exactly as HandleGet builds them.
 	contentType := row.contentType
@@ -319,7 +329,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	// to every link (a Range always); the client's status is the origin's.
 	admit := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpGet, Backend: row.backend, StorageKey: blob,
 		ContentLength: length, ContentType: contentType, Floor: row.floor, ClientIP: req.ClientIP, RequestID: req.RequestID,
-		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), Status: status}}
+		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), Status: status, MirrorLeg: mirrorLeg}}
 	if admit.ID, err = newEdgeAdmitID(); err != nil {
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
@@ -337,9 +347,44 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	if unverifiedReason(bodyMD5) != "" {
 		bodyMD5 = ""
 	}
-	return edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
+	resp := edgeAdmitResponse{Edge: true, AdmitID: admit.ID, URL: presigned, Method: http.MethodGet, SendHeaders: sendHeaders,
 		ExpectStatus: http.StatusPartialContent, Status: status, ResponseHeaders: responseHeaders, Backend: row.backend, StorageKey: blob,
-		ContentLength: length, BodyMD5: bodyMD5, Window: window, ExpiresAt: &admit.ExpiresAt}, http.StatusOK
+		ContentLength: length, BodyMD5: bodyMD5, Window: window, ExpiresAt: &admit.ExpiresAt}
+	if mirrorURL != "" {
+		resp.URLs, resp.MirrorSendHeaders = []string{presigned, mirrorURL}, mirrorHeaders
+	}
+	return resp, http.StatusOK
+}
+
+// edgeMirrorReadLink is the read link of a READY mirror copy of the blob
+// (WP-EDGE-4): its URL, its leg and the headers it signs; "" when there is
+// none or its leg cannot be asked.
+func (s *Server) edgeMirrorReadLink(ctx context.Context, tenantID, container, blob, rangeValue string) (string, string, map[string]string) {
+	var leg string
+	err := s.db.QueryRowContext(ctx, `SELECT leg FROM blob_copies
+		WHERE tenant_id = $1 AND storage_key = $2 AND kind = 'mirror' AND state = 'ready' AND bucket <> '' LIMIT 1`, tenantID, blob).Scan(&leg)
+	if err != nil {
+		return "", "", nil
+	}
+	ew, err := s.edgeWriterFor(leg)
+	if err != nil {
+		return "", "", nil
+	}
+	u, signed, err := ew.PresignGet(ctx, container, blob, engine.EdgePresign{Range: rangeValue, TTL: edgeAdmitTTL})
+	if err != nil || edgePresignSigns(u, "range") != nil {
+		return "", "", nil
+	}
+	headers := map[string]string{}
+	for _, name := range signed {
+		switch name {
+		case "range":
+			headers["range"] = rangeValue
+		case "host", "if-match":
+		default:
+			return "", "", nil
+		}
+	}
+	return u, leg, headers
 }
 
 // The windowed reader (D-EDGE-32, the SPEED bench § 4): a read of at least
@@ -472,7 +517,14 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 		}
 		s.recordEdgeAccess(row, status, 0, n)
 		if s.engine != nil {
-			s.engine.RecordReadOutcome(row.Backend, nil)
+			if req.ServedURL == 1 && row.Attrs.MirrorLeg != "" {
+				// The primary did not answer as admitted and the mirror leg
+				// served (WP-EDGE-4): the leg's success, the read counted.
+				s.engine.RecordReadOutcome(row.Attrs.MirrorLeg, nil)
+				blobCopiesReads.WithLabelValues("served_mirror").Inc()
+			} else {
+				s.engine.RecordReadOutcome(row.Backend, nil)
+			}
 		}
 		s.logger.Info("artifact retrieved", zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 			zap.String("backend", row.Backend), zap.Int64("bytes", n), zap.String("host", row.Host))

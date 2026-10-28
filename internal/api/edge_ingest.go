@@ -152,6 +152,10 @@ type edgeAdmitAttrs struct {
 	// the blob, and the upload's Complete the assembled object, against the
 	// admitted size.
 	CheckLength bool `json:"check_length,omitempty"`
+	// MirrorLeg (WP-EDGE-4): the leg this write is mirrored to, decided
+	// once at the admit — the index's second links and the commit's copy
+	// rows name it. "" = not mirrored.
+	MirrorLeg string `json:"mirror_leg,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -827,6 +831,11 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 			s.logger.Error("edge admit: the header-signed request does not sign what it must — refused", zap.Error(cErr), zap.String("backend", backend))
 			return edgeAdmitResponse{}, http.StatusInternalServerError
 		}
+		if req.Op == edgeOpPut {
+			// An aws-chunked PUT is signed for one backend: its mirror is the
+			// blob_copies job's (pending at the commit).
+			row.Attrs.MirrorLeg = s.mirrorFor(tenantID, backend)
+		}
 		return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
 			Headers: streamHeaders, StreamingTrailer: stream.Trailer, ContentLength: size, Backend: backend,
 			Expect: &edgeExpect{MD5: contentMD5 != ""}, Unverified: !streamProps.VerifiesTrailer && contentMD5 == ""})
@@ -858,8 +867,49 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		}
 	}
 
-	return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
-		SendHeaders: sendHeaders, Backend: backend, Expect: &edgeExpect{MD5: contentMD5 != ""}})
+	resp := edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
+		SendHeaders: sendHeaders, Backend: backend, Expect: &edgeExpect{MD5: contentMD5 != ""}}
+	if req.Op == edgeOpPut {
+		// WP-EDGE-4: a mirrored PUT gets the leg's link beside the
+		// placement's, signing the same headers (the host sends one set);
+		// a leg that cannot sign it is the blob_copies job's copy.
+		if leg := s.mirrorFor(tenantID, backend); leg != "" {
+			row.Attrs.MirrorLeg = leg
+			if murl, msigned, mErr := s.presignMirrorPut(sctx, leg, container, row.StorageKey,
+				engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType, TTL: edgeAdmitTTL}); mErr == nil && sameHeaderSet(signed, msigned) {
+				resp.URLs = []string{presigned, murl}
+			} else if mErr != nil {
+				s.logger.Warn("edge admit: the mirror leg could not sign — the copy is the blob_copies job's", zap.Error(mErr), zap.String("leg", leg))
+			}
+		}
+	}
+	return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, resp)
+}
+
+// presignMirrorPut signs a PUT of the same address on the mirror leg.
+func (s *Server) presignMirrorPut(ctx context.Context, leg, container, storageKey string, p engine.EdgePresign) (string, []string, error) {
+	ew, err := s.edgeWriterFor(leg)
+	if err != nil {
+		return "", nil, err
+	}
+	return ew.PresignPut(ctx, container, storageKey, p)
+}
+
+// sameHeaderSet: two links sign the same headers.
+func sameHeaderSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := map[string]bool{}
+	for _, h := range a {
+		set[strings.ToLower(h)] = true
+	}
+	for _, h := range b {
+		if !set[strings.ToLower(h)] {
+			return false
+		}
+	}
+	return true
 }
 
 // recordEdgeWriteAdmit writes the admit row of a write admitted for the
@@ -1226,7 +1276,7 @@ func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitR
 			// committed are the chunk orphan sweep's, WP-EDGE-2).
 			s.dropEdgeCodecClaims(context.WithoutCancel(ctx), row)
 		case row.Op == edgeOpPut:
-			retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+			s.queueEdgePutOrphans(ctx, row)
 		}
 	}
 	_, _ = tx.ExecContext(ctx, `UPDATE edge_admits SET state = 'expired', finished_at = NOW() WHERE id = $1`, row.ID)
@@ -1246,7 +1296,17 @@ func (s *Server) edgeDeleteBlob(ctx context.Context, row edgeAdmitRow) {
 				zap.Error(err), zap.String("backend", row.Backend), zap.String("storage_key", row.StorageKey))
 		}
 	}
+	s.queueEdgePutOrphans(ctx, row)
+}
+
+// queueEdgePutOrphans queues an uncommitted PUT's address for the collector
+// on its backend and — mirrored (WP-EDGE-4) — on the mirror leg, which the
+// host may have written too.
+func (s *Server) queueEdgePutOrphans(ctx context.Context, row edgeAdmitRow) {
 	retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+	if row.Attrs.MirrorLeg != "" {
+		retireOrphanWrite(ctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Attrs.MirrorLeg)
+	}
 }
 
 // settleEdgeAdmit decides and performs the commit of a pending admit,
@@ -1266,7 +1326,7 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	fail := func(code string, opts ...ErrorOption) (string, int64, func()) {
 		s.releaseEdgeAdmit(ctx, row)
 		if row.Op == edgeOpPut {
-			retireOrphanWrite(context.WithoutCancel(ctx), s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+			s.queueEdgePutOrphans(context.WithoutCancel(ctx), row)
 		}
 		WriteS3ErrorWithContext(rec, code, path, reqID, opts...)
 		s.recordEdgeAccess(row, rec.status, 0, 0)
@@ -1367,7 +1427,7 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 	var n int64
 	switch row.Op {
 	case edgeOpPut:
-		state, n = s.commitEdgePut(ctx, row, rec, etag, reqID)
+		state, n = s.commitEdgePut(ctx, row, req, rec, etag, reqID)
 	default:
 		state, n = s.commitEdgePart(ctx, row, req, rec, etag, reqID)
 	}
@@ -1396,7 +1456,7 @@ func (s *Server) edgeBlobSize(ctx context.Context, row edgeAdmitRow) (int64, err
 
 // commitEdgePut is the PUT's commit: commitBlobWrite exactly as HandlePut,
 // then the lock, the log, the notification and the event.
-func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relayRecorder, etag, reqID string) (string, int64) {
+func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, req edgeCommitRequest, rec *relayRecorder, etag, reqID string) (string, int64) {
 	cctx := common.WithTenantID(context.WithoutCancel(ctx), row.TenantID)
 	var bill *writeBill
 	if s.quotaManager != nil {
@@ -1412,12 +1472,26 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 		Upsert: func(tx *sql.Tx) error {
 			// The backend's ETag the Worker reported is the row's
 			// backend_etag (RP72-1): checked above to be the body's MD5.
-			return upsertWholeObjectHeadRow(cctx, tx, row.TenantID, row.Bucket, row.Key, row.StorageKey, row.ContentLength, etag,
-				row.Backend, row.Floor, attrs, etag)
+			if err := upsertWholeObjectHeadRow(cctx, tx, row.TenantID, row.Bucket, row.Key, row.StorageKey, row.ContentLength, etag,
+				row.Backend, row.Floor, attrs, etag); err != nil {
+				return err
+			}
+			if row.Attrs.MirrorLeg == "" {
+				return nil
+			}
+			// WP-EDGE-4: the copy on the mirror leg, in the same transaction
+			// — ready when the leg answered the body's MD5, else owed.
+			mirrorETag := ""
+			if len(req.BackendETags) > 1 {
+				mirrorETag = req.BackendETags[1]
+			}
+			state, metag := mirrorCopyState(etag, mirrorETag)
+			return recordBlobCopy(cctx, tx, blobCopy{TenantID: row.TenantID, Bucket: row.Bucket, Key: row.Key, StorageKey: row.StorageKey,
+				Source: row.Backend, Leg: row.Attrs.MirrorLeg, State: state, ETag: metag, Size: row.ContentLength})
 		}})
 	if dbErr != nil {
 		s.releaseEdgeAdmit(ctx, row)
-		retireOrphanWrite(cctx, s.db, s.log(), row.TenantID, row.Bucket, row.StorageKey, row.Backend)
+		s.queueEdgePutOrphans(cctx, row)
 		sr := &http.Request{Method: http.MethodPut, URL: &url.URL{Path: "/" + row.Bucket + "/" + row.Key}}
 		sr = sr.WithContext(cctx)
 		switch {

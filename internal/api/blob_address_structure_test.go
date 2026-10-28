@@ -36,6 +36,14 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 
 	// file → trimmed code fragments allowed to pass a raw key, and why.
 	allowed := map[string]map[string]string{
+		"blob_copies_job.go": {
+			"src.Get(cctx, container, artifact)":                                            "a mirror copy's address IS the row's resolved storage_key (blob_copies.storage_key, WP-EDGE-4)",
+			"leg.Put(cctx, container, artifact, counted, engine.WithContentLength(c.Size))": "the copy written at the primary's resolved address on the leg",
+			"leg.Delete(dctx, container, artifact)":                                         "a mirror copy removed at its recorded, resolved address",
+		},
+		"routing_truth.go": {
+			"d.Exists(cctx, container, artifact)": "a mirror copy asked at its recorded, resolved address (blob_copies.storage_key)",
+		},
 		"backend_canary.go": {
 			"drv.Exists(cctx, probeCanaryContainer, key)":                                                                 "the probe canary, not a customer object",
 			"drv.Put(cctx, probeCanaryContainer, key, bytes.NewReader(body), engine.WithContentLength(int64(len(body))))": "the probe canary",

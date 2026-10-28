@@ -83,17 +83,24 @@ type Expect struct {
 
 // AdmitResponse is the decision.
 type AdmitResponse struct {
-	Edge        bool              `json:"edge"`
-	Reason      string            `json:"reason,omitempty"` // why not (a pass-through), for the host's log line
-	Refusal     *Relay            `json:"refusal,omitempty"`
-	AdmitID     string            `json:"admit_id,omitempty"`
-	URL         string            `json:"url,omitempty"`
-	Method      string            `json:"method,omitempty"`
-	SendHeaders map[string]string `json:"send_headers,omitempty"`
-	Backend     string            `json:"backend,omitempty"`
-	StorageKey  string            `json:"storage_key,omitempty"`
-	Expect      *Expect           `json:"expect,omitempty"`
-	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
+	Edge    bool   `json:"edge"`
+	Reason  string `json:"reason,omitempty"` // why not (a pass-through), for the host's log line
+	Refusal *Relay `json:"refusal,omitempty"`
+	AdmitID string `json:"admit_id,omitempty"`
+	URL     string `json:"url,omitempty"`
+	// URLs (WP-EDGE-4, edge_mirror): a mirrored write's links — [the
+	// placement's, the mirror leg's], the same signed headers on both; URL
+	// stays URLs[0] for a host that knows one link. A read: [the primary's,
+	// the mirror's] — the second tried when the first does not answer as
+	// admitted, before the origin fallback (MirrorSendHeaders its headers).
+	URLs              []string          `json:"urls,omitempty"`
+	MirrorSendHeaders map[string]string `json:"mirror_send_headers,omitempty"`
+	Method            string            `json:"method,omitempty"`
+	SendHeaders       map[string]string `json:"send_headers,omitempty"`
+	Backend           string            `json:"backend,omitempty"`
+	StorageKey        string            `json:"storage_key,omitempty"`
+	Expect            *Expect           `json:"expect,omitempty"`
+	ExpiresAt         *time.Time        `json:"expires_at,omitempty"`
 	// A GET (Part B): the status the backend must answer (206 — every link
 	// names a Range, the whole object's for a whole read), the status the
 	// CLIENT gets (200, or 206 for the client's own Range), the ORIGIN's
@@ -183,6 +190,12 @@ type CommitRequest struct {
 	// (hex) — a PUT's ETag, a part's part digest.
 	Chunks  []CommitChunk `json:"chunks,omitempty"`
 	BodyMD5 string        `json:"body_md5,omitempty"`
+	// BackendETags (WP-EDGE-4): a mirrored write's ETag per link, in the
+	// admit's urls order; a failed mirror PUT's is omitted (the copy is the
+	// blob_copies job's). ServedURL: the read link that served (0 the
+	// primary, 1 the mirror).
+	BackendETags []string `json:"backend_etags,omitempty"`
+	ServedURL    int      `json:"served_url,omitempty"`
 	// Verified (a GET, RP74-4): the host checks the whole body against the
 	// admit's body_md5 as it streams — counted verified only for host=slc,
 	// the one host the control plane trusts to say so.
@@ -210,7 +223,10 @@ type CommitChunk struct {
 	Size        int64  `json:"size"`
 	SealedSize  int64  `json:"sealed_size,omitempty"`
 	BackendETag string `json:"backend_etag,omitempty"`
-	Status      string `json:"status"` // stored | hit
+	// BackendETags (WP-EDGE-4): one per link of a mirrored miss, in the
+	// links' order; a failed mirror PUT's is omitted.
+	BackendETags []string `json:"backend_etags,omitempty"`
+	Status       string   `json:"status"` // stored | hit
 }
 
 // IndexRequest is one batch of the host's chunk hashes.
@@ -230,6 +246,7 @@ type IndexChunk struct {
 type IndexMiss struct {
 	Hash         string            `json:"hash"`
 	URL          string            `json:"url"`
+	URLs         []string          `json:"urls,omitempty"` // [URL, the mirror leg's] (WP-EDGE-4)
 	SendHeaders  map[string]string `json:"send_headers"`
 	SealedLength int64             `json:"sealed_length"`
 }

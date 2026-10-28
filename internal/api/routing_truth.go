@@ -96,6 +96,10 @@ var (
 		Name: "vaultaire_routing_truth_chunk_checks_total",
 		Help: "Chunks of sampled chunked objects the routing_truth job checked at the one address, by backend and result: present (HEAD and a read of the first bytes), unreadable (HEAD 200, the read failed), legacy (found only under the uploader's prefix — run the chunk move), missing, error, unknown_backend.",
 	}, []string{"backend", "result"})
+	routingCopyChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_routing_truth_copy_checks_total",
+		Help: "Mirror copies (blob_copies ready rows, WP-EDGE-4) the routing_truth job asked of their LEG, by leg and result: present (HEAD and a read of the first bytes), unreadable, missing (the leg does not hold a copy the row says is there), changed (the row changed mid-check), error.",
+	}, []string{"leg", "result"})
 	routingUnknownReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_routing_unknown_backend_reads_total",
 		Help: "Requests that read a head row whose recorded backend is not a registered driver (backend=\"\" is a row with no backend): the request fell back to the engine's fan-out.",
@@ -219,6 +223,9 @@ type RoutingTruthResult struct {
 	// Unknown: head rows on a name no driver has ("" = NULL), by name.
 	Unknown map[string]int64 `json:"unknown"`
 	Chunks  ChunkTruth       `json:"chunks"`
+	// Copies: the mirror copies sampled (WP-EDGE-4), by leg — Rows the ready
+	// copies the leg holds by the table, the verdicts as a backend's.
+	Copies map[string]*BackendTruth `json:"copies,omitempty"`
 	// Checks is the number of calls made (whole rows + chunks).
 	Checks int64 `json:"checks"`
 	// Summary is the one-line note (job_runs.last_error on an ok run, the
@@ -410,6 +417,9 @@ func (c *RoutingTruthChecker) RunOnce(ctx context.Context) (RoutingTruthResult, 
 	if err := c.sampleChunked(ctx, &res); err != nil {
 		return res, err
 	}
+	if err := c.sampleCopies(ctx, &res); err != nil {
+		return res, err
+	}
 
 	res.FinishedAt = time.Now().UTC()
 	res.Summary = summarizeRoutingTruth(&res)
@@ -576,6 +586,90 @@ func (c *RoutingTruthChecker) checkWhole(ctx context.Context, backend string, h 
 	}
 	c.logger.Warn("routing truth: head row points at bytes the backend does not have",
 		zap.String("backend", backend), zap.String("tenant_id", h.tenantID), zap.String("bucket", h.bucket), zap.String("key", h.key))
+	return "missing"
+}
+
+// routingCopySample is how many ready mirror copies a run asks of their legs.
+const routingCopySample = 100
+
+// sampleCopies asks each sampled ready copy of its LEG (WP-EDGE-4): a HEAD
+// and the first bytes, as a head row is asked of its recorded backend; a
+// miss re-reads the row (a copy deleted or re-written meanwhile is changed).
+func (c *RoutingTruthChecker) sampleCopies(ctx context.Context, res *RoutingTruthResult) error {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts FROM blob_copies
+		WHERE state = 'ready' AND kind = 'mirror' AND ($1 = '' OR tenant_id = $1)
+		ORDER BY random() LIMIT $2`, c.scopeTenant, routingCopySample)
+	if err != nil {
+		return fmt.Errorf("routing truth: sample copies: %w", err)
+	}
+	sample, err := scanCopies(rows)
+	if err != nil {
+		return fmt.Errorf("routing truth: sample copies: %w", err)
+	}
+	for _, cp := range sample {
+		if res.Copies == nil {
+			res.Copies = map[string]*BackendTruth{}
+		}
+		bt := res.Copies[cp.Leg]
+		if bt == nil {
+			bt = &BackendTruth{}
+			res.Copies[cp.Leg] = bt
+		}
+		bt.Sampled++
+		res.Checks++
+		result := c.checkCopy(ctx, cp.blobCopy)
+		routingCopyChecks.WithLabelValues(cp.Leg, result).Inc()
+		switch result {
+		case "present":
+			bt.Present++
+		case "unreadable":
+			bt.Unreadable++
+		case "missing":
+			bt.Missing++
+		case "changed":
+			bt.Changed++
+		default:
+			bt.Errors++
+		}
+	}
+	return nil
+}
+
+// checkCopy is one copy's verdict, asked of its leg's driver directly (the
+// breaker observed, never charged).
+func (c *RoutingTruthChecker) checkCopy(ctx context.Context, cp blobCopy) string {
+	d, ok := c.eng.GetDriver(cp.Leg)
+	if !ok || c.eng.GetFailoverStatus()[cp.Leg] == engine.StateOpen.String() {
+		return "error"
+	}
+	actx, container, artifact := cp.address(ctx)
+	cctx, cancel := context.WithTimeout(actx, routingExistsTimeout)
+	defer cancel()
+	there, err := d.Exists(cctx, container, artifact)
+	if err != nil {
+		return "error"
+	}
+	if there {
+		verdict, rerr := readProbe(cctx, d, container, artifact, cp.Size)
+		if verdict != "missing" {
+			if verdict == "unreadable" {
+				c.logger.Warn("routing truth: a mirror copy the leg cannot serve", zap.String("leg", cp.Leg), zap.String("tenant_id", cp.TenantID), zap.Error(rerr))
+			}
+			return verdict
+		}
+	}
+	var one int
+	rerr := c.db.QueryRowContext(ctx, `SELECT 1 FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND kind = 'mirror' AND state = 'ready'`,
+		cp.TenantID, cp.StorageKey, cp.Leg).Scan(&one)
+	if errors.Is(rerr, sql.ErrNoRows) {
+		return "changed"
+	}
+	if rerr != nil {
+		return "error"
+	}
+	c.logger.Warn("routing truth: a ready mirror copy the leg does not hold", zap.String("leg", cp.Leg), zap.String("tenant_id", cp.TenantID),
+		zap.String("bucket", cp.Bucket), zap.String("key", cp.Key))
 	return "missing"
 }
 

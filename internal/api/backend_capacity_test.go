@@ -59,6 +59,7 @@ func setupCapFixture(t *testing.T) *capFixture {
 			_, _ = f.db.Exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, tn)
 			_, _ = f.db.Exec(`DELETE FROM multipart_uploads WHERE tenant_id = $1`, tn)
 			_, _ = f.db.Exec(`DELETE FROM vault_parity WHERE tenant_id = $1`, tn)
+			_, _ = f.db.Exec(`DELETE FROM blob_copies WHERE tenant_id = $1`, tn)
 			_, _ = f.db.Exec(`DELETE FROM retired_blobs WHERE tenant_id = $1`, tn)
 			_, _ = f.db.Exec(`DELETE FROM tenants WHERE id = $1`, tn)
 		}
@@ -109,6 +110,15 @@ func TestBackendCapacity_SumsEveryHolderOnce(t *testing.T) {
 	// A live pack (50 B) and a retired one (never counted).
 	f.exec(`INSERT INTO packs (backend, name, folder, size, sha256, member_count) VALUES ($1, 'aa/p1.pack', 'aa', 50, 's', 1)`, leg)
 	f.exec(`INSERT INTO packs (backend, name, folder, size, sha256, member_count, retired_at) VALUES ($1, 'aa/p2.pack', 'aa', 70, 's', 1, NOW())`, leg)
+	// Mirror copies on the leg (WP-EDGE-4): ready and stale are on it, a
+	// pending one is owed, not held.
+	for _, c := range []struct {
+		sk, state string
+		size      int64
+	}{{"whole.bin@C1", "ready", 9}, {"whole.bin@C2", "pending", 4}, {"whole.bin@C3", "stale", 3}} {
+		f.exec(`INSERT INTO blob_copies (tenant_id, bucket, object_key, storage_key, source_backend, leg, state, size)
+		        VALUES ($1, 'b', 'whole.bin', $2, $3, $4, $5, $6)`, f.tenant, c.sk, bk, leg, c.state, c.size)
+	}
 	// A displaced blob awaiting the collector: a ROW count, not bytes.
 	f.exec(`INSERT INTO retired_blobs (backend_id, container, storage_key, tenant_id, reason, retire_after)
 	        VALUES ($1, $2, 'whole.bin@GONE', $3, 'overwritten', NOW())`, bk, f.tenant+"_b", f.tenant)
@@ -137,6 +147,7 @@ func TestBackendCapacity_SumsEveryHolderOnce(t *testing.T) {
 	require.NotNil(t, legSums)
 	assert.Equal(t, int64(24), legSums.Parity, "4 shards x 6 B on the recorded leg")
 	assert.Equal(t, int64(50), legSums.Packs, "live packs only")
+	assert.Equal(t, int64(12), legSums.Copies, "ready and stale mirror copies; a pending one is not on the leg yet")
 	assert.Equal(t, int64(7777), legSums.Objects, "the second tenant's rows count on THEIR backend")
 	assert.Equal(t, int64(1), res.RetiredBlobRows[bk], "retired_blobs has no size column: rows, not bytes")
 	assert.Contains(t, res.Notes[0], "vendor view off", "no reseller key: a note on an ok run")
