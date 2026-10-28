@@ -621,6 +621,13 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
+	// An RS object (WP-EDGE-4 PR B, edge_rs): its bytes are its shards,
+	// rebuilt from the data shards (any K when a leg does not answer).
+	if cacheHit && !cachedIsChunked && cachedBackendName == rsBackendSentinel {
+		a.handleRSGet(w, r, t.ID, bucket, cachedStorageKey, integrityDigest(cachedBodyMD5, cachedETag), cachedSize, oh)
+		return
+	}
+
 	// A ranged read of a cached, unencrypted, whole object goes straight to
 	// the backend's native range GET. The full-object Get below used to be
 	// opened first and abandoned once the Range branch took over, which
@@ -2165,7 +2172,9 @@ func (a *S3ToEngine) HandleDelete(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 	switch {
-	case isChunked || keptByVersion:
+	case isChunked || keptByVersion || recordedBackend == rsBackendSentinel:
+		// (An RS object's shards are the blob_copies job's once its row is
+		// gone — WP-EDGE-4 PR B.)
 		// Nothing to delete on the backend: the chunks stay until dedup GC
 		// (the manifest is released together with the head row below, in one
 		// transaction, R8-08), and a version's bytes stay with the version.

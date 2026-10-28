@@ -184,7 +184,7 @@ type kindSum struct {
 var backendCapacitySums = []kindSum{
 	{name: "objects", add: func(b *BackendBytes, v int64) { b.Objects = v },
 		sql: `SELECT backend_name, COALESCE(SUM(size_bytes), 0) FROM object_head_cache
-		       WHERE NOT is_chunked AND backend_name IS NOT NULL AND backend_name <> '' AND backend_name <> 'chunked'
+		       WHERE NOT is_chunked AND backend_name IS NOT NULL AND backend_name <> '' AND backend_name <> 'chunked' AND backend_name <> 'rs'
 		       GROUP BY backend_name`},
 	{name: "versions", add: func(b *BackendBytes, v int64) { b.Versions = v },
 		sql: `SELECT v.backend_name, COALESCE(SUM(v.size_bytes), 0) FROM ` + usage.RetainedVersionsFrom + `

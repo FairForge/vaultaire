@@ -222,6 +222,13 @@ func (d objectDeleteAftermath) settle(ctx context.Context, tenantID, bucket, key
 				zap.String("tenant_id", tenantID), zap.String("bucket", bucket), zap.String("key", key))
 		}
 		if !superseded {
+			if read.found {
+				// An RS object's shards and a mirror's copy row: the
+				// blob_copies job's now (WP-EDGE-4).
+				if err := staleShardsTx(ctx, d.db, tenantID, read.storageKey); err != nil {
+					d.logger.Warn("delete: the object's shards were not marked stale — the blob_copies orphan pass finds them", zap.Error(err))
+				}
+			}
 			d.afterObjectGone(ctx, tenantID, bucket, key)
 		} else {
 			// A Smart-demoted object has a second copy the delete did not

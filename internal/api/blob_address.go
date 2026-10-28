@@ -342,6 +342,11 @@ func retireRowBytes(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, addr
 	if chunked {
 		return retireManifest(ctx, tx, tenantID, bucket, key, manifestAddress(key, addr), reason)
 	}
+	if backend == rsBackendSentinel {
+		// An RS object's bytes are its shards (WP-EDGE-4 PR B): the
+		// blob_copies job deletes them on their legs.
+		return staleShardsTx(ctx, tx, tenantID, addr)
+	}
 	return retireBlob(ctx, tx, tenantID, bucket, key, addr, backend, reason)
 }
 

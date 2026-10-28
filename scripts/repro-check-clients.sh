@@ -68,7 +68,7 @@ done <<<"$rows"
 
 # The checkout's clients (RP51-3). The default list is translog's closed list
 # (TestReproCheckClients_DefaultsToTheClosedClientList).
-checkout_clients=${REPRO_CHECKOUT_CLIENTS:-sdk-wasm sdk-js edge-ingest edge-chunker edge-codec edge-seal edge-wasm-exec edge-awschunked}
+checkout_clients=${REPRO_CHECKOUT_CLIENTS:-sdk-wasm sdk-js edge-ingest edge-chunker edge-codec edge-seal edge-wasm-exec edge-awschunked edge-ec}
 checkout_build=${REPRO_CHECKOUT_BUILD:-$root/scripts/build-client.sh}
 for client in $checkout_clients; do
 	start=$SECONDS

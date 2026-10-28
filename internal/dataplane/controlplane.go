@@ -50,6 +50,10 @@ const (
 // FeatureWindow: the host reads a windowed answer (D-EDGE-32).
 const FeatureWindow = "window"
 
+// FeatureRS: the host stripes an RS write itself (WP-EDGE-4 PR B) — a Go
+// host (a node, host=slc); the Worker never names it.
+const FeatureRS = "rs"
+
 // AdmitRequest is what the host describes of the client's request.
 type AdmitRequest struct {
 	Op        string            `json:"op"`
@@ -95,12 +99,16 @@ type AdmitResponse struct {
 	// admitted, before the origin fallback (MirrorSendHeaders its headers).
 	URLs              []string          `json:"urls,omitempty"`
 	MirrorSendHeaders map[string]string `json:"mirror_send_headers,omitempty"`
-	Method            string            `json:"method,omitempty"`
-	SendHeaders       map[string]string `json:"send_headers,omitempty"`
-	Backend           string            `json:"backend,omitempty"`
-	StorageKey        string            `json:"storage_key,omitempty"`
-	Expect            *Expect           `json:"expect,omitempty"`
-	ExpiresAt         *time.Time        `json:"expires_at,omitempty"`
+	// RS (WP-EDGE-4 PR B, edge_rs): the write is striped K+M by the host
+	// (internal/ec) — one presigned PUT per shard, no body link. Answered
+	// only to a host naming FeatureRS (a Go host; never the Worker).
+	RS          *RSGrant          `json:"rs,omitempty"`
+	Method      string            `json:"method,omitempty"`
+	SendHeaders map[string]string `json:"send_headers,omitempty"`
+	Backend     string            `json:"backend,omitempty"`
+	StorageKey  string            `json:"storage_key,omitempty"`
+	Expect      *Expect           `json:"expect,omitempty"`
+	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
 	// A GET (Part B): the status the backend must answer (206 — every link
 	// names a Range, the whole object's for a whole read), the status the
 	// CLIENT gets (200, or 206 for the client's own Range), the ORIGIN's
@@ -160,6 +168,24 @@ type CodecGrant struct {
 	SegmentSize    int    `json:"segment_size"`
 }
 
+// RSGrant is an RS write's shard links (WP-EDGE-4 PR B): the layout and,
+// per shard, its presigned PUT (signing ShardBytes) on its leg.
+type RSGrant struct {
+	K          int         `json:"k"`
+	M          int         `json:"m"`
+	Stripe     int         `json:"stripe"`
+	ShardBytes int64       `json:"shard_bytes"`
+	Shards     []ShardLink `json:"shards"`
+}
+
+// ShardLink is one shard's PUT.
+type ShardLink struct {
+	Index       int               `json:"index"`
+	Leg         string            `json:"leg"`
+	URL         string            `json:"url"`
+	SendHeaders map[string]string `json:"send_headers"`
+}
+
 // Relay is one S3 answer, as JSON for the host: the exact status, headers
 // and XML body the origin would have answered.
 type Relay struct {
@@ -196,6 +222,9 @@ type CommitRequest struct {
 	// primary, 1 the mirror).
 	BackendETags []string `json:"backend_etags,omitempty"`
 	ServedURL    int      `json:"served_url,omitempty"`
+	// ShardETags (an RS write): each shard's backend ETag, in shard order;
+	// "" for a shard that did not land. BodyMD5 is the body's.
+	ShardETags []string `json:"shard_etags,omitempty"`
 	// Verified (a GET, RP74-4): the host checks the whole body against the
 	// admit's body_md5 as it streams — counted verified only for host=slc,
 	// the one host the control plane trusts to say so.
