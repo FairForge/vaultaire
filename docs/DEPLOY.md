@@ -762,6 +762,72 @@ archive settings back). Then steps 3–7, and once the restored cluster runs,
 `pg-pitr-install.sh <cipher-file>` again without the flag (stanza-create now matches,
 the timers come back on).
 
+## Data nodes
+
+A data node (WP-EDGE-3, `docs/reviews/WP-EDGE-3.md`) is this binary with
+`VAULTAIRE_ROLE=node` on a VPS: it moves customer bytes between S3 clients
+and the backends on the links the control plane (the origin) mints, and
+asks the control plane for every decision. **What a node never holds:** a
+database, the master key, a tenant key version, an S3 secret, a backend
+key, a job. What it holds: its own token (minted once by the registry) and,
+for the seconds a request lasts, that request's presigned links and — for a
+codec write — the tenant's codec PUBLIC key and the per-chunk random keys it
+makes. A node is not the attested data plane (contract line 10).
+
+**What it serves:** PutObject and UploadPart (the move, or the codec when
+`edge_codec` is on for the tenant) and GetObject of a whole unsealed row
+through `internal/dataplane`; every other signed S3 request (HEAD, DELETE,
+listings, Create/Complete/Abort, any pass-through) is handed to the origin
+untouched with the client's Host; the origin's web and API paths are 404.
+Clients reach a node by the hostname they configure as their endpoint:
+**no S3 client follows a 307 with a fresh signature** (the probe of
+2026-10-28), so there is no redirect steering.
+
+**Register it** (an admin JWT — the owner's TOTP):
+
+```bash
+curl -X PUT https://stored.ge/api/v1/admin/data-plane-hosts/node1.example.net \
+  -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+  -d '{"kind":"node","address":"203.0.113.10","weight":1}'
+# → the row and "token": "<64 hex>" — ONCE. Only its sha256 is stored; a lost
+#   token is a DELETE and a new PUT. A tenant-scoped (BYO) node adds
+#   "tenant_id": it admits that tenant only, and nothing it reports is trusted
+#   for integrity (every stored chunk opened at commit) or metering (its reads
+#   metered at the admitted span).
+```
+
+The token is accepted only from `address` (the node's IP as HAProxy sees
+it). **Install it** on the node, as root, from a SIGNED release:
+
+```bash
+go build ./cmd/tools/release-sign          # from the release's tagged source
+RELEASE_VKEY_FILE=./release.vkey deploy/node/install.sh \
+  https://github.com/FairForge/vaultaire/releases/download/<tag> https://stored.ge node1.example.net
+umask 077; printf %s "$TOKEN" > /etc/vaultaire/node_token   # the registry's token
+systemctl daemon-reload && systemctl enable --now vaultaire-node
+```
+
+`install.sh` installs only what `release-sign verify` accepts under the
+release verifier key (none exists until the owner's key ceremony —
+docs/RELEASES.md — so no node can be installed before it). The unit
+(`deploy/node/vaultaire-node.service`) runs as a dynamic user with the token
+as the systemd credential `node_token`; `/etc/vaultaire/node.env` holds
+`NODE_CONTROL_PLANE_URL`, `NODE_PUBLIC_HOST`, `PORT` (8100). The origin must
+also accept the node's hostname on pass-throughs (HAProxy, Cloudflare) —
+check with the first node.
+
+**Health:** the node heartbeats `POST /api/v1/edge/heartbeat` every 30 s; a
+node unseen for 90 s takes no new admit (503 `host_down`, Retry-After 30) and
+the `edge_admit_reaper` marks it down; `vaultaire_data_plane_host_up{host,kind}`,
+rule `DataPlaneHostDown` (`deploy/monitoring/vaultaire-dataplane.yml`), the
+System page's Data-plane hosts card. Drain one with `"health":"draining"`
+on its row (its commits are always accepted). The lab: `deploy/node/lab-proof.sh`.
+
+**`host=slc`:** the flag `data_plane_slc` (per tenant, default OFF) sends a
+tenant's edge-eligible PutObject / UploadPart / GetObject through the same
+package on this box (registry row `slc`, weight 0) — the bytes still cross
+SLC and are metered by the origin's own writer; the rows are the one shape.
+
 ## Monitoring
 
 ```
