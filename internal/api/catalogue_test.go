@@ -109,6 +109,9 @@ func (f *codecFixture) seedPublic(body []byte) []crypto.Chunk {
 	require.NoError(f.t, f.db.QueryRow(`INSERT INTO public_artefacts (name, sha256, size_bytes) VALUES ('lab artefact', $1, $2) RETURNING id`,
 		hex.EncodeToString(whole[:]), len(body)).Scan(&id))
 	f.t.Cleanup(func() {
+		// Before the rows: this tenant's references to them (this cleanup
+		// runs before the fixture's, which deletes the references).
+		_, _ = f.db.Exec(`DELETE FROM tenant_chunk_refs WHERE tenant_id = $1 AND dedup_scope = '_public'`, f.tenantID)
 		_, _ = f.db.Exec(`DELETE FROM public_artefacts WHERE id = $1`, id)
 		for _, c := range chunks {
 			_, _ = f.db.Exec(`DELETE FROM global_content_index WHERE dedup_scope = '_public' AND plaintext_hash = $1`, c.Hash)
