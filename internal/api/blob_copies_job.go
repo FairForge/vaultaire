@@ -60,6 +60,10 @@ const (
 	// named at most this often.
 	blobCopiesOrphanRecheck = time.Hour
 	blobCopiesCallTimeout   = 30 * time.Second
+	// blobCopiesTailReserve is the time the copy pass leaves the orphan and
+	// stale passes before the run's deadline (prod's first backfill run
+	// spent all 9 minutes copying and the orphan pass hit the deadline).
+	blobCopiesTailReserve = 90 * time.Second
 )
 
 // Outcomes (vaultaire_blob_copies_total{outcome}).
@@ -125,22 +129,27 @@ func (j *BlobCopiesJob) spec() jobSpec {
 				rep.Note = fmt.Sprintf("%d copy attempt(s) failed, %d skipped (unregistered or breaker open), %d past %d attempts — they wait",
 					res.Failed, res.Skipped, res.GaveUp, blobCopiesMaxAttempts)
 			}
+			if res.Stopped != "" {
+				rep.Note = strings.TrimPrefix(rep.Note+"; "+res.Stopped, "; ")
+			}
 			return rep, err
 		}}
 }
 
 // BlobCopiesResult is one run, recorded as job_runs.result.
 type BlobCopiesResult struct {
-	Enqueued    int      `json:"enqueued"`
-	Copied      int      `json:"copied"`
-	CopiedBytes int64    `json:"copied_bytes"`
-	Failed      int      `json:"failed"`
-	GaveUp      int      `json:"gave_up,omitempty"`
-	Orphaned    int      `json:"orphaned"`
-	Deleted     int      `json:"deleted"`
-	Skipped     int      `json:"skipped"`
-	Pending     int64    `json:"pending"`
-	Errors      []string `json:"errors,omitempty"`
+	Enqueued    int   `json:"enqueued"`
+	Copied      int   `json:"copied"`
+	CopiedBytes int64 `json:"copied_bytes"`
+	Failed      int   `json:"failed"`
+	GaveUp      int   `json:"gave_up,omitempty"`
+	Orphaned    int   `json:"orphaned"`
+	Deleted     int   `json:"deleted"`
+	Skipped     int   `json:"skipped"`
+	Pending     int64 `json:"pending"`
+	// Stopped: the run's time ran out; what is left is the next run's.
+	Stopped string   `json:"stopped,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 func (r *BlobCopiesResult) note(err error) {
@@ -149,20 +158,26 @@ func (r *BlobCopiesResult) note(err error) {
 	}
 }
 
-// RunOnce runs the four passes.
+// RunOnce runs the four passes. A run whose time runs out stops where it
+// is — a note (Stopped), never a failed run: the next run goes on.
 func (j *BlobCopiesJob) RunOnce(ctx context.Context) (BlobCopiesResult, error) {
 	var res BlobCopiesResult
-	if err := j.backfill(ctx, &res); err != nil {
-		return res, fmt.Errorf("blob copies backfill: %w", err)
-	}
-	if err := j.copyPending(ctx, &res); err != nil {
-		return res, fmt.Errorf("blob copies copy: %w", err)
-	}
-	if err := j.findOrphans(ctx, &res); err != nil {
-		return res, fmt.Errorf("blob copies orphans: %w", err)
-	}
-	if err := j.deleteStale(ctx, &res); err != nil {
-		return res, fmt.Errorf("blob copies stale: %w", err)
+	passes := []struct {
+		name string
+		run  func(context.Context, *BlobCopiesResult) error
+	}{{"backfill", j.backfill}, {"copy", j.copyPending}, {"orphans", j.findOrphans}, {"stale", j.deleteStale}}
+	for _, p := range passes {
+		if ctx.Err() != nil {
+			res.Stopped = "the run's time ran out before the " + p.name + " pass; the next run goes on"
+			return res, nil
+		}
+		if err := p.run(ctx, &res); err != nil {
+			if ctx.Err() != nil {
+				res.Stopped = "the run's time ran out in the " + p.name + " pass; the next run goes on"
+				return res, nil
+			}
+			return res, fmt.Errorf("blob copies %s: %w", p.name, err)
+		}
 	}
 	if err := j.s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blob_copies WHERE state = 'pending'`).Scan(&res.Pending); err == nil {
 		blobCopiesPending.Set(float64(res.Pending))
@@ -307,8 +322,15 @@ func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) 
 		return err
 	}
 	var spent int64
+	stopAt := time.Time{}
+	if dl, ok := ctx.Deadline(); ok {
+		stopAt = dl.Add(-blobCopiesTailReserve)
+	}
 	for _, c := range due {
-		if ctx.Err() != nil || spent >= j.maxBytes {
+		if ctx.Err() != nil || spent >= j.maxBytes || (!stopAt.IsZero() && !j.now().Before(stopAt)) {
+			if !stopAt.IsZero() && !j.now().Before(stopAt) && res.Stopped == "" {
+				res.Stopped = "the copy pass left the rest to the next run (its time is the orphan and stale passes')"
+			}
 			return nil
 		}
 		if c.attempts >= blobCopiesMaxAttempts {
