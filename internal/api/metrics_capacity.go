@@ -82,7 +82,7 @@ func (c *capacityCollector) Collect(ch chan<- prometheus.Metric) {
 	snap := c.read()
 	kinds := func(b *BackendBytes) map[string]int64 {
 		return map[string]int64{"objects": b.Objects, "versions": b.Versions, "chunks": b.Chunks,
-			"multipart": b.Multipart, "parity": b.Parity, "packs": b.Packs}
+			"multipart": b.Multipart, "parity": b.Parity, "packs": b.Packs, "copies": b.Copies}
 	}
 	for backend, b := range snap.stored {
 		for kind, v := range kinds(b) {

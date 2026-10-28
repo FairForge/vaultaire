@@ -716,6 +716,32 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 	verify := h.Verify != nil && h.Verify.WholeRead != nil && admit.BodyMD5 != "" && admit.ContentLength > 0 &&
 		(admit.Status == http.StatusOK || admit.Status == 0 && admit.ExpectStatus == http.StatusOK)
 	commit.Verified = verify && commit.Outcome == OutcomeServed
+	if commit.Outcome != OutcomeServed && len(admit.URLs) == 2 {
+		// WP-EDGE-4: the primary did not answer as admitted — the mirror
+		// leg's copy before the origin.
+		if resp != nil {
+			_ = resp.Body.Close()
+			resp = nil
+		}
+		hdrs := admit.MirrorSendHeaders
+		if hdrs == nil {
+			hdrs = admit.SendHeaders
+		}
+		if mreq, mErr := http.NewRequestWithContext(ctx, http.MethodGet, admit.URLs[1], nil); mErr == nil {
+			for k, v := range hdrs {
+				mreq.Header.Set(k, v)
+			}
+			if mresp, mErr := h.client().Do(mreq); mErr == nil {
+				if mresp.StatusCode == admit.ExpectStatus && (mresp.ContentLength < 0 || admit.ContentLength <= 0 || mresp.ContentLength == admit.ContentLength) {
+					resp = mresp
+					commit.Outcome, commit.ServedURL, commit.BackendStatus = OutcomeServed, 1, mresp.StatusCode
+					commit.BackendContentLength = max(mresp.ContentLength, 0)
+				} else {
+					_ = mresp.Body.Close()
+				}
+			}
+		}
+	}
 	commit.DurationMS = time.Since(started).Milliseconds()
 	// The commit at the backend's headers (served meters the backend's
 	// Content-Length; fallback and error meter nothing — the caller serves).

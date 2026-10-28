@@ -13,13 +13,17 @@ import (
 	"crypto/md5" // #nosec G501 -- the S3 ETag
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
 
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
 )
@@ -332,4 +336,77 @@ func TestBlobCopiesJob_AChunkCopyNoIndexRowNamesIsRemoved(t *testing.T) {
 func codecChunkKeyedOK(tenantID, sk string) string {
 	k, _ := codecChunkKeyed(tenantID, sk)
 	return k
+}
+
+// --- the read (step 7) ---
+
+// A read whose primary does not answer as admitted (the blob gone: a 404)
+// is served from the ready mirror copy before the origin, and counted.
+func TestEdgeMirror_AReadThePrimaryCannotServeComesFromTheMirror(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.wireEgress(1<<40, 0, nil)
+	m := f.addMirrorLeg()
+	host := f.dataHost()
+	host.Client = &http.Client{Transport: edgeFakeMux{f.drv, m}}
+	body := testBytes(40_000)
+	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/r.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.Relay.Status)
+	sk := res.Admit.StorageKey
+	require.Equal(t, "ready", f.copyState(sk))
+
+	rr, err := host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/r.bin", nil, nil, nil))
+	require.NoError(t, err)
+	require.Len(t, rr.Admit.URLs, 2, "the mirror's link beside the primary's")
+	assert.Equal(t, map[string]string{"range": "bytes=0-39999"}, rr.Admit.MirrorSendHeaders, "the exact span, no If-Match")
+	_ = rr.Body.Close()
+
+	f.drv.mu.Lock()
+	delete(f.drv.objects, "t-"+f.tenantID+"/"+f.container()+"/"+sk)
+	f.drv.mu.Unlock()
+	served := promtestutil.ToFloat64(blobCopiesReads.WithLabelValues("served_mirror"))
+	rr, err = host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/r.bin", nil, nil, nil))
+	require.NoError(t, err)
+	require.False(t, rr.PassThrough, "served from the mirror, not the origin")
+	got, err := io.ReadAll(rr.Body)
+	_ = rr.Body.Close()
+	require.NoError(t, err)
+	assert.Equal(t, body, got)
+	assert.Equal(t, served+1, promtestutil.ToFloat64(blobCopiesReads.WithLabelValues("served_mirror")))
+
+	// No ready copy: one link, and the origin takes a primary that fails.
+	f.exec(`UPDATE blob_copies SET state = 'pending' WHERE tenant_id = $1`, f.tenantID)
+	rr, err = host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/r.bin", nil, nil, nil))
+	require.NoError(t, err)
+	assert.Len(t, rr.Admit.URLs, 0)
+	assert.True(t, rr.PassThrough)
+}
+
+// routing_truth samples the mirror copies like head rows (kind="copy"):
+// asked of their LEG, present / missing by the same rules.
+func TestRoutingTruth_SamplesMirrorCopies(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	host := f.dataHost()
+	host.Client = &http.Client{Transport: edgeFakeMux{f.drv, m}}
+	body := testBytes(9000)
+	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/rt.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.Relay.Status)
+
+	c := NewRoutingTruthChecker(f.db, f.srv.engine, nil, zap.NewNop())
+	c.scopeTenant, c.JobName = f.tenantID, "rt_copies_"+f.tenantID
+	present := promtestutil.ToFloat64(routingCopyChecks.WithLabelValues("edgemirror", "present"))
+	out, err := c.RunOnce(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, out.Copies["edgemirror"], "%+v", out)
+	assert.Equal(t, 1, out.Copies["edgemirror"].Present)
+	assert.Equal(t, present+1, promtestutil.ToFloat64(routingCopyChecks.WithLabelValues("edgemirror", "present")))
+
+	m.mu.Lock()
+	m.objects = map[string][]byte{}
+	m.mu.Unlock()
+	out, err = c.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, out.Copies["edgemirror"].Missing, "a ready copy the leg does not hold")
 }

@@ -77,6 +77,10 @@ var (
 		Name: "vaultaire_blob_copies_total",
 		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open).",
 	}, []string{"outcome"})
+	blobCopiesReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_blob_copies_reads_total",
+		Help: "Edge reads the mirror copy served because the primary did not answer as admitted (WP-EDGE-4), by outcome (served_mirror).",
+	}, []string{"outcome"})
 	blobCopiesPending = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "vaultaire_blob_copies_pending",
 		Help: "Mirror copies owed (blob_copies rows in state pending), counted at the end of each blob_copies run.",
@@ -87,6 +91,7 @@ func init() {
 	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped} {
 		blobCopiesTotal.WithLabelValues(o)
 	}
+	blobCopiesReads.WithLabelValues("served_mirror")
 }
 
 // BlobCopiesJob is the job.

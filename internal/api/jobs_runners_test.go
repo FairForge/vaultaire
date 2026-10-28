@@ -315,6 +315,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"edge_admit_reaper": "every 5m0s",
 		"account_export":    "every 1m0s",
 		"retired_blobs":     "every 10m0s",
+		"blob_copies":       "every 10m0s",
 		"renewal_stops":     "every 10m0s",
 		// K4: signs a transparency-log checkpoint when the tree grew.
 		"translog_checkpoint": "every 10m0s",

@@ -112,7 +112,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))
 		// The edge mirror's copies (WP-EDGE-4): the blob_copies job's
 		// outcomes and the copies owed.
-		reg.MustRegister(blobCopiesTotal, blobCopiesPending)
+		reg.MustRegister(blobCopiesTotal, blobCopiesPending, blobCopiesReads)
 		// Hydrate-before-serve of large Sia objects (sia_promotion.go).
 		reg.MustRegister(siaPromotions, siaPromotionSeconds, newSiaPromotedBytesCollector(s.db, s.log()))
 		if s.tenantKeys != nil {
@@ -181,7 +181,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(packstore.Collectors()...)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads
 		// the unknown-backend rows and the last run from the tables.
-		reg.MustRegister(routingTruthChecks, routingChunkChecks, routingUnknownReads)
+		reg.MustRegister(routingTruthChecks, routingChunkChecks, routingCopyChecks, routingUnknownReads)
 		if s.routingTruth != nil {
 			reg.MustRegister(newRoutingCollector(s.routingTruth))
 		}
