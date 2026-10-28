@@ -436,6 +436,19 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WP-LOG-1: a request whose credential resolved a tenant is recorded
+	// ONCE, whatever answers it — a refusal below included — by the deferred
+	// recordS3Access (the bucket log and the request log, access_log.go).
+	// The writer counts the body and keeps the S3 error answered.
+	var cw *countingResponseWriter
+	var s3Req *S3Request
+	var ingressBytes int64
+	if tenantID != "" {
+		cw = &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
+		w = cw
+		defer func() { s.recordS3Access(cw, r, tenantID, s3Req, ingressBytes) }()
+	}
+
 	// The key's scope travels with the request: Object Lock reads it to
 	// decide whether x-amz-bypass-governance-retention is this key's to send
 	// (WP-R4-1 — it used to be a local of this function, and the header
@@ -490,7 +503,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	parser := NewS3Parser(s.logger)
 
-	s3Req, err := parser.ParseRequest(r)
+	s3Req, err = parser.ParseRequest(r)
 	if err != nil {
 		s.logger.Error("Failed to parse S3 request", zap.Error(err))
 		http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -581,7 +594,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Wrap response writer to count egress bytes for bandwidth tracking.
 	// Every byte also lands on the tenant's month counter as it is written
 	// (WP-R10-9), so a response still in flight counts toward the allowance.
-	cw := &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
+	if cw == nil { // an anonymous request: counted, not recorded
+		cw = &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
+	}
 	metered := tenantID != "" && tenantID != "default" && s.egress != nil
 	if metered {
 		cw.span = s.egress.span(r.Context(), tenantID)
@@ -594,7 +609,6 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(noteCtx)
 
 	// Track ingress bytes from PUT/UploadPart request bodies.
-	var ingressBytes int64
 	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
 		ingressBytes = r.ContentLength
 		if ingressBytes < 0 {
@@ -705,33 +719,44 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
 	}
 
-	// Record S3 access log for authenticated requests (the resolved tenant:
-	// identical to tenantID in production, the context tenant in test mode).
-	if t.ID != "" && t.ID != "default" && s.accessLogTracker != nil {
-		statusCode := cw.statusCode
-		if statusCode == 0 {
-			statusCode = http.StatusOK
-		}
-		s.accessLogTracker.Record(r.Context(), s3AccessEvent{
-			tenantID:      t.ID,
-			bucket:        s3Req.Bucket,
-			objectKey:     s3Req.Object,
-			operation:     s3Req.Operation,
-			statusCode:    statusCode,
-			bytesSent:     cw.bytesWritten,
-			bytesReceived: ingressBytes,
-			sourceIP:      extractClientIP(r),
-			userAgent:     r.UserAgent(),
-			requestID:     r.Header.Get("X-Request-Id"),
-			loggedAt:      time.Now(),
-		})
-	}
-
 	// Record bandwidth for authenticated requests, attributed to the backend
 	// the engine reports having served the bytes ("" if none was touched).
 	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
 		s.bandwidthTracker.recordResponse(tenantID, common.BackendUsed(r.Context()), ingressBytes, cw)
 	}
+}
+
+// recordS3Access writes one request to the access-log tracker (the bucket
+// log and the request log, WP-LOG-1): what the response writer saw — the
+// status, the bytes, the S3 error code and the request id answered — and
+// what the request named. Deferred by handleS3Request from the moment the
+// tenant is known, so a refusal after authentication is recorded too.
+func (s *Server) recordS3Access(cw *countingResponseWriter, r *http.Request, tenantID string, req *S3Request, ingress int64) {
+	if s.accessLogTracker == nil || tenantID == "" || tenantID == "default" {
+		return
+	}
+	status := cw.statusCode
+	if status == 0 {
+		status = http.StatusOK
+	}
+	reqID := cw.errRequestID
+	if reqID == "" {
+		reqID = cw.Header().Get("x-amz-request-id")
+	}
+	if reqID == "" {
+		reqID = r.Header.Get("X-Request-Id")
+	}
+	ev := s3AccessEvent{
+		tenantID: tenantID, operation: r.Method, statusCode: status,
+		bytesSent: cw.bytesWritten, bytesReceived: ingress,
+		sourceIP: extractClientIP(r), userAgent: r.UserAgent(),
+		requestID: reqID, errorCode: cw.errCode,
+		keyID: attemptedAccessKey(r), host: "origin", loggedAt: time.Now(),
+	}
+	if req != nil {
+		ev.bucket, ev.objectKey, ev.operation = req.Bucket, req.Object, req.Operation
+	}
+	s.accessLogTracker.Record(r.Context(), ev)
 }
 
 // serveGetObject is the one place an object body leaves on the S3 surface

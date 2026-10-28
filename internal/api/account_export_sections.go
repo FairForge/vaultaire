@@ -75,6 +75,7 @@ var exportExcludedTables = map[string]string{
 	"abuse_reports":       "reports filed by third parties about content; the reporter's data, not the customer's",
 	// logs with their own retention
 	"s3_access_log":     "request log of the tenant's buckets (30-day retention); deliverable to the customer's own bucket via server access logging",
+	"request_log":       "the same requests as the S3 access log, kept 7 days for the developer's own debugging (115, WP-LOG-1): the Developers page and GET /api/v1/manage/requests show them",
 	"cdn_access_log":    "public-link visitor log (2-day retention): the visitors' data, not the customer's",
 	"cdn_stats_daily":   "aggregate of public-link visitors, not the customer's personal data",
 	"stripe_events":     "payment-provider event bodies (90-day retention), the processor's records",
@@ -147,6 +148,8 @@ var exportNeverColumns = map[string]string{
 	"pseudonym_mappings.original_hash":     "D-12 scaffolding, no writer",
 	"s3_access_log.error_code":             "false positive (an S3 error code); the table is excluded anyway",
 	"s3_access_log.status_code":            "false positive (an HTTP status); the table is excluded anyway",
+	"request_log.error_code":               "false positive (an S3 error code); the table is excluded anyway",
+	"request_suggestions.error_code":       "false positive (an S3 error code); infrastructure, no tenant column — never a section",
 	"webhook_deliveries.response_code":     "false positive (an HTTP status); not a tenant table",
 }
 

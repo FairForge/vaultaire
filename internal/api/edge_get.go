@@ -330,7 +330,7 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	// to every link (a Range always); the client's status is the origin's.
 	admit := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpGet, Backend: row.backend, StorageKey: blob,
 		ContentLength: length, ContentType: contentType, Floor: row.floor, ClientIP: req.ClientIP, RequestID: req.RequestID,
-		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), Status: status, MirrorLeg: mirrorLeg}}
+		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr), Status: status, MirrorLeg: mirrorLeg}}
 	if admit.ID, err = newEdgeAdmitID(); err != nil {
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}

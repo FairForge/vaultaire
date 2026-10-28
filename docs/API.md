@@ -434,6 +434,37 @@ never reported as a miss — it is 503, so sync clients do not treat the object
 as deleted. Lock refusals use `AccessDenied` (the AWS wire code), not an
 invented code.
 
+## Request log
+
+Every S3 request of your account from the last 7 days, newest first. It is
+on the dashboard's **Developers** page and at
+`GET /api/v1/manage/requests` (Bearer JWT). Each row has:
+
+- the time and the access key id that signed the request (never the secret)
+- the operation, bucket and key
+- the HTTP status and the S3 error code, with what to do about that code
+  (`suggestion`)
+- the **request id the client was answered**: the `RequestId` of an error
+  body, the id a support ticket quotes
+- the body bytes in and out
+- what served the request: `origin`, or the edge host
+
+It never holds a body, a header, an IP address, a user agent, an SSE-C key
+or any secret. Unlike the S3 access log (per bucket, opt-in, 30 days), it
+covers every bucket and is always on.
+
+| Query parameter | |
+|---|---|
+| `key` | only requests signed with this access key id |
+| `since` | only requests at or after this time (RFC 3339) |
+| `status` | an exact status (`403`), a class (`4xx`, `5xx`), or `error` (400 and above) |
+| `request_id` | the one request answered with this id |
+| `cursor`, `limit` | keyset paging: pass `next_cursor` back as `cursor`; `limit` 1–200, default 50 |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" "https://stored.cloud/api/v1/manage/requests?status=error&limit=20"
+```
+
 ## Rate limits
 
 | Surface | Limit |

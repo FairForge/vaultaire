@@ -30,6 +30,10 @@ type s3AccessEvent struct {
 	requestID     string
 	errorCode     string
 	loggedAt      time.Time
+	// keyID and host ride to the request log only (WP-LOG-1): the access
+	// key id that signed the request (never its secret) and what served it.
+	keyID string
+	host  string
 }
 
 // S3AccessLogTracker buffers S3 access events and flushes them to the
@@ -55,6 +59,14 @@ type S3AccessLogTracker struct {
 	enabledMu     sync.RWMutex
 	enabled       map[string]bool
 	enabledLoaded bool
+
+	// The request log (WP-LOG-1, request_log.go): the second sink, every
+	// tenant's every request, 7 days. requestLogOn is the request_log flag
+	// per tenant (nil = the sink is off); requests buffers its rows;
+	// suggested are the error codes whose suggestion this process stored.
+	requestLogOn func(tenantID string) bool
+	requests     []s3AccessEvent
+	suggested    sync.Map
 }
 
 func NewS3AccessLogTracker(db *sql.DB) *S3AccessLogTracker {
@@ -68,6 +80,9 @@ func NewS3AccessLogTracker(db *sql.DB) *S3AccessLogTracker {
 func (at *S3AccessLogTracker) SetLogger(logger *zap.Logger) {
 	at.logger = logger
 }
+
+// SetRequestLog wires the request log's flag (nil = the sink is off).
+func (at *S3AccessLogTracker) SetRequestLog(on func(tenantID string) bool) { at.requestLogOn = on }
 
 // SetWriter wires the delivery writer (nil disables delivery).
 func (at *S3AccessLogTracker) SetWriter(w *generatedObjectWriter) { at.writer = w }
@@ -127,21 +142,30 @@ func (at *S3AccessLogTracker) shouldRecord(event s3AccessEvent) bool {
 	return at.enabled[event.tenantID+"/"+event.bucket]
 }
 
-// Record appends an S3 access event to the buffer. Auto-flushes at 100 events.
+// Record appends an S3 access event to the buffers: the request log's for
+// every tenant with the request_log flag (WP-LOG-1), the bucket log's for a
+// logging-enabled bucket or an error. Auto-flushes at 100 events.
 func (at *S3AccessLogTracker) Record(_ context.Context, event s3AccessEvent) {
-	if event.tenantID == "" || event.bucket == "" {
-		return
-	}
-	if !at.shouldRecord(event) {
+	if event.tenantID == "" {
 		return
 	}
 	if event.loggedAt.IsZero() {
 		event.loggedAt = time.Now()
 	}
+	toRequests := at.requestLogOn != nil && at.requestLogOn(event.tenantID)
+	toBuckets := event.bucket != "" && at.shouldRecord(event)
+	if !toRequests && !toBuckets {
+		return
+	}
 
 	at.mu.Lock()
-	at.buffer = append(at.buffer, event)
-	needsFlush := len(at.buffer) >= 100
+	if toRequests {
+		at.requests = append(at.requests, event)
+	}
+	if toBuckets {
+		at.buffer = append(at.buffer, event)
+	}
+	needsFlush := len(at.buffer) >= 100 || len(at.requests) >= 100
 	at.mu.Unlock()
 
 	if needsFlush {
@@ -166,15 +190,16 @@ func (at *S3AccessLogTracker) StartFlusher(ctx context.Context, interval time.Du
 	}()
 }
 
-// Flush writes all buffered events to the s3_access_log table.
+// Flush writes the buffered events: the request log's in one statement,
+// then each bucket-log row to s3_access_log.
 func (at *S3AccessLogTracker) Flush() {
 	at.mu.Lock()
-	if len(at.buffer) == 0 {
+	if len(at.buffer) == 0 && len(at.requests) == 0 {
 		at.mu.Unlock()
 		return
 	}
-	events := at.buffer
-	at.buffer = make([]s3AccessEvent, 0, 128)
+	events, requests := at.buffer, at.requests
+	at.buffer, at.requests = make([]s3AccessEvent, 0, 128), nil
 	at.mu.Unlock()
 
 	if at.db == nil {
@@ -183,6 +208,12 @@ func (at *S3AccessLogTracker) Flush() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	if len(requests) > 0 {
+		if err := at.writeRequestLog(ctx, requests); err != nil && at.logger != nil {
+			at.logger.Error("flush request log", zap.Int("rows", len(requests)), zap.Error(err))
+		}
+	}
 
 	for _, e := range events {
 		_, err := at.db.ExecContext(ctx, `

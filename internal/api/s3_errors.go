@@ -252,10 +252,32 @@ func WriteS3Error(w http.ResponseWriter, code string, resource string, requestID
 		return
 	}
 
+	noteS3Error(w, code, requestID)
 	setS3ErrorHeaders(w)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(xmlData)
+}
+
+// s3ErrorNoter is a response writer that keeps the S3 error it answered:
+// the request log's error code and request id (WP-LOG-1, request_log.go).
+type s3ErrorNoter interface {
+	noteS3Error(code, requestID string)
+}
+
+// noteS3Error tells the first noter in w's Unwrap chain the error answered.
+func noteS3Error(w http.ResponseWriter, code, requestID string) {
+	for w != nil {
+		if n, ok := w.(s3ErrorNoter); ok {
+			n.noteS3Error(code, requestID)
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
+	}
 }
 
 // setS3ErrorHeaders marks an S3 error response as XML the edge must hand over
@@ -337,6 +359,7 @@ func WriteS3ErrorWithContext(w http.ResponseWriter, code string, resource string
 		return
 	}
 
+	noteS3Error(w, code, requestID)
 	setS3ErrorHeaders(w)
 	w.WriteHeader(statusCode)
 	_, _ = w.Write([]byte(xml.Header))

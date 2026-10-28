@@ -239,6 +239,9 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		// The other providers' webhook bodies (WP-PAY-1): "payment-provider
 		// event records, 90 days".
 		"payment_events": 90 * 24 * time.Hour,
+		// The developers' request log (WP-LOG-1): "developer request
+		// records, 7 days".
+		"request_log": 7 * 24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {

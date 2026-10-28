@@ -177,7 +177,7 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 	row := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpPut, Backend: chunkedBackendSentinel,
 		ContentLength: size, ContentType: attrs.ContentType, Codec: true,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
-			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"),
+			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr),
 			CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(sctx, tenantID, bucket, s.engine.GetPrimary())},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	settled := false

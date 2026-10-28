@@ -25,6 +25,15 @@ type countingResponseWriter struct {
 	// span, when set, adds every byte to the tenant's month counter as it is
 	// written, so a response still in flight counts (WP-R10-9).
 	span *egressSpan
+	// errCode and errRequestID: the first S3 error the response answered
+	// (noteS3Error) — the request log's (WP-LOG-1).
+	errCode, errRequestID string
+}
+
+func (cw *countingResponseWriter) noteS3Error(code, requestID string) {
+	if cw.errCode == "" {
+		cw.errCode, cw.errRequestID = code, requestID
+	}
 }
 
 func (cw *countingResponseWriter) WriteHeader(code int) {

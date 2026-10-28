@@ -306,6 +306,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		))
 		dr.Get("/usage", handlers.HandleUsage(usageTmpl, deps.DB, deps.Logger))
 
+		// Developers page: the request log (WP-LOG-1).
+		devTmpl := template.Must(baseTmpl.Clone())
+		template.Must(devTmpl.ParseFS(Templates,
+			"templates/customer/developers.html",
+		))
+		dr.Get("/developers", handlers.HandleDevelopers(devTmpl, deps.DB, deps.Logger))
+
 		// Settings page.
 		settingsTmpl := template.Must(baseTmpl.Clone())
 		template.Must(settingsTmpl.ParseFS(Templates,

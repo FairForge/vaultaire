@@ -134,6 +134,7 @@ var Deleted = []Rule{
 
 	// --- logs and rollups (PII: source IP, user agent, referer, country) ---
 	{"s3_access_log", `DELETE FROM s3_access_log WHERE tenant_id = $1`, ByTenant},
+	{"request_log", `DELETE FROM request_log WHERE tenant_id = $1`, ByTenant}, // WP-LOG-1 (115)
 	{"cdn_access_log", `DELETE FROM cdn_access_log WHERE tenant_id = $1`, ByTenant},
 	{"cdn_stats_daily", `DELETE FROM cdn_stats_daily WHERE tenant_id = $1`, ByTenant},
 	{"access_patterns", `DELETE FROM access_patterns WHERE tenant_id = $1`, ByTenant},

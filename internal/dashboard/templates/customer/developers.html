@@ -1,0 +1,66 @@
+{{define "title"}}Developers, Stored{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Developers</h1>
+        <p class="text-muted">Your S3 requests of the last 7 days, newest first. An error shows what to do about it; search by the request id an error answered.</p>
+    </div>
+</div>
+
+<form method="GET" action="/dashboard/developers" class="card" style="display:flex;flex-wrap:wrap;gap:0.75rem;align-items:flex-end;margin-bottom:1.5rem">
+    <label style="display:flex;flex-direction:column;gap:0.25rem">Key
+        <select name="key">
+            <option value="">every key</option>
+            {{range .Keys}}<option value="{{.ID}}"{{if eq .ID $.Filter.Key}} selected{{end}}>{{if .Name}}{{.Name}} · {{end}}{{.ID}}</option>{{end}}
+        </select>
+    </label>
+    <label style="display:flex;flex-direction:column;gap:0.25rem">Status
+        <select name="status">
+            <option value="">any</option>
+            <option value="error"{{if eq .Filter.Status "error"}} selected{{end}}>errors</option>
+            <option value="4xx"{{if eq .Filter.Status "4xx"}} selected{{end}}>4xx</option>
+            <option value="5xx"{{if eq .Filter.Status "5xx"}} selected{{end}}>5xx</option>
+            <option value="403"{{if eq .Filter.Status "403"}} selected{{end}}>403</option>
+            <option value="404"{{if eq .Filter.Status "404"}} selected{{end}}>404</option>
+        </select>
+    </label>
+    <label style="display:flex;flex-direction:column;gap:0.25rem;flex:1;min-width:12rem">Request id
+        <input type="search" name="request_id" value="{{.Filter.RequestID}}" placeholder="the RequestId of an error" autocomplete="off">
+    </label>
+    <button type="submit" class="btn btn-primary">Search</button>
+    {{if or .Filter.Key .Filter.Status .Filter.RequestID}}<a href="/dashboard/developers" class="btn">Clear</a>{{end}}
+</form>
+
+{{if .Requests}}
+<div class="card" style="overflow-x:auto">
+    <table class="table">
+        <thead>
+            <tr><th>Time (UTC)</th><th>Key</th><th>Operation</th><th>Bucket / key</th><th>Status</th><th>Request id</th><th>In / out</th><th>Served by</th></tr>
+        </thead>
+        <tbody>
+            {{range .Requests}}
+            <tr>
+                <td style="white-space:nowrap">{{.LoggedAt.UTC.Format "2006-01-02 15:04:05"}}</td>
+                <td><code>{{.KeyID}}</code></td>
+                <td>{{.Op}}</td>
+                <td>{{.Bucket}}{{if .Key}}/{{.Key}}{{end}}</td>
+                <td>
+                    {{.Status}}{{if .ErrorCode}} <strong>{{.ErrorCode}}</strong>
+                    {{if .Suggestion}}<div class="text-muted" style="font-size:0.8rem;max-width:22rem">{{.Suggestion}}</div>{{end}}{{end}}
+                </td>
+                <td><code>{{.RequestID}}</code></td>
+                <td style="white-space:nowrap">{{.BytesIn}} / {{.BytesOut}} B</td>
+                <td>{{.Host}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{if .OlderURL}}<p style="margin-top:1rem"><a href="{{.OlderURL}}" class="btn">Older requests</a></p>{{end}}
+</div>
+{{else}}
+<div class="card">
+    <p class="text-muted empty-state">No requests match{{if or .Filter.Key .Filter.Status .Filter.RequestID}} these filters{{end}} in the last 7 days. Requests appear here within a few seconds of being answered.</p>
+</div>
+{{end}}
+<p class="text-muted" style="font-size:0.8rem;margin-top:1rem">Kept 7 days. Holds the access key id, operation, bucket, object name, status, error code and request id of each S3 request; never a body, an IP address or a secret. Also at <code>GET /api/v1/manage/requests</code>.</p>
+{{end}}

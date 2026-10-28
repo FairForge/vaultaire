@@ -137,6 +137,9 @@ type edgeAdmitAttrs struct {
 	LockUntil string      `json:"lock_until,omitempty"`
 	// UserAgent is the client's (RP64-11): the access-log row carries it.
 	UserAgent string `json:"user_agent,omitempty"`
+	// KeyID is the access key id that signed the request (never its
+	// secret): the request log's key column (WP-LOG-1).
+	KeyID string `json:"key_id,omitempty"`
 	// Status is what a GET answers the client (200, 206) — the access-log
 	// row's status when the Worker served it.
 	Status int `json:"status,omitempty"`
@@ -708,7 +711,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	row := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: req.Op, Backend: backend,
 		ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
-			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent")},
+			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr)},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	row.Attrs.CheckLength = stream != nil && !streamProps.EnforcesDecodedLength
 	container := tenantID + "_" + bucket
@@ -1617,8 +1620,13 @@ func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOu
 	if ua == "" {
 		ua = "edge"
 	}
+	host := row.Host // the data-plane host that served it (the request log, WP-LOG-1)
+	if host == "" {
+		host = "edge"
+	}
 	s.accessLogTracker.Record(context.Background(), s3AccessEvent{
 		tenantID: row.TenantID, bucket: row.Bucket, objectKey: row.Key, operation: op, statusCode: status,
 		bytesSent: bytesOut, bytesReceived: bytesIn, sourceIP: row.ClientIP, userAgent: ua, requestID: row.RequestID, loggedAt: time.Now(),
+		host: host, keyID: row.Attrs.KeyID,
 	})
 }

@@ -365,6 +365,22 @@
       "what": "The request log of your buckets: each request's bucket, object name, operation, client IP address and user agent."
     },
     {
+      "table": "request_log",
+      "days": 7,
+      "action": "delete",
+      "holds": [
+        "key_id",
+        "op",
+        "bucket",
+        "object_key",
+        "status",
+        "error_code",
+        "request_id",
+        "logged_at"
+      ],
+      "what": "The developer request log of your account: each S3 request's access key id, operation, bucket, object name, status, error code and request id; no IP address, no user agent, no body."
+    },
+    {
       "table": "events",
       "days": 90,
       "action": "delete",
