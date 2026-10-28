@@ -116,6 +116,14 @@ const (
 	// Default OFF, per tenant first; dark on prod until the F-14 ceremony.
 	flagEdgeCodec = "edge_codec"
 
+	// flagDataPlaneSLC sends a tenant's edge-eligible PutObject, UploadPart
+	// and GetObject through the ORIGIN as a data-plane host (host=slc,
+	// WP-EDGE-3): admit and commit in-process, the bytes through
+	// internal/dataplane on this box — every byte labelled by host, the rows
+	// the one shape. Needs edge_ingest's gate too (the admit's). Default
+	// OFF, per tenant first: OFF = the handlers as today.
+	flagDataPlaneSLC = "data_plane_slc"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -148,6 +156,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagVersionedChunking, false)
 	fl.Register(flagEdgeIngest, false)
 	fl.Register(flagEdgeCodec, false)
+	fl.Register(flagDataPlaneSLC, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")

@@ -610,7 +610,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	case "PutObject":
 		if r.Header.Get("x-amz-copy-source") != "" {
 			s.handleCopyObject(cw, r, s3Req)
-		} else {
+		} else if !s.slcWrite(cw, r, t.ID) {
 			s.handlePutObject(cw, r, s3Req)
 		}
 	case "DeleteObject":
@@ -630,7 +630,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	case "InitiateMultipartUpload":
 		s.handleInitiateMultipartUpload(cw, r, s3Req.Bucket, s3Req.Object)
 	case "UploadPart":
-		s.handleUploadPart(cw, r, s3Req.Bucket, s3Req.Object)
+		if !s.slcWrite(cw, r, t.ID) {
+			s.handleUploadPart(cw, r, s3Req.Bucket, s3Req.Object)
+		}
 	case "UploadPartCopy":
 		s.handleUploadPartCopy(cw, r, s3Req.Bucket, s3Req.Object)
 	case "CompleteMultipartUpload":
@@ -737,8 +739,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 // paced through the tenant's token bucket (WP-R10-9). The wrapper goes on
 // here, before the handler, so no path inside it can send around it.
 func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req *S3Request, tenantID string, metered bool) {
+	slcTenant := tenantID
+	if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
+		slcTenant = t.ID
+	}
 	if !metered {
-		s.handleGetObject(cw, r, req)
+		if !s.slcRead(cw, r, slcTenant) {
+			s.handleGetObject(cw, r, req)
+		}
 		return
 	}
 	gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceS3)
@@ -752,7 +760,9 @@ func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req
 		return
 	}
 	defer gw.close() // also on a panic: a leaked slot would shrink the guard for good
-	s.handleGetObject(gw, r, req)
+	if !s.slcRead(gw, r, slcTenant) {
+		s.handleGetObject(gw, r, req)
+	}
 }
 
 // handleGetObject handles S3 GET requests

@@ -67,7 +67,10 @@ func TestDataHost_MoverPutPartAndRead(t *testing.T) {
 	assert.True(t, bytes.Equal(body, got))
 	assert.Equal(t, http.StatusOK, rr.Status)
 	assert.Equal(t, `"`+hex.EncodeToString(sum[:])+`"`, rr.Headers["Etag"], "the origin's headers")
-	assert.Equal(t, before+int64(len(body)), f.egressRecorded(), "metered once at the commit")
+	// Server.DataPlane is host=slc: the bytes cross this box, so the
+	// origin's own writer meters them (handleS3Request), never the commit
+	// (step 11) — Host.Read alone meters nothing.
+	assert.Equal(t, before, f.egressRecorded(), "an slc commit leaves the metering to the origin's writer")
 
 	// A pass-through (no such key): handed back untouched.
 	rr, err = host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/nope.bin", nil, nil, nil))

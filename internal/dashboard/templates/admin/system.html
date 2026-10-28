@@ -122,6 +122,34 @@
 </div>
 {{end}}
 
+{{if .DataPlaneHosts}}
+<div class="card">
+    <div class="card-title">Data-plane hosts</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Host</th><th>Kind</th><th>Up</th><th>Health</th><th>Last heartbeat</th><th>Version</th><th>Weight</th><th>Scope</th></tr>
+            </thead>
+            <tbody>
+                {{range .DataPlaneHosts}}
+                <tr>
+                    <td>{{.Host}}</td>
+                    <td>{{.Kind}}</td>
+                    <td>{{if .Up}}<span class="badge badge-success">up</span>{{else}}<span class="badge badge-danger">down</span>{{end}}</td>
+                    <td>{{.Health}}</td>
+                    <td>{{.LastSeen}}</td>
+                    <td>{{if .Version}}{{.Version}}{{else}}—{{end}}</td>
+                    <td>{{.Weight}}</td>
+                    <td>{{if .TenantScoped}}one customer (BYO){{else}}platform{{end}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-detail">The hosts that move customer bytes (WP-EDGE-3): the Worker (edge), this box (slc) and data nodes (node; up = a heartbeat within 90 s). A node unseen for 90 s takes no new admit. Rows: <code>GET/PUT/DELETE /api/v1/admin/data-plane-hosts/{host}</code>; rule <code>DataPlaneHostDown</code>.</div>
+</div>
+{{end}}
+
 {{if .Routing}}
 <div class="card">
     <div class="card-title">Routing Truth</div>

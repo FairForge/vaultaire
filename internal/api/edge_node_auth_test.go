@@ -33,7 +33,9 @@ func (f *edgeFixture) registerNode(address, tenantID, health string) (string, st
 	host := "node-" + uuid.New().String()[:8] + ".lab.test"
 	token := "node-token-" + uuid.New().String()
 	sum := sha256.Sum256([]byte(token))
-	f.exec(`INSERT INTO data_plane_hosts (host, kind, address, token_hash, tenant_id, weight, health) VALUES ($1, 'node', $2, $3, NULLIF($4, ''), 1, $5)`,
+	// A node registered up has just sent its heartbeat (a node up but
+	// unseen for 90 s is down at the gate — step 13).
+	f.exec(`INSERT INTO data_plane_hosts (host, kind, address, token_hash, tenant_id, weight, health, last_seen) VALUES ($1, 'node', $2, $3, NULLIF($4, ''), 1, $5, NOW())`,
 		host, address, hex.EncodeToString(sum[:]), tenantID, health)
 	f.t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM data_plane_hosts WHERE host = $1`, host) })
 	f.srv.dataPlaneHosts().invalidate()

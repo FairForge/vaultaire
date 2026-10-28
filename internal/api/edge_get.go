@@ -451,7 +451,11 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 					row.TenantID, row.Bucket, row.Key)
 			}()
 		}
-		s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
+		if row.Host != dataplane.HostSLC {
+			// host=slc: the bytes crossed this box and the origin's own
+			// writer metered them (handleS3Request) — never twice.
+			s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
+		}
 		status := row.Attrs.Status
 		if status == 0 {
 			status = http.StatusOK

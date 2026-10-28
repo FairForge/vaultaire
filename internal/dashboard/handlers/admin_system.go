@@ -54,6 +54,7 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			data["Jobs"] = loadJobRuns(r.Context(), db, logger)
 			data["Routing"] = loadRoutingTruth(r.Context(), db, logger)
 			data["Capacity"] = loadBackendCapacity(r.Context(), db, logger)
+			data["DataPlaneHosts"] = loadDataPlaneHosts(r.Context(), db, logger)
 		} else {
 			data["DBStatus"] = "not connected"
 		}
@@ -64,6 +65,48 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// DataPlaneHostRow is one data-plane host on the System page (WP-EDGE-3):
+// the registry row's health, and Up = what vaultaire_data_plane_host_up
+// says (a node: its health up AND a heartbeat within 90 s). TenantScoped
+// says a host is a customer's own (BYO) — never which customer: the
+// System page names none.
+type DataPlaneHostRow struct {
+	Host, Kind, Health, Version, LastSeen string
+	Up, TenantScoped                      bool
+	Weight                                int
+}
+
+// loadDataPlaneHosts reads the data_plane_hosts registry for the card.
+func loadDataPlaneHosts(ctx context.Context, db *sql.DB, logger *zap.Logger) []DataPlaneHostRow {
+	rows, err := db.QueryContext(ctx, `
+		SELECT host, kind, health, COALESCE(version, ''), weight, tenant_id IS NOT NULL, last_seen,
+		       health = 'up' AND (kind <> 'node' OR (last_seen IS NOT NULL AND last_seen > NOW() - interval '90 seconds'))
+		FROM data_plane_hosts ORDER BY kind, host`)
+	if err != nil {
+		logger.Warn("admin system: read data_plane_hosts", zap.Error(err))
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []DataPlaneHostRow
+	for rows.Next() {
+		var row DataPlaneHostRow
+		var seen sql.NullTime
+		if err := rows.Scan(&row.Host, &row.Kind, &row.Health, &row.Version, &row.Weight, &row.TenantScoped, &seen, &row.Up); err != nil {
+			logger.Warn("admin system: scan data_plane_hosts", zap.Error(err))
+			return out
+		}
+		row.LastSeen = "—"
+		if seen.Valid {
+			row.LastSeen = time.Since(seen.Time).Truncate(time.Second).String() + " ago"
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("admin system: read data_plane_hosts", zap.Error(err))
+	}
+	return out
 }
 
 // RoutingTruthRow is the routing-truth line of the System page (WP-R7-5):

@@ -126,3 +126,39 @@ func TestHandleAdminSystem_ShowsTheRoutingTruthLine(t *testing.T) {
 	assert.Contains(t, body, "288 missing")
 	assert.Contains(t, body, "|2675|(NULL) 62, onedrive 2613]")
 }
+
+// WP-EDGE-3 step 13: the Data-plane hosts card lists the registry — host,
+// kind, health, up (a node: a heartbeat within 90 s), last seen, version,
+// and whether the host is tenant-scoped — never which tenant (the System
+// page names no customer).
+func TestHandleAdminSystem_ShowsTheDataPlaneHosts(t *testing.T) {
+	db, err := sql.Open("postgres", testutil.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Skipf("no test database: %v", err)
+	}
+	node := "card-" + uuid.New().String()[:8] + ".lab.test"
+	tenantID := "card-" + uuid.New().String()[:8]
+	_, err = db.Exec(`INSERT INTO tenants (id, name, email) VALUES ($1, 'Card', $2)`, tenantID, tenantID+"@test.local")
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO data_plane_hosts (host, kind, address, token_hash, tenant_id, weight, health, last_seen, version)
+		VALUES ($1, 'node', '198.51.100.99', $2, $3, 1, 'up', NOW() - INTERVAL '2 minutes', 'abc1234')`, node, "h-"+node, tenantID)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM data_plane_hosts WHERE host = $1`, node)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID)
+	})
+	tmpl := template.Must(template.New("admin").Parse(`{{define "admin"}}{{block "content" .}}{{end}}{{end}}`))
+	template.Must(tmpl.Parse(`{{define "content"}}{{range .DataPlaneHosts}}[{{.Host}}|{{.Kind}}|{{.Health}}|{{.Up}}|{{.TenantScoped}}|{{.Version}}]{{end}}{{end}}`))
+
+	req := httptest.NewRequest("GET", "/admin/system", nil).WithContext(adminCtx(t))
+	w := httptest.NewRecorder()
+	HandleAdminSystem(tmpl, db, zap.NewNop()).ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, "["+node+"|node|up|false|true|abc1234]", "up in the registry, no heartbeat for 2 min: not up")
+	assert.Contains(t, body, "[s3.stored.cloud|edge|up|true|false|]")
+	assert.NotContains(t, body, tenantID, "never which tenant")
+}
