@@ -123,6 +123,21 @@ func edgeConfigOrFatal(logger *zap.Logger, getenv func(string) string, readFile 
 	return cfg
 }
 
+// isNodeTokenShape reports whether tok has the shape the registry mints:
+// 64 lower-case hex characters (32 random bytes).
+func isNodeTokenShape(tok string) bool {
+	if len(tok) != 64 {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		c := tok[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // edgeCaller is the auth of an edge call (admit, index, commit, heartbeat):
 // the Worker — the service token, compared in constant time, from a
 // Cloudflare peer (unless the lab switch is on) — or a registered data node
@@ -145,7 +160,10 @@ func (s *Server) edgeCaller(r *http.Request) (h dataplane.HostInfo, health strin
 		}
 		return dataplane.HostInfo{Name: edgeHost, Kind: dataplane.KindEdge}, "up", true
 	}
-	if s.db == nil {
+	if !isNodeTokenShape(got) || s.db == nil {
+		// RP74-2: the registry mints exactly 64 lower-case hex characters;
+		// any other shape is the route's 404 before a lookup — no query, no
+		// cache entry for an unauthenticated caller to grow.
 		return h, "", false
 	}
 	sum := sha256.Sum256([]byte(got))
