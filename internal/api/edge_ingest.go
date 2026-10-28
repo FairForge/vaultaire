@@ -183,6 +183,19 @@ type edgeAdmitRow struct {
 	// Codec: the admit answered the codec shape (WP-EDGE-2) — no presigned
 	// body PUT; the commit carries the chunk list.
 	Codec bool
+	// Host is the data-plane host the admit was made for (WP-EDGE-3,
+	// migration 112): edge (the Worker), a node's registry name, slc (the
+	// origin in-process); "" on a row written before = edge.
+	Host string
+}
+
+// admitHost is the host an admit is made for: the caller on ctx (the gate
+// or the in-process control plane), else the Worker.
+func admitHost(ctx context.Context) string {
+	if h, ok := dataplane.HostFrom(ctx); ok && h.Name != "" {
+		return h.Name
+	}
+	return edgeHost
 }
 
 // registerEdgeRoutes mounts the two calls when the token is loaded.
@@ -399,6 +412,14 @@ func (s *Server) edgeAdmitPrelude(ctx context.Context, req edgeAdmitRequest) (p 
 	}
 	if tenantID == "" || engine.IsReservedTenantID(tenantID) {
 		WriteS3Error(rec, ErrAccessDenied, sr.URL.Path, generateRequestID())
+		return decide(refusalOf(rec))
+	}
+	// A tenant-scoped (BYO) data-plane host admits ONE tenant (contract
+	// line 13: the tenant is the unit of disclosure — a customer's own node
+	// never sees another's request admitted). WP-EDGE-3.
+	if h, ok := dataplane.HostFrom(ctx); ok && h.TenantScoped() && h.TenantID != tenantID {
+		WriteS3ErrorWithContext(rec, ErrAccessDenied, sr.URL.Path, generateRequestID(),
+			WithSuggestion("This endpoint serves one account only: use your own endpoint or s3.stored.cloud."))
 		return decide(refusalOf(rec))
 	}
 	if scope != nil && auth.IsKeyExpired(scope.ExpiresAt) {
@@ -992,16 +1013,19 @@ func insertEdgeAdmit(ctx context.Context, db *sql.DB, row edgeAdmitRow) error {
 	if err != nil {
 		return err
 	}
+	if row.Host == "" {
+		row.Host = admitHost(ctx)
+	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO edge_admits
 			(id, tenant_id, bucket, object_key, op, upload_id, part_number, backend, storage_key, content_length,
 			 content_md5, content_type, attrs, storage_class, floor, reserved_bytes, reserved_floor,
-			 floor_reserved, credited, client_ip, request_id, state, expires_at, codec)
+			 floor_reserved, credited, client_ip, request_id, state, expires_at, codec, host)
 		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, 0), $8, $9, $10, NULLIF($11, ''), $12, $13, $14, $15,
-		        $16, NULLIF($17, ''), $18, $19, $20, $21, 'pending', $22, $23)`,
+		        $16, NULLIF($17, ''), $18, $19, $20, $21, 'pending', $22, $23, $24)`,
 		row.ID, row.TenantID, row.Bucket, row.Key, row.Op, row.UploadID, row.PartNumber, row.Backend, row.StorageKey, row.ContentLength,
 		row.ContentMD5, row.ContentType, attrs, row.StorageClass, row.Floor, row.ReservedBytes, row.ReservedFloor,
-		row.FloorReserved, row.Credited, row.ClientIP, row.RequestID, row.ExpiresAt, row.Codec)
+		row.FloorReserved, row.Credited, row.ClientIP, row.RequestID, row.ExpiresAt, row.Codec, row.Host)
 	return err
 }
 
@@ -1124,7 +1148,7 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 		after()
 	}
 	if state == "committed" {
-		dataPlaneBytes.WithLabelValues(edgeHost, row.Op).Add(float64(bytes))
+		dataPlaneBytes.WithLabelValues(row.Host, row.Op).Add(float64(bytes))
 	}
 	s.logger.Info("edge commit", zap.String("op", row.Op), zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket),
 		zap.String("key", row.Key), zap.String("backend", row.Backend), zap.String("state", state), zap.Int("status", relay.Status),
@@ -1143,11 +1167,11 @@ func lockEdgeAdmit(ctx context.Context, tx *sql.Tx, id string) (edgeAdmitRow, er
 	err := tx.QueryRowContext(ctx, `
 		SELECT id, tenant_id, bucket, object_key, op, upload_id, part_number, backend, storage_key, content_length,
 		       content_md5, content_type, attrs, storage_class, floor, reserved_bytes, reserved_floor,
-		       floor_reserved, credited, client_ip, request_id, state, result, expires_at, codec
+		       floor_reserved, credited, client_ip, request_id, state, result, expires_at, codec, COALESCE(host, '`+edgeHost+`')
 		FROM edge_admits WHERE id = $1 FOR UPDATE`, id).Scan(
 		&row.ID, &row.TenantID, &row.Bucket, &row.Key, &row.Op, &uploadID, &partNumber, &row.Backend, &row.StorageKey, &row.ContentLength,
 		&md5, &row.ContentType, &attrs, &row.StorageClass, &row.Floor, &row.ReservedBytes, &reservedFloor,
-		&row.FloorReserved, &row.Credited, &row.ClientIP, &row.RequestID, &row.State, &result, &row.ExpiresAt, &row.Codec)
+		&row.FloorReserved, &row.Credited, &row.ClientIP, &row.RequestID, &row.State, &result, &row.ExpiresAt, &row.Codec, &row.Host)
 	if err != nil {
 		return row, err
 	}
@@ -1415,7 +1439,7 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, rec *relay
 	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength, 0)
 	s.logger.Info("artifact stored", zap.String("tenant_id", row.TenantID), zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 		zap.String("backend", row.Backend), zap.String("etag", etag), zap.String("version_id", flip.VersionID),
-		zap.Int64("size", row.ContentLength), zap.String("host", edgeHost))
+		zap.Int64("size", row.ContentLength), zap.String("host", row.Host))
 	NewNotificationDispatcher(s.db, s.logger).Fire(row.TenantID, row.Bucket, "s3:ObjectCreated:Put", row.Key, row.ContentLength, etag)
 	emitEvent(cctx, s.db, s.logger, "object.created", row.TenantID, map[string]interface{}{
 		"bucket": row.Bucket, "key": row.Key, "size": row.ContentLength, "etag": etag,

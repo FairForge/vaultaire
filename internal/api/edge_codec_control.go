@@ -575,6 +575,10 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 	}
 
 	stored := 0 // stored chunks seen: the HEAD sample's position
+	// A tenant-scoped (BYO) host's reports are never trusted for integrity
+	// (RP68-3 at 100 %): EVERY stored chunk of its commit is opened.
+	host, _ := dataplane.HostFrom(ctx)
+	openAll := host.TenantScoped()
 	for _, c := range chunks {
 		plain, decErr := hex.DecodeString(c.Hash)
 		if decErr != nil || len(plain) != 32 {
@@ -606,7 +610,7 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			// seed (RP70-3: a wrong-key blob has an ETag and size of its own)
 			// — and every edgeCodecHeadEvery-th after it is HEADed (RP68-3).
 			switch {
-			case stored == 0:
+			case stored == 0 || openAll:
 				if oErr := s.openEdgeChunkPrefix(ctx, row.TenantID, keyed, version, since, etag, c.SealedSize); oErr != nil {
 					return fail(oErr)
 				}
@@ -993,7 +997,7 @@ func (s *Server) commitEdgeCodecPut(ctx context.Context, row edgeAdmitRow, req e
 	s.recordEdgeAccess(row, http.StatusOK, total, 0)
 	s.logger.Info("artifact stored", zap.String("tenant_id", row.TenantID), zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 		zap.String("backend", chunkedBackendSentinel), zap.Bool("codec", true), zap.String("etag", etag), zap.Int("chunks", count),
-		zap.Int64("size", total), zap.String("host", edgeHost))
+		zap.Int64("size", total), zap.String("host", row.Host))
 	NewNotificationDispatcher(s.db, s.logger).Fire(row.TenantID, row.Bucket, "s3:ObjectCreated:Put", row.Key, total, etag)
 	emitEvent(cctx, s.db, s.logger, "object.created", row.TenantID, map[string]interface{}{
 		"bucket": row.Bucket, "key": row.Key, "size": total, "etag": etag,
