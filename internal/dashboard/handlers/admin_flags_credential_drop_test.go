@@ -28,3 +28,14 @@ func TestFlagRefused_CredentialPlaintextDrop(t *testing.T) {
 	assert.True(t, flagRefused(rr, fmt.Errorf("%w: %w", flags.ErrChangeRefused, &auth.PlaintextDropRefusal{Code: "credentials_not_wrapped", Unwrapped: 3})))
 	assert.Contains(t, rr.Body.String(), "3 live S3 secret(s)")
 }
+
+// standard_sealed_default's refusals (WP-EDGE-4 PR C) reach the dashboard
+// the same way: 409 with the code and the count.
+func TestFlagRefused_StandardSealedDefault(t *testing.T) {
+	rr := httptest.NewRecorder()
+	refusal := &flags.Refusal{Flag: "standard_sealed_default", Code: "tenant_keys_missing", Count: 4, Msg: "4 tenant(s) have no key version yet"}
+	assert.True(t, flagRefused(rr, fmt.Errorf("%w: %w", flags.ErrChangeRefused, refusal)))
+	assert.Equal(t, http.StatusConflict, rr.Code)
+	assert.Contains(t, rr.Body.String(), "tenant_keys_missing")
+	assert.Contains(t, rr.Body.String(), "4 tenant(s)")
+}

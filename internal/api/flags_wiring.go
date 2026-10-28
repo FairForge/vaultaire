@@ -124,6 +124,15 @@ const (
 	// OFF, per tenant first: OFF = the handlers as today.
 	flagDataPlaneSLC = "data_plane_slc"
 
+	// flagStandardSealedDefault seals every Standard-mode write (WP-EDGE-4
+	// PR C, Stage 1a Prompt 48; sealed_default.go): at the origin a
+	// sub-threshold body is placed whole and SSE-S3 sealed, a chunked one
+	// chunk-encrypted; at the edge it implies edge_codec for every tenant.
+	// A write that cannot be sealed is 503, never plaintext. Global only,
+	// default OFF; turning it on is refused (409) without a master key or
+	// while a tenant has no key version. Flipped after the F-14 ceremony.
+	flagStandardSealedDefault = "standard_sealed_default"
+
 	// flagEntitlementLapse lets the entitlement_lapse job clear a house whose
 	// paid_through + ENTITLEMENT_GRACE has passed (WP-PAY-1). Default OFF,
 	// per tenant first: off, the job only counts it (would_clear). WP-PAY-2
@@ -202,6 +211,8 @@ func registerFlags(fl *flags.Service) {
 	// sign any S3 request (vaultaire-switch refuses one).
 	fl.Register(flagCredentialPlaintextDrop, false)
 	fl.GlobalOnly(flagCredentialPlaintextDrop)
+	fl.Register(flagStandardSealedDefault, false)
+	fl.GlobalOnly(flagStandardSealedDefault)
 }
 
 // tierGate says whether a tenant may place on a flag-gated tier class

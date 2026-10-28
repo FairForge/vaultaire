@@ -148,6 +148,8 @@ var (
 		Suggestion: "This bucket stores on a backend reached without TLS, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseSealedTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket stores on a third-party network, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
+	refuseSealedDefaultNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
+		Suggestion: "Objects are sealed at rest and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseNoMasterKeyRequested = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "The request asks for server-side encryption (x-amz-server-side-encryption: AES256) and the server's encryption key is not available right now. Nothing was stored; retry later."}
 )
@@ -236,7 +238,17 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 		return writePlacement{Refusal: refuseCleartextTierNoKey}
 	}
 
-	encryptionRequired := (req.SSERequested || bucketSSE || sealedTier) && !req.SSEC
+	// standard_sealed_default (sealed_default.go): every Standard write is
+	// sealed — not Private (SSE-C seals it already), not Public (meant to be
+	// read); with no master key the write is refused, never plaintext.
+	sealedDefault := !req.SSEC && req.Class != "PUBLIC" && a.sealedByDefault()
+	if sealedDefault && (a.sseService == nil || (chunkable && a.chunkEncSvc == nil)) && req.Size > 0 {
+		a.logger.Error("write refused: standard_sealed_default is on and ENCRYPTION_MASTER_KEY is not configured on this process",
+			zap.String("bucket", req.Bucket))
+		return writePlacement{Refusal: refuseSealedDefaultNoKey}
+	}
+
+	encryptionRequired := (req.SSERequested || bucketSSE || sealedTier || sealedDefault) && !req.SSEC
 	if a.sseService != nil && encryptionRequired && !chunkEncrypt && req.Size > 0 {
 		return writePlacement{Kind: placeWholeSealed}
 	}

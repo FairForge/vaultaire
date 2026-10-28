@@ -41,6 +41,19 @@ var ErrNotExemptible = errors.New("flags: this flag cannot be turned off for one
 // ErrGlobalOnly: a per-tenant row of a flag that is read only globally.
 var ErrGlobalOnly = errors.New("flags: this flag has a global row only")
 
+// Refusal is a write a server-side guard refused because the flag's
+// preconditions do not hold (standard_sealed_default without a master key
+// or with tenants that have no key version): the API's and the dashboard's
+// 409 with Code and Count. Nothing was written.
+type Refusal struct {
+	Flag  string
+	Code  string
+	Count int64
+	Msg   string
+}
+
+func (e *Refusal) Error() string { return e.Flag + ": " + e.Msg + " (" + e.Code + ")" }
+
 // ErrChangeRefused: the write guard refused the change; nothing was written
 // (the guard's own error is wrapped too).
 var ErrChangeRefused = errors.New("flags: the change was refused before it was written")
