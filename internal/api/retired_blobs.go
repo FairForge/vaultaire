@@ -384,6 +384,12 @@ func (c *RetiredBlobCollector) collect(ctx context.Context, drv engine.Driver, r
 	if err := drv.Delete(dctx, r.container, r.storageKey); err != nil && !isObjectMissingErr(err) {
 		return retiredOutcomeFailed, fmt.Errorf("delete: %w", err)
 	}
+	// Its mirror copies (WP-EDGE-4) go with it: the blob_copies job
+	// deletes them from their legs.
+	if _, err := tx.ExecContext(ctx, `UPDATE blob_copies SET state = 'stale', updated_at = NOW()
+		WHERE tenant_id = $1 AND storage_key = $2 AND bucket <> '' AND state <> 'stale'`, r.tenantID, r.storageKey); err != nil {
+		return retiredOutcomeFailed, fmt.Errorf("mark the blob's copies stale: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retired_blobs WHERE backend_id = $1 AND container = $2 AND storage_key = $3`,
 		r.backend, r.container, r.storageKey); err != nil {
 		return retiredOutcomeFailed, err

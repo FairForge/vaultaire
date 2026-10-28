@@ -110,6 +110,9 @@ func (s *Server) initMetrics() {
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))
+		// The edge mirror's copies (WP-EDGE-4): the blob_copies job's
+		// outcomes and the copies owed.
+		reg.MustRegister(blobCopiesTotal, blobCopiesPending)
 		// Hydrate-before-serve of large Sia objects (sia_promotion.go).
 		reg.MustRegister(siaPromotions, siaPromotionSeconds, newSiaPromotedBytesCollector(s.db, s.log()))
 		if s.tenantKeys != nil {

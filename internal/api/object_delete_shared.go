@@ -446,7 +446,9 @@ func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bu
 // Smart-demotion ledger row of the key at the address (its hot copy until
 // reclaimed, its cold copy), and a retired_blobs row naming the address on
 // another backend (a CompleteMultipartUpload retry that reused its address
-// after the first attempt's blob was queued as an orphan elsewhere; 090).
+// after the first attempt's blob was queued as an orphan elsewhere; 090),
+// and a mirror copy of the blob on its leg (blob_copies, WP-EDGE-4: the
+// row is left for the blob_copies job, which finds it orphaned).
 const knownCopiesSQL = `
 	SELECT hot_backend FROM smart_demotions
 	 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, '') = $4
@@ -458,7 +460,10 @@ const knownCopiesSQL = `
 	UNION
 	SELECT backend_id FROM retired_blobs
 	 WHERE container = $5 AND storage_key = $4 AND $4 <> '' AND tenant_id = $1 AND backend_id <> $6
-	   AND backend_id <> '` + chunkedBackendSentinel + `'` // a retired manifest is no copy of a blob (WP-VM-1)
+	   AND backend_id <> '` + chunkedBackendSentinel + `'
+	UNION
+	SELECT leg FROM blob_copies
+	 WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND storage_key = $4 AND kind = 'mirror' AND leg <> $6` // a retired manifest is no copy of a blob (WP-VM-1); a mirror copy is (WP-EDGE-4)
 
 // knownBlobCopies is every backend other than recorded the blob at
 // storageKey ("" = the key) is known to be on. A DELETE removes them with

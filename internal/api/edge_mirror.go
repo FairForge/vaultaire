@@ -102,14 +102,16 @@ const (
 
 // mirrorCopyState is the state a commit records for a mirror whose leg
 // answered mirrorETag for a blob whose primary MD5 is primaryMD5: ready
-// only when both are the same MD5 (the same bytes), pending otherwise —
-// the job writes it.
+// only when both are the same MD5 (the same bytes), pending otherwise — the
+// job writes it. The row's etag is the primary's MD5 either way: what the
+// job's copy is checked against.
 func mirrorCopyState(primaryMD5, mirrorETag string) (string, string) {
+	p := strings.ToLower(strings.Trim(strings.TrimSpace(primaryMD5), `"`))
 	m := strings.ToLower(strings.Trim(strings.TrimSpace(mirrorETag), `"`))
-	if m != "" && m == strings.ToLower(primaryMD5) {
-		return copyReady, m
+	if m != "" && m == p {
+		return copyReady, p
 	}
-	return copyPending, ""
+	return copyPending, p
 }
 
 // recordBlobCopy writes (or re-asserts) a copy row: a ready row is never
@@ -120,7 +122,7 @@ func recordBlobCopy(ctx context.Context, q execer, c blobCopy) error {
 		VALUES ($1, $2, $3, $4, $5, $6, 'mirror', $7, $8, $9)
 		ON CONFLICT (tenant_id, storage_key, leg, shard_index) DO UPDATE SET
 			state = CASE WHEN blob_copies.state = 'ready' AND EXCLUDED.state = 'pending' THEN 'ready' ELSE EXCLUDED.state END,
-			etag = CASE WHEN EXCLUDED.state = 'ready' THEN EXCLUDED.etag ELSE blob_copies.etag END,
+			etag = CASE WHEN EXCLUDED.etag <> '' THEN EXCLUDED.etag ELSE blob_copies.etag END,
 			size = EXCLUDED.size, source_backend = EXCLUDED.source_backend, updated_at = NOW()`,
 		c.TenantID, c.Bucket, c.Key, c.StorageKey, c.Source, c.Leg, c.State, c.ETag, c.Size)
 	return err

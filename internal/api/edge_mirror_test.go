@@ -194,3 +194,142 @@ func TestEdgeMirror_ACodecWriteMirrorsItsStoredChunks(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, body, w.Body.Bytes())
 }
+
+// --- the blob_copies job (step 6) ---
+
+func (f *edgeFixture) copiesJob() *BlobCopiesJob {
+	j := newBlobCopiesJob(f.srv)
+	j.JobName, j.onlyTenant = "blob_copies_test_"+f.tenantID, f.tenantID
+	return j
+}
+
+func (f *edgeFixture) copyState(storageKey string) string {
+	f.t.Helper()
+	var st string
+	err := f.db.QueryRow(`SELECT state FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2`, f.tenantID, storageKey).Scan(&st)
+	if err != nil {
+		return ""
+	}
+	return st
+}
+
+// A copy the edge could not write is written from the primary by the job
+// (once past its 5 min of grace), checked by MD5, then ready.
+func TestBlobCopiesJob_APendingCopyIsWrittenFromThePrimary(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(70_000)
+	resp := f.admit(f.signed("/"+f.bucket+"/p.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ := f.commit(okCommit(resp.AdmitID, body, a)) // the mirror's ETag never came
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	require.Equal(t, "pending", f.copyState(resp.StorageKey))
+
+	j := f.copiesJob()
+	res, err := j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, res.Copied, "younger than 5 min: the edge may still be writing it")
+
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Copied, "%+v", res)
+	assert.Equal(t, "ready", f.copyState(resp.StorageKey))
+	assert.True(t, m.has(f.tenantID, f.container(), resp.StorageKey), "the bytes on the leg")
+
+	// A primary that holds other bytes than the row says: never ready.
+	resp = f.admit(f.signed("/"+f.bucket+"/q.bin", nil, body, nil, ""))
+	a = f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ = f.commit(okCommit(resp.AdmitID, body, a))
+	require.Equal(t, http.StatusOK, relay.Status)
+	f.drv.tamper(t, "q.bin")
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Failed)
+	assert.Equal(t, "pending", f.copyState(resp.StorageKey))
+	assert.False(t, m.has(f.tenantID, f.container(), resp.StorageKey), "the wrong copy removed")
+}
+
+// DELETE removes the copy with the object (the known copies); the job
+// then finds the row orphaned and drops it.
+func TestBlobCopiesJob_ADeleteRemovesBothAndTheRowGoes(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(9000)
+	resp := f.admit(f.signed("/"+f.bucket+"/d.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	b := m.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c := okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a, b}
+	relay, _ := f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status)
+	require.Equal(t, "ready", f.copyState(resp.StorageKey))
+
+	w := f.s3(http.MethodDelete, "/"+f.bucket+"/d.bin", nil, nil)
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	assert.False(t, f.drv.has(f.tenantID, f.container(), resp.StorageKey))
+	assert.False(t, m.has(f.tenantID, f.container(), resp.StorageKey), "DELETE removes the leg's copy too")
+
+	f.exec(`UPDATE blob_copies SET updated_at = NOW() - interval '2 hours' WHERE tenant_id = $1`, f.tenantID)
+	res, err := f.copiesJob().RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Orphaned)
+	assert.Equal(t, 1, res.Deleted)
+	assert.Empty(t, f.copyState(resp.StorageKey), "the row gone")
+}
+
+// Turning edge_mirror on backfills: every whole object of the tenant gets
+// its copy (origin writes, everything written before), vault never.
+func TestBlobCopiesJob_BackfillCopiesWhatTheTenantHolds(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(12_000)
+	f.exec(`DELETE FROM feature_flags WHERE tenant_id = $1 AND flag_key = $2`, f.tenantID, flagEdgeMirror)
+	require.NoError(t, f.fl.Refresh(context.Background()))
+	resp := f.admit(f.signed("/"+f.bucket+"/old.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ := f.commit(okCommit(resp.AdmitID, body, a))
+	require.Equal(t, http.StatusOK, relay.Status)
+	require.Empty(t, f.copies(), "written while the flag was off: no copy")
+
+	j := f.copiesJob()
+	res, err := j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, res.Enqueued, "the flag is off")
+
+	require.NoError(t, f.fl.Set(context.Background(), flagEdgeMirror, f.tenantID, true, "test"))
+	require.NoError(t, f.fl.Refresh(context.Background()))
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Enqueued)
+	assert.Equal(t, 1, res.Copied, "due at once")
+	assert.Equal(t, "ready", f.copyState(resp.StorageKey))
+	assert.True(t, m.has(f.tenantID, f.container(), resp.StorageKey))
+
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, res.Enqueued, "one copy per blob")
+}
+
+// A codec chunk's copy whose index row is gone (the dedup GC, a commit that
+// failed after it) is orphaned and removed from the leg.
+func TestBlobCopiesJob_AChunkCopyNoIndexRowNamesIsRemoved(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	sk := "_chunks/" + f.tenantID + "/" + strings.Repeat("ab", 32) + ".k1"
+	m.workerPut("_global", "_global", sk, []byte("sealed"))
+	require.NoError(t, recordBlobCopy(context.Background(), f.db, blobCopy{TenantID: f.tenantID, StorageKey: sk, Source: "edgefake", Leg: "edgemirror", State: copyReady, Size: 6}))
+	f.exec(`UPDATE blob_copies SET updated_at = NOW() - interval '2 hours' WHERE tenant_id = $1`, f.tenantID)
+	res, err := f.copiesJob().RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Orphaned)
+	assert.Equal(t, 1, res.Deleted)
+	assert.False(t, m.has("_global", "_global", sk))
+	assert.Equal(t, "0123", fmt.Sprint(codecChunkKeyedOK(f.tenantID, "_chunks/"+f.tenantID+"/0123.k4")))
+}
+
+func codecChunkKeyedOK(tenantID, sk string) string {
+	k, _ := codecChunkKeyed(tenantID, sk)
+	return k
+}
