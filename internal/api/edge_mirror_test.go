@@ -17,7 +17,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -409,4 +411,65 @@ func TestRoutingTruth_SamplesMirrorCopies(t *testing.T) {
 	out, err = c.RunOnce(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, out.Copies["edgemirror"].Missing, "a ready copy the leg does not hold")
+}
+
+// A run whose time runs out in the copy pass (prod's first backfill run:
+// the copies filled the 9 minutes and the orphan pass hit the deadline) is
+// a note on an ok run, never an error — and the copy pass leaves the
+// other passes their time.
+func TestBlobCopiesJob_ARunOutOfTimeIsANoteNotAFailure(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	body := testBytes(9000)
+	resp := f.admit(f.signed("/"+f.bucket+"/late.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ := f.commit(okCommit(resp.AdmitID, body, a))
+	require.Equal(t, http.StatusOK, relay.Status)
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+
+	// Less than the tail reserve left: the copy pass copies nothing.
+	ctx, cancel := context.WithTimeout(context.Background(), blobCopiesTailReserve/2)
+	defer cancel()
+	res, err := f.copiesJob().RunOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res.Copied, "no copy started inside the tail reserve")
+
+	// The deadline already past: still no error.
+	done, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	res, err = f.copiesJob().RunOnce(done)
+	require.NoError(t, err)
+	assert.NotEmpty(t, res.Stopped, "the run says it stopped")
+}
+
+// The copy pass copies several blobs at once (prod's backfill ran one at a
+// time: ~250 small Lightroom files per 9-minute run).
+func TestBlobCopiesJob_CopiesSeveralAtOnce(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(5000)
+	for i := range 12 {
+		resp := f.admit(f.signed(fmt.Sprintf("/%s/many-%d.bin", f.bucket, i), nil, body, nil, ""))
+		a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+		relay, _ := f.commit(okCommit(resp.AdmitID, body, a))
+		require.Equal(t, http.StatusOK, relay.Status)
+	}
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+	var inFlight, peak atomic.Int32
+	m.putHook = func() func() {
+		n := inFlight.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		return func() { inFlight.Add(-1) }
+	}
+	res, err := f.copiesJob().RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 12, res.Copied)
+	assert.Greater(t, peak.Load(), int32(1), "copies overlap")
+	assert.LessOrEqual(t, peak.Load(), int32(blobCopiesConcurrency))
 }
