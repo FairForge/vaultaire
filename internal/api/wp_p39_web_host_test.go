@@ -173,11 +173,11 @@ func TestWebHost_S3ClientsAndOtherHostsAreUnchanged(t *testing.T) {
 }
 
 // The two paths a launch reader types: browser page views only.
+// /pricing itself is a page since WP-PRICE-1 (pricing_page_test.go).
 func TestWebHost_SignupAndPricingRedirect(t *testing.T) {
-	require.Equal(t, 1, strings.Count(landingTemplateSrc, `id="pricing"`), "the landing's pricing section is the one source the 301 points at")
 	for _, env := range []map[string]string{prodTodayHosts, prodTargetHosts} {
 		h := webServer(t, env)
-		for path, want := range map[string]string{"/signup": "/register", "/pricing": "/#pricing", "/pricing/": "/#pricing"} {
+		for path, want := range map[string]string{"/signup": "/register", "/pricing/": "/pricing"} {
 			w := webReq{host: "stored.cloud", path: path, accept: browserAccept}.do(h)
 			assert.Equal(t, http.StatusMovedPermanently, w.Code, path)
 			assert.Equal(t, want, w.Header().Get("Location"), path)

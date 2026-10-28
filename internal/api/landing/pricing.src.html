@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pricing, Stored: Standard $__PRICE_STD__/TB, Vault $__PRICE_VAULT__/TB, no API or egress fees</title>
+<meta name="description" content="Every Stored price on one page: Standard $__PRICE_STD__/TB/mo, Vault tape archive $__PRICE_VAULT__/TB/mo, a flat whole-TB quota, no API fees, no retrieval fees, egress never billed. A calculator and a dated comparison with S3, B2, Wasabi and R2.">
+<meta property="og:title" content="Stored pricing: pay per TB, that's the whole model">
+<meta property="og:description" content="Standard $__PRICE_STD__/TB/mo, Vault $__PRICE_VAULT__/TB/mo. Flat quota, no API fees, egress never billed.">
+<meta property="og:url" content="{{.Web}}/pricing">
+<meta property="og:image" content="{{.Web}}/og.png">
+<link rel="canonical" href="{{.Web}}/pricing">
+<meta name="theme-color" content="#101010" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#383838" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/favicon.ico">
+
+<script>try{var t=localStorage.getItem("sg-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
+<style>
+__CSS__
+.pricing-page .section-head { margin-bottom: 1.5rem; }
+.pricing-page section { padding-top: 2.5rem; padding-bottom: 2.5rem; }
+.pricing-page .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1.25rem; }
+.pricing-page .rules h3 { margin: 0 0 0.5rem; }
+.pricing-page .rules ul { margin: 0; padding-left: 1.1rem; }
+.pricing-page .calc-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; align-items: end; margin-bottom: 1rem; }
+.pricing-page .calc-form label { display: flex; flex-direction: column; gap: 0.35rem; }
+.pricing-page .calc-form input[type=number] { font: inherit; padding: 0.5rem; max-width: 100%; }
+.pricing-page .calc-form fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 1rem; }
+.pricing-page .table-scroll { overflow-x: auto; }
+</style>
+</head>
+<body class="pricing-page">
+__SPRITES__
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>Stored</span></a>
+        <nav aria-label="Main">
+            <ul class="topnav">
+                <li class="hide-sm"><a href="/#build">Build yours</a></li>
+                <li class="hide-sm"><a href="/pricing" aria-current="page">Pricing</a></li>
+                <li class="hide-sm"><a href="/docs">Docs</a></li>
+                <li class="hide-sm"><a href="/changelog">Changelog</a></li>
+                <li class="hide-sm"><a href="/status">Status</a></li>
+                <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
+                <li><a class="help" href="/docs/faq" aria-label="? frequently asked questions" title="FAQ">?</a></li>
+                <li><a href="/login">Sign in</a></li>
+                {{if .SignupsOpen}}
+                <li><a class="btn btn-primary" href="/register">Start free</a></li>
+                {{else}}
+                <li><a class="btn btn-primary" href="/#waitlist">Join waitlist</a></li>
+                {{end}}
+            </ul>
+        </nav>
+    </div>
+</header>
+
+<main id="main">
+
+<section id="tiers">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>01</b>Pricing</p>
+            <h1>Pay per TB. That's the whole model.</h1>
+            <p class="lede">You buy a quota in whole TB at a flat per-TB rate and resize it whenever you like (prorated). The bill never moves on its own: no meters, no overage, no API fees, no request classes, no retrieval surcharges. Every number below comes from one price file; this page is built from it.</p>
+        </div>
+
+        <div class="plans">
+            <div class="plan">
+                <p class="plan-kicker">Vault</p>
+                <div class="price">$__PRICE_VAULT__<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $__PRICE_VAULT_MONTHLY__ monthly &middot; any size</p>
+                <ul>
+                    <li>Tape-backed archive, restores start in minutes</li>
+                    <li>Restore up to __EGRESS_VAULT__× your Vault quota every month, free</li>
+                    <li>30-day minimum per object</li>
+                    <li>Monthly: $__PRICE_VAULT_MIN__ minimum a month</li>
+                </ul>
+            </div>
+            <div class="plan pop">
+                <p class="plan-kicker">Standard, most popular</p>
+                <div class="price">$__PRICE_STD__<small>/TB/mo</small></div>
+                <p class="alt-price">annual &middot; $__PRICE_STD_MONTHLY__ monthly &middot; any whole-TB quota</p>
+                <ul>
+                    <li>Automatic tiering built in</li>
+                    <li>Egress free to __EGRESS_STD__× your quota every month, __EGRESS_PAST__</li>
+                    <li>Hard quota, resize any time, no overage</li>
+                    <li>Pin-hot add-on: $__PRICE_PIN_HOT_2DP__/TB/mo keeps chosen data on hot storage</li>
+                </ul>
+                {{if .SignupsOpen}}
+                <div class="plan-cta"><a class="btn btn-primary" href="/register">Start free</a></div>
+                {{else}}
+                <div class="plan-cta"><a class="btn btn-primary" href="/#waitlist">Join waitlist</a></div>
+                {{end}}
+            </div>
+            <div class="plan">
+                <p class="plan-kicker">Performance, coming after launch</p>
+                <div class="price">$__PRICE_PERF__<small>/TB/mo</small></div>
+                <p class="alt-price">pure hot storage &middot; not for sale on launch day</p>
+                <ul>
+                    <li>Data never ages out</li>
+                    <li>Egress free to 1× your quota every month</li>
+                    <li>Until then: the pin-hot add-on on Standard</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="packs">
+            <p class="packs-title">Every tier and period</p>
+            <div class="table-scroll">
+            <table>
+                <tr><td>Standard, annual (prepaid)</td><td>$__PRICE_STD__/TB/mo</td><td>any whole-TB quota, billed yearly</td></tr>
+                <tr><td>Standard, monthly</td><td>$__PRICE_STD_MONTHLY__/TB/mo</td><td>any whole-TB quota</td></tr>
+                <tr class="best"><td>Vault, annual (prepaid)</td><td>$__PRICE_VAULT_2DP__/TB/mo</td><td>any size, billed yearly</td></tr>
+                <tr><td>Vault, monthly</td><td>$__PRICE_VAULT_MONTHLY__/TB/mo</td><td>$__PRICE_VAULT_MIN__ monthly minimum</td></tr>
+                <tr><td>Vault Founders slots</td><td>$__PRICE_FOUNDERS__/TB/mo</td><td>first 100 TB &middot; annual only &middot; 3 to 10 TB per account &middot; lifetime rate</td></tr>
+                <tr><td>Pin-hot add-on (Standard)</td><td>$__PRICE_PIN_HOT_2DP__/TB/mo</td><td>per TB kept hot</td></tr>
+                <tr><td>Performance (after launch)</td><td>$__PRICE_PERF__/TB/mo</td><td>not for sale on launch day</td></tr>
+            </table>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section id="free">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>02</b>Free tier</p>
+            <h2>{{.FreeGB}} GB free, no card.</h2>
+            <p class="lede">One bucket, one API key, every feature: the real S3 API, multipart, Object Lock, presigned links, version history. Downloads up to {{.FreeEgressGB}} GB a month are free on it too ({{.FreeRatio}}× the free quota), {{.EgressPastShort}}.</p>
+        </div>
+    </div>
+</section>
+
+<section id="egress">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>03</b>What is charged, and what never is</p>
+            <h2>The quota you buy. Nothing else.</h2>
+        </div>
+        <div class="rules">
+            <div>
+                <h3>Never charged</h3>
+                <ul>
+                    <li>API calls and requests, of every kind</li>
+                    <li>Downloads inside your allowance</li>
+                    <li>Vault restores (they draw on the same allowance)</li>
+                    <li>Retrieval fees, request classes, minimum object sizes</li>
+                </ul>
+            </div>
+            <div>
+                <h3>The egress allowance</h3>
+                <p>One allowance for the account each UTC month: __EGRESS_STD__× your Standard quota plus __EGRESS_VAULT__× your Vault quota.</p>
+                <p>__EGRESS_PAST_LONG__</p>
+                <p>__EGRESS_ONE__</p>
+            </div>
+            <div>
+                <h3>What is charged</h3>
+                <ul>
+                    <li>The quota, in whole TB, at the tier's rate for the period you chose</li>
+                    <li>Past the allowance nothing is billed: downloads slow down until the 1st (UTC). There is no per-GB rate today</li>
+                    <li>A write past the quota is refused with a clear error until you resize; there is no overage</li>
+                </ul>
+            </div>
+            <div>
+                <h3>Uploads through the edge</h3>
+                <p>A single upload request is limited to 100 MB: that is Cloudflare's request limit, and a larger one is answered with an HTML 413 before it reaches us. Every S3 tool sends a large file as a multipart upload; keep the part size under 95 MB (64 MB is a good choice). <a href="/docs/faq">The FAQ</a> has the settings.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section id="calculator">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>04</b>Calculator</p>
+            <h2>What your house costs.</h2>
+            <p class="lede">The house builder's maths: whole TB downstairs (Standard) and in the attic (Vault), times the rate for the period.</p>
+        </div>
+        <div class="calc">
+            <form class="calc-form" id="price-calc" action="/pricing" method="get">
+                <label>Standard (TB) <input type="number" id="pc-std" name="std" min="0" max="10000" step="1" value="1" inputmode="numeric"></label>
+                <label>Vault (TB) <input type="number" id="pc-vault" name="vault" min="0" max="10000" step="1" value="0" inputmode="numeric"></label>
+                <fieldset>
+                    <legend class="sr-only">Billing period</legend>
+                    <label><input type="radio" name="period" value="annual" checked> annual</label>
+                    <label><input type="radio" name="period" value="monthly"> monthly</label>
+                </fieldset>
+            </form>
+            <div class="calc-rows" aria-live="polite">
+                <div class="calc-row us"><span class="who">Stored, a month</span><span class="amt" id="pc-total">$__PRICE_STD__/mo</span></div>
+                <div class="calc-row"><span class="who">Free downloads a month</span><span class="amt" id="pc-egress">__EGRESS_STD__ TB</span></div>
+                <div class="calc-row"><span class="who">Backblaze B2, the same TB</span><span class="amt" id="pc-b2">$__PRICE_B2__/mo</span></div>
+                <div class="calc-row"><span class="who">Wasabi, the same TB</span><span class="amt" id="pc-wasabi">$__PRICE_WASABI__/mo</span></div>
+                <div class="calc-row"><span class="who">Cloudflare R2, the same TB</span><span class="amt" id="pc-r2">$__PRICE_R2__/mo</span></div>
+                <div class="calc-row"><span class="who">AWS S3, the same TB</span><span class="amt" id="pc-aws">$__PRICE_AWS__/mo</span></div>
+            </div>
+            <p class="calc-note">Their figures are storage only, at the list prices below; their egress and request fees come on top.</p>
+            <noscript><p class="calc-note">The calculator needs JavaScript; the rates above are the whole sum.</p></noscript>
+        </div>
+    </div>
+</section>
+
+<section id="compare">
+    <div class="container">
+        <div class="section-head">
+            <p class="kicker"><b>05</b>Compare</p>
+            <h2>Against the usual suspects.</h2>
+        </div>
+        <div class="compare table-scroll">
+            <table>
+                <thead>
+                    <tr><th></th><th class="us">Stored</th><th>Backblaze B2</th><th>Wasabi</th><th>Cloudflare R2</th><th>AWS S3</th></tr>
+                </thead>
+                <tbody>
+                    <tr><th scope="row">$/TB/mo</th><td class="us">$__PRICE_STD__</td><td>$__PRICE_B2__</td><td>$__PRICE_WASABI__</td><td>$__PRICE_R2__</td><td>$__PRICE_AWS__</td></tr>
+                    <tr><th scope="row">API/request fees</th><td class="us">$0</td><td>Class B/C fees</td><td>$0</td><td>ops-based</td><td>per-request</td></tr>
+                    <tr><th scope="row">Egress</th><td class="us">__EGRESS_STD__× quota free/mo, __EGRESS_PAST__</td><td>3× free, then $__PRICE_B2_EGRESS__/GB</td><td>"Free" (fair-use policy)</td><td>Free</td><td>$__PRICE_AWS_EGRESS__/GB</td></tr>
+                    <tr><th scope="row">Billing</th><td class="us">Flat quota, no meters</td><td>Metered</td><td>Metered (90-day min)</td><td>Metered</td><td>Metered</td></tr>
+                    <tr><th scope="row">Min storage duration</th><td class="us">None (Vault: 30 days)</td><td>None</td><td>90 days</td><td>None</td><td>None</td></tr>
+                    <tr><th scope="row">Archive tier</th><td class="us">$__PRICE_VAULT__/TB (tape)</td><td>none</td><td>none</td><td>none</td><td>Glacier (retrieval fees)</td></tr>
+                </tbody>
+            </table>
+            <p class="fine">Competitor prices as published on their pricing pages, __PRICES_ASOF__ (__PRICES_SOURCES__). Wasabi's free egress is subject to their fair-use ratio policy.</p>
+        </div>
+    </div>
+</section>
+
+</main>
+
+<footer>
+    <div class="container">
+        <div class="footer-grid">
+            <div class="footer-brand">
+                <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:34;--h:30" viewBox="0 0 34 30" aria-hidden="true" focusable="false"><use href="#s-logo"/></svg></a>
+                <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
+            </div>
+            <div>
+                <h3>Product</h3>
+                <ul class="footer-links">
+                    <li><a href="/pricing">Pricing</a></li>
+                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="/changelog">Changelog</a></li>
+                    <li><a href="/status">Status</a></li>
+                    <li><a href="https://github.com/FairForge/vaultaire">GitHub</a></li>
+                </ul>
+            </div>
+            <div>
+                <h3>Legal</h3>
+                <ul class="footer-links">
+                    <li><a href="/legal/terms">Terms of Service</a></li>
+                    <li><a href="/legal/privacy">Privacy Policy</a></li>
+                    <li><a href="/legal/aup">Acceptable Use</a></li>
+                </ul>
+            </div>
+            <div>
+                <h3>Support</h3>
+                <ul class="footer-links">
+                    <li><a href="mailto:{{.Support}}">{{.Support}}</a></li>
+                    <li><a href="/login">Sign in</a></li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <span>© 2026 FairForge LLC. All rights reserved.</span>
+            <span>founder-direct support, replies target &lt;4h</span>
+        </div>
+    </div>
+</footer>
+
+<script>
+__PRICING_SCRIPT__
+</script>
+
+</body>
+</html>
