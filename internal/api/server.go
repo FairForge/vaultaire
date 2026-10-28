@@ -203,6 +203,9 @@ type Server struct {
 	// dataPlaneTransport, when set, is the transport host=slc reaches the
 	// backends' links with (the tests' fake backend); nil = the default.
 	dataPlaneTransport http.RoundTripper
+	// mirrorLegs is MIRROR_LEGS (WP-EDGE-4): the edge mirror's legs in
+	// preference order.
+	mirrorLegs []string
 	// slcHostV is host=slc's data-plane host, built once (slcHost).
 	slcHostV    *dataplane.Host
 	slcHostOnce sync.Once
@@ -657,6 +660,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
 	s.chunkPutBudget = newChunkPutBudget(chunkPutBudgetFromEnv(os.Getenv, debug.SetMemoryLimit(-1), logger))
+	s.mirrorLegs = mirrorLegsFromEnv(os.Getenv, logger)
 	chunkPutBudgetSize.Set(float64(s.chunkPutBudget.limit()))
 
 	// Retention (Review R13-14): nightly prune of the log tables; started in

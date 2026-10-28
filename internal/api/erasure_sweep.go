@@ -140,6 +140,9 @@ var sweepBucketSources = []struct{ table, query string }{
 	// A promoted copy of a Sia object sits in its bucket's container on the
 	// primary (sia_promotion.go).
 	{"sia_promotions", `SELECT DISTINCT bucket FROM sia_promotions WHERE tenant_id = $1`},
+	// Mirror copies (113, WP-EDGE-4): a whole object's second copy is at
+	// its address on the leg, under the bucket's container there.
+	{"blob_copies", `SELECT DISTINCT bucket FROM blob_copies WHERE tenant_id = $1 AND bucket <> ''`},
 	{"object_locks", `SELECT DISTINCT bucket FROM object_locks WHERE tenant_id = $1`},
 	{"object_metadata", `SELECT DISTINCT bucket_name FROM object_metadata WHERE tenant_id::text = $1`},
 	{"tenant_chunk_refs", `SELECT DISTINCT bucket_name FROM tenant_chunk_refs WHERE tenant_id::text = $1`},

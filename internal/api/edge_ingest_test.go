@@ -74,10 +74,15 @@ type edgeFakeDriver struct {
 	deleteGate    chan struct{}
 	deleteEntered chan struct{}
 	deleteOnce    sync.Once
+	// name and urlHost: a second fake is a mirror leg (WP-EDGE-4) — its own
+	// driver name and the host its links name.
+	name, urlHost string
+	// putFails, when set, answers every PUT on a link 503 (a mirror leg down).
+	putFails atomic.Bool
 }
 
 func newEdgeFakeDriver() *edgeFakeDriver {
-	return &edgeFakeDriver{objects: map[string][]byte{}, uploads: map[string]map[int]string{}}
+	return &edgeFakeDriver{objects: map[string][]byte{}, uploads: map[string]map[int]string{}, name: "edgefake", urlHost: "fake.backend.invalid"}
 }
 
 func (d *edgeFakeDriver) key(ctx context.Context, container, artifact string) (string, error) {
@@ -88,7 +93,7 @@ func (d *edgeFakeDriver) key(ctx context.Context, container, artifact string) (s
 	return "t-" + tid + "/" + container + "/" + artifact, nil
 }
 
-func (d *edgeFakeDriver) Name() string { return "edgefake" }
+func (d *edgeFakeDriver) Name() string { return d.name }
 func (d *edgeFakeDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
@@ -208,7 +213,7 @@ func (d *edgeFakeDriver) signStreaming(key, query string, decoded int64, trailer
 	if d.failPresign.Load() {
 		return nil, "", errors.New("sign refused (test)")
 	}
-	u := "https://fake.backend.invalid/vaultaire/" + key
+	u := "https://" + d.urlHost + "/vaultaire/" + key
 	if query != "" {
 		u += "?" + query
 	}
@@ -219,7 +224,7 @@ func (d *edgeFakeDriver) signStreaming(key, query string, decoded int64, trailer
 		"content-encoding":             "aws-chunked",
 		"x-amz-decoded-content-length": fmt.Sprint(decoded),
 		"x-amz-trailer":                trailer,
-		"host":                         "fake.backend.invalid",
+		"host":                         d.urlHost,
 	}, u, nil
 }
 func (d *edgeFakeDriver) SignPut(ctx context.Context, container, artifact string, decoded int64, trailer string) (map[string]string, string, error) {
@@ -250,7 +255,7 @@ func (d *edgeFakeDriver) presign(key string, p engine.EdgePresign, query string)
 	if p.ContentType != "" {
 		signed = append(signed, "content-type")
 	}
-	u := "https://fake.backend.invalid/vaultaire/" + key + "?" + query + "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";"))
+	u := "https://" + d.urlHost + "/vaultaire/" + key + "?" + query + "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";"))
 	return u, signed, nil
 }
 func (d *edgeFakeDriver) PresignPut(ctx context.Context, container, artifact string, p engine.EdgePresign) (string, []string, error) {
@@ -273,7 +278,7 @@ func (d *edgeFakeDriver) PresignGet(ctx context.Context, container, artifact str
 	if p.Range != "" {
 		signed = append(signed, "range")
 	}
-	u := "https://fake.backend.invalid/vaultaire/" + k + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";")) +
+	u := "https://" + d.urlHost + "/vaultaire/" + k + "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef&X-Amz-SignedHeaders=" + url.QueryEscape(strings.Join(signed, ";")) +
 		"&x-probe-if-match=" + url.QueryEscape(p.IfMatch) + "&x-probe-range=" + url.QueryEscape(p.Range)
 	return u, signed, nil
 }
@@ -585,7 +590,7 @@ func (f *edgeFixture) dataHost() *dataplane.Host {
 // stores the body (a part under its upload), a GET serves the blob or its
 // Range — what iDrive or Lyve answer a host.
 func (d *edgeFakeDriver) RoundTrip(r *http.Request) (*http.Response, error) {
-	if r.URL.Host != "fake.backend.invalid" {
+	if r.URL.Host != d.urlHost {
 		return nil, fmt.Errorf("fake transport: no backend at %s", r.URL.Host)
 	}
 	k := strings.TrimPrefix(r.URL.Path, "/vaultaire/")
@@ -598,6 +603,9 @@ func (d *edgeFakeDriver) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	switch r.Method {
 	case http.MethodPut:
+		if d.putFails.Load() {
+			return answer(http.StatusServiceUnavailable, nil, []byte("<Error><Code>ServiceUnavailable</Code></Error>")), nil
+		}
 		var body []byte
 		var err error
 		if r.Body != nil {

@@ -178,7 +178,7 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 		ContentLength: size, ContentType: attrs.ContentType, Codec: true,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
 			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"),
-			CodecVersion: grant.Version},
+			CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(tenantID, s.engine.GetPrimary())},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	settled := false
 	if s.quotaManager != nil {
@@ -316,6 +316,12 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 		}
 	}
 
+	var mirrorEW engine.EdgeWriter
+	if row.Attrs.MirrorLeg != "" {
+		if mirrorEW, err = s.edgeWriterFor(row.Attrs.MirrorLeg); err != nil {
+			mirrorEW = nil // the leg went away since the admit: the job's copies
+		}
+	}
 	resp := &edgeIndexResponse{Hits: []string{}, Misses: []edgeIndexMiss{}}
 	for _, it := range items {
 		if it.hit {
@@ -344,7 +350,17 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 				return nil, http.StatusInternalServerError, fmt.Errorf("the chunk link signs a header the host does not send: %s", name)
 			}
 		}
-		resp.Misses = append(resp.Misses, edgeIndexMiss{Hash: it.hash, URL: presigned, SendHeaders: sendHeaders, SealedLength: sealedLen})
+		miss := edgeIndexMiss{Hash: it.hash, URL: presigned, SendHeaders: sendHeaders, SealedLength: sealedLen}
+		if mirrorEW != nil {
+			// WP-EDGE-4: the same sealed bytes at the same address on the
+			// mirror leg; a link that cannot be made leaves the copy to the
+			// job (the commit's row says pending).
+			if murl, msigned, mErr := mirrorEW.PresignPut(engine.ChunkContext(ctx), engine.ChunkContainer, blobKey,
+				engine.EdgePresign{ContentLength: sealedLen, TTL: edgeAdmitTTL}); mErr == nil && sameHeaderSet(signed, msigned) {
+				miss.URLs = []string{presigned, murl}
+			}
+		}
+		resp.Misses = append(resp.Misses, miss)
 		edgeCodecChunks.WithLabelValues("miss").Inc()
 	}
 	return resp, http.StatusOK, nil
@@ -625,6 +641,22 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 				return fail(fErr)
 			}
 			if flipped {
+				if row.Attrs.MirrorLeg != "" {
+					// WP-EDGE-4: the stored chunk's copy on the mirror leg —
+					// ready when the leg answered the same sealed bytes' MD5,
+					// else owed (the job copies it from the primary). A
+					// commit that fails after this leaves a row whose chunk
+					// no index row names: the job's orphan pass removes it.
+					mirrorETag := ""
+					if len(c.BackendETags) > 1 {
+						mirrorETag = c.BackendETags[1]
+					}
+					state, metag := mirrorCopyState(etag, mirrorETag)
+					if cErr := recordBlobCopy(ctx, s.db, blobCopy{TenantID: row.TenantID, StorageKey: edgeCodecChunkKey(row.TenantID, keyed, version),
+						Source: s.engine.GetPrimary(), Leg: row.Attrs.MirrorLeg, State: state, ETag: metag, Size: c.SealedSize}); cErr != nil {
+						s.logger.Warn("edge codec: the chunk's copy row was not written — the backfill pass finds it", zap.Error(cErr))
+					}
+				}
 				taken = append(taken, keyed)
 				refs = append(refs, edgeCodecRef{Keyed: keyed, Size: c.Size, SealedSize: c.SealedSize, CiphertextHash: &etag, KeyVersion: version})
 				edgeCodecChunks.WithLabelValues("stored").Inc()
