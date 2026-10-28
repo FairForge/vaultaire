@@ -114,9 +114,29 @@ func (h *Host) log() *zap.Logger {
 
 func (h *Host) client() *http.Client {
 	if h.Client == nil {
-		return http.DefaultClient
+		return NewBackendClient(BackendAnswerTimeout)
 	}
 	return h.Client
+}
+
+// BackendAnswerTimeout is how long a backend may take to answer once the
+// host has sent its request (the body included): the origin driver's
+// per-PUT deadline (FIXED_BUCKET_PUT_TIMEOUT's 60 s for 64 MiB — a host's
+// largest single request is a 64 MiB part or a 16 MiB sealed chunk). A
+// backend that takes the body and never answers (Lyve us-east-1, 1–3 % of
+// PUTs on 2026-10-17) ends the request as the host's edge_error — the
+// client's 503 — never a request that hangs. A GET's body has no
+// deadline: it streams as long as the client reads.
+const BackendAnswerTimeout = 60 * time.Second
+
+// NewBackendClient is the HTTP client a host reaches the backends' links
+// with: the default transport's dialing and pooling, and a deadline on the
+// backend's answer after the request was sent.
+func NewBackendClient(answer time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = answer
+	t.MaxIdleConnsPerHost = 64
+	return &http.Client{Transport: t}
 }
 
 // newRequestID is a request id for the admit, the logs and the client.
