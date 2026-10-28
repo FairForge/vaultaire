@@ -85,6 +85,13 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.4.1 — the RP72 fixes (Stage 1a Prompt 47 Part 0, #1018)
+
+- A control plane's 401/403 at a codec commit is the Worker's 503 SlowDown (the service channel's, transient), not the client's 400 (RP72-3).
+- The windowed reader stops at `request.signal` (the client's disconnect): no range is launched after it, the ranges in flight are cancelled, and the commit is `served` with `bytes_sent` and `backend_code client_disconnected` — never a breaker charge (RP72-5).
+- ONE isolate-wide byte budget (`ISOLATE_BYTES` 96 MiB, `src/codec.js`): the window takes its ranges from it and each codec write's 48 MiB is a child of it (RP72-6).
+- Manifest rows `edge-ingest` / `edge-codec` 0.4.1 at `048ee7f1`; `edge-seal`, `edge-awschunked` and the wasm modules are byte-identical to their 0.4.0 rows. **Not deployed yet** (WP-EDGE-3 RB5-1): deploy after the server that holds the rows has booted, with RB-9's capture armed as for 0.4.0.
+
 ## 0.4.0 — aws-chunked, the windowed reader, the RP70 fixes (WP-EDGE-2 Part C)
 
 - **aws-cli's default upload is the edge's.** That is `x-amz-content-sha256:
