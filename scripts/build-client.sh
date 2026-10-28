@@ -25,6 +25,8 @@
 #   edge-awschunked  the Worker's aws-chunked decoder and CRC tables
 #                 (edge/s3-ingest/src/awschunked.js), published as the
 #                 file (WP-EDGE-2 Part C)
+#   edge-ec       the Reed-Solomon stripe codec (internal/ec) compiled to
+#                 WebAssembly (sdk/ecwasm → ec.wasm; WP-EDGE-4 PR B)
 #   edge-wasm-exec  the toolchain's wasm_exec.js, the Go runtime's JS half
 #                 the Worker loads beside chunker.wasm and e2ee.wasm (go.mod's
 #                 toolchain's GOROOT/lib/wasm; WP-EDGE-2 Part B)
@@ -63,6 +65,15 @@ edge-chunker)
 edge-codec)
 	cp edge/s3-ingest/src/codec.js "$out"
 	;;
+edge-ec)
+	toolchain=$(awk '$1 == "toolchain" { print $2 }' go.mod)
+	if [ -z "$toolchain" ]; then
+		echo "build-client: go.mod has no toolchain line" >&2
+		exit 1
+	fi
+	GOTOOLCHAIN=$toolchain CGO_ENABLED=0 GOFLAGS= GOOS=js GOARCH=wasm \
+		go build -trimpath -buildvcs=false -ldflags=-s -o "$out" ./sdk/ecwasm
+	;;
 edge-seal)
 	cp edge/s3-ingest/src/seal.js "$out"
 	;;
@@ -79,7 +90,7 @@ edge-wasm-exec)
 	install -m 0644 "$goroot/lib/wasm/wasm_exec.js" "$out"
 	;;
 *)
-	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker, edge-codec, edge-seal, edge-wasm-exec, edge-awschunked)" >&2
+	echo "build-client: unknown client $client (sdk-wasm, sdk-js, edge-ingest, edge-chunker, edge-codec, edge-seal, edge-wasm-exec, edge-awschunked, edge-ec)" >&2
 	exit 1
 	;;
 esac

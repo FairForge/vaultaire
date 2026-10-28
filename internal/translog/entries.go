@@ -148,9 +148,12 @@ const (
 	// The Worker 0.4.0's aws-chunked decoder and its CRC tables (WP-EDGE-2
 	// Part C), published as its file.
 	ClientEdgeAWSChunked = "edge-awschunked" // edge/s3-ingest/src/awschunked.js
+	// The Reed-Solomon stripe codec (internal/ec) compiled to WebAssembly
+	// (WP-EDGE-4 PR B): sdk/ecwasm → ec.wasm.
+	ClientEdgeEC = "edge-ec"
 )
 
-var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker, ClientEdgeCodec, ClientEdgeSeal, ClientEdgeWasmExec, ClientEdgeAWSChunked}
+var buildClients = []string{ClientSDKWasm, ClientSDKJS, ClientEdgeIngest, ClientEdgeChunker, ClientEdgeCodec, ClientEdgeSeal, ClientEdgeWasmExec, ClientEdgeAWSChunked, ClientEdgeEC}
 
 // BuildClients lists the clients.
 func BuildClients() []string { return append([]string(nil), buildClients...) }

@@ -72,10 +72,17 @@ edge-wasm:
 	scripts/build-client.sh sdk-wasm edge/s3-ingest/src/wasm/e2ee.wasm
 	scripts/build-client.sh edge-wasm-exec edge/s3-ingest/src/wasm/wasm_exec.js
 
+# The Reed-Solomon stripe codec in WebAssembly (WP-EDGE-4 PR B, client
+# edge-ec): for an SDK client and the measurement — the Worker never stripes.
+ec-wasm:
+	mkdir -p edge/s3-ingest/src/wasm
+	scripts/build-client.sh edge-ec edge/s3-ingest/src/wasm/ec.wasm
+	scripts/build-client.sh edge-wasm-exec edge/s3-ingest/src/wasm/wasm_exec.js
+
 # Kept for Part A's name: the chunker alone.
 edge-chunker-wasm: edge-wasm
 
-.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge edge-wasm edge-chunker-wasm
+.PHONY: test test-unit test-integration test-load test-all test-coverage test-bench test-pkg test-clean test-db test-edge edge-wasm edge-chunker-wasm ec-wasm
 
 # Code formatting
 fmt:
