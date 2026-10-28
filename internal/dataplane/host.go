@@ -224,6 +224,9 @@ func (h *Host) Write(ctx context.Context, req *http.Request, body io.Reader, siz
 	case admit.Codec != nil:
 		h.codec(ctx, req, body, size, desc, res)
 		return res, nil
+	case admit.RS != nil:
+		h.rsWrite(ctx, req, body, size, desc, res)
+		return res, nil
 	}
 	h.move(ctx, req, body, size, desc, res)
 	return res, nil

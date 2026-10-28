@@ -390,7 +390,7 @@ func (s *Server) batchDeleteKey(r *http.Request, t *tenant.Tenant, bucket, conta
 	// below, in one transaction (R8-08); there is no backend delete. A key
 	// with no row names no bytes: nothing to delete on any backend (WP-R6-1,
 	// Stage 1a Prompt 6 Part 0 — it was a delete of <key> on the primary).
-	if !isChunked && !keptByVersion && read.found {
+	if !isChunked && !keptByVersion && read.found && recordedBackend != rsBackendSentinel {
 		bctx := r.Context()
 		if recordedBackend != "" && s.engine != nil {
 			noteRecordedBackend(s.engine, s.logger, "delete_objects", recordedBackend)

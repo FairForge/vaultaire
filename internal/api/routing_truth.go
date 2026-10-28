@@ -299,7 +299,9 @@ func (c *RoutingTruthChecker) bootReport() *RoutingBootReport {
 // rows (hot copy not yet reclaimed) on either column; object_versions its
 // non-marker rows.
 func (c *RoutingTruthChecker) unknownBackendRows(ctx context.Context) ([]unknownRows, error) {
-	registered := pq.Array(c.eng.GetDriverNames())
+	// The RS sentinel names an object whose bytes are its shards
+	// (WP-EDGE-4 PR B): known, its shards sampled as copies.
+	registered := pq.Array(append(c.eng.GetDriverNames(), rsBackendSentinel))
 	scope := c.scopeTenant
 	type q struct{ table, sql string }
 	queries := []q{
@@ -597,8 +599,8 @@ const routingCopySample = 100
 // miss re-reads the row (a copy deleted or re-written meanwhile is changed).
 func (c *RoutingTruthChecker) sampleCopies(ctx context.Context, res *RoutingTruthResult) error {
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts FROM blob_copies
-		WHERE state = 'ready' AND kind = 'mirror' AND ($1 = '' OR tenant_id = $1)
+		SELECT tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts, kind, shard_index FROM blob_copies
+		WHERE state = 'ready' AND ($1 = '' OR tenant_id = $1)
 		ORDER BY random() LIMIT $2`, c.scopeTenant, routingCopySample)
 	if err != nil {
 		return fmt.Errorf("routing truth: sample copies: %w", err)
@@ -660,8 +662,8 @@ func (c *RoutingTruthChecker) checkCopy(ctx context.Context, cp blobCopy) string
 		}
 	}
 	var one int
-	rerr := c.db.QueryRowContext(ctx, `SELECT 1 FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND kind = 'mirror' AND state = 'ready'`,
-		cp.TenantID, cp.StorageKey, cp.Leg).Scan(&one)
+	rerr := c.db.QueryRowContext(ctx, `SELECT 1 FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND shard_index = $4 AND state = 'ready'`,
+		cp.TenantID, cp.StorageKey, cp.Leg, cp.Index).Scan(&one)
 	if errors.Is(rerr, sql.ErrNoRows) {
 		return "changed"
 	}

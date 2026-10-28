@@ -289,7 +289,7 @@ func Build(getenv func(string) string, readFile func(string) ([]byte, error), ve
 	n := &Node{cfg: cfg, logger: logger, version: version, reg: prometheus.NewRegistry()}
 	n.cp = dataplane.NewHTTPControlPlane(cfg.ControlPlaneURL, cfg.Token, nil)
 	n.host = &dataplane.Host{CP: n.cp, Client: dataplane.NewBackendClient(dataplane.BackendAnswerTimeout), ClientIP: peerIP, Logger: logger,
-		Budget: dataplane.NewByteBudget(cfg.CodecBudgetBytes)}
+		Budget: dataplane.NewByteBudget(cfg.CodecBudgetBytes), Features: []string{dataplane.FeatureRS}}
 	// The origin answers what the node does not take: the request as the
 	// client sent it — its Host kept, so its signature verifies there.
 	n.proxy = &httputil.ReverseProxy{

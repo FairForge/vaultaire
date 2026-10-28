@@ -178,6 +178,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEdgeCodec, false)
 	fl.Register(flagDataPlaneSLC, false)
 	fl.Register(flagEdgeMirror, false)
+	fl.Register(flagEdgeRS, false)
 	fl.Register(flagParallelGet, false)
 	fl.Register(flagEntitlementLapse, false)
 	fl.Register(flagPayStripe, os.Getenv("STRIPE_SECRET_KEY") != "")

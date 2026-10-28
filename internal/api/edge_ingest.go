@@ -160,6 +160,9 @@ type edgeAdmitAttrs struct {
 	// answered as hits on the public catalogue's `_public` copy — the only
 	// "hit" the commit may reference there.
 	CodecPublic map[string]bool `json:"codec_public,omitempty"`
+	// RS (WP-EDGE-4 PR B, edge_rs): the stripe geometry and each shard's
+	// leg of an RS write — the commit records the shard rows from it.
+	RS *edgeRSAttrs `json:"rs,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -874,6 +877,13 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	resp := edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
 		SendHeaders: sendHeaders, Backend: backend, Expect: &edgeExpect{MD5: contentMD5 != ""}}
 	if req.Op == edgeOpPut {
+		// WP-EDGE-4 PR B: RS k+m for a host that stripes (edge_rs, dark).
+		if grant, rsAttrs := s.edgeRSGrantFor(sctx, req, tenantID, bucket, backend, container, row.StorageKey, size); grant != nil {
+			row.Attrs.RS = rsAttrs
+			return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, Method: http.MethodPut, Backend: backend, RS: grant})
+		}
+	}
+	if req.Op == edgeOpPut {
 		// WP-EDGE-4: a mirrored PUT gets the leg's link beside the
 		// placement's, signing the same headers (the host sends one set);
 		// a leg that cannot sign it is the blob_copies job's copy.
@@ -1348,6 +1358,10 @@ func (s *Server) settleEdgeAdmit(ctx context.Context, row edgeAdmitRow, req edge
 			return state, n, nil
 		}
 		state, n := s.commitEdgeCodecPart(ctx, row, req, rec)
+		return state, n, nil
+	}
+	if row.Attrs.RS != nil && row.Op == edgeOpPut {
+		state, n := s.settleEdgeRS(ctx, row, req, rec, reqID)
 		return state, n, nil
 	}
 	deleteAfter := func() { s.edgeDeleteBlob(ctx, row) }

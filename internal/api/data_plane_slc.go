@@ -38,7 +38,9 @@ func (s *Server) slcHost() *dataplane.Host {
 			client.Transport = s.dataPlaneTransport
 		}
 		s.slcHostV = &dataplane.Host{CP: s.DataPlane(), Client: client, ClientIP: extractClientIP, Logger: s.logger,
-			Verify: &dataplane.Verify{WholeRead: s.slcVerifiedBody, Trailer: true}}
+			Verify: &dataplane.Verify{WholeRead: s.slcVerifiedBody, Trailer: true},
+			// A Go host stripes an RS write itself (WP-EDGE-4 PR B).
+			Features: []string{dataplane.FeatureRS}}
 		if s.chunkPutBudget != nil {
 			s.slcHostV.Budget = slcBudget{s.chunkPutBudget}
 		}

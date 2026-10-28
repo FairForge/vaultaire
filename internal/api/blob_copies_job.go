@@ -284,7 +284,7 @@ func scanCopies(rows *sql.Rows) ([]copyRec, error) {
 	var out []copyRec
 	for rows.Next() {
 		var c copyRec
-		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Leg, &c.State, &c.ETag, &c.Size, &c.attempts); err != nil {
+		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Leg, &c.State, &c.ETag, &c.Size, &c.attempts, &c.Kind, &c.Index); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -292,7 +292,7 @@ func scanCopies(rows *sql.Rows) ([]copyRec, error) {
 	return out, rows.Err()
 }
 
-const copyColumns = `tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts`
+const copyColumns = `tenant_id, bucket, object_key, storage_key, source_backend, leg, state, etag, size, attempts, kind, shard_index`
 
 // copyPending writes owed copies from the primary.
 func (j *BlobCopiesJob) copyPending(ctx context.Context, res *BlobCopiesResult) error {
@@ -368,7 +368,11 @@ func (c blobCopy) address(ctx context.Context) (context.Context, string, string)
 	if c.isChunkCopy() {
 		return engine.ChunkContext(ctx), engine.ChunkContainer, c.StorageKey
 	}
-	return common.WithTenantID(ctx, c.TenantID), c.TenantID + "_" + c.Bucket, c.StorageKey
+	artifact := c.StorageKey
+	if c.Kind == "shard" {
+		artifact = rsShardKey(c.StorageKey, c.Index)
+	}
+	return common.WithTenantID(ctx, c.TenantID), c.TenantID + "_" + c.Bucket, artifact
 }
 
 // copyOne streams the blob from its source into the leg and checks its
@@ -436,7 +440,7 @@ func codecChunkKeyed(tenantID, storageKey string) (string, bool) {
 
 func (j *BlobCopiesJob) setState(ctx context.Context, c blobCopy, state, lastErr string) {
 	_, _ = j.s.db.ExecContext(ctx, `UPDATE blob_copies SET state = $3, last_error = NULLIF($4, ''), updated_at = NOW()
-		WHERE tenant_id = $1 AND storage_key = $2 AND leg = $5 AND kind = 'mirror'`, c.TenantID, c.StorageKey, state, lastErr, c.Leg)
+		WHERE tenant_id = $1 AND storage_key = $2 AND leg = $5 AND shard_index = $6`, c.TenantID, c.StorageKey, state, lastErr, c.Leg, c.Index)
 }
 
 // findOrphans makes stale the copies whose blob nothing names.
@@ -458,8 +462,8 @@ func (j *BlobCopiesJob) findOrphans(ctx context.Context, res *BlobCopiesResult) 
 			continue
 		}
 		if named {
-			_, _ = j.s.db.ExecContext(ctx, `UPDATE blob_copies SET updated_at = NOW() WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND kind = 'mirror'`,
-				c.TenantID, c.StorageKey, c.Leg)
+			_, _ = j.s.db.ExecContext(ctx, `UPDATE blob_copies SET updated_at = NOW() WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND shard_index = $4`,
+				c.TenantID, c.StorageKey, c.Leg, c.Index)
 			continue
 		}
 		j.setState(ctx, c.blobCopy, copyStale, "")
@@ -501,8 +505,8 @@ func (j *BlobCopiesJob) deleteStale(ctx context.Context, res *BlobCopiesResult) 
 			res.note(fmt.Errorf("delete %s on %s: %w", artifact, c.Leg, err))
 			continue
 		}
-		if _, err := j.s.db.ExecContext(ctx, `DELETE FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND kind = 'mirror' AND state = 'stale'`,
-			c.TenantID, c.StorageKey, c.Leg); err != nil {
+		if _, err := j.s.db.ExecContext(ctx, `DELETE FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2 AND leg = $3 AND shard_index = $4 AND state = 'stale'`,
+			c.TenantID, c.StorageKey, c.Leg, c.Index); err != nil {
 			res.note(err)
 			continue
 		}

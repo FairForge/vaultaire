@@ -91,6 +91,9 @@ type blobCopy struct {
 	Source, Leg                       string
 	State, ETag                       string
 	Size                              int64
+	// Kind and Index: a mirror (index 0) or an RS shard (WP-EDGE-4 PR B).
+	Kind  string
+	Index int
 }
 
 // The copy states (113).
