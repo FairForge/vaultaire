@@ -19,9 +19,18 @@ Wants=network-online.target
 Type=simple
 DynamicUser=yes
 Environment=VAULTAIRE_ROLE=node
-# NODE_CONTROL_PLANE_URL, NODE_PUBLIC_HOST, PORT (and NODE_ORIGIN_URL when
+# NODE_CONTROL_PLANE_URL (a DNS-only origin), NODE_PUBLIC_HOST, PORT, and
+# NODE_ACME_EMAIL or NODE_TLS_CERT + NODE_TLS_KEY (NODE_ORIGIN_URL when
 # pass-throughs go elsewhere than the control plane's origin).
+Environment=PORT=443
 EnvironmentFile=/etc/vaultaire/node.env
+# The ACME account and certificates (NODE_STATE_DIR defaults to
+# $STATE_DIRECTORY): writable under ProtectSystem=strict.
+StateDirectory=vaultaire-node
+StateDirectoryMode=0700
+# :443 and the ACME challenge on :80 as the dynamic user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LoadCredential=node_token:/etc/vaultaire/node_token
 ExecStart=/opt/vaultaire/bin/vaultaire-node
 Restart=always

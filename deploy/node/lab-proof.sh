@@ -58,7 +58,7 @@ start_cp() {
 }
 
 start_node() {
-	env -i PATH="$PATH" HOME="$HOME" VAULTAIRE_ROLE=node PORT=$NODE_PORT NODE_CONTROL_PLANE_URL=http://127.0.0.1:$CP_PORT \
+	env -i PATH="$PATH" HOME="$HOME" VAULTAIRE_ROLE=node PORT=$NODE_PORT NODE_BIND=127.0.0.1 NODE_METRICS_ADDR=off NODE_CONTROL_PLANE_URL=http://127.0.0.1:$CP_PORT \
 		NODE_TOKEN_FILE="$LAB/node.token" NODE_PUBLIC_HOST=$NODE_HOST \
 		nohup "$LAB/vaultaire-lab" </dev/null >"$LAB/node.log" 2>&1 &
 	echo $! >"$LAB/node.pid"
