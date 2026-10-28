@@ -300,7 +300,13 @@ func (s *Server) edgeIndex(ctx context.Context, req edgeIndexRequest) (*edgeInde
 		if kErr != nil {
 			return nil, http.StatusInternalServerError, kErr
 		}
-		items = append(items, edgeIndexItem{hash: c.Hash, keyed: keyed, size: c.Size})
+		items = append(items, edgeIndexItem{hash: c.Hash, keyed: keyed, size: c.Size, public: c.Public})
+	}
+	// A chunk the host marked public is the catalogue's only when
+	// public_chunks names it and the `_public` copy is ready — a false
+	// positive of the filter is an ordinary chunk (WP-EDGE-4 PR D).
+	if err := s.verifyPublicChunks(ctx, items); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("public catalogue: %w", err)
 	}
 	if err := s.claimEdgeChunks(ctx, req.AdmitID, row.TenantID, version, items); err != nil {
 		if errors.Is(err, errEdgeAdmitExpired) || errors.Is(err, errEdgeAdmitUnknown) {
@@ -416,6 +422,10 @@ type edgeIndexItem struct {
 	size  int64
 	hit   bool
 	since time.Time
+	// public: the catalogue holds the chunk (the host marked it, the
+	// control plane checked public_chunks): a hit on the `_public` copy,
+	// never a claim.
+	public bool
 }
 
 // claimEdgeChunks is chunk_claim.go's claim for every chunk of one index
@@ -451,8 +461,20 @@ func (s *Server) claimEdgeChunks(ctx context.Context, admitID, tenantID string, 
 	}
 	primary := s.writeAdapter().primaryName()
 	var claimed []string
+	var public []string
 	for _, i := range order {
 		it := &items[i]
+		if it.public {
+			// The catalogue's: never a claim — and never in `_public`
+			// (contract line 5: nothing a tenant uploads enters it).
+			it.hit = true
+			if admit.Attrs.CodecPublic == nil {
+				admit.Attrs.CodecPublic = map[string]bool{}
+			}
+			admit.Attrs.CodecPublic[it.hash] = true
+			public = append(public, it.hash)
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`, tenantID, it.keyed); err != nil {
 			return err
 		}
@@ -505,7 +527,7 @@ func (s *Server) claimEdgeChunks(ctx context.Context, admitID, tenantID string, 
 		admit.Attrs.CodecClaims[it.keyed] = it.since
 		claimed = append(claimed, it.keyed)
 	}
-	if len(claimed) > 0 {
+	if len(claimed) > 0 || len(public) > 0 {
 		attrs, err := json.Marshal(admit.Attrs)
 		if err != nil {
 			return err
@@ -551,6 +573,9 @@ func (s *Server) dropEdgeCodecClaims(ctx context.Context, row edgeAdmitRow) {
 // edgeCodecRef is one settled chunk of a codec commit: what the manifest
 // row records.
 type edgeCodecRef struct {
+	// Public (WP-EDGE-4 PR D): the chunk is the catalogue's — Keyed is then
+	// its PLAIN hash in the `_public` scope.
+	Public         bool    `json:"p,omitempty"`
 	Keyed          string  `json:"h"`
 	Size           int64   `json:"s"`
 	SealedSize     int64   `json:"z,omitempty"`
@@ -573,11 +598,11 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 	defer clear(indexKey)
 
 	refs := make([]edgeCodecRef, 0, len(chunks))
-	var taken []string // keyed hashes referenced so far (compensation)
+	var taken []edgeCodecRef // references taken so far (compensation)
 	fail := func(ferr error) ([]edgeCodecRef, error) {
 		cctx := context.WithoutCancel(ctx)
-		for _, keyed := range taken {
-			if _, decErr := s.gci.DecrementRef(cctx, row.TenantID, keyed); decErr != nil {
+		for _, cr := range taken {
+			if _, decErr := s.gci.DecrementRef(cctx, cr.scope(row.TenantID), cr.Keyed); decErr != nil {
 				s.logger.Warn("edge codec: compensating ref decrement failed (reconcile heals)", zap.Error(decErr))
 			}
 		}
@@ -657,7 +682,7 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 						s.logger.Warn("edge codec: the chunk's copy row was not written — the backfill pass finds it", zap.Error(cErr))
 					}
 				}
-				taken = append(taken, keyed)
+				taken = append(taken, edgeCodecRef{Keyed: keyed})
 				refs = append(refs, edgeCodecRef{Keyed: keyed, Size: c.Size, SealedSize: c.SealedSize, CiphertextHash: &etag, KeyVersion: version})
 				edgeCodecChunks.WithLabelValues("stored").Inc()
 				edgeCodecBytes.WithLabelValues("sealed").Add(float64(c.SealedSize))
@@ -668,11 +693,26 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 			// row stands, exactly as a hit.
 			fallthrough
 		case "hit":
+			if row.Attrs.CodecPublic[c.Hash] {
+				// The public catalogue's copy (WP-EDGE-4 PR D): its plain
+				// hash in `_public`, plaintext — public content.
+				rowSize, refErr := s.referencePublicChunk(ctx, c.Hash)
+				if refErr != nil {
+					return fail(refErr)
+				}
+				taken = append(taken, edgeCodecRef{Public: true, Keyed: c.Hash})
+				if rowSize != c.Size {
+					return fail(fmt.Errorf("%w: the host says %d bytes, the public row %d", errEdgeChunkSizeMismatch, c.Size, rowSize))
+				}
+				refs = append(refs, edgeCodecRef{Public: true, Keyed: c.Hash, Size: c.Size})
+				edgeCodecChunks.WithLabelValues("public").Inc()
+				continue
+			}
 			ct, ver, rowSize, refErr := s.referenceEdgeChunk(ctx, row.TenantID, keyed)
 			if refErr != nil {
 				return fail(refErr)
 			}
-			taken = append(taken, keyed)
+			taken = append(taken, edgeCodecRef{Keyed: keyed})
 			if rowSize != c.Size {
 				// RP68-6: the host's size would shift every later chunk's
 				// offset in the manifest.
@@ -966,7 +1006,7 @@ func (s *Server) commitEdgeCodecPut(ctx context.Context, row edgeAdmitRow, req e
 	var offset int64
 	for i, cr := range codecRefs {
 		refs = append(refs, crypto.TenantChunkRef{TenantID: row.TenantID, BucketName: row.Bucket, ObjectKey: row.StorageKey,
-			ChunkIndex: i, ChunkOffset: offset, PlaintextHash: cr.Keyed, DedupScope: row.TenantID,
+			ChunkIndex: i, ChunkOffset: offset, PlaintextHash: cr.Keyed, DedupScope: cr.scope(row.TenantID),
 			EncryptionKeyVersion: cr.KeyVersion, CiphertextHash: cr.CiphertextHash})
 		offset += cr.Size
 	}
@@ -997,7 +1037,7 @@ func (s *Server) commitEdgeCodecPut(ctx context.Context, row edgeAdmitRow, req e
 		// the grace), the reservation released.
 		compCtx := context.WithoutCancel(cctx)
 		for _, cr := range codecRefs {
-			if _, decErr := s.gci.DecrementRef(compCtx, row.TenantID, cr.Keyed); decErr != nil {
+			if _, decErr := s.gci.DecrementRef(compCtx, cr.scope(row.TenantID), cr.Keyed); decErr != nil {
 				s.logger.Warn("edge codec commit: compensating decrement failed (reconcile heals)", zap.Error(decErr))
 			}
 		}

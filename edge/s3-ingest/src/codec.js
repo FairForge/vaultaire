@@ -334,6 +334,58 @@ export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadline
   }
 }
 
+// --- the public catalogue (0.5.0, WP-EDGE-4 PR D) ---------------------------
+
+/** The catalogue's filter is fetched once per isolate and asked again for
+ * its latest version after CATALOGUE_TTL_MS. */
+const CATALOGUE_TTL_MS = 3_600_000;
+let catalogue = null; // {handle, version, at, contains(hash)}
+
+/** resetCatalogue forgets the isolate's filter (tests). */
+export function resetCatalogue() {
+  catalogue = null;
+}
+
+/**
+ * catalogueFilter is the public catalogue's Bloom filter (internal/catalogue
+ * in e2ee.wasm): `${CATALOGUE_URL}/latest` names the version, then
+ * `${CATALOGUE_URL}/<version>.bloom` is loaded once — the control plane's
+ * catalogue_filter job publishes both. No CATALOGUE_URL, or a catalogue
+ * that cannot be fetched, is no filter (every chunk is asked as before);
+ * a refresh that fails keeps the filter the isolate has. → {version,
+ * contains(plainHash)} | null.
+ */
+export async function catalogueFilter(env, e2ee, doFetch = fetch, now = Date.now()) {
+  if (!env || !env.CATALOGUE_URL || !e2ee) return null;
+  if (catalogue && now - catalogue.at < CATALOGUE_TTL_MS) return catalogue;
+  try {
+    const base = String(env.CATALOGUE_URL).replace(/\/+$/, "");
+    const lr = await doFetch(`${base}/latest`, { cache: "no-store" });
+    if (!lr.ok) throw new Error(`catalogue latest answered ${lr.status}`);
+    const version = (await lr.text()).trim();
+    if (!/^[0-9]+$/.test(version)) throw new Error("catalogue latest is not a version");
+    if (catalogue && String(catalogue.version) === version) {
+      catalogue.at = now;
+      return catalogue;
+    }
+    const fr = await doFetch(`${base}/${version}.bloom`, { cache: "no-store" });
+    if (!fr.ok) throw new Error(`catalogue filter answered ${fr.status}`);
+    const loaded = e2ee.catalogueLoad(new Uint8Array(await fr.arrayBuffer()));
+    if (loaded.error) throw new Error(loaded.error);
+    if (catalogue) e2ee.catalogueFree(catalogue.handle);
+    const handle = loaded.value.handle;
+    catalogue = { handle, version: loaded.value.version, at: now, contains: (h) => e2ee.catalogueContains(handle, h).value === true };
+  } catch (e) {
+    if (catalogue) {
+      catalogue.at = now; // keep it; ask again after the TTL
+      return catalogue;
+    }
+    console.log(JSON.stringify({ edge: "catalogue_unavailable", error: String(e && e.message ? e.message : e) }));
+    return null;
+  }
+  return catalogue;
+}
+
 function val(r, what) {
   if (r && r.error !== undefined) throw new Error(`${what}: ${r.error}`);
   return r.value;
@@ -381,6 +433,7 @@ export async function runCodec(request, admit, env, ctx, deps) {
   const log = deps.log || (() => {});
   const sem = deps.sem || new Semaphore(CODEC_IN_FLIGHT_BYTES, isolateBudget()); // this write's bound, under the isolate's (RP72-6)
   const tamper = deps.tamper || "";
+  const cat = deps.catalogue !== undefined ? deps.catalogue : await catalogueFilter(env, deps.e2ee, doFetch);
   const started = Date.now();
   // An aws-chunked body (0.4.0, D-EDGE-31): the admit names its trailer and
   // its DECODED length; the framing is decoded and the trailer verified on
@@ -406,7 +459,10 @@ export async function runCodec(request, admit, env, ctx, deps) {
     const t = Date.now();
     let idx;
     try {
-      const r = await cp("/api/v1/edge/index", { admit_id: admit.admit_id, chunks: items.map((it) => ({ hash: it.hash, size: it.size })) });
+      // 0.5.0 (WP-EDGE-4 PR D): a chunk the public catalogue's filter holds
+      // is marked public — the control plane checks it and references the
+      // one public copy (a false positive is answered a miss as any chunk).
+      const r = await cp("/api/v1/edge/index", { admit_id: admit.admit_id, chunks: items.map((it) => (cat && cat.contains(it.hash) ? { hash: it.hash, size: it.size, public: true } : { hash: it.hash, size: it.size })) });
       if (r.status !== 200) throw new Error(`index answered ${r.status}`);
       idx = await r.json();
     } catch (e) {

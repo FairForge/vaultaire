@@ -323,7 +323,7 @@ func (s *Server) commitEdgeCodecPart(ctx context.Context, row edgeAdmitRow, req 
 func failWithRefs(ctx context.Context, s *Server, row edgeAdmitRow, refs []edgeCodecRef,
 	fail func(string, ...ErrorOption) (string, int64), code string) (string, int64) {
 	for _, cr := range refs {
-		if _, decErr := s.gci.DecrementRef(ctx, row.TenantID, cr.Keyed); decErr != nil {
+		if _, decErr := s.gci.DecrementRef(ctx, cr.scope(row.TenantID), cr.Keyed); decErr != nil {
 			s.logger.Warn("edge codec part: compensating decrement failed (reconcile heals)", zap.Error(decErr))
 		}
 	}
@@ -417,7 +417,7 @@ func releaseCodecRefList(ctx context.Context, gci *crypto.GlobalContentIndex, lo
 		return
 	}
 	for _, cr := range refs {
-		if _, err := gci.DecrementRef(ctx, tenantID, cr.Keyed); err != nil {
+		if _, err := gci.DecrementRef(ctx, cr.scope(tenantID), cr.Keyed); err != nil {
 			logger.Warn("edge codec: a replaced part's reference not given back (reconcile heals)", zap.Error(err))
 		}
 	}
@@ -503,7 +503,7 @@ func (s *Server) completeCodecUpload(w http.ResponseWriter, r *http.Request, t *
 		}
 		for _, cr := range list {
 			refs = append(refs, crypto.TenantChunkRef{TenantID: t.ID, BucketName: bucket, ObjectKey: up.StorageKey,
-				ChunkIndex: count, ChunkOffset: totalSize, PlaintextHash: cr.Keyed, DedupScope: t.ID,
+				ChunkIndex: count, ChunkOffset: totalSize, PlaintextHash: cr.Keyed, DedupScope: cr.scope(t.ID),
 				EncryptionKeyVersion: cr.KeyVersion, CiphertextHash: cr.CiphertextHash})
 			totalSize += cr.Size
 			count++
