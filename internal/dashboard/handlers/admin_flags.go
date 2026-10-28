@@ -170,11 +170,16 @@ func HandleAdminFlagClear(svc *flags.Service, logger *zap.Logger) http.HandlerFu
 func flagRefused(w http.ResponseWriter, err error) bool {
 	w.Header().Set("Cache-Control", "no-store")
 	var drop *auth.PlaintextDropRefusal
+	var pre *flags.Refusal
 	switch {
 	case errors.As(err, &drop):
 		// credential_plaintext_drop's preconditions (plan 43.7): no master
 		// key, or live S3 secrets not wrapped yet — nothing was written.
 		http.Error(w, "Conflict: "+drop.Error()+".", http.StatusConflict)
+	case errors.As(err, &pre):
+		// A flag's own preconditions (standard_sealed_default): nothing
+		// was written.
+		http.Error(w, "Conflict: "+pre.Error()+".", http.StatusConflict)
 	case errors.Is(err, flags.ErrNotExemptible):
 		http.Error(w, "Conflict: this flag is on globally and cannot be turned off for one tenant (flag_not_exemptible).", http.StatusConflict)
 	case errors.Is(err, flags.ErrGlobalOnly):

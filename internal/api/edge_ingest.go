@@ -606,7 +606,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	// one extra decision, only with the flag on), so a 4–64 MiB PUT the
 	// origin would store whole is chunked here when the bucket allows it.
 	codecPlacement := placement
-	if req.Op == edgeOpPut && placement.Kind != placeChunked && s.flags.Enabled(flagEdgeCodec, tenantID) {
+	if req.Op == edgeOpPut && placement.Kind != placeChunked && s.edgeCodecFor(tenantID) {
 		codecPlacement = adapter.decidePlacement(sctx, placementRequest{
 			TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: placeSize,
 			SSEC: false, SSERequested: sseRequested, EdgeCodec: true,

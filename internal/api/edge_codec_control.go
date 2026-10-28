@@ -141,7 +141,7 @@ func (s *Server) edgeCodecStoreReady() bool {
 func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int64, attrs objectAttrs,
 	storageClass, floor string) (edgeAdmitResponse, int, edgeCodecVerdict) {
 	sr, sctx, rec, tenantID, bucket, key := p.sr, p.sctx, p.rec, p.tenantID, p.bucket, p.key
-	if s.flags == nil || !s.flags.Enabled(flagEdgeCodec, tenantID) {
+	if !s.edgeCodecFor(tenantID) {
 		return edgeAdmitResponse{}, 0, edgeCodecNo
 	}
 	grant, ok := s.edgeCodecGrantFor(sctx, tenantID)

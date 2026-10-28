@@ -37,6 +37,9 @@ func (s *Server) useFlags(fl *flags.Service) {
 // slot): the credential drop's preconditions first — a refusal there writes
 // nothing and appends nothing — then the translog_* log_policy entry.
 func (s *Server) guardFlagWrite(ctx context.Context, c flags.Change) error {
+	if err := s.guardStandardSealedDefault(ctx, c); err != nil {
+		return err
+	}
 	if err := s.guardCredentialPlaintextDrop(ctx, c); err != nil {
 		return err
 	}
@@ -85,9 +88,12 @@ func isPolicyFlag(key string) bool {
 // not one of the refusals (the caller's 500).
 func flagWriteError(w http.ResponseWriter, err error) bool {
 	var drop *auth.PlaintextDropRefusal
+	var pre *flags.Refusal
 	switch {
 	case errors.As(err, &drop):
 		writeJSON(w, http.StatusConflict, map[string]any{"error": drop.Code, "unwrapped": drop.Unwrapped, "message": drop.Error()})
+	case errors.As(err, &pre):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": pre.Code, "count": pre.Count, "message": pre.Error()})
 	case errors.Is(err, flags.ErrNotExemptible):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "flag_not_exemptible"})
 	case errors.Is(err, flags.ErrGlobalOnly):

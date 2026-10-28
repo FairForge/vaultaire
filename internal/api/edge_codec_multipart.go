@@ -51,7 +51,7 @@ const codecUploadRefusal = "This upload is fed through the edge codec; send ever
 func (s *Server) edgeAdmitCodecPart(req edgeAdmitRequest, p edgePrelude, size int64, uploadAttrs objectAttrs,
 	storageClass, floor string) (edgeAdmitResponse, int, edgeCodecVerdict) {
 	sr, sctx, rec, tenantID, bucket, key := p.sr, p.sctx, p.rec, p.tenantID, p.bucket, p.key
-	if s.flags == nil || !s.flags.Enabled(flagEdgeCodec, tenantID) {
+	if !s.edgeCodecFor(tenantID) {
 		return edgeAdmitResponse{}, 0, edgeCodecNo
 	}
 	uploadID := sr.URL.Query().Get("uploadId")
