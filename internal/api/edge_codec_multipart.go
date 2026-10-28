@@ -137,7 +137,7 @@ func (s *Server) edgeAdmitCodecPart(req edgeAdmitRequest, p edgePrelude, size in
 	row := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpPart, Backend: chunkedBackendSentinel,
 		UploadID: uploadID, PartNumber: partNumber, StorageKey: res.StorageKey, ContentLength: size,
 		ContentType: uploadAttrs.ContentType, Codec: true, ReservedBytes: res.Reserved,
-		Attrs:        edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(tenantID, s.engine.GetPrimary())},
+		Attrs:        edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(sctx, tenantID, bucket, s.engine.GetPrimary())},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	settled := false
 	defer func() {

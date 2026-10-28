@@ -55,6 +55,10 @@ import (
 //	   is asked what it still holds for the tenant — blobs behind a delete
 //	   marker, blobs no row names — and it is deleted. A backend that cannot
 //	   be listed or refuses a delete defers the tenant.
+//	   Then the CHUNK COPIES (erasure_chunk_copies.go, RP76-3): a codec
+//	   chunk's copy on a mirror leg is named only by its blob_copies row;
+//	   it is deleted on its leg through the row, and a leg that cannot be
+//	   asked defers the tenant.
 //	   Then the RECOVERY REALMS (recovery_erasure.go, RP52-3): the user's
 //	   record at every realm of RECOVERY_REALMS_FILE gets a Delete on its own
 //	   token; a realm that does not confirm defers the tenant, and so does a
@@ -188,6 +192,9 @@ type TenantErasure struct {
 	// ParityErased counts vault objects whose parity shards were erased
 	// from the leg (WP-VAULT-1).
 	ParityErased int `json:"parity_erased,omitempty"`
+	// ChunkCopiesDeleted counts the codec chunks' mirror copies deleted on
+	// their legs through their rows (RP76-3, stage b1b).
+	ChunkCopiesDeleted int `json:"chunk_copies_deleted,omitempty"`
 	// Swept is the number of blobs with no head row the sweep deleted, per
 	// backend (WP-R10-3c). SweptAfterErase of them were found by the pass
 	// after the row erase (a write that was in flight).
@@ -463,6 +470,12 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		if err != nil {
 			return r.defer_(te, log, "parity", err)
 		}
+		// b1b. The codec chunks' copies on the mirror legs (RP76-3): named
+		// by their blob_copies rows alone, outside the tenant's prefix the
+		// sweep walks — deleted through the rows before the rows go.
+		if err := r.eraseChunkCopies(ctx, d.TenantID, &te); err != nil {
+			return r.defer_(te, log, "chunk copies", err)
+		}
 	}
 
 	// b2. The sweep: what the backends still hold for the tenant with no head
@@ -613,11 +626,12 @@ func (r *AccountDeletionRunner) auditMeta(ctx context.Context, te TenantErasure,
 		"multipart_aborted": te.MultipartAborted, "object_failures": te.ObjectFailures,
 		"swept": te.Swept, "swept_after_erase": te.SweptAfterErase, "sweep_failures": te.SweepFailures,
 		"chunk_blobs_left": te.ChunkBlobsLeft, "swept_backends": te.SweptBackends,
-		"unswept_backends": te.UnsweptBackends,
-		"rows":             te.Rows,
-		"keys_shredded":    te.KeysShredded,
-		"realms_deleted":   te.RealmsDeleted,
-		"realms_deferred":  te.RealmsDeferred,
+		"chunk_copies_deleted": te.ChunkCopiesDeleted,
+		"unswept_backends":     te.UnsweptBackends,
+		"rows":                 te.Rows,
+		"keys_shredded":        te.KeysShredded,
+		"realms_deleted":       te.RealmsDeleted,
+		"realms_deferred":      te.RealmsDeferred,
 	}
 	if te.RealmsNotConfigured {
 		meta["realms_not_configured"] = true

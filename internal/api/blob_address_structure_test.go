@@ -44,6 +44,9 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 		"routing_truth.go": {
 			"d.Exists(cctx, container, artifact)": "a mirror copy asked at its recorded, resolved address (blob_copies.storage_key)",
 		},
+		"erasure_chunk_copies.go": {
+			"drv.Delete(dctx, container, artifact)": "a codec chunk's mirror copy deleted at its recorded address (blob_copies.storage_key) by the account erasure (RP76-3)",
+		},
 		"edge_rs.go": {
 			"one.GetOn(tctx, leg, container, key)": "an RS shard read at <row's storage_key>.s<i> on its recorded leg (blob_copies, WP-EDGE-4 PR B)",
 		},

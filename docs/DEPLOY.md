@@ -381,6 +381,12 @@ vaultaire@8001  "green"   /opt/vaultaire/bin/vaultaire-8001     the other stoppe
     database`) brings the plaintext back with it — that, not a rollback, is
     the way to an older build. The script is installed by hand like every
     `deploy/**` change.
+- **`standard_sealed_default` is set only through the admin API or the
+  dashboard, never a psql row** (RP76-9, as `credential_plaintext_drop`'s
+  RP62-13): its guard (409 `master_key_absent` / `tenant_keys_missing`)
+  runs in the flag service only, so a psql row turns it on with no master
+  key, and from then every Standard-mode write answers 503 SlowDown until
+  the row is cleared.
 - **The `edge_ingest` flag stays OFF until the build that knows edge uploads
   is the active slot** (WP-EDGE-1 Part A, migration 109, Stage 1a Prompt
   44). The migration is additive, but the PREVIOUS build cannot Complete an

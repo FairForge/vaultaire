@@ -357,6 +357,7 @@ async function moveBody(request, admit) {
       resp = two.resp;
       result.backend_etags = [resp.headers.get("etag") || ""];
       if (two.mirrorETag) result.backend_etags.push(two.mirrorETag);
+      if (two.mirrorCut) result.mirror_cut = true; // RP76-2: counted by the control plane
     } else {
       resp = await fetch(admit.url, moveInit(request, admit));
     }

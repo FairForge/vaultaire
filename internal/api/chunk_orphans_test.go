@@ -451,3 +451,34 @@ func TestChunkOrphans_AKeyWithNoModificationTimeIsNeverErased(t *testing.T) {
 	require.Len(t, warns, 2, "one Warn per run")
 	assert.Equal(t, o.backend, warns[0].ContextMap()["backend"])
 }
+
+// RP76-3: every registered mirror leg is walked as the primary is — a
+// codec chunk's copy no row names (an erased tenant's, a host's that never
+// committed: RB6-2) is erased past the grace; a copy a blob_copies row
+// names on that leg is never touched, though no index row names the leg.
+func TestChunkOrphans_WalksEveryMirrorLeg(t *testing.T) {
+	o := setupOrphanFixture(t)
+	tenant := "co-" + uuid.NewString()[:8]
+	named, unnamed := "_chunks/"+tenant+"/"+newHash(t)+".k1", "_chunks/"+tenant+"/"+newHash(t)+".k1"
+	o.blob(named, 3*time.Hour)
+	o.blob(unnamed, 3*time.Hour)
+	_, err := o.f.db.Exec(`INSERT INTO blob_copies (tenant_id, bucket, object_key, storage_key, source_backend, leg, kind, state, size)
+		VALUES ($1, '', '', $2, 'idrive', $3, 'mirror', 'ready', 10)`, tenant, named, o.backend)
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = o.f.db.Exec(`DELETE FROM blob_copies WHERE tenant_id = $1`, tenant) })
+
+	// The leg holds no index row: it is walked because it is a mirror leg.
+	o.sweeper.MirrorLegs = []string{o.backend, "not-registered-leg"}
+	o.sweeper.onlyBackends = nil
+	bs, err := o.sweeper.backends(context.Background(), ChunkOrphanResult{})
+	require.NoError(t, err)
+	assert.Contains(t, bs, o.backend)
+	assert.NotContains(t, bs, "not-registered-leg", "a leg with no driver is no backend to walk")
+
+	o.sweeper.onlyBackends = []string{o.backend}
+	res, err := o.sweeper.Run(context.Background(), false)
+	require.NoError(t, err)
+	assert.True(t, o.present(named), "a copy its blob_copies row names is never erased")
+	assert.False(t, o.present(unnamed), "a copy no row names is erased past the grace")
+	assert.Equal(t, 1, res.Backends[o.backend].Erased)
+}

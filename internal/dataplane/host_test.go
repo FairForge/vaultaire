@@ -116,3 +116,32 @@ func TestHost_ASealedChunkPutWithNoAnswerIsRetriedOnceOnAFreshConnection(t *test
 	assert.Error(t, err)
 	assert.Equal(t, int32(11), puts.Load(), "an answer is the backend's verdict")
 }
+
+// RP76-7: a whole read the mirror serves is wrapped by Verify.WholeRead as
+// the primary's would be, so its commit says verified.
+func TestHost_AMirrorServedWholeReadIsCountedVerified(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	mirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "5")
+		_, _ = w.Write([]byte("hello"))
+	}))
+	defer mirror.Close()
+	cp := &fakeCP{admit: AdmitResponse{Edge: true, AdmitID: "R1", URL: primary.URL + "/b/k", URLs: []string{primary.URL + "/b/k", mirror.URL + "/b/k"},
+		Method: http.MethodGet, ExpectStatus: http.StatusOK, Status: http.StatusOK, ContentLength: 5, BodyMD5: "5d41402abc4b2a76b9719d911017c592"}}
+	wrapped := false
+	h := &Host{CP: cp, Client: NewBackendClient(5 * time.Second), Verify: &Verify{WholeRead: func(b io.ReadCloser, _ string, _ int64) io.ReadCloser {
+		wrapped = true
+		return b
+	}}}
+	res, err := h.Read(context.Background(), httptest.NewRequest(http.MethodGet, "https://s3.test/b/k", nil))
+	require.NoError(t, err)
+	require.False(t, res.PassThrough, "%+v", res)
+	_ = res.Body.Close()
+	require.NotNil(t, cp.commit)
+	assert.Equal(t, 1, cp.commit.ServedURL)
+	assert.True(t, wrapped)
+	assert.True(t, cp.commit.Verified, "the mirror's whole read is verified like the primary's")
+}

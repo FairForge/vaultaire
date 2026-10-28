@@ -591,6 +591,27 @@ ranged GETs (`max_concurrent_requests` applies); rclone splits a large
 download to a local disk into `--multi-thread-streams` ranges (default 4),
 and 8 helps for single large files.
 
+## Durability
+
+Every object is stored with one storage provider, whose own redundancy
+keeps it. For an account with the edge mirror (a second copy at the
+time of the write), the same bytes also go to a second fast provider at
+the same address, and a background job writes the second copy for
+everything written before. The second copy never slows a write: a second
+provider more than 16 MiB behind the first, or that has not answered five
+seconds after it, is dropped from that write and the background job
+writes the copy later.
+
+The second copy satisfies the bucket:
+
+- **An EU-pinned bucket is a single copy until an EU leg exists.** Its
+  objects are never copied outside the EU, and today the second provider
+  has no EU location, so nothing in an EU bucket is mirrored.
+- A bucket pinned to a US region is mirrored only within the US; a bucket
+  in the default region (US Central) is mirrored only within the US.
+- A bucket on a dedicated tier (Sync, Blomp, Sia) is never mirrored: its
+  objects stay on the tier the bucket names.
+
 ## Other public routes
 
 ```

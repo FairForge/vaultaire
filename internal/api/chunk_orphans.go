@@ -49,6 +49,11 @@ import (
 //     meanwhile keeps it). A legacy address (a tenant's own prefix, before
 //     WP-R8-7) is never listed: it is the chunk move's.
 //
+// The mirror legs (MIRROR_LEGS, RP76-3) are walked too: a codec chunk's
+// copy on a leg sits at the chunk's one address and is named by its
+// blob_copies row, so the copy of an erased tenant or one a host wrote and
+// never committed (RB6-2) is an orphan there like any other.
+//
 // The grace (CHUNK_ORPHAN_GRACE, 24 h) is measured on the blob's own age —
 // the S3 LastModified the listing returns — and is longer than everything
 // that can leave a blob briefly unnamed: the chunk PUT bound (90 s), the
@@ -112,6 +117,10 @@ type ChunkOrphanSweeper struct {
 	beforeErase func(chunkOrphan)
 	// guardFloor overrides chunkOrphanGuardFloor (tests).
 	guardFloor int
+	// MirrorLegs are MIRROR_LEGS (RP76-3): each registered leg is walked
+	// as a chunk backend is, a key a blob_copies row names on it counting
+	// as named — a codec chunk's copy is named by that row, not the index.
+	MirrorLegs []string
 }
 
 // NewChunkOrphanSweeper builds the job; CHUNK_ORPHAN_GRACE is read here.
@@ -377,6 +386,11 @@ func (c *ChunkOrphanSweeper) backends(ctx context.Context, prev ChunkOrphanResul
 	for b := range prev.NotSwept {
 		add(b)
 	}
+	for _, b := range c.MirrorLegs {
+		if _, ok := c.eng.GetDriver(b); ok {
+			add(b)
+		}
+	}
 	sort.Strings(out)
 	return out, nil
 }
@@ -563,8 +577,9 @@ func (c *ChunkOrphanSweeper) examine(ctx context.Context, backend string, objs [
 }
 
 // keysNamed reads which of keys on backend a row names: "row" (an index row
-// of any state — a pending claim names its blob too) or "retired" (a
-// re-encrypt's old address, the collector's to delete).
+// of any state — a pending claim names its blob too — or a chunk copy's
+// blob_copies row on this leg) or "retired" (a re-encrypt's old address,
+// the collector's to delete).
 func (c *ChunkOrphanSweeper) keysNamed(ctx context.Context, q interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, backend string, keys []string) (map[string]string, error) {
@@ -572,6 +587,9 @@ func (c *ChunkOrphanSweeper) keysNamed(ctx context.Context, q interface {
 	for _, t := range []struct{ query, kind string }{
 		{`SELECT storage_key FROM global_content_index WHERE backend_id = $1 AND storage_key = ANY($2)`, "row"},
 		{`SELECT storage_key FROM retired_chunk_blobs WHERE backend_id = $1 AND storage_key = ANY($2)`, "retired"},
+		// A codec chunk's mirror copy on this leg (RP76-3): named by its
+		// blob_copies row (pending, ready or stale — the job's to finish).
+		{`SELECT storage_key FROM blob_copies WHERE leg = $1 AND bucket = '' AND storage_key = ANY($2)`, "row"},
 	} {
 		rows, err := q.QueryContext(ctx, t.query, backend, pq.Array(keys))
 		if err != nil {

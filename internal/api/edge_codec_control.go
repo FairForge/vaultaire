@@ -178,7 +178,7 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 		ContentLength: size, ContentType: attrs.ContentType, Codec: true,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
 			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"),
-			CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(tenantID, s.engine.GetPrimary())},
+			CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(sctx, tenantID, bucket, s.engine.GetPrimary())},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	settled := false
 	if s.quotaManager != nil {
@@ -675,6 +675,9 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 					mirrorETag := ""
 					if len(c.BackendETags) > 1 {
 						mirrorETag = c.BackendETags[1]
+					}
+					if c.MirrorCut {
+						blobCopiesTotal.WithLabelValues(blobCopyCut).Inc()
 					}
 					state, metag := mirrorCopyState(etag, mirrorETag)
 					if cErr := recordBlobCopy(ctx, s.db, blobCopy{TenantID: row.TenantID, StorageKey: edgeCodecChunkKey(row.TenantID, keyed, version),

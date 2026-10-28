@@ -841,7 +841,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		if req.Op == edgeOpPut {
 			// An aws-chunked PUT is signed for one backend: its mirror is the
 			// blob_copies job's (pending at the commit).
-			row.Attrs.MirrorLeg = s.mirrorFor(tenantID, backend)
+			row.Attrs.MirrorLeg = s.mirrorFor(sctx, tenantID, bucket, backend)
 		}
 		return s.recordEdgeWriteAdmit(sctx, req, &row, &settled, edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
 			Headers: streamHeaders, StreamingTrailer: stream.Trailer, ContentLength: size, Backend: backend,
@@ -887,7 +887,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		// WP-EDGE-4: a mirrored PUT gets the leg's link beside the
 		// placement's, signing the same headers (the host sends one set);
 		// a leg that cannot sign it is the blob_copies job's copy.
-		if leg := s.mirrorFor(tenantID, backend); leg != "" {
+		if leg := s.mirrorFor(sctx, tenantID, bucket, backend); leg != "" {
 			row.Attrs.MirrorLeg = leg
 			if murl, msigned, mErr := s.presignMirrorPut(sctx, leg, container, row.StorageKey,
 				engine.EdgePresign{ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType, TTL: edgeAdmitTTL}); mErr == nil && sameHeaderSet(signed, msigned) {
@@ -1523,6 +1523,9 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, req edgeCo
 		}
 		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
+	}
+	if req.MirrorCut && row.Attrs.MirrorLeg != "" {
+		blobCopiesTotal.WithLabelValues(blobCopyCut).Inc() // RP76-2: the copy is owed
 	}
 	// The bucket's default retention and the request's lock headers,
 	// exactly as plain PUT (applyObjectLockOnPut reads the headers).

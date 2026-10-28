@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- the S3 ETag
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -80,10 +81,10 @@ func TestMirrorLegFor_TheFirstRegisteredWriterThatIsNotThePlacement(t *testing.T
 	f := setupEdgeFixture(t)
 	f.addMirrorLeg()
 	f.srv.mirrorLegs = []string{"nosuch", "edgefake", "edgemirror"}
-	assert.Equal(t, "edgemirror", f.srv.mirrorLegFor("edgefake"), "unregistered and the placement itself are skipped")
-	assert.Equal(t, "edgefake", f.srv.mirrorLegFor("edgemirror"))
+	assert.Equal(t, "edgemirror", f.srv.mirrorLegFor("edgefake", bucketScope{}), "unregistered and the placement itself are skipped")
+	assert.Equal(t, "edgefake", f.srv.mirrorLegFor("edgemirror", bucketScope{}))
 	f.srv.mirrorLegs = []string{"edgefake"}
-	assert.Empty(t, f.srv.mirrorLegFor("edgefake"), "no other leg: no mirror (never a refusal)")
+	assert.Empty(t, f.srv.mirrorLegFor("edgefake", bucketScope{}), "no other leg: no mirror (never a refusal)")
 
 	assert.Equal(t, []string{"lyve", "idrive"}, mirrorLegsFromEnv(func(string) string { return "" }, nil))
 	assert.Equal(t, []string{"idrive", "lyve"}, mirrorLegsFromEnv(func(string) string { return " idrive, lyve ,idrive" }, nil), "trimmed, deduplicated")
@@ -376,6 +377,25 @@ func TestEdgeMirror_AReadThePrimaryCannotServeComesFromTheMirror(t *testing.T) {
 	assert.Equal(t, body, got)
 	assert.Equal(t, served+1, promtestutil.ToFloat64(blobCopiesReads.WithLabelValues("served_mirror")))
 
+	// RP76-8: the lookup is the mirrored tenant's only — flag off, no link
+	// (and no query), though the ready copy is still there.
+	require.NoError(t, f.fl.Set(context.Background(), flagEdgeMirror, f.tenantID, false, "test"))
+	require.NoError(t, f.fl.Refresh(context.Background()))
+	f.drv.mu.Lock()
+	f.drv.objects["t-"+f.tenantID+"/"+f.container()+"/"+sk] = body
+	f.drv.mu.Unlock()
+	rr, err = host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/r.bin", nil, nil, nil))
+	require.NoError(t, err)
+	assert.Len(t, rr.Admit.URLs, 0, "edge_mirror off: no mirror link")
+	if rr.Body != nil {
+		_ = rr.Body.Close()
+	}
+	require.NoError(t, f.fl.Set(context.Background(), flagEdgeMirror, f.tenantID, true, "test"))
+	require.NoError(t, f.fl.Refresh(context.Background()))
+	f.drv.mu.Lock()
+	delete(f.drv.objects, "t-"+f.tenantID+"/"+f.container()+"/"+sk)
+	f.drv.mu.Unlock()
+
 	// No ready copy: one link, and the origin takes a primary that fails.
 	f.exec(`UPDATE blob_copies SET state = 'pending' WHERE tenant_id = $1`, f.tenantID)
 	rr, err = host.Read(context.Background(), f.signedHTTP(http.MethodGet, "/"+f.bucket+"/r.bin", nil, nil, nil))
@@ -472,4 +492,200 @@ func TestBlobCopiesJob_CopiesSeveralAtOnce(t *testing.T) {
 	assert.Equal(t, 12, res.Copied)
 	assert.Greater(t, peak.Load(), int32(1), "copies overlap")
 	assert.LessOrEqual(t, peak.Load(), int32(blobCopiesConcurrency))
+}
+
+// RP76-2: a host that cut its mirror for falling behind says so on the
+// commit; the control plane counts it (vaultaire_blob_copies_total{outcome
+// ="cut"}) and the copy is owed, as for any mirror that did not store.
+func TestEdgeMirror_ACutMirrorIsCountedAndTheCopyOwed(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	body := testBytes(9000)
+	before := promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyCut))
+	resp := f.admit(f.signed("/"+f.bucket+"/cut.bin", nil, body, nil, ""))
+	require.Len(t, resp.URLs, 2)
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c := okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorCut = true
+	relay, _ := f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Equal(t, before+1, promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyCut)))
+	var state string
+	require.NoError(t, f.db.QueryRow(`SELECT state FROM blob_copies WHERE tenant_id = $1 AND storage_key = $2`, f.tenantID, resp.StorageKey).Scan(&state))
+	assert.Equal(t, "pending", state)
+}
+
+// RP76-1 + RP76-6: the mirror leg must satisfy the bucket. A region-pinned
+// bucket mirrors only to a leg of its own jurisdiction (an EU bucket today
+// has none: no mirror, never a refusal); a strict-target tier is never
+// mirrored; an unpinned bucket mirrors as before.
+func TestMirrorLegFor_RespectsResidencyAndTier(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	ctx := context.Background()
+	t.Setenv("LYVE_REGION", "us-west-1")
+	t.Setenv("IDRIVE_REGION", "us-central-1")
+
+	// The pure rule.
+	f.srv.mirrorLegs = []string{"edgemirror"}
+	assert.Empty(t, f.srv.mirrorLegFor("idrive-eu-west-1", bucketScope{Region: "eu-west-1"}), "a leg of no known region is never a pinned bucket's")
+	assert.Equal(t, "edgemirror", f.srv.mirrorLegFor("edgefake", bucketScope{}), "unpinned: as before")
+	assert.Equal(t, "edgemirror", f.srv.mirrorLegFor("edgefake", bucketScope{Region: "us-central-1"}), "the default region is unpinned")
+	for _, tier := range []string{"sia", "blomp", "sync"} {
+		assert.Empty(t, f.srv.mirrorLegFor("edgefake", bucketScope{Tier: tier}), "a strict tier is never mirrored: %s", tier)
+	}
+	assert.Empty(t, f.srv.mirrorLegFor("blomp", bucketScope{}), "a strict placement is never mirrored")
+	assert.Empty(t, f.srv.mirrorLegFor(rsBackendSentinel, bucketScope{}), "an rs object is never mirrored")
+
+	// Legs with a region: lyve (LYVE_REGION) and idrive-<region>.
+	lyve := newEdgeFakeDriver()
+	lyve.name, lyve.urlHost = "lyve", "lyve.backend.invalid"
+	f.srv.engine.AddDriver("lyve", lyve)
+	eu := newEdgeFakeDriver()
+	eu.name, eu.urlHost = "idrive-eu-central-1", "eu.backend.invalid"
+	f.srv.engine.AddDriver("idrive-eu-central-1", eu)
+	idr := newEdgeFakeDriver()
+	idr.name, idr.urlHost = "idrive", "idrive.backend.invalid"
+	f.srv.engine.AddDriver("idrive", idr)
+	f.srv.mirrorLegs = []string{"lyve", "idrive-eu-central-1", "idrive"}
+	assert.Equal(t, "idrive-eu-central-1", f.srv.mirrorLegFor("idrive-eu-west-1", bucketScope{Region: "eu-west-1"}), "the EU's own leg")
+	assert.Equal(t, "lyve", f.srv.mirrorLegFor("idrive-us-west-2", bucketScope{Region: "us-west-2"}), "a US pin: a US leg")
+	assert.Equal(t, "idrive", f.srv.mirrorLegFor("lyve", bucketScope{Tier: "resilient"}), "a us-central-1 resilient bucket mirrors to idrive (never to the EU leg listed first)")
+	assert.Equal(t, "idrive", f.srv.mirrorLegFor("lyve", bucketScope{Region: "us-central-1", Tier: "resilient"}))
+	f.srv.mirrorLegs = []string{"lyve", "idrive"}
+	assert.Empty(t, f.srv.mirrorLegFor("idrive-eu-west-1", bucketScope{Region: "eu-west-1"}), "no EU leg: a single copy")
+
+	// The admit: an EU-pinned bucket's write gets one link and no copy row.
+	f.srv.mirrorLegs = []string{"edgemirror"}
+	f.srv.engine.AddDriver("idrive-eu-west-1", f.drv)
+	f.exec(`INSERT INTO buckets (tenant_id, name, visibility, region) VALUES ($1, 'edge-eu', 'private', 'eu-west-1')`, f.tenantID)
+	body := testBytes(9000)
+	resp := f.admit(f.signed("/edge-eu/eu.bin", nil, body, nil, ""))
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Len(t, resp.URLs, 0, "no mirror link")
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	relay, _ := f.commit(okCommit(resp.AdmitID, body, a))
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Empty(t, f.copies(), "an EU bucket is a single copy until an EU leg exists")
+	assert.Equal(t, "", f.srv.mirrorFor(ctx, f.tenantID, "edge-eu", "idrive-eu-west-1"))
+	assert.Equal(t, "edgemirror", f.srv.mirrorFor(ctx, f.tenantID, f.bucket, "edgefake"))
+}
+
+// RP76-1 + RP76-6: the backfill never enqueues what cannot or must not be
+// mirrored — an rs head row, a strict-target row, a strict-tier bucket's
+// object, an EU-pinned bucket's object with no EU leg.
+func TestBlobCopiesJob_BackfillSkipsRSStrictAndPinnedRows(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	f.exec(`INSERT INTO buckets (tenant_id, name, visibility, tier_preference) VALUES ($1, 'edge-blomp', 'private', 'blomp')`, f.tenantID)
+	f.exec(`INSERT INTO buckets (tenant_id, name, visibility, region) VALUES ($1, 'edge-eu2', 'private', 'eu-west-1')`, f.tenantID)
+	for _, r := range []struct{ bucket, key, backend string }{
+		{f.bucket, "rs.bin", rsBackendSentinel},
+		{f.bucket, "strict.bin", "blomp"},
+		{"edge-blomp", "tier.bin", "edgefake"},
+		{"edge-eu2", "eu.bin", "edgefake"},
+		{f.bucket, "plain.bin", "edgefake"},
+	} {
+		f.exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, floor)
+			VALUES ($1, $2, $3, 10, 'e807f1fcf82d132f9bb018ca6738a19f', $4, 'standard')`, f.tenantID, r.bucket, r.key, r.backend)
+	}
+	// A pending row from before the fix whose source is no driver (an rs
+	// object's sentinel): stale, never skipped for ever.
+	f.exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, floor)
+		VALUES ($1, $2, 'old-rs.bin', 10, 'e807f1fcf82d132f9bb018ca6738a19f', 'rs', 'standard')`, f.tenantID, f.bucket)
+	f.exec(`INSERT INTO blob_copies (tenant_id, bucket, object_key, storage_key, source_backend, leg, kind, state, etag, size, created_at)
+		VALUES ($1, $2, 'old-rs.bin', 'old-rs.bin', 'rs', 'edgemirror', 'mirror', 'pending', '', 10, NOW() - interval '1 hour')`, f.tenantID, f.bucket)
+	res, err := f.copiesJob().RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Enqueued, "only plain.bin")
+	assert.Zero(t, res.Skipped)
+	got := f.copies()
+	var keys []string
+	for _, c := range got {
+		if c.state != "stale" {
+			keys = append(keys, c.storageKey)
+		}
+	}
+	assert.Equal(t, []string{"plain.bin"}, keys, "the rs row's copy is stale (or gone), never pending")
+}
+
+// pendingCopies writes n mirrored objects whose mirror PUT failed: n
+// pending copies, due at once.
+func (f *edgeFixture) pendingCopies(n, size int, prefix string) {
+	f.t.Helper()
+	body := testBytes(size)
+	for i := range n {
+		resp := f.admit(f.signed(fmt.Sprintf("/%s/%s-%d.bin", f.bucket, prefix, i), nil, body, nil, ""))
+		require.True(f.t, resp.Edge, "%+v", resp)
+		a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+		c := okCommit(resp.AdmitID, body, a)
+		c.BackendETags = []string{a}
+		relay, _ := f.commit(c)
+		require.Equal(f.t, http.StatusOK, relay.Status, relay.Body)
+	}
+	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
+}
+
+// RP76-4: the copy pass spends a source's free egress (backend_plans'
+// egress_free_multiple × what the last backend_capacity run counted
+// stored there) and no more within a UTC month; what it copied this month
+// is carried in its own job_runs.result. (Scaled: 10 KiB stored × 3 →
+// 30 KiB of 9,000-byte copies, three of them.)
+func TestBlobCopiesJob_StopsAtTheVendorsEgressBudget(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	f.pendingCopies(5, 9000, "eg")
+	capJob := "test_cap_for_copies_" + f.tenantID
+	raw, err := json.Marshal(BackendCapacityResult{Backends: map[string]*BackendBytes{"edgefake": {Objects: 10 << 10, Total: 10 << 10}}})
+	require.NoError(t, err)
+	f.exec(`INSERT INTO job_runs (job, last_outcome, result) VALUES ($1, 'ok', $2)`, capJob, raw)
+	mult := 3.0
+	require.NoError(t, upsertBackendPlan(context.Background(), f.db, BackendPlan{Backend: "edgefake", CapacityBytes: 1 << 40, EgressFreeMultiple: &mult,
+		TermStart: time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC), TermEnd: time.Date(2027, 10, 20, 0, 0, 0, 0, time.UTC)}))
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, capJob)
+		_, _ = f.db.Exec(`DELETE FROM backend_plans WHERE backend = 'edgefake'`)
+	})
+
+	j := f.copiesJob()
+	j.capacityJob = capJob
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, j.JobName) })
+	res, err := j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.Copied, "3 × 9,000 fits in 30,720; a fourth would not")
+	assert.Equal(t, 2, res.Skipped)
+	require.NotNil(t, res.Egress)
+	assert.Equal(t, int64(27_000), res.Egress.Spent["edgefake"])
+	assert.Contains(t, strings.Join(res.Errors, " ")+res.Stopped+res.EgressNote, "egress")
+
+	// The next run in the same month reads what this one spent.
+	raw, err = json.Marshal(res)
+	require.NoError(t, err)
+	f.exec(`INSERT INTO job_runs (job, last_outcome, result) VALUES ($1, 'ok', $2) ON CONFLICT (job) DO UPDATE SET result = EXCLUDED.result`, j.JobName, raw)
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, res.Copied, "the month's budget is spent")
+
+	// A new UTC month: the budget is whole again.
+	j.now = func() time.Time { return time.Now().AddDate(0, 1, 0) }
+	res, err = j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Copied)
+}
+
+// RP76-4 / RB6-10: a run copies batch after batch while rows are pending
+// and its time remains — it never idles at a fixed count.
+func TestBlobCopiesJob_LoopsWhileTimeRemains(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	f.pendingCopies(25, 1000, "loop")
+	j := f.copiesJob()
+	j.copyBatch = 10
+	res, err := j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 25, res.Copied, "three batches of 10 in one run")
+	var pending int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM blob_copies WHERE tenant_id = $1 AND state = 'pending'`, f.tenantID).Scan(&pending))
+	assert.Zero(t, pending)
 }

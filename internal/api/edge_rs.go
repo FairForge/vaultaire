@@ -34,6 +34,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 
@@ -159,6 +160,13 @@ func (s *Server) settleEdgeRS(ctx context.Context, row edgeAdmitRow, req edgeCom
 			return fail(ErrServiceUnavailable)
 		}
 	}
+	// RP76-5: the host's word is checked — every shard HEADed on its leg,
+	// at the shard's size and the ETag the host reported.
+	if err := s.headEdgeRSShards(cctx, row, req.ShardETags); err != nil {
+		s.logger.Warn("edge commit: an RS shard is not on its leg as the host said — the write fails", zap.Error(err),
+			zap.String("admit_id", row.ID), zap.String("host", row.Host))
+		return fail(ErrServiceUnavailable)
+	}
 	var bill *writeBill
 	if s.quotaManager != nil {
 		bill = &writeBill{Floor: row.ReservedFloor, Reserved: row.ReservedBytes, FloorReserved: row.FloorReserved, Credited: row.Credited}
@@ -197,6 +205,44 @@ func (s *Server) settleEdgeRS(ctx context.Context, row edgeAdmitRow, req edgeCom
 	s.logger.Info("artifact stored", zap.String("tenant_id", row.TenantID), zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 		zap.String("backend", rsBackendSentinel), zap.Int("k", rs.K), zap.Int("m", rs.M), zap.Int64("size", row.ContentLength), zap.String("host", row.Host))
 	return "committed", row.ContentLength
+}
+
+// headEdgeRSShards HEADs each shard of an RS write on its leg, all at once:
+// a shard that is absent, of another size than the stripe geometry's, or
+// whose ETag is not the one the host reported fails the commit (RP76-5).
+func (s *Server) headEdgeRSShards(ctx context.Context, row edgeAdmitRow, etags []string) error {
+	rs := row.Attrs.RS
+	errs := make([]error, len(rs.Legs))
+	var wg sync.WaitGroup
+	for i, leg := range rs.Legs {
+		wg.Add(1)
+		go func(i int, leg string) {
+			defer wg.Done()
+			drv, ok := s.engine.GetDriver(leg)
+			if !ok {
+				errs[i] = fmt.Errorf("shard %d: leg %s is not registered", i, leg)
+				return
+			}
+			h, ok := drv.(engine.ObjectHeader)
+			if !ok {
+				errs[i] = fmt.Errorf("shard %d: leg %s cannot be asked for an object's size", i, leg)
+				return
+			}
+			hctx, cancel := context.WithTimeout(ctx, edgeBackendCallTimeout)
+			defer cancel()
+			info, err := h.HeadObject(hctx, row.TenantID+"_"+row.Bucket, rsShardKey(row.StorageKey, i))
+			switch {
+			case err != nil:
+				errs[i] = fmt.Errorf("shard %d on %s: %w", i, leg, err)
+			case info.Size != rs.ShardBytes:
+				errs[i] = fmt.Errorf("shard %d on %s is %d bytes, the stripes make %d", i, leg, info.Size, rs.ShardBytes)
+			case !strings.EqualFold(strings.Trim(info.ETag, `"`), strings.Trim(etags[i], `"`)):
+				errs[i] = fmt.Errorf("shard %d on %s has ETag %s, the host said %s", i, leg, info.ETag, etags[i])
+			}
+		}(i, leg)
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // rsShard is one shard row of an object.
