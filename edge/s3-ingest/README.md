@@ -92,6 +92,7 @@ chunker costs ≈ 11 s of CPU per GiB.
   - before the fix: chunked, 411;
   - after: `content-length` on both, 200;
   - a 64 MiB PUT with a mirror reading at 2 MB/s: 0.74 s with the mirror cut at 1.5 MB (0.5.0's `putTwo`: 34.75 s, held to the mirror's pace).
+- Manifest row `edge-codec` 0.5.2 at `f134825a` (#1042); `edge-ingest` is byte-identical to its 0.5.1 row (`index.js` did not change), the other modules to theirs.
 - 0.5.1 is never to be deployed again: its manifest rows stay in the log, and 0.5.2's rows follow.
 
 ## 0.5.1 — the mirror never slows the write (Stage 1a Prompt 49 Part 0, RP76-2)
