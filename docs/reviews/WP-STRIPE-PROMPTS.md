@@ -524,6 +524,132 @@ Prod: PR 0 first. PRs A–C deploy dark: no tenant has `platform = true` until t
 
 Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one child was made by the API, and one object went through the child's scoped key with its bytes counted in the parent's pool; Prompt 52 written here.
 
+## Stage 1a Prompt 52: WP-TEAM-1 — teams: members, roles and invitations on a tenant (Part 0: RP82's findings)
+
+**From 51 (`docs/reviews/WP-STRIPE-3.md`; the post-merge review is RP82):**
+- **Platform tenants are live and dark until the owner grants one** (migration 117):
+  - `tenants.platform` (set only by `PUT /api/v1/admin/tenants/{id}/platform`, admin + TOTP) opens `/api/v1/platform/*` to that tenant's JWT; every other tenant gets 404;
+  - a **child** is a `tenants` row with `parent_tenant_id`, no `users` row, no primary pair; its keys are scoped (`auth.CapScope`: never wider than the calling credential) and their row's `user_id` is the platform user who minted them;
+  - **the pool:** `usage.ReserveTx` locks the owner's quota row and sums the pool (`usage/pool.go`); the edge admit goes through it;
+  - **the cascade:** the deletion runner's stage b5 erases a platform's children first; `EraseRows` refuses a platform while a child row remains; a child is scheduled on `tenants.deletion_scheduled_at`.
+- **Part 0 of 51 (RP80):** a sandbox is metered (never billed) against a fixed 5 GiB allowance, its presigned links ≤ 1 h, never Public, suspended with its parent; the event cursor's 2 s horizon and ≤ 4 waits per tenant; `?mode=test` on the request log.
+- **What TEAM-1 inherits from 51:**
+  - **Who acts is now "a user on a tenant", not "the tenant's user".** The JWT's `tenant_id` claim is the user's one tenant today (users ↔ tenants by e-mail, the registration contract). Members make the tenant a choice: the session and the JWT must carry the ACTIVE tenant, and every route that reads `tenantIDKey` (the management API, `/api/v1/platform`, `requirePlatform`, the request log's management rows) reads the active one.
+  - **Keys are listed by user today** (`AuthService.ListAPIKeys(userID)`, the free-tier cap counts `user_id`). A child's keys were kept out of that list by a clause (`notChildKeySQL`); members make "the tenant's keys" the right list. Change it to tenant-keyed listing, never a second exclusion clause.
+  - **Account deletion is user-centric** (`users.deletion_scheduled_at`, `account.ListDue` joins users → tenants by e-mail). With members: deleting the ACCOUNT is the owner's, and it erases the tenant (and its sandbox, its children); a member leaving removes a `tenant_members` row, never a tenant.
+  - **The audit row names the member** (`audit.Entry.Actor` = the acting user; `UserID` = the subject). `platform.*` rows already put the platform tenant in `tenant_id` and the acting user in `performed_by`.
+- **Decided the same day** (`docs/reviews/WP-STRIPE-3.md` § The open questions, decided; **`docs/ACCOUNTS.md`, the account model — read it**):
+  - D-STRIPE-29: a platform, an app's backend and an agent use a **management key** (WP-KEY-1), never a person's JWT;
+  - D-STRIPE-30: `tenants.residency` (WP-ACCT-1);
+  - D-STRIPE-31: a child's downloads count against its POOL's allowance (Part 0 below).
+- **What TEAM-1 must leave room for (`docs/ACCOUNTS.md`):** a family is a pool of personal tenants that reuses THIS WP's invitations, so `tenant_invitations` gets a `kind` (`member` now, `family` in WP-FAMILY-1); and a team is one shared tenant. Never make a family "a tenant with members".
+
+**Part 0 (in this order):**
+1. **D-STRIPE-31 / RB9-2: a child's downloads count against its pool's allowance.** Test first: `TestPool_AChildsDownloadsSpendThePoolsAllowance`. Its setup: a platform with an allowance of 10 MiB; child A downloads 6 MiB and child B 6 MiB. It asserts:
+   - B's second response is paced with `egress_throttle` on, and the same decision is counted with it off;
+   - the rows stay under A and B;
+   - the alert ladder fires for the platform.
+
+   Then `usage.EgressAllowance` and `egressMeter` resolve the pool root through ONE function (`usage.PoolRoot(ctx, q, tenantID)`, the owner `COALESCE(parent_tenant_id, id)`; WP-ACCT-1 swaps it for `pool_root_id`):
+   - the allowance is the root's;
+   - the month's egress is summed over the pool (`MonthEgressBytes` of the root sums the pool's rows);
+   - the live counter is the root's (`egressMeter.tenant` keyed by the root for decide and pace), while `BandwidthTracker` still records each tenant's own rows;
+   - a sandbox is never in a pool (its fixed allowance, RP80-1).
+2. **RP82's findings, in RP82's order** (`docs/reviews/WP-STRIPE-3-REVIEW.md`). Fold any that touch TEAM-1's surfaces (the JWT's tenant, the key listing, the deletion runner) before PR A.
+
+Continue from WP-STRIPE-3 and its review RP82. `git log origin/main`, `gh pr list`.
+
+Read first:
+- plan § WP-STRIPE (the WP-TEAM-1 row — the contract);
+- `internal/auth/auth.go` (`CreateUserWithTenant`, the four-table rule; `GenerateJWT` / `ValidateJWT` and the claims; `LoadFromDB`), `internal/auth/apikey.go` (`ListAPIKeys`, `checkKeyCap`, `RevokeAPIKey`'s ownership), `internal/auth/platform_keys.go` (`notChildKeySQL`, the clause members replace);
+- `internal/dashboard/auth` (the session: `SessionData`) and `internal/dashboard/handlers` (every handler reads `sd.TenantID`);
+- `internal/api/server.go` `requireJWT`, `internal/api/middleware.go` (`requireAdmin`), `internal/api/platform_tenants.go` `requirePlatform`;
+- `internal/account/service.go` + `erase.go` (who may schedule; what a member's removal erases — nothing but the membership);
+- `internal/audit` (`Entry.Actor`);
+- `internal/email` (the sender; the invitation's signed link reuses `VERIFY_SECRET`'s HMAC shape).
+
+Lane: Developer surface (the Stripe layer). Migration 118: `tenant_members` (tenant, user, role, invited_by, accepted_at; unique (tenant, user)), `tenant_invitations` (tenant, e-mail, role, token hash, expires_at, accepted_at).
+
+PRs:
+- (0) RP82's fixes;
+- (A) members and roles: the tables, registration creates the owner member, the role check on every management and dashboard write, the active tenant in the session and the JWT;
+- (B) invitations: e-mail, the signed link (7 days), accept, the Members page and the `members` routes;
+- (C) a user in several tenants: the switcher, keys and audit by the active tenant;
+- (D) docs.
+
+What to build
+1. **`tenant_members`** with roles `owner` / `admin` / `developer` / `viewer`. Registration writes the owner member in its one transaction (the four-table rule becomes five). A backfill makes every existing user the owner member of its tenant (in the migration, idempotent).
+2. **Authorisation by role**, one function (`auth.Can(role, action)`) every write calls: a viewer reads; a developer makes keys and buckets; an admin invites and manages members (never the owner); the owner alone deletes the account, changes billing or grants nothing a platform admin grants. The JWT carries the active tenant and the role; `requirePlatform` reads the active tenant.
+3. **Invitations:** `POST /api/v1/manage/members {email, role}` sends a signed link (7 days, single use, its hash stored); accepting creates the member (a new user registers through the link without a tenant of their own — the four-table rule's tenant step is the inviting tenant's member row).
+4. **Several tenants per user:** the dashboard's switcher; `POST /auth/login` returns the user's tenants and mints a JWT for one (`tenant_id` in the body, default the owned one); every key, audit and request-log list is by the active tenant.
+5. **The audit row names the member** (actor = the acting user, tenant = the active tenant).
+
+Tests (red first):
+- `TestMembers_ViewerCannotCreateAKey`;
+- `TestMembers_OnlyTheOwnerDeletesTheAccount`;
+- `TestMembers_InvitationExpiresIn7Days`;
+- `TestMembers_AUserInTwoTenantsSeesTheRightOne`;
+- `TestMembers_AuditRowNamesTheMember`;
+- `TestRegister_CreatesTheOwnerMember`;
+- `TestMembers_APlatformsMemberActsOnItsChildren` (a developer of a platform mints a child's key; a viewer cannot);
+- the schema walks: `TestErasedTablesCoverSchema` (both tables erased with the tenant; a member's own user row is NOT erased with a tenant it does not own), `TestExportSectionsCoverSchema`.
+
+Prod proof: tenant zero invites a second address of the owner's (the owner's mailbox), the invitee accepts and sees the buckets read-only, the audit page names both. Needs the owner (TOTP and the mailbox).
+
+Architecture notes
+- A member is a (user, tenant, role) row. Nothing about a tenant's data changes: S3 keys stay tenant-keyed; only the management surfaces learn who acts.
+- The role default for an un-migrated flow is `owner` for the registering user, so every existing account keeps working unchanged.
+- Closeout: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan § WP-STRIPE's row, CLAUDE.md (the tables, the role rule, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-ACCT-1) written here. The post-merge review is RP84.
+
+ultrathink
+
+## Stage 1a Prompt 52 — Opus edition
+
+**From 51 (as above).**
+
+You are building plan § WP-STRIPE's WP-TEAM-1 row in the Vaultaire repository: members, roles and invitations on a tenant, and a user who belongs to several tenants. Part 0 (RP82's fixes) comes first. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`. Migration 118.
+
+Read before editing:
+- plan § WP-STRIPE (the WP-TEAM-1 row);
+- `docs/reviews/WP-STRIPE-3.md` + `WP-STRIPE-3-REVIEW.md`;
+- `internal/auth/auth.go` (`CreateUserWithTenant`, `GenerateJWT`, `ValidateJWT`, `JWTClaims`, `LoadFromDB`), `internal/auth/apikey.go` (`ListAPIKeys`, `checkKeyCap`, `RevokeAPIKey`), `internal/auth/platform_keys.go` (`notChildKeySQL`);
+- `internal/dashboard/auth` (`SessionData`, the store), `internal/dashboard/handlers/keys.go`, `settings.go`;
+- `internal/api/server.go` (`requireJWT`), `internal/api/management_routes.go` (every handler reading `tenantIDKey` / `userIDKey`), `internal/api/platform_tenants.go` (`requirePlatform`);
+- `internal/account/service.go`, `erase.go`;
+- `internal/audit/audit.go`;
+- `internal/email` (the sender) and the verify-token code (`VERIFY_SECRET`).
+
+PR 0 — Branch `stage1a-p52-part0`. Read `docs/ACCOUNTS.md` first.
+- **0a (D-STRIPE-31, RB9-2).** Test first: `TestPool_AChildsDownloadsSpendThePoolsAllowance` (the platform's allowance 10 MiB; children A and B download 6 MiB each; B's second response is paced with `egress_throttle` on and counted in `vaultaire_egress_would_throttle_total` with it off; the rows stay under A and B; the platform gets the alert). Then `usage.PoolRoot(ctx, q, tenantID)` (one function; `COALESCE(parent_tenant_id, id)`), `EgressAllowance` and `MonthEgressBytes` answer the root's allowance and the pool's month, `egressMeter.tenant` keys its counter by the root while `BandwidthTracker` keeps each tenant's own rows; a sandbox keeps its fixed allowance. Verify: `go test -race ./internal/usage/ ./internal/api/ -run 'Pool|Egress|Sandbox'`.
+- **0b…** RP82's fixes (`docs/reviews/WP-STRIPE-3-REVIEW.md`), one step per finding, each test first, in RP82's order.
+
+PR A — members and roles. Branch `stage1a-p52-members`.
+1. Migration 118 `118_members.sql`:
+   - `CREATE TABLE IF NOT EXISTS tenant_members (tenant_id VARCHAR(255) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK (role IN ('owner','admin','developer','viewer')), invited_by UUID, accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (tenant_id, user_id))`;
+   - a partial unique index: one `owner` per tenant;
+   - the backfill: `INSERT … SELECT t.id, u.id, 'owner' FROM users u JOIN tenants t ON t.email = u.email ON CONFLICT DO NOTHING` (idempotent; a child and a sandbox have no user and get no row);
+   - `tenant_invitations (id UUID PK, tenant_id, kind TEXT NOT NULL DEFAULT 'member' CHECK (kind IN ('member','family')), email, role, token_hash TEXT NOT NULL, invited_by UUID, expires_at, accepted_at, created_at)` (`family` is WP-FAMILY-1's; this WP accepts `member` only);
+   - then `make test-db`, the reapply test, `TestErasedTablesCoverSchema` (both tables erased by tenant; `tenant_members` also by user for a user erased from a tenant it does not own) and `TestExportSectionsCoverSchema` (a `members` section).
+2. Test first: `TestRegister_CreatesTheOwnerMember`. Then `CreateUserWithTenant` writes the member row in its transaction.
+3. Test first: `TestMembers_ViewerCannotCreateAKey`, `TestMembers_OnlyTheOwnerDeletesTheAccount`, `TestMembers_APlatformsMemberActsOnItsChildren`. Then:
+   - `internal/auth/members.go`: `Role`, `Can(role, action)` with the action table of the plan row as a Go map (the one rule), `MemberRole(ctx, db, tenantID, userID)`;
+   - `JWTClaims` gains `Role`; `requireJWT` puts it on the context; a JWT minted before 118 (no role claim) is read as `owner` only when the user owns the tenant (a member row says so), else refused;
+   - every management and platform write calls `requireRole(action)` (a middleware per route group, the action named per route — `TestManagementRoutes_EveryWriteNamesItsAction` walks the router);
+   - the dashboard's handlers read the session's role the same way.
+
+PR B — invitations. Branch `stage1a-p52-invitations`.
+4. Test first: `TestMembers_InvitationExpiresIn7Days` (accepting at day 8 is 410 `invitation_expired`; a token is single use; its hash, never the token, is stored). Then `POST/GET/DELETE /api/v1/manage/members[/{user}]`, `POST /api/v1/manage/invitations/{token}/accept`, the e-mail through the existing sender, the dashboard's Members page (invite, change a role, remove; the owner row cannot be removed or demoted).
+
+PR C — several tenants. Branch `stage1a-p52-switch`.
+5. Test first: `TestMembers_AUserInTwoTenantsSeesTheRightOne` (a user in tenants A and B: a JWT for A lists A's buckets and keys, never B's; switching mints B's). Then `POST /auth/login` answers `tenants: [{id, role}]` and takes `tenant_id`; the dashboard's switcher sets the session's active tenant; `ListAPIKeys` becomes tenant-keyed (`notChildKeySQL` goes: a child's keys are the child's tenant's, never in any member's list).
+6. Test first: `TestMembers_AuditRowNamesTheMember`. Then every `audit.Entry` from the management and dashboard paths carries the actor (the member) and the active tenant.
+
+PR D — docs: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan row DONE, CLAUDE.md (the tables, `auth.Can`, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-ACCT-1, `docs/ACCOUNTS.md`) in both editions with Part 0 = RP84. The post-merge review is RP84.
+
+Prod: PR 0 first. PRs A–C deploy with the backfill: every existing user is its tenant's owner, so nothing changes for anyone until an invitation is sent. The proof needs the owner (TOTP and the mailbox).
+
+Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accepted an invitation and reads its buckets read-only, and the audit page names both; Prompt 53 (WP-ACCT-1) written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -533,6 +659,8 @@ Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one chil
   - #1049: the sandbox, migration 116.
   - #1050: `livemode` and `stored listen`.
   - #1051: the image.
+  - The post-merge review is RP80.
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
-- **Prompt 51 — WP-PLAT-1** (API-created accounts, the Connect primitive) — WRITTEN above by Prompt 50's closeout, both editions. Part 0 = RP80-1…7 + RB8-2 (filled by RP80). Migration 117. The post-merge review is RP82.
-- **52 — WP-TEAM-1**; **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
+- **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82.
+- **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = RP82 (filled by RP82). Migration 118. The post-merge review is RP84.
+- **53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`); **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
