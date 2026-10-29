@@ -30,6 +30,11 @@ func ResolveMember(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handl
 				return
 			}
 			role := auth.RoleOwner
+			if db != nil && sd.TenantID == "" {
+				// A session on no tenant (a sign-in that is no member of any):
+				// it may read its own pages and change nothing of an account.
+				role = auth.RoleViewer
+			}
 			if db != nil && sd.TenantID != "" {
 				var err error
 				role, err = auth.MemberRole(r.Context(), db, sd.TenantID, sd.UserID)
