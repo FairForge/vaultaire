@@ -1,0 +1,4 @@
+# The image copies only the release binary (WP-DX-1 PR C): everything else stays out of the context.
+*
+!bin/vaultaire-linux-*
+!deploy/docker/data/

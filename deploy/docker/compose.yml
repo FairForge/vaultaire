@@ -1,0 +1,60 @@
+# The local server (WP-DX-1 PR C; docs/guides/local.md): Postgres 18, the
+# migrations applied by a one-shot init step from the image's own copy, and
+# the stored image (`make docker` builds stored/vaultaire:local). The first
+# boot makes one account and prints its key pair once:
+#
+#   docker compose -f deploy/docker/compose.yml logs vaultaire | grep AWS_
+#
+# Local only: the JWT secret below is a placeholder, the database has no
+# password, and nothing here is fit for a server reachable by anyone else.
+name: stored-local
+
+services:
+  postgres:
+    image: postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    environment:
+      POSTGRES_USER: stored
+      POSTGRES_DB: stored
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "stored", "-d", "stored"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  migrations:
+    # The checkout's migrations, applied in order at every `up` (each is
+    # idempotent, as the Deploy workflow applies them).
+    image: postgres:18@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../internal/database/migrations:/migrations:ro
+    entrypoint: ["sh", "-ec", "for f in /migrations/*.sql; do psql -X -q -v ON_ERROR_STOP=1 -h postgres -U stored -d stored -f \"$$f\" >/dev/null; done; echo migrations applied"]
+
+  vaultaire:
+    image: ${STORED_IMAGE:-stored/vaultaire:local}
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: stored
+      DB_USER: stored
+      DB_PASSWORD: ""
+      JWT_SECRET: local-only-not-a-secret
+      VAULTAIRE_BOOTSTRAP_EMAIL: dev@localhost.local
+      VAULTAIRE_PUBLIC_HOST: http://localhost:8000
+      VAULTAIRE_ENDPOINT: http://localhost:8000
+    ports:
+      - "127.0.0.1:${STORED_PORT:-8000}:8000"
+    volumes:
+      - data:/data
+
+volumes:
+  pgdata:
+  data:

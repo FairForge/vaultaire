@@ -277,3 +277,57 @@ jobs:
           done
           echo "::error::stored.ge/version reports '${got:-nothing}', expected $want"
           exit 1
+
+  # The local server's image (WP-DX-1 PR C, docs/guides/local.md): the very
+  # binary prod now serves, copied as built onto the pinned distroless base
+  # (Dockerfile) — never rebuilt — and pushed to ghcr.io/fairforge/vaultaire
+  # as :<sha12> and :latest. Its /vaultaire must hash to the artifact's
+  # sha256, which is the server_build entry the transparency log holds for
+  # this build (appended when prod boots it). linux/amd64 only (the release
+  # recipe's one target here; `make docker` builds the host's arch locally).
+  image:
+    needs: deploy-prod
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            Dockerfile
+            .dockerignore
+            deploy/docker
+          sparse-checkout-cone-mode: false
+
+      - name: Download artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: vaultaire-linux
+
+      - name: Build the image from the release binary
+        run: |
+          mkdir -p bin
+          cp vaultaire-linux bin/vaultaire-linux-amd64
+          tag="ghcr.io/fairforge/vaultaire:${GITHUB_SHA::12}"
+          docker build --platform linux/amd64 --build-arg TARGETARCH=amd64 -t "$tag" -t ghcr.io/fairforge/vaultaire:latest .
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: The image's binary is the release binary
+        run: |
+          want=$(sha256sum vaultaire-linux | cut -d' ' -f1)
+          cid=$(docker create "$TAG")
+          docker cp "$cid:/vaultaire" image-binary
+          docker rm "$cid" >/dev/null
+          got=$(sha256sum image-binary | cut -d' ' -f1)
+          echo "release binary sha256 $want (the server_build entry's), image /vaultaire $got"
+          [ "$want" = "$got" ] || { echo "::error::the image's binary is not the release binary"; exit 1; }
+
+      - name: Push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$TAG"
+          docker push ghcr.io/fairforge/vaultaire:latest

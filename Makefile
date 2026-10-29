@@ -171,6 +171,14 @@ repro-check:
 version:
 	@echo "$(BUILD_SHA) $(BUILD_DATE)"
 
+# The local server's image (WP-DX-1 PR C, docs/guides/local.md): the release
+# binary for the host's architecture (the one recipe, never `go build`
+# here), then the Dockerfile copies it as built — stored/vaultaire:local.
+DOCKER_ARCH ?= $(shell go env GOARCH)
+docker:
+	GOOS=linux GOARCH=$(DOCKER_ARCH) scripts/build-release.sh bin/vaultaire-linux-$(DOCKER_ARCH)
+	docker build --platform linux/$(DOCKER_ARCH) --build-arg TARGETARCH=$(DOCKER_ARCH) -t stored/vaultaire:local .
+
 # The SBOMs (WP-SUPPLY-1): CycloneDX 1.6 JSON for the server (from the release
 # binary), sdk-wasm and sdk-js into bin/sbom/, by cyclonedx-gomod pinned in
 # scripts/sbom.sh (built for the host into a temporary GOBIN, never a PATH
@@ -205,7 +213,7 @@ clean:
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	go clean
 
-.PHONY: build repro-check version sbom sbom-check repro-check-sbom clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
+.PHONY: build docker repro-check version sbom sbom-check repro-check-sbom clean landing landing-browser og dash-shots dash-lighthouse sdk-wasm
 
 # The Private-mode key core for the browser (keystone K2): sdk/go/e2ee compiled
 # to WebAssembly, with the SAME toolchain's wasm_exec.js beside it (they must
