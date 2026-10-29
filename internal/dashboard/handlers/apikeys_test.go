@@ -43,7 +43,7 @@ func setupAuthWithUser(t *testing.T) (*auth.AuthService, *dashauth.SessionData) 
 	user, _ := authSvc.CreateUser(context.Background(), "keys@stored.ge", "securepass123")
 	sd := &dashauth.SessionData{
 		UserID:   user.ID,
-		TenantID: "tenant-test",
+		TenantID: user.TenantID,
 		Email:    user.Email,
 		Role:     "user",
 	}

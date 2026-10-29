@@ -617,7 +617,7 @@ func TestKeyAPIs_CreateAKeyWithTheBypassPermission(t *testing.T) {
 		s := &Server{logger: zap.NewNop(), auth: svc, config: &config.Config{}, quotaManager: &stubQuotaManager{}}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/manage/keys", strings.NewReader(body))
 		ctx := context.WithValue(req.Context(), userIDKey, user.ID)
-		req = req.WithContext(context.WithValue(ctx, tenantIDKey, "test-tenant"))
+		req = req.WithContext(context.WithValue(ctx, tenantIDKey, user.TenantID))
 		w := httptest.NewRecorder()
 
 		s.handleMgmtCreateKey(w, req)

@@ -319,6 +319,7 @@ func TestKeyAPIs_PrimaryRevokeIs409(t *testing.T) {
 	rctx.URLParams.Add("keyId", f.key.ID)
 	c := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
 	c = context.WithValue(c, userIDKey, f.user.ID)
+	c = context.WithValue(c, tenantIDKey, f.tenant.ID) // the active tenant (WP-TEAM-1)
 	rr := httptest.NewRecorder()
 	f.srv.handleDeleteUserAPIKey(rr, req.WithContext(c))
 	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
