@@ -608,7 +608,9 @@ func TestEdgeCommitGet_ServedTouchesLastAccessedAndCountsUnverified(t *testing.T
 	assert.Equal(t, before+1, promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified")),
 		"every served edge read is unverified by design (RP66-2)")
 
-	// The touch is fire-and-forget, as the origin's.
+	// The touch goes through the origin's coalescer (WP-R9-5): written at
+	// its flush (within a minute, or at a stop).
+	accessToucherFor(f.db, zap.NewNop()).Flush(context.Background())
 	assert.Eventually(t, func() bool {
 		var age float64
 		if err := f.db.QueryRow(`SELECT EXTRACT(EPOCH FROM (NOW() - last_accessed)) FROM object_head_cache
@@ -626,7 +628,7 @@ func TestEdgeCommitGet_ServedTouchesLastAccessedAndCountsUnverified(t *testing.T
 	_, code = f.commit(edgeCommitRequest{AdmitID: resp.AdmitID, Outcome: edgeGetFallback, BackendStatus: 500, BackendCode: "InternalError"})
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, served, promtestutil.ToFloat64(objectIntegrityUnverified.WithLabelValues("edge", "unverified")))
-	time.Sleep(150 * time.Millisecond)
+	accessToucherFor(f.db, zap.NewNop()).Flush(context.Background())
 	var age float64
 	require.NoError(t, f.db.QueryRow(`SELECT EXTRACT(EPOCH FROM (NOW() - last_accessed)) FROM object_head_cache
 		WHERE tenant_id = $1 AND object_key = 'touch.bin'`, f.tenantID).Scan(&age))

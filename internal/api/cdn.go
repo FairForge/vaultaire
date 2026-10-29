@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -194,12 +193,7 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		backendName = s.smartPromoter.OnRead(ctx, tenantID, bucket, key, etag)
 	}
 	if time.Since(lastAccessed) > cdnAccessTouchEvery {
-		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
-			_, _ = s.db.ExecContext(context.Background(), `
-				UPDATE object_head_cache SET last_accessed = NOW()
-				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				tenantID, bucket, key)
-		}()
+		accessToucherFor(s.db, s.logger).Touch(tenantID, bucket, key) // coalesced (WP-R9-5)
 	}
 	// Seed the engine's routing map like the S3 GET path does, so the fetch
 	// goes straight to the backend that holds the object instead of walking

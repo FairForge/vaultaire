@@ -2057,6 +2057,7 @@ func (s *Server) flushTrackers(ctx context.Context) {
 	if s.accessLogTracker != nil {
 		s.accessLogTracker.Flush()
 	}
+	accessToucherFor(s.db, s.logger).Flush(ctx) // the GETs' last_accessed (WP-R9-5)
 	if s.siteStats != nil {
 		if ferr := s.siteStats.Flush(ctx, s.db); ferr != nil {
 			s.logger.Warn("site stats flush on shutdown", zap.Error(ferr))

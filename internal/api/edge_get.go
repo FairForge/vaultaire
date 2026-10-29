@@ -498,15 +498,8 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 		}
 		// The origin refreshes last_accessed on every cache hit (the
 		// smart_demotion job reads it): an edge read is a read (RP66-3).
-		// Fire-and-forget, as the origin's own touch.
-		if s.db != nil {
-			go func() { // #nosec G118 -- fire-and-forget access-time touch, the origin's own pattern
-				_, _ = s.db.ExecContext(context.Background(), `
-					UPDATE object_head_cache SET last_accessed = NOW()
-					WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-					row.TenantID, row.Bucket, row.Key)
-			}()
-		}
+		// Through the origin's coalescer (WP-R9-5).
+		accessToucherFor(s.db, s.logger).Touch(row.TenantID, row.Bucket, row.Key)
 		if row.Host != dataplane.HostSLC {
 			// host=slc: the bytes crossed this box and the origin's own
 			// writer metered them (handleS3Request) — never twice.

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -643,6 +644,9 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
+	// The answer's length (WP-R3-6): ignored on the slow path, where the
+	// keep-alive's 200 is already on the wire.
+	w.Header().Set("Content-Length", strconv.Itoa(len(xml.Header)+len(xmlData)))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	if sealer.encryption().Algorithm != "" {
 		w.Header().Set("x-amz-server-side-encryption", "AES256")
@@ -976,6 +980,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	w.Header().Set("Content-Type", "application/xml")
+	w.Header().Set("Content-Length", strconv.Itoa(len(xml.Header)+len(xmlData)))
 	w.Header().Set("x-amz-request-id", generateRequestID())
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(xml.Header))
