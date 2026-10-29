@@ -80,3 +80,84 @@ func TestPool_GuardChecksThePool(t *testing.T) {
 	require.ErrorIs(t, apply(owner, 400), ErrOverQuota, "the owner's own change too")
 	require.NoError(t, apply(owner, 300))
 }
+
+// RP82-1 (Stage 1a Prompt 52, Part 0): floors are pooled like the total. A
+// child of an owner with a house draws from the OWNER's floors: its
+// counting floor rows (limit 0) hold its bytes, and the check sums the
+// pool's rows for the floor against the owner's floor limit.
+func TestPool_ChildFloorsDrawFromTheOwnersFloors(t *testing.T) {
+	db, owner, child := poolDB(t)
+	m := NewQuotaManager(db)
+	ctx := context.Background()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id IN ($1, $2)`, owner, child) })
+	require.NoError(t, m.SetHouse(ctx, owner, House{StdBytes: 10 << 10, VaultBytes: 100 << 10}))
+
+	res, err := m.ReserveOnFloor(ctx, child, FloorStandard, 12<<10)
+	require.NoError(t, err)
+	assert.False(t, res.OK, "12 KiB on Standard is past the owner's 10 KiB Standard floor")
+	res, err = m.ReserveOnFloor(ctx, child, FloorVault, 12<<10)
+	require.NoError(t, err)
+	assert.True(t, res.OK, "the Vault floor has room")
+	assert.True(t, res.Floor, "the child's own floor row was charged")
+
+	res, err = m.ReserveOnFloor(ctx, owner, FloorStandard, 6<<10)
+	require.NoError(t, err)
+	require.True(t, res.OK)
+	res, err = m.ReserveOnFloor(ctx, child, FloorStandard, 6<<10)
+	require.NoError(t, err)
+	assert.False(t, res.OK, "the owner's own 6 KiB counts against the same 10 KiB")
+	res, err = m.ReserveOnFloor(ctx, child, FloorStandard, 4<<10)
+	require.NoError(t, err)
+	assert.True(t, res.OK)
+
+	floors, err := m.GetFloors(ctx, child)
+	require.NoError(t, err)
+	got := map[string]FloorQuota{}
+	for _, f := range floors {
+		got[f.Floor] = f
+	}
+	assert.Equal(t, FloorQuota{Floor: FloorStandard, LimitBytes: 0, UsedBytes: 4 << 10}, got[FloorStandard])
+	assert.Equal(t, FloorQuota{Floor: FloorVault, LimitBytes: 0, UsedBytes: 12 << 10}, got[FloorVault])
+
+	// A guarded ledger change (a settle) of the child is checked the same way.
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	err = ApplyLedgerTx(ctx, tx, child, LedgerChange{Total: 1 << 10, Floors: map[string]int64{FloorStandard: 1 << 10}, Guard: FloorStandard})
+	_ = tx.Rollback()
+	require.ErrorIs(t, err, ErrOverQuota, "6 + 4 + 1 KiB > the owner's 10 KiB Standard floor")
+}
+
+// SetHouse on an owner gives each existing child counting floor rows,
+// seeded from the child's billed bytes, so its objects count on the right
+// floor of the pool from that moment.
+func TestPool_SetHouseGivesChildrenCountingFloors(t *testing.T) {
+	db, owner, child := poolDB(t)
+	m := NewQuotaManager(db)
+	ctx := context.Background()
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id IN ($1, $2)`, owner, child) })
+	insertHead(t, child, "kept", FloorStandard, 5<<10)
+
+	require.NoError(t, m.SetHouse(ctx, owner, House{StdBytes: 10 << 10, VaultBytes: 100 << 10}))
+
+	floors, err := m.GetFloors(ctx, child)
+	require.NoError(t, err)
+	require.Len(t, floors, 2)
+	assert.Equal(t, FloorQuota{Floor: FloorStandard, LimitBytes: 0, UsedBytes: 5 << 10}, floors[0])
+	assert.Equal(t, FloorQuota{Floor: FloorVault, LimitBytes: 0, UsedBytes: 0}, floors[1])
+	res, err := m.ReserveOnFloor(ctx, owner, FloorStandard, 6<<10)
+	require.NoError(t, err)
+	assert.False(t, res.OK, "the child's 5 KiB already sit on the owner's 10 KiB Standard floor")
+
+	// A replay keeps what the child's rows hold; the reconcile rewrites the
+	// child's floor rows from its head rows as it does the owner's.
+	require.NoError(t, m.SetHouse(ctx, owner, House{StdBytes: 10 << 10, VaultBytes: 100 << 10}))
+	_, err = db.Exec(`UPDATE tenant_floor_quotas SET storage_used_bytes = 1 WHERE tenant_id = $1 AND floor = 'standard'`, child)
+	require.NoError(t, err)
+	require.NoError(t, m.ReconcileTenantStorageUsage(ctx, child))
+	_, floorsBilled, err := m.BilledBytes(ctx, child)
+	require.NoError(t, err)
+	floors, err = m.GetFloors(ctx, child)
+	require.NoError(t, err)
+	assert.Equal(t, floorsBilled[FloorStandard], floors[0].UsedBytes)
+	assert.Equal(t, int64(5<<10), floors[0].UsedBytes)
+}

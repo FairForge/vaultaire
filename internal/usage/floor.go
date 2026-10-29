@@ -116,6 +116,15 @@ func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("set house for tenant %s: no tenant_quotas row", tenantID)
 	}
+	// A platform's children draw from these floors (RP82-1): their totals
+	// are locked after the owner's and before any floor row (the pool's
+	// order), and each gets its counting floor rows below.
+	if _, err := tx.ExecContext(ctx, `
+		SELECT 1 FROM tenant_quotas
+		 WHERE tenant_id IN (SELECT c.id FROM tenants c WHERE c.parent_tenant_id = $1)
+		 ORDER BY tenant_id FOR UPDATE`, tenantID); err != nil {
+		return fmt.Errorf("set house for tenant %s: lock children: %w", tenantID, err)
+	}
 
 	for _, f := range []struct {
 		floor string
@@ -129,6 +138,17 @@ func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error
 			tenantID, f.floor, f.limit); err != nil {
 			return fmt.Errorf("set house for tenant %s: floor %s: %w", tenantID, f.floor, err)
 		}
+	}
+	// Every child of the owner gets a counting row (limit 0) on both floors,
+	// seeded from its billed bytes; a row it has is kept.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes)
+		SELECT f.tenant_id, f.floor, 0, `+billedBytesOfF+`
+		  FROM (SELECT c.id AS tenant_id, fl.floor
+		          FROM tenants c CROSS JOIN (VALUES ('`+FloorStandard+`'), ('`+FloorVault+`')) AS fl(floor)
+		         WHERE c.parent_tenant_id = $1) f
+		ON CONFLICT (tenant_id, floor) DO NOTHING`, tenantID); err != nil {
+		return fmt.Errorf("set house for tenant %s: children's floors: %w", tenantID, err)
 	}
 	return nil
 }
@@ -267,46 +287,89 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 // child's counter (lockPool), and the bytes are reserved on the child's
 // own row. A tenant in no pool is its own row, as before.
 func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes int64) (Reservation, error) {
-	used, limit, err := lockPool(ctx, tx, tenantID)
+	p, err := lockPool(ctx, tx, tenantID)
 	if err != nil {
 		return Reservation{}, err
 	}
-	if used+bytes > limit {
+	if p.used+bytes > p.limit {
 		return Reservation{}, nil
 	}
 
-	// The floor ledger, when the tenant has one. The total row lock above
-	// serialises every floor write for the tenant (every path locks a floor
-	// row only while it holds the total — ledger_tx.go, asserted by
-	// TestLedger_LockOrder_*), so the floor read is consistent without its
-	// own FOR UPDATE.
-	var floorRows int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID).Scan(&floorRows); err != nil {
-		return Reservation{}, fmt.Errorf("checking floors for tenant %s: %w", tenantID, err)
-	}
 	res := Reservation{OK: true}
-	if floorRows > 0 {
-		var fUsed, fLimit int64
-		err := tx.QueryRowContext(ctx,
-			`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_floor_quotas
-			  WHERE tenant_id = $1 AND floor = $2`, tenantID, floor).Scan(&fUsed, &fLimit)
-		if err == sql.ErrNoRows {
-			return Reservation{}, nil // the house has no such floor
-		}
+	if p.pooled {
+		// The pool's floors (RP82-1): the owner's floor limit against the
+		// pool's sum on that floor, the owner's floor row locked before the
+		// child's is charged.
+		house, err := poolHasFloors(ctx, tx, p.owner)
 		if err != nil {
-			return Reservation{}, fmt.Errorf("checking floor %s for tenant %s: %w", floor, tenantID, err)
+			return Reservation{}, err
 		}
-		if fUsed+bytes > fLimit {
-			return Reservation{}, nil
+		if house {
+			fLimit, ok, err := lockPoolFloor(ctx, tx, p.owner, floor)
+			if err != nil {
+				return Reservation{}, err
+			}
+			if !ok {
+				return Reservation{}, nil // the house has no such floor
+			}
+			fUsed, err := poolFloorUsed(ctx, tx, p.owner, floor)
+			if err != nil {
+				return Reservation{}, err
+			}
+			if fUsed+bytes > fLimit {
+				return Reservation{}, nil
+			}
+			if p.owner != tenantID {
+				if err := ensureChildFloorRow(ctx, tx, tenantID, floor); err != nil {
+					return Reservation{}, err
+				}
+			}
 		}
-		if _, err := tx.ExecContext(ctx,
+		// A counting row is charged whether or not the owner has a house
+		// (a child keeps its rows past a ClearHouse; the reconcile is the
+		// same rule either way).
+		r, err := tx.ExecContext(ctx,
 			`UPDATE tenant_floor_quotas
 			    SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
-			  WHERE tenant_id = $2 AND floor = $3`, bytes, tenantID, floor); err != nil {
+			  WHERE tenant_id = $2 AND floor = $3`, bytes, tenantID, floor)
+		if err != nil {
 			return Reservation{}, fmt.Errorf("reserving on floor %s: %w", floor, err)
 		}
-		res.Floor = true
+		n, _ := r.RowsAffected()
+		res.Floor = n > 0
+	} else {
+		// The floor ledger, when the tenant has one. The total row lock
+		// above serialises every floor write for the tenant (every path
+		// locks a floor row only while it holds the total — ledger_tx.go,
+		// asserted by TestLedger_LockOrder_*), so the floor read is
+		// consistent without its own FOR UPDATE.
+		var floorRows int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID).Scan(&floorRows); err != nil {
+			return Reservation{}, fmt.Errorf("checking floors for tenant %s: %w", tenantID, err)
+		}
+		if floorRows > 0 {
+			var fUsed, fLimit int64
+			err := tx.QueryRowContext(ctx,
+				`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_floor_quotas
+				  WHERE tenant_id = $1 AND floor = $2`, tenantID, floor).Scan(&fUsed, &fLimit)
+			if err == sql.ErrNoRows {
+				return Reservation{}, nil // the house has no such floor
+			}
+			if err != nil {
+				return Reservation{}, fmt.Errorf("checking floor %s for tenant %s: %w", floor, tenantID, err)
+			}
+			if fUsed+bytes > fLimit {
+				return Reservation{}, nil
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE tenant_floor_quotas
+				    SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
+				  WHERE tenant_id = $2 AND floor = $3`, bytes, tenantID, floor); err != nil {
+				return Reservation{}, fmt.Errorf("reserving on floor %s: %w", floor, err)
+			}
+			res.Floor = true
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,

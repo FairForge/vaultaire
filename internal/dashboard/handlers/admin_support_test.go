@@ -145,11 +145,19 @@ func mockTenantDetailQueries(mock sqlmock.Sqlmock, tenantID string) {
 		WillReturnRows(sqlmock.NewRows([]string{"ingress", "egress", "requests"}).
 			AddRow(int64(0), int64(0), int64(0)))
 
-	// The egress allowance and the month's egress (usage.EgressStatusFromDB).
+	// The egress allowance and the month's egress (usage.EgressStatusFromDB),
+	// each of the tenant's pool root (usage.PoolRoot, D-STRIPE-31).
+	poolRoot := func() {
+		mock.ExpectQuery(`SELECT COALESCE\(parent_tenant_id, id\) FROM tenants`).
+			WithArgs(tenantID).
+			WillReturnRows(sqlmock.NewRows([]string{"root"}).AddRow(tenantID))
+	}
+	poolRoot()
 	mock.ExpectQuery(`SELECT q.storage_limit_bytes`).
 		WithArgs(tenantID).
 		WillReturnRows(sqlmock.NewRows([]string{"limit", "override", "std", "vault", "floors", "sandbox"}).
 			AddRow(int64(5368709120), int64(0), int64(0), int64(0), 0, false))
+	poolRoot()
 	mock.ExpectQuery(`SELECT COALESCE\(SUM\(egress_bytes\), 0\) FROM bandwidth_usage_daily`).
 		WithArgs(tenantID, sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"sum"}).AddRow(int64(0)))

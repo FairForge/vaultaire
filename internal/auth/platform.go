@@ -126,6 +126,15 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 	if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes, tier) VALUES ($1, 0, $2)`, c.ID, tier); err != nil {
 		return nil, fmt.Errorf("create child of %s: the quota row: %w", parentTenantID, err)
 	}
+	// A counting floor row (limit 0) per floor the parent bought (RP82-1):
+	// the child's bytes on a floor count against the PARENT's floor limit
+	// (usage.ReserveTx sums the pool's rows). A parent with no house gives
+	// none; usage.SetHouse adds them when it buys one.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes)
+		SELECT $1, floor, 0, 0 FROM tenant_floor_quotas WHERE tenant_id = $2`, c.ID, parentTenantID); err != nil {
+		return nil, fmt.Errorf("create child of %s: the floor rows: %w", parentTenantID, err)
+	}
 	if err := audit.RecordTx(ctx, tx, audit.Entry{TenantID: parentTenantID, EventType: "platform",
 		Action: "platform.tenant_created", Resource: "tenant:" + c.ID,
 		Metadata: map[string]any{"child": c.ID, "label": label, "external_id": externalID}}); err != nil {

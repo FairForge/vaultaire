@@ -123,9 +123,12 @@ func (a *AuthService) GenerateChildKey(ctx context.Context, actorUserID, parentI
 		return nil, fmt.Errorf("generate child key: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var scheduled bool
-	err = tx.QueryRowContext(ctx, `SELECT deletion_scheduled_at IS NOT NULL FROM tenants WHERE id = $1 AND parent_tenant_id = $2 FOR SHARE`,
-		childID, parentID).Scan(&scheduled)
+	// The child, locked against its erasure while the key is written. A
+	// child scheduled for erasure may still be given keys: the 30-day grace
+	// blocks nothing (D-16), so nothing here reads the schedule (RP82-5).
+	var one int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id = $1 AND parent_tenant_id = $2 FOR SHARE`,
+		childID, parentID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrTenantNotFound
 	}

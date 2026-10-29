@@ -58,7 +58,12 @@ type egressFixture struct {
 	// finished holds the ids of requests whose server handler has returned
 	// (see settle).
 	finished sync.Map
+	// as holds other tenants a request may act as (egressTestAs → *tenant.Tenant).
+	as sync.Map
 }
+
+// egressTestAs names the tenant (of f.as) a fixture request acts as.
+const egressTestAs = "X-Egress-Test-As"
 
 // egressTestRequestID marks a fixture request so the test can wait for its
 // server handler to return.
@@ -161,7 +166,16 @@ func (f *egressFixture) handler() http.Handler {
 			f.srv.router.ServeHTTP(w, r)
 			return
 		}
-		f.srv.handleS3Request(w, r.WithContext(s3Ctx(r.Context(), f.tn)))
+		tn := f.tn
+		if id := r.Header.Get(egressTestAs); id != "" {
+			v, ok := f.as.Load(id)
+			if !ok {
+				http.Error(w, "unknown fixture tenant", http.StatusInternalServerError)
+				return
+			}
+			tn = v.(*tenant.Tenant)
+		}
+		f.srv.handleS3Request(w, r.WithContext(s3Ctx(r.Context(), tn)))
 	})
 }
 
