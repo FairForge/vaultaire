@@ -27,9 +27,9 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 ## Decisions (D-STRIPE-18…)
 
 - **D-STRIPE-18 (deviation):** migration 117 adds a **fifth** column, `tenants.deletion_scheduled_at`, and two indexes (`idx_tenants_parent`, `idx_tenants_deletion_due`). The prompt names four columns, but a child has no `users` row to hold its 30-day date (`account.ScheduleTenant`).
-- **D-STRIPE-19:** the platform routes take the **JWT only** (the Opus edition). The chain edition's "a key with the new `PlatformAdmin` permission" is not built: a SigV4-signed request belongs to the S3 API before any route (Architecture Decision 8), so a key-authenticated platform call needs an exemption to the gate (as `/api/v1/whoami` has) or a token exchange. That is open question 1.
+- **D-STRIPE-19:** the platform routes take the **JWT only** (the Opus edition). The chain edition's "a key with the new `PlatformAdmin` permission" is not built: a SigV4-signed request belongs to the S3 API before any route (Architecture Decision 8), so a key-authenticated platform call needs an exemption to the gate (as `/api/v1/whoami` has) or a token exchange. That was open question 1, decided below as D-STRIPE-29.
   - The scope cap reads the calling credential's scope from the context (`auth.KeyScopeFromContext`). A JWT carries none: it is the account's own authority. `TestPlatform_ChildKeysNeverExceedTheParentsScope` sets a scoped credential on the context, which is the seam a key-authenticated caller would use.
-- **D-STRIPE-20:** **a tenant has no residency of its own** (each bucket picks its region). The prompt's "the parent's region in metadata" names a column `tenants` does not have. A child's `residency` answer is the deployment's default bucket region's (`drivers.DataResidency(IDriveDefaultRegion)`), the same as the parent's, and nothing is stored. Open question 2.
+- **D-STRIPE-20:** **a tenant has no residency of its own** (each bucket picks its region). The prompt's "the parent's region in metadata" names a column `tenants` does not have. A child's `residency` answer is the deployment's default bucket region's (`drivers.DataResidency(IDriveDefaultRegion)`), the same as the parent's, and nothing is stored. That was open question 2, decided below as D-STRIPE-30.
 - **D-STRIPE-21:** a child's quota row has limit 0 and the **parent's tier**. The free-tier bucket and key caps read the tier, and a child is the platform's customer, not a free account of its own.
 - **D-STRIPE-22: the pool's walk is two statements.** The first resolves `COALESCE(parent_tenant_id, id)` and locks the owner's row (`FOR UPDATE OF o`). The second sums the pool after the lock.
   - A sum inside the locking statement keeps the snapshot from before the lock wait, so it would miss a reservation committed while it waited.
@@ -49,10 +49,10 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 ## Residuals (RB9-n)
 
 - **RB9-1:** a child has no floor rows. A platform with a house has its floors charged by its own writes only; its children draw on the pool's total.
-- **RB9-2: a child's egress has no allowance.** Its quota row's limit is 0, so `EgressAllowance` answers 0: never "over" and never paced. Its downloads are recorded under its id, but nothing applies the pool's allowance to children. This is the obvious follow-up (the pool's allowance against the pool's month).
+- **RB9-2: a child's egress has no allowance.** Its quota row's limit is 0, so `EgressAllowance` answers 0: never "over" and never paced. Its downloads are recorded under its id, but nothing applies the pool's allowance to children. Decided below as D-STRIPE-31: Prompt 52's Part 0.
 - **RB9-3:** the parent dashboard's "Children" card (chain edition item 5) is not built. The list endpoint answers the per-child usage.
 - **RB9-4 (RB8-3 widened):** admin views count children (and sandboxes) as tenants.
-- **RB9-5:** no `PlatformAdmin` key permission (D-STRIPE-19).
+- **RB9-5:** no `PlatformAdmin` key permission (D-STRIPE-19): replaced by the management key, D-STRIPE-29.
 - **RB9-6 (fixed, #1059):** the Worker's JS test `putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored` failed CI on #1054 and #1057. On a loaded runner the first PUT's mirror fell 16 MiB behind and was cut inside the second's 200 ms wait, giving the buffer back. The test now holds the budget itself.
 - **RB9-7:** a child whose erasure settles on a lagging backend records `user_id = ""` in its settle row. The walk is tenant-keyed, so nothing else reads it.
 
@@ -87,8 +87,23 @@ All on prod, 2026-10-29 (UTC), after #1057 (the pool) went live (build `3ba1e2e0
 
 **Left in place:** tenant zero is a platform. The child, its bucket and its 3 MB object stay as the proof. The key was **revoked** at the end, and the secret file was removed with the script (no live credential outlives it).
 
-## Open questions
+## The open questions, decided (owner, 2026-10-29: "go ahead … think through it a bit more")
 
-1. **A platform key (D-STRIPE-19).** Should a platform's server call `/api/v1/platform/*` with an access key instead of a JWT? Either an exemption to the S3 gate for these routes (SigV4-verified by the handler, as `/whoami` is), or an exchange of a `PlatformAdmin` key for a short JWT.
-2. **Residency (D-STRIPE-20).** Should a tenant have a residency of its own (a column), inherited by its children and enforced at bucket create? Today every bucket picks its own region.
-3. **RB9-2.** A child's downloads: the pool's allowance, or a per-child allowance the platform sets?
+The three questions were answered the same day. The owner also asked for family, AI-agent and AI-app accounts. They became one account model, `docs/ACCOUNTS.md`.
+
+- **D-STRIPE-29 (was open question 1): a platform's server uses a management key, not a JWT and not SigV4.**
+  - **The key:** an opaque bearer key (`sk_live_…` for the account itself, `sk_test_…` for its sandbox, Stripe's shape and WP-DX-1's), stored as its sha256 and tied to the TENANT, not to a person, so it survives member changes (WP-TEAM-1). It carries scopes (`manage:read`, `manage:write`, `platform`, `apps`) and a ceiling on the S3 scope it may mint. Caps come from WP-KEY-1; it is revocable, and its last use is recorded.
+  - **No gate change:** the S3 gate captures only AWS schemes and presigned queries, so a bearer key reaches `requireCaller` (today's `requireJWT`, extended) with no exemption. `/whoami` stays the one SigV4 exception (Architecture Decision 8).
+  - **No CapScope change:** `auth.CapScope` already reads the caller's scope from the context: that is the seam.
+  - **Why not the alternatives:** an exemption for the platform routes would be a second hole in the gate; a key-for-JWT exchange hits the same gate; and a person's JWT needs their TOTP and expires, so no server can run on it.
+  - Built in **WP-KEY-1**, as Prompt 54, after WP-ACCT-1.
+- **D-STRIPE-30 (was open question 2): residency is a tenant attribute.** `tenants.residency` (`eu` / `uk` / `us`, NULL = any) is set at creation and never changed. A child inherits its parent's and may narrow it, never widen it.
+  - **Enforced** at bucket creation (a region outside it is 400 `InvalidLocationConstraint`; the default region is one inside it), and on the mirror leg and the parity leg. That also closes RP76-1: an EU bucket's second copy could land on lyve us-west-1.
+  - **An existing tenant** may set it only when every bucket it holds already complies (409 otherwise).
+  - **It covers bytes at rest.** Bytes in transit through an edge colo are not storage, and the docs say so.
+  - **Rethought (the 2026-10-29 answer put it in Prompt 52's Part 0):** it is a migration plus enforcement on three write paths, and the account tree's other edges need the same inheritance rule. So it is built once in **WP-ACCT-1** (Prompt 53). No outside platform exists before then.
+- **D-STRIPE-31 (was open question 3 = RB9-2): a child's downloads count against its pool's allowance.**
+  - **Shared:** the pool root's plan gives the allowance; the month's egress is summed over the pool; pacing decides on the pool's position for every member. Rows stay under each tenant.
+  - **Alerts and status:** the alert ladder speaks to the root, the payer. A member's own status page shows the pool's position.
+  - **Caps:** a per-child egress cap inside the pool (min(cap, pool)) comes with WP-ACCT-1's caps.
+  - **First:** this is a correctness gap (today a child is never paced), so it is **Prompt 52's Part 0**, written through one function that resolves the pool root. WP-ACCT-1's `pool_root_id` then changes that one place.

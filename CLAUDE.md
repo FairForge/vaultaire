@@ -18,6 +18,7 @@ Vaultaire is a universal storage orchestration engine providing a unified S3-com
 - **`.private/IDRIVE_RESELLER_API.md`** — Complete iDrive e2 Reseller API reference, all endpoints, pricing, 6-phase integration plan
 - **`.private/TIER_STRATEGY.md`** — Three-tier GTM: Vault (archive), Standard (smart), Performance (B2 killer). Selling model, use cases, novel features
 - **`.private/PERMAFROST_TESTING_RESULTS.md`** — OneDrive benchmark results v1→v2→v3 (HTTP/1.1 + Range = 214 MB/s fleet)
+- **`docs/ACCOUNTS.md`** — the account model (2026-10-29): tenant = space and unit of disclosure, pool = paying unit, persons and principals act; the edges `managed` / `app` / `sponsored`; teams, families, platforms, AI-created apps (and claimable ones), AI agents as principals; the WP order and F-40…F-43
 - **`docs/RELEASES.md`** — the SBOM and release-signature page (WP-SUPPLY-1, 2026-10-25): `make sbom` / `sbom-check` / `repro-check-sbom`, `release-sign keygen|sign|verify [-log]`, the owner's key ceremony and where the public key is published, what CI does (SBOMs) and never does (sign)
 - **`docs/CLOUDFLARE.md`** — the Cloudflare operator page: which account holds what, tokens, zone settings applied 2026-10-04, what the edge Workers do, rules learned
 - **`internal/drivers/onedrive_README.md`** — OneDrive integration + dual-transport pattern (HTTP/2 for API, HTTP/1.1 for CDN)

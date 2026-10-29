@@ -538,11 +538,24 @@ Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one chil
   - **Keys are listed by user today** (`AuthService.ListAPIKeys(userID)`, the free-tier cap counts `user_id`). A child's keys were kept out of that list by a clause (`notChildKeySQL`); members make "the tenant's keys" the right list. Change it to tenant-keyed listing, never a second exclusion clause.
   - **Account deletion is user-centric** (`users.deletion_scheduled_at`, `account.ListDue` joins users → tenants by e-mail). With members: deleting the ACCOUNT is the owner's, and it erases the tenant (and its sandbox, its children); a member leaving removes a `tenant_members` row, never a tenant.
   - **The audit row names the member** (`audit.Entry.Actor` = the acting user; `UserID` = the subject). `platform.*` rows already put the platform tenant in `tenant_id` and the acting user in `performed_by`.
-- **Open:**
-  - D-STRIPE-19 (a platform key instead of a JWT) and D-STRIPE-20 (a tenant-level residency): owner decisions;
-  - RB9-2: a child's downloads have no allowance (its limit is 0) — RP82 decides whether it is a Part 0 item.
+- **Decided the same day** (`docs/reviews/WP-STRIPE-3.md` § The open questions, decided; **`docs/ACCOUNTS.md`, the account model — read it**):
+  - D-STRIPE-29: a platform, an app's backend and an agent use a **management key** (WP-KEY-1), never a person's JWT;
+  - D-STRIPE-30: `tenants.residency` (WP-ACCT-1);
+  - D-STRIPE-31: a child's downloads count against its POOL's allowance (Part 0 below).
+- **What TEAM-1 must leave room for (`docs/ACCOUNTS.md`):** a family is a pool of personal tenants that reuses THIS WP's invitations, so `tenant_invitations` gets a `kind` (`member` now, `family` in WP-FAMILY-1); and a team is one shared tenant. Never make a family "a tenant with members".
 
-**Part 0 (RP82, in its order — filled by RP82's review, `docs/reviews/WP-STRIPE-3-REVIEW.md`):** RP82's findings, in its order. Fold any that touch TEAM-1's surfaces (the JWT's tenant, the key listing, the deletion runner) before PR A.
+**Part 0 (in this order):**
+1. **D-STRIPE-31 / RB9-2: a child's downloads count against its pool's allowance.** Test first: `TestPool_AChildsDownloadsSpendThePoolsAllowance`. Its setup: a platform with an allowance of 10 MiB; child A downloads 6 MiB and child B 6 MiB. It asserts:
+   - B's second response is paced with `egress_throttle` on, and the same decision is counted with it off;
+   - the rows stay under A and B;
+   - the alert ladder fires for the platform.
+
+   Then `usage.EgressAllowance` and `egressMeter` resolve the pool root through ONE function (`usage.PoolRoot(ctx, q, tenantID)`, the owner `COALESCE(parent_tenant_id, id)`; WP-ACCT-1 swaps it for `pool_root_id`):
+   - the allowance is the root's;
+   - the month's egress is summed over the pool (`MonthEgressBytes` of the root sums the pool's rows);
+   - the live counter is the root's (`egressMeter.tenant` keyed by the root for decide and pace), while `BandwidthTracker` still records each tenant's own rows;
+   - a sandbox is never in a pool (its fixed allowance, RP80-1).
+2. **RP82's findings, in RP82's order** (`docs/reviews/WP-STRIPE-3-REVIEW.md`). Fold any that touch TEAM-1's surfaces (the JWT's tenant, the key listing, the deletion runner) before PR A.
 
 Continue from WP-STRIPE-3 and its review RP82. `git log origin/main`, `gh pr list`.
 
@@ -586,7 +599,7 @@ Prod proof: tenant zero invites a second address of the owner's (the owner's mai
 Architecture notes
 - A member is a (user, tenant, role) row. Nothing about a tenant's data changes: S3 keys stay tenant-keyed; only the management surfaces learn who acts.
 - The role default for an un-migrated flow is `owner` for the registering user, so every existing account keeps working unchanged.
-- Closeout: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan § WP-STRIPE's row, CLAUDE.md (the tables, the role rule, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-KEY-1 + WP-POST-1) written here. The post-merge review is RP84.
+- Closeout: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan § WP-STRIPE's row, CLAUDE.md (the tables, the role rule, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-ACCT-1) written here. The post-merge review is RP84.
 
 ultrathink
 
@@ -606,14 +619,16 @@ Read before editing:
 - `internal/audit/audit.go`;
 - `internal/email` (the sender) and the verify-token code (`VERIFY_SECRET`).
 
-PR 0 — RP82's fixes (`docs/reviews/WP-STRIPE-3-REVIEW.md`). Branch `stage1a-p52-part0`. One step per finding, each test first, in RP82's order.
+PR 0 — Branch `stage1a-p52-part0`. Read `docs/ACCOUNTS.md` first.
+- **0a (D-STRIPE-31, RB9-2).** Test first: `TestPool_AChildsDownloadsSpendThePoolsAllowance` (the platform's allowance 10 MiB; children A and B download 6 MiB each; B's second response is paced with `egress_throttle` on and counted in `vaultaire_egress_would_throttle_total` with it off; the rows stay under A and B; the platform gets the alert). Then `usage.PoolRoot(ctx, q, tenantID)` (one function; `COALESCE(parent_tenant_id, id)`), `EgressAllowance` and `MonthEgressBytes` answer the root's allowance and the pool's month, `egressMeter.tenant` keys its counter by the root while `BandwidthTracker` keeps each tenant's own rows; a sandbox keeps its fixed allowance. Verify: `go test -race ./internal/usage/ ./internal/api/ -run 'Pool|Egress|Sandbox'`.
+- **0b…** RP82's fixes (`docs/reviews/WP-STRIPE-3-REVIEW.md`), one step per finding, each test first, in RP82's order.
 
 PR A — members and roles. Branch `stage1a-p52-members`.
 1. Migration 118 `118_members.sql`:
    - `CREATE TABLE IF NOT EXISTS tenant_members (tenant_id VARCHAR(255) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK (role IN ('owner','admin','developer','viewer')), invited_by UUID, accepted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (tenant_id, user_id))`;
    - a partial unique index: one `owner` per tenant;
    - the backfill: `INSERT … SELECT t.id, u.id, 'owner' FROM users u JOIN tenants t ON t.email = u.email ON CONFLICT DO NOTHING` (idempotent; a child and a sandbox have no user and get no row);
-   - `tenant_invitations (id UUID PK, tenant_id, email, role, token_hash TEXT NOT NULL, invited_by UUID, expires_at, accepted_at, created_at)`;
+   - `tenant_invitations (id UUID PK, tenant_id, kind TEXT NOT NULL DEFAULT 'member' CHECK (kind IN ('member','family')), email, role, token_hash TEXT NOT NULL, invited_by UUID, expires_at, accepted_at, created_at)` (`family` is WP-FAMILY-1's; this WP accepts `member` only);
    - then `make test-db`, the reapply test, `TestErasedTablesCoverSchema` (both tables erased by tenant; `tenant_members` also by user for a user erased from a tenant it does not own) and `TestExportSectionsCoverSchema` (a `members` section).
 2. Test first: `TestRegister_CreatesTheOwnerMember`. Then `CreateUserWithTenant` writes the member row in its transaction.
 3. Test first: `TestMembers_ViewerCannotCreateAKey`, `TestMembers_OnlyTheOwnerDeletesTheAccount`, `TestMembers_APlatformsMemberActsOnItsChildren`. Then:
@@ -629,11 +644,11 @@ PR C — several tenants. Branch `stage1a-p52-switch`.
 5. Test first: `TestMembers_AUserInTwoTenantsSeesTheRightOne` (a user in tenants A and B: a JWT for A lists A's buckets and keys, never B's; switching mints B's). Then `POST /auth/login` answers `tenants: [{id, role}]` and takes `tenant_id`; the dashboard's switcher sets the session's active tenant; `ListAPIKeys` becomes tenant-keyed (`notChildKeySQL` goes: a child's keys are the child's tenant's, never in any member's list).
 6. Test first: `TestMembers_AuditRowNamesTheMember`. Then every `audit.Entry` from the management and dashboard paths carries the actor (the member) and the active tenant.
 
-PR D — docs: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan row DONE, CLAUDE.md (the tables, `auth.Can`, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-KEY-1 + WP-POST-1) in both editions with Part 0 = RP84. The post-merge review is RP84.
+PR D — docs: `docs/reviews/WP-STRIPE-4.md`, STATUS, plan row DONE, CLAUDE.md (the tables, `auth.Can`, the active tenant), `docs/API.md` § Members, the ledger row; Prompt 53 (WP-ACCT-1, `docs/ACCOUNTS.md`) in both editions with Part 0 = RP84. The post-merge review is RP84.
 
 Prod: PR 0 first. PRs A–C deploy with the backfill: every existing user is its tenant's owner, so nothing changes for anyone until an invitation is sent. The proof needs the owner (TOTP and the mailbox).
 
-Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accepted an invitation and reads its buckets read-only, and the audit page names both; Prompt 53 written here.
+Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accepted an invitation and reads its buckets read-only, and the audit page names both; Prompt 53 (WP-ACCT-1) written here.
 
 ## The chain
 
@@ -648,4 +663,4 @@ Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accept
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
 - **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade. The post-merge review is RP82.
 - **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = RP82 (filled by RP82). Migration 118. The post-merge review is RP84.
-- **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
+- **53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`); **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
