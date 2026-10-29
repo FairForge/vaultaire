@@ -118,7 +118,7 @@ func TestPrimaryKey_RotationKillsTheOldPairEverywhere(t *testing.T) {
 	require.NoError(t, err, "the pair works before the rotation")
 
 	// Act
-	newKey, err := a.svc.RotateAPIKey(ctx, a.user.ID, a.key.ID)
+	newKey, err := a.svc.RotateAPIKey(ctx, a.user.TenantID, a.key.ID)
 	require.NoError(t, err)
 
 	// Assert: the new pair is the primary, the old one is dead on every path.
@@ -155,7 +155,7 @@ func TestPrimaryKey_RotationKillsTheOldPairEverywhere(t *testing.T) {
 	tn, err = fresh.ValidateS3Request(ctx, newKey.Key)
 	require.NoError(t, err)
 	assert.Empty(t, tn.SecretKey, "no secret is loaded into memory at boot (plan 43.7): the lookup reads the row")
-	keys, err := fresh.ListAPIKeys(ctx, a.user.ID)
+	keys, err := fresh.ListAPIKeys(ctx, a.user.TenantID)
 	require.NoError(t, err)
 	var primaries int
 	for _, k := range keys {
@@ -175,7 +175,7 @@ func TestPrimaryKey_RotationKillsTheOldPairEverywhere(t *testing.T) {
 func TestPrimaryKey_RevokeIsRefused(t *testing.T) {
 	a := newLifecycleAccount(t, "rev")
 
-	err := a.svc.RevokeAPIKey(context.Background(), a.user.ID, a.key.ID)
+	err := a.svc.RevokeAPIKey(context.Background(), a.user.TenantID, a.key.ID)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrPrimaryKeyRevoke), "got %v", err)
 
@@ -196,7 +196,7 @@ func TestScopedFullAccessKey_IsNotThePrimary(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, full.IsPrimary)
 
-	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.ID, full.ID))
+	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.TenantID, full.ID))
 	assert.Equal(t, 1, a.livePrimaries())
 	_, _, err = a.authenticate(full.Key, full.Secret)
 	assert.True(t, errors.Is(err, ErrAccessKeyRevoked), "got %v", err)
@@ -215,7 +215,7 @@ func TestPrimaryKey_ConcurrentRotationOneWins(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			keys[i], results[i] = a.svc.RotateAPIKey(ctx, a.user.ID, a.key.ID)
+			keys[i], results[i] = a.svc.RotateAPIKey(ctx, a.user.TenantID, a.key.ID)
 		}(i)
 	}
 	wg.Wait()
@@ -250,11 +250,11 @@ func TestScopedKey_RevokeEvictsTheInProcessCache(t *testing.T) {
 	_, err = a.svc.ValidateS3Request(ctx, k.Key)
 	require.NoError(t, err)
 
-	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.ID, k.ID))
+	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.TenantID, k.ID))
 
 	_, err = a.svc.ValidateS3Request(ctx, k.Key)
 	assert.Error(t, err, "a revoked key is not in the hot index of the same process")
-	keys, _ := a.svc.ListAPIKeys(ctx, a.user.ID)
+	keys, _ := a.svc.ListAPIKeys(ctx, a.user.TenantID)
 	var listed bool
 	for _, l := range keys {
 		if l.ID == k.ID {
@@ -324,13 +324,13 @@ func TestKeyCap_ExcludesThePrimaryByRow(t *testing.T) {
 	require.NoError(t, err)
 
 	// After a rotation the primary is a VLT_ row; the cap must still not count it.
-	_, err = a.svc.RotateAPIKey(ctx, a.user.ID, a.key.ID)
+	_, err = a.svc.RotateAPIKey(ctx, a.user.TenantID, a.key.ID)
 	require.NoError(t, err)
 	extra, err := a.svc.GenerateAPIKey(ctx, a.user.ID, "one extra", nil)
 	require.NoError(t, err, "the free tier allows one key beyond the primary")
 	_, err = a.svc.GenerateAPIKey(ctx, a.user.ID, "two extra", nil)
 	assert.True(t, errors.Is(err, ErrKeyLimitReached), "got %v", err)
-	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.ID, extra.ID))
+	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.TenantID, extra.ID))
 	_, err = a.svc.GenerateAPIKey(ctx, a.user.ID, "again", nil)
 	assert.NoError(t, err, "revoking frees the slot")
 }
@@ -348,7 +348,7 @@ func TestPrimaryAPIKey_IsTheLiveRow(t *testing.T) {
 	assert.Equal(t, a.key.Key, ak)
 	assert.Equal(t, a.key.Secret, sk)
 
-	nk, err := a.svc.RotateAPIKey(ctx, a.user.ID, a.key.ID)
+	nk, err := a.svc.RotateAPIKey(ctx, a.user.TenantID, a.key.ID)
 	require.NoError(t, err)
 	p, err = a.svc.GetPrimaryAPIKey(ctx, a.tenant.ID)
 	require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestSTS_ParentRevokedKillsItsTokens(t *testing.T) {
 	assert.Equal(t, a.tenant.ID, tenantID)
 	assert.True(t, scope.Temporary)
 
-	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.ID, parent.ID))
+	require.NoError(t, a.svc.RevokeAPIKey(ctx, a.user.TenantID, parent.ID))
 
 	_, _, err = a.authenticate(tok.AccessKey, tok.SecretKey)
 	require.Error(t, err, "a token of a revoked parent is dead")
@@ -392,7 +392,7 @@ func TestSTS_PrimaryRotatedKillsItsTokens(t *testing.T) {
 	_, _, err = a.authenticate(tok.AccessKey, tok.SecretKey)
 	require.NoError(t, err)
 
-	_, err = a.svc.RotateAPIKey(ctx, a.user.ID, a.key.ID)
+	_, err = a.svc.RotateAPIKey(ctx, a.user.TenantID, a.key.ID)
 	require.NoError(t, err)
 
 	_, _, err = a.authenticate(tok.AccessKey, tok.SecretKey)

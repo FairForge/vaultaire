@@ -30,7 +30,7 @@ func TestGenerateAPIKey_FreeTierCapCountsActiveExtraKeys(t *testing.T) {
 	_, err = svc.GenerateAPIKey(context.Background(), user.ID, "second", nil)
 	require.ErrorIs(t, err, ErrKeyLimitReached, "free tier: %d extra key(s)", usage.FreeTierLimits.MaxAPIKeys)
 
-	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.ID, first.ID))
+	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.TenantID, first.ID))
 	_, err = svc.GenerateAPIKey(context.Background(), user.ID, "replacement", nil)
 	assert.NoError(t, err, "revoking frees the slot")
 

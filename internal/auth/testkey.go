@@ -77,6 +77,12 @@ func ParentOfSandbox(ctx context.Context, db queryRower, tenantID string) (strin
 // GenerateTestKey mints a VLT_TEST_ key on the user's tenant's sandbox,
 // creating the sandbox in the same transaction when it does not exist.
 func (a *AuthService) GenerateTestKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
+	return a.GenerateTestKeyForTenant(ctx, "", userID, name, opts)
+}
+
+// GenerateTestKeyForTenant is GenerateTestKey on tenantID's sandbox, for a
+// member acting on its active tenant (WP-TEAM-1); "" = the user's own.
+func (a *AuthService) GenerateTestKeyForTenant(ctx context.Context, tenantID, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
 	if a.sqlDB == nil {
 		return nil, errors.New("generate test key: no database")
 	}
@@ -90,6 +96,9 @@ func (a *AuthService) GenerateTestKey(ctx context.Context, userID, name string, 
 	a.cacheMu.RLock()
 	parent := cached.TenantID
 	a.cacheMu.RUnlock()
+	if tenantID != "" {
+		parent = tenantID
+	}
 	if parent == "" {
 		return nil, errors.New("generate test key: the user has no tenant")
 	}

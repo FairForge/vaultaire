@@ -94,7 +94,7 @@ func TestGenerateAPIKey_RefusesJunkScope(t *testing.T) {
 	svc := NewAuthService(nil, nil)
 	user, _, _, err := svc.CreateUserWithTenant(context.Background(), "hygiene@stored.ge", "a-long-password", "x")
 	require.NoError(t, err)
-	before, _ := svc.ListAPIKeys(context.Background(), user.ID)
+	before, _ := svc.ListAPIKeys(context.Background(), user.TenantID)
 
 	past := time.Now().Add(-time.Hour)
 	cases := map[string]*KeyCreateOptions{
@@ -110,7 +110,7 @@ func TestGenerateAPIKey_RefusesJunkScope(t *testing.T) {
 		require.ErrorIs(t, err, wantErr[name], name)
 		assert.Nil(t, k)
 	}
-	after, _ := svc.ListAPIKeys(context.Background(), user.ID)
+	after, _ := svc.ListAPIKeys(context.Background(), user.TenantID)
 	assert.Len(t, after, len(before), "a refused key is not created")
 
 	// A valid scope is stored canonical.
@@ -129,12 +129,12 @@ func TestGetOwnedAPIKey_ExpiredIsItsOwnError(t *testing.T) {
 	k, err := svc.GenerateAPIKey(context.Background(), user.ID, "short", &KeyCreateOptions{ExpiresAt: &soon})
 	require.NoError(t, err)
 
-	got, err := svc.GetOwnedAPIKey(context.Background(), user.ID, k.ID)
+	got, err := svc.GetOwnedAPIKey(context.Background(), user.TenantID, k.ID)
 	require.NoError(t, err)
 	assert.Equal(t, k.ID, got.ID)
 
 	time.Sleep(60 * time.Millisecond)
-	_, err = svc.GetOwnedAPIKey(context.Background(), user.ID, k.ID)
+	_, err = svc.GetOwnedAPIKey(context.Background(), user.TenantID, k.ID)
 	require.ErrorIs(t, err, ErrKeyExpired, "not ErrKeyRevoked, not a generic error")
 	_, err = svc.ValidateAPIKey(context.Background(), k.Key, k.Secret)
 	require.ErrorIs(t, err, ErrKeyExpired)

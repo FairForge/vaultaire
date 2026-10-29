@@ -37,17 +37,21 @@ type UserInfo struct {
 func (s *Server) registerUserAPIRoutes() {
 	s.router.Route("/api/v1/user", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireMember) // WP-TEAM-1: the JWT's user is a member of its tenant
 
 		r.Get("/", s.handleGetUserInfo)
 		// Same contract and handler as DELETE /api/v1/manage/account: one
-		// account-deletion flow (30-day grace, cancel via either API).
-		r.Delete("/", s.handleMgmtDeleteAccount)
+		// account-deletion flow (30-day grace, cancel via either API) —
+		// the owner's alone (WP-TEAM-1).
+		r.With(s.requireRole(auth.ActionAccountDelete)).Delete("/", s.handleMgmtDeleteAccount)
 
+		// The active tenant's keys (WP-TEAM-1: tenant-keyed; a write is a
+		// developer's or above).
 		r.Get("/apikeys", s.handleListUserAPIKeys)
-		r.Post("/apikeys", s.handleCreateUserAPIKey)
-		r.Post("/apikeys/{keyId}/rotate", s.handleRotateUserAPIKey)
-		r.Delete("/apikeys/{keyId}", s.handleDeleteUserAPIKey)
-		r.Post("/apikeys/{keyId}/expire", s.handleSetUserAPIKeyExpiration)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/apikeys", s.handleCreateUserAPIKey)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/apikeys/{keyId}/rotate", s.handleRotateUserAPIKey)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Delete("/apikeys/{keyId}", s.handleDeleteUserAPIKey)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/apikeys/{keyId}/expire", s.handleSetUserAPIKeyExpiration)
 		r.Get("/apikeys/audit", s.handleGetUserAPIKeyAuditLogs)
 
 		r.Get("/quota", s.handleGetQuota)
@@ -134,11 +138,9 @@ func usagePercent(used, limit int64) float64 {
 // `http.Error(err.Error(), 500)` — "API key not found" one day, a
 // `persist api key: pq: …` string the next. Success bodies are unchanged.
 
-// handleListUserAPIKeys lists all API keys for a user
+// handleListUserAPIKeys lists the active tenant's API keys (WP-TEAM-1)
 func (s *Server) handleListUserAPIKeys(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value(userIDKey).(string)
-
-	keys, err := s.auth.ListAPIKeys(r.Context(), userID)
+	keys, err := s.auth.ListAPIKeys(r.Context(), activeTenant(r))
 	if err != nil {
 		s.logger.Error("list user api keys", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list API keys", "")
@@ -187,7 +189,7 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
+	key, err := s.auth.GenerateAPIKeyForTenant(r.Context(), activeTenant(r), userID, req.Name, opts)
 	if err != nil {
 		if !writeKeyScopeError(w, err) {
 			s.logger.Error("create user api key", zap.Error(err))
@@ -240,10 +242,9 @@ func (s *Server) writeKeyLifecycleError(w http.ResponseWriter, action string, er
 
 // handleRotateUserAPIKey rotates an API key
 func (s *Server) handleRotateUserAPIKey(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value(userIDKey).(string)
 	keyID := chi.URLParam(r, "keyId")
 
-	newKey, err := s.auth.RotateAPIKey(r.Context(), userID, keyID)
+	newKey, err := s.auth.RotateAPIKey(r.Context(), activeTenant(r), keyID)
 	if err != nil {
 		s.writeKeyLifecycleError(w, "rotate API key", err)
 		return
@@ -269,7 +270,7 @@ func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) 
 	userID := r.Context().Value(userIDKey).(string)
 	keyID := chi.URLParam(r, "keyId")
 
-	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
+	if err := s.auth.RevokeAPIKey(r.Context(), activeTenant(r), keyID); err != nil {
 		s.writeKeyLifecycleError(w, "revoke API key", err)
 		return
 	}
@@ -284,7 +285,6 @@ func (s *Server) handleDeleteUserAPIKey(w http.ResponseWriter, r *http.Request) 
 // `days`, at least one (R11-22: 0 and negative numbers used to expire the
 // key at or before now). A revoked key is 409.
 func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Request) {
-	userID := r.Context().Value(userIDKey).(string)
 	keyID := chi.URLParam(r, "keyId")
 
 	var req struct {
@@ -300,7 +300,7 @@ func (s *Server) handleSetUserAPIKeyExpiration(w http.ResponseWriter, r *http.Re
 	}
 
 	expiresAt := time.Now().AddDate(0, 0, req.Days)
-	if err := s.auth.SetAPIKeyExpiration(r.Context(), userID, keyID, expiresAt); err != nil {
+	if err := s.auth.SetAPIKeyExpiration(r.Context(), activeTenant(r), keyID, expiresAt); err != nil {
 		s.writeKeyLifecycleError(w, "set API key expiry", err)
 		return
 	}

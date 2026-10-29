@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"go.uber.org/zap"
@@ -28,6 +30,11 @@ func ResolveMember(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handl
 				return
 			}
 			role := auth.RoleOwner
+			if db != nil && sd.TenantID == "" {
+				// A session on no tenant (a sign-in that is no member of any):
+				// it may read its own pages and change nothing of an account.
+				role = auth.RoleViewer
+			}
 			if db != nil && sd.TenantID != "" {
 				var err error
 				role, err = auth.MemberRole(r.Context(), db, sd.TenantID, sd.UserID)
@@ -43,7 +50,8 @@ func ResolveMember(db *sql.DB, logger *zap.Logger) func(http.Handler) http.Handl
 			}
 			cp := *sd
 			cp.MemberRole = string(role)
-			next.ServeHTTP(w, r.WithContext(dashauth.WithSession(r.Context(), &cp)))
+			ctx := audit.WithTenant(dashauth.WithSession(r.Context(), &cp), sd.TenantID) // the audit rows' tenant
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -64,4 +72,18 @@ func RequireAction(action auth.Action) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// SessionTenant is the tenant a new dashboard session acts on (WP-TEAM-1):
+// the one the user owns, else the first it joined (auth.ActiveTenant);
+// fallback (the user's own, as before) without a database or a membership.
+func SessionTenant(ctx context.Context, db *sql.DB, userID, fallback string) string {
+	if db == nil {
+		return fallback
+	}
+	m, _, err := auth.ActiveTenant(ctx, db, userID, "")
+	if err != nil {
+		return fallback
+	}
+	return m.TenantID
 }

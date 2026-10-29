@@ -137,7 +137,7 @@ func TestCredentialPlaintextDrop_WritersStopWritingPlaintext(t *testing.T) {
 	extra, err := f.svc.GenerateAPIKey(ctx, f.user.ID, "extra", nil)
 	require.NoError(t, err)
 	assert.Nil(t, f.plaintextOf("api_keys", "key_id", extra.Key))
-	rotated, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	rotated, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 	assert.Nil(t, f.plaintextOf("api_keys", "key_id", rotated.Key))
 	assert.Nil(t, f.mirrorOf(), "the rotation's mirror")
@@ -150,7 +150,7 @@ func TestCredentialPlaintextDrop_WritersStopWritingPlaintext(t *testing.T) {
 
 	// The flag off again: the writers write the plaintext again.
 	f.srv.flags = nil
-	again, err := f.svc.RotateAPIKey(ctx, f.user.ID, extra.ID)
+	again, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, extra.ID)
 	require.NoError(t, err)
 	assert.NotNil(t, f.plaintextOf("api_keys", "key_id", again.Key))
 }

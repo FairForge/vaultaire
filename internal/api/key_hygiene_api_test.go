@@ -29,7 +29,7 @@ func TestS3Auth_ExpiredKeyAnswersExpiredToken(t *testing.T) {
 	require.Equal(t, "", f.put(k.Key, k.Secret, "before-expiry.txt"))
 
 	// Expire it (SetAPIKeyExpiration persists; the S3 path reads the row).
-	require.NoError(t, f.svc.SetAPIKeyExpiration(ctx, f.user.ID, k.ID, time.Now().Add(-time.Minute)))
+	require.NoError(t, f.svc.SetAPIKeyExpiration(ctx, f.user.TenantID, k.ID, time.Now().Add(-time.Minute)))
 
 	_, err = f.client(k.Key, k.Secret).PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(f.bucket), Key: aws.String("after-expiry.txt"), Body: strings.NewReader("late")})
@@ -44,7 +44,7 @@ func TestSTSRoute_ExpiredParentIsATyped401(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	parent, err := f.svc.GenerateAPIKey(ctx, f.user.ID, "parent", &auth.KeyCreateOptions{ExpiresAt: &future})
 	require.NoError(t, err)
-	require.NoError(t, f.svc.SetAPIKeyExpiration(ctx, f.user.ID, parent.ID, time.Now().Add(-time.Minute)))
+	require.NoError(t, f.svc.SetAPIKeyExpiration(ctx, f.user.TenantID, parent.ID, time.Now().Add(-time.Minute)))
 
 	req := httptest.NewRequest("POST", "/api/v1/sts/token", strings.NewReader(`{"permissions":["PutObject"],"ttl":600,"parent_key_id":"`+parent.ID+`"}`))
 	c := context.WithValue(req.Context(), userIDKey, f.user.ID)

@@ -620,7 +620,7 @@ func (s *Server) handleMgmtListKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keys, err := s.auth.ListAPIKeys(r.Context(), userID)
+	keys, err := s.auth.ListAPIKeys(r.Context(), activeTenant(r))
 	if err != nil {
 		s.logger.Error("management list keys", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list API keys", "")
@@ -705,9 +705,9 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	var key *auth.APIKey
 	var err error
 	if req.Test {
-		key, err = s.auth.GenerateTestKey(r.Context(), userID, req.Name, opts)
+		key, err = s.auth.GenerateTestKeyForTenant(r.Context(), activeTenant(r), userID, req.Name, opts)
 	} else {
-		key, err = s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
+		key, err = s.auth.GenerateAPIKeyForTenant(r.Context(), activeTenant(r), userID, req.Name, opts)
 	}
 	if err != nil {
 		if errors.Is(err, auth.ErrSandboxOfSandbox) {
@@ -783,7 +783,7 @@ func (s *Server) handleMgmtDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 	keyID := chi.URLParam(r, "id")
 
-	if err := s.auth.RevokeAPIKey(r.Context(), userID, keyID); err != nil {
+	if err := s.auth.RevokeAPIKey(r.Context(), activeTenant(r), keyID); err != nil {
 		switch {
 		case errors.Is(err, auth.ErrPrimaryKeyRevoke):
 			writeManagementError(w, ErrTypeConflict, "primary_key", "the primary key cannot be revoked; rotate it instead", "id")

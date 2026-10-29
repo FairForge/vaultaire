@@ -104,7 +104,7 @@ func TestPlatform_ChildKeysNeverExceedTheParentsScope(t *testing.T) {
 	for _, k := range out["data"].([]any) {
 		assert.NotContains(t, k.(map[string]any), "secret")
 	}
-	own, err := f.s.auth.ListAPIKeys(context.Background(), f.user.ID)
+	own, err := f.s.auth.ListAPIKeys(context.Background(), f.user.TenantID)
 	require.NoError(t, err)
 	for _, k := range own {
 		assert.NotEqual(t, child, k.TenantID, "a child's key is not the platform user's")

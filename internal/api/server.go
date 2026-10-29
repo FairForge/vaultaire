@@ -1461,6 +1461,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 		Code     string `json:"code"`
+		// TenantID chooses the ACTIVE tenant of the token among the user's
+		// (WP-TEAM-1); "" = the one it owns, else the first joined.
+		TenantID string `json:"tenant_id"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1560,9 +1563,30 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ev = event("auth.mfa_succeeded", via, "")
 	}
 
+	// The active tenant (WP-TEAM-1): the user's tenants, and the one the
+	// token is for. A tenant_id the user is no member of is refused; a user
+	// with no membership at all (an operator account) keeps its own.
+	active := auth.Membership{TenantID: user.TenantID}
+	var tenants []auth.Membership
+	if s.db != nil {
+		a, all, merr := auth.ActiveTenant(ctx, s.db, user.ID, strings.TrimSpace(req.TenantID))
+		switch {
+		case merr == nil:
+			active, tenants = a, all
+		case errors.Is(merr, auth.ErrNotMember) && req.TenantID != "":
+			writeManagementError(w, ErrTypePermission, "not_a_member", "this account is not a member of tenant_id", "tenant_id")
+			return
+		case errors.Is(merr, auth.ErrNotMember):
+		default:
+			ours("store_error", "read the user's tenants", merr)
+			return
+		}
+	}
 	mint := s.loginTokenMinter
 	if mint == nil {
-		mint = s.auth.GenerateJWT
+		mint = func(u *auth.User) (string, error) {
+			return s.auth.GenerateJWTForTenant(u, active.TenantID, active.Role)
+		}
 	}
 	token, err := mint(user)
 	if err != nil {
@@ -1582,9 +1606,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	handlers.RecordLoginEvent(ctx, s.db, ev)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{
+	if tenants == nil {
+		tenants = []auth.Membership{}
+	}
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"token":     token,
-		"tenant_id": user.TenantID,
+		"tenant_id": active.TenantID,
+		"role":      active.Role,
+		"tenants":   tenants,
 	}); err != nil {
 		s.logger.Error("failed to encode login response", zap.Error(err))
 	}

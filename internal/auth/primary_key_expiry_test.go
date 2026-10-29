@@ -39,27 +39,27 @@ func TestPrimaryKey_ExpiryIsRefused(t *testing.T) {
 	svc, user, key := newExpiryAccount(t)
 	ctx := context.Background()
 
-	err := svc.SetAPIKeyExpiration(ctx, user.ID, key.ID, time.Now().Add(24*time.Hour))
+	err := svc.SetAPIKeyExpiration(ctx, user.TenantID, key.ID, time.Now().Add(24*time.Hour))
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrPrimaryKeyExpire), "got %v", err)
 	assert.False(t, errors.Is(err, ErrPrimaryKeyRevoke), "its own sentinel: the message must not say 'revoked'")
 
-	got, err := svc.GetOwnedAPIKey(ctx, user.ID, key.ID)
+	got, err := svc.GetOwnedAPIKey(ctx, user.TenantID, key.ID)
 	require.NoError(t, err)
 	assert.Nil(t, got.ExpiresAt, "the primary keeps no expiry")
 
 	// Rotating first does not open a way around it: the successor is the
 	// primary too.
-	successor, err := svc.RotateAPIKey(ctx, user.ID, key.ID)
+	successor, err := svc.RotateAPIKey(ctx, user.TenantID, key.ID)
 	require.NoError(t, err)
 	require.True(t, successor.IsPrimary)
-	err = svc.SetAPIKeyExpiration(ctx, user.ID, successor.ID, time.Now().Add(24*time.Hour))
+	err = svc.SetAPIKeyExpiration(ctx, user.TenantID, successor.ID, time.Now().Add(24*time.Hour))
 	assert.True(t, errors.Is(err, ErrPrimaryKeyExpire), "got %v", err)
 
 	// A scoped key still takes an expiry.
 	scoped, err := svc.GenerateAPIKey(ctx, user.ID, "scoped", &KeyCreateOptions{Permissions: []string{OpGetObject}})
 	require.NoError(t, err)
-	require.NoError(t, svc.SetAPIKeyExpiration(ctx, user.ID, scoped.ID, time.Now().Add(24*time.Hour)))
+	require.NoError(t, svc.SetAPIKeyExpiration(ctx, user.TenantID, scoped.ID, time.Now().Add(24*time.Hour)))
 }
 
 func TestRotateAPIKey_ExpiredKeyIsRefused(t *testing.T) {
@@ -68,12 +68,12 @@ func TestRotateAPIKey_ExpiredKeyIsRefused(t *testing.T) {
 
 	scoped, err := svc.GenerateAPIKey(ctx, user.ID, "scoped", &KeyCreateOptions{Permissions: []string{OpGetObject}})
 	require.NoError(t, err)
-	require.NoError(t, svc.SetAPIKeyExpiration(ctx, user.ID, scoped.ID, time.Now().Add(-time.Minute)))
+	require.NoError(t, svc.SetAPIKeyExpiration(ctx, user.TenantID, scoped.ID, time.Now().Add(-time.Minute)))
 
-	before, err := svc.ListAPIKeys(ctx, user.ID)
+	before, err := svc.ListAPIKeys(ctx, user.TenantID)
 	require.NoError(t, err)
 
-	_, err = svc.RotateAPIKey(ctx, user.ID, scoped.ID)
+	_, err = svc.RotateAPIKey(ctx, user.TenantID, scoped.ID)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrKeyExpired), "got %v", err)
 
@@ -81,10 +81,10 @@ func TestRotateAPIKey_ExpiredKeyIsRefused(t *testing.T) {
 	// the same way, and it is still the live primary — never revoked by a
 	// refused rotation.
 	forceExpiry(svc, key.Key, time.Now().Add(-time.Minute))
-	_, err = svc.RotateAPIKey(ctx, user.ID, key.ID)
+	_, err = svc.RotateAPIKey(ctx, user.TenantID, key.ID)
 	assert.True(t, errors.Is(err, ErrKeyExpired), "got %v", err)
 
-	after, err := svc.ListAPIKeys(ctx, user.ID)
+	after, err := svc.ListAPIKeys(ctx, user.TenantID)
 	require.NoError(t, err)
 	assert.Len(t, after, len(before), "a refused rotation mints no successor")
 	for _, k := range after {

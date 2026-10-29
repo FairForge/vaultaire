@@ -432,7 +432,7 @@ func TestAccountExport_DownloadIsAPresignedGETOnThePrimaryPair(t *testing.T) {
 	// did that).
 	svc := auth.NewAuthService(nil, f.db)
 	require.NoError(t, svc.LoadFromDB(context.Background()))
-	rotated, err := svc.RotateAPIKey(context.Background(), f.userID, f.primaryKeyID)
+	rotated, err := svc.RotateAPIKey(context.Background(), f.tenantID, f.primaryKeyID)
 	require.NoError(t, err)
 	require.True(t, rotated.IsPrimary)
 	rr = get()

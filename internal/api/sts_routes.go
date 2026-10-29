@@ -16,7 +16,8 @@ import (
 func (s *Server) registerSTSRoutes() {
 	s.router.Route("/api/v1/sts", func(r chi.Router) {
 		r.Use(s.requireJWT)
-		r.Post("/token", s.handleSTSCreateToken)
+		r.Use(s.requireMember) // WP-TEAM-1: a temporary credential is a key write
+		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/token", s.handleSTSCreateToken)
 	})
 }
 
@@ -53,7 +54,7 @@ func (s *Server) handleSTSCreateToken(w http.ResponseWriter, r *http.Request) {
 	var parent *auth.APIKey
 	var err error
 	if req.ParentKeyID != "" {
-		parent, err = s.auth.GetOwnedAPIKey(r.Context(), userID, req.ParentKeyID)
+		parent, err = s.auth.GetOwnedAPIKey(r.Context(), tenantID, req.ParentKeyID)
 	} else {
 		parent, err = s.auth.GetPrimaryAPIKey(r.Context(), tenantID)
 	}

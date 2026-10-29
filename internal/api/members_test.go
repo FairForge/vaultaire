@@ -123,10 +123,13 @@ var memberWritesOpenToAnyMember = map[string]string{
 	"POST /api/v1/manage/invitations/{token}/accept": "the invitee is no member yet: the invitation's own address decides (PR B)",
 }
 
-// Every write route of /api/v1/manage and /api/v1/platform names a write
-// action: a viewer — who may only read — is refused by role on each.
+// Every write route of /api/v1/manage, /api/v1/platform and /api/v1/user
+// names a write action: a viewer — who may only read — is refused by role on each.
 func TestManagementRoutes_EveryWriteNamesItsAction(t *testing.T) {
 	f := setupPlatformFixture(t).withManagement()
+	f.s.registerUserAPIRoutes()
+	f.s.registerWebhookRoutes()
+	f.s.registerSTSRoutes()
 	f.grant()
 	_, viewer := f.addMember(auth.RoleViewer)
 	rl, _ := f.s.jsonAPIMiddleware()
@@ -138,7 +141,9 @@ func TestManagementRoutes_EveryWriteNamesItsAction(t *testing.T) {
 		if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
 			return nil
 		}
-		if !strings.HasPrefix(route, "/api/v1/manage/") && !strings.HasPrefix(route, "/api/v1/platform/") {
+		if !strings.HasPrefix(route, "/api/v1/manage/") && !strings.HasPrefix(route, "/api/v1/platform/") &&
+			!strings.HasPrefix(route, "/api/v1/user/") && !strings.HasPrefix(route, "/api/v1/webhooks/") &&
+			!strings.HasPrefix(route, "/api/v1/sts/") {
 			return nil
 		}
 		if why, open := memberWritesOpenToAnyMember[method+" "+route]; open {
@@ -146,7 +151,7 @@ func TestManagementRoutes_EveryWriteNamesItsAction(t *testing.T) {
 			return nil
 		}
 		writes++
-		path := strings.NewReplacer("{name}", "b", "{id}", "x", "{key}", "k", "{user}", "u").Replace(route)
+		path := strings.NewReplacer("{name}", "b", "{id}", "x", "{key}", "k", "{user}", "u", "{keyId}", "k").Replace(route)
 		code, out := f.call(method, path, viewer, map[string]any{})
 		assert.Equal(t, http.StatusForbidden, code, "%s %s: %v", method, route, out)
 		assert.Equal(t, "role_forbidden", errCode(out), "%s %s names no write action", method, route)

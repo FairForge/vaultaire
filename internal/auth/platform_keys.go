@@ -31,10 +31,6 @@ var ErrScopeExceedsParent = errors.New("the key's scope exceeds the calling cred
 // maxChildKeys bounds the live keys of one child.
 const maxChildKeys = 50
 
-// notChildKeySQL is the clause that leaves a child's keys out of a query
-// over api_keys ak (the platform user's own lists and cap).
-const notChildKeySQL = `NOT EXISTS (SELECT 1 FROM tenants ct WHERE ct.id = ak.tenant_id AND ct.parent_tenant_id IS NOT NULL)`
-
 // CapScope bounds o by the calling credential's scope (nil = the account's
 // own authority: no bound beyond Validate). What o leaves unset is the
 // caller's — permissions, buckets, IP allowlist, expiry — so a child key

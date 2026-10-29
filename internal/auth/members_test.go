@@ -84,8 +84,8 @@ func TestMemberRole_RowThenRegistrationElseNotMember(t *testing.T) {
 func TestCan_TheActionTable(t *testing.T) {
 	want := map[Role][]Action{
 		RoleViewer:    {ActionRead},
-		RoleDeveloper: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionSandboxReset, ActionChildKey},
-		RoleAdmin:     {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionSandboxReset, ActionChildKey, ActionChildWrite, ActionMemberManage},
+		RoleDeveloper: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey},
+		RoleAdmin:     {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey, ActionChildWrite, ActionMemberManage},
 		RoleOwner:     Actions(),
 	}
 	for role, allowed := range want {

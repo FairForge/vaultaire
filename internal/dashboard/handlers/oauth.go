@@ -148,6 +148,7 @@ func HandleOAuthCallback(
 		}
 
 		role := ResolveRole(r.Context(), db, user.ID)
+		active := SessionTenant(r.Context(), db, user.ID, user.TenantID) // WP-TEAM-1
 		via := "oauth:" + provider
 
 		// Second factor (R5-06): an existing account that enabled TOTP stops
@@ -159,7 +160,7 @@ func HandleOAuthCallback(
 				status = authSvc
 			}
 			handled, mErr := BeginMFAChallenge(w, r, status, mfa, MFAChallenge{
-				UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: role,
+				UserID: user.ID, TenantID: active, Email: user.Email, Role: role,
 			})
 			if mErr != nil {
 				logger.Error("oauth: begin mfa challenge", zap.Error(mErr))
@@ -176,7 +177,7 @@ func HandleOAuthCallback(
 		// Create session.
 		sessionToken, err := sessions.Create(r.Context(), dashauth.SessionData{
 			UserID:    user.ID,
-			TenantID:  user.TenantID,
+			TenantID:  active,
 			Email:     user.Email,
 			Role:      role,
 			IPAddress: middleware.ClientIP(r),

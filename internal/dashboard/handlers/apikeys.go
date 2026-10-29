@@ -51,7 +51,7 @@ func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *z
 		data := sessionData(sd, "apikeys")
 		withCSRF(r.Context(), data)
 		withFlash(r.Context(), data)
-		data["Keys"] = listKeys(r, authSvc, sd.UserID)
+		data["Keys"] = listKeys(r, authSvc, sd.TenantID)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -91,7 +91,7 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 
 		fail := func(msg string) {
 			data["GenerateError"] = msg
-			data["Keys"] = listKeys(r, authSvc, sd.UserID)
+			data["Keys"] = listKeys(r, authSvc, sd.TenantID)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_ = tmpl.ExecuteTemplate(w, "base", data)
 		}
@@ -119,7 +119,7 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 
 		// The scope is validated by the service, the same way for the
 		// dashboard, the user API and the management API (WP-R5-12).
-		key, err := authSvc.GenerateAPIKey(r.Context(), sd.UserID, name, opts)
+		key, err := authSvc.GenerateAPIKeyForTenant(r.Context(), sd.TenantID, sd.UserID, name, opts)
 		if err != nil {
 			switch {
 			case errors.Is(err, auth.ErrKeyLimitReached):
@@ -147,7 +147,7 @@ func HandleGenerateKey(tmpl *template.Template, authSvc *auth.AuthService, db *s
 			Key:    key.Key,
 			Secret: key.Secret,
 		}
-		data["Keys"] = listKeys(r, authSvc, sd.UserID)
+		data["Keys"] = listKeys(r, authSvc, sd.TenantID)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -172,7 +172,7 @@ func HandleRevokeKey(authSvc *auth.AuthService, logger *zap.Logger) http.Handler
 			return
 		}
 
-		switch err := authSvc.RevokeAPIKey(r.Context(), sd.UserID, keyID); {
+		switch err := authSvc.RevokeAPIKey(r.Context(), sd.TenantID, keyID); {
 		case errors.Is(err, auth.ErrPrimaryKeyRevoke):
 			middleware.SetFlash(w, "error", "The primary key cannot be revoked — rotate it instead. The old pair stops working the moment the new one is shown.")
 		case err != nil:
@@ -202,7 +202,7 @@ func HandleRotateKey(tmpl *template.Template, authSvc *auth.AuthService, logger 
 			return
 		}
 
-		newKey, err := authSvc.RotateAPIKey(r.Context(), sd.UserID, keyID)
+		newKey, err := authSvc.RotateAPIKey(r.Context(), sd.TenantID, keyID)
 		if err != nil {
 			logger.Warn("rotate API key", zap.Error(err), zap.String("key_id", keyID))
 			msg := "That key could not be rotated."
@@ -221,7 +221,7 @@ func HandleRotateKey(tmpl *template.Template, authSvc *auth.AuthService, logger 
 		withCSRF(r.Context(), data)
 		data["NewKey"] = NewKeyData{Key: newKey.Key, Secret: newKey.Secret}
 		data["Rotated"] = true
-		data["Keys"] = listKeys(r, authSvc, sd.UserID)
+		data["Keys"] = listKeys(r, authSvc, sd.TenantID)
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -231,8 +231,8 @@ func HandleRotateKey(tmpl *template.Template, authSvc *auth.AuthService, logger 
 	}
 }
 
-func listKeys(r *http.Request, authSvc *auth.AuthService, userID string) []KeyRow {
-	keys, err := authSvc.ListAPIKeys(r.Context(), userID)
+func listKeys(r *http.Request, authSvc *auth.AuthService, tenantID string) []KeyRow {
+	keys, err := authSvc.ListAPIKeys(r.Context(), tenantID)
 	if err != nil || keys == nil {
 		return nil
 	}
