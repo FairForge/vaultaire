@@ -121,7 +121,10 @@ func TestNewAuth_EveryCallSiteHasTheOpener(t *testing.T) {
 		"internal/api/account_export.go:AccountExportService.DownloadURL on s.signer",
 	}, primaryPair)
 	assert.Equal(t, []string{"internal/api/server.go:NewServer signer=s.s3Auth()"}, exportSvc)
-	assert.Equal(t, []string{"internal/api/sts_routes.go:Server.handleSTSCreateToken keys=s.credentialKeys()"}, sts)
+	assert.ElementsMatch(t, []string{
+		"internal/api/sts_routes.go:Server.handleSTSCreateToken keys=s.credentialKeys()",
+		"internal/api/platform_keys.go:Server.handlePlatformCreateSTS keys=s.credentialKeys()", // a platform's child (WP-PLAT-1)
+	}, sts)
 	var dropWired bool
 	ast.Inspect(files["internal/api/server.go"], func(n ast.Node) bool {
 		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 &&
