@@ -1312,14 +1312,14 @@ func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *
 }
 
 // isTenantSuspended checks if a tenant has been suspended by an admin.
-// A sandbox is suspended with its parent (RP80-2: an account suspended for
-// abuse kept its test keys): one query reads the tenant's own row and its
-// parent's.
+// A sandbox, and a platform's child, is suspended with its parent (RP80-2:
+// an account suspended for abuse kept its test keys; WP-PLAT-1): one query
+// reads the tenant's own row and its parent's (a tenant has at most one).
 func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
 	var suspended bool
 	err := db.QueryRowContext(ctx, `
 		SELECT t.suspended_at IS NOT NULL OR p.suspended_at IS NOT NULL
-		  FROM tenants t LEFT JOIN tenants p ON p.id = t.sandbox_of
+		  FROM tenants t LEFT JOIN tenants p ON p.id = COALESCE(t.sandbox_of, t.parent_tenant_id)
 		 WHERE t.id = $1`, tenantID).Scan(&suspended)
 	if err != nil {
 		return false // fail open — if we can't check, allow access

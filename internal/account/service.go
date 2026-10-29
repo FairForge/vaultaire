@@ -121,6 +121,33 @@ func (s *Service) Schedule(ctx context.Context, userID, tenantID, reason string)
 	return got, nil
 }
 
+// ErrNotAChild: ScheduleTenant was asked for a tenant that is not a
+// platform's child (a user's account is scheduled through its user).
+var ErrNotAChild = errors.New("not a child tenant")
+
+// ScheduleTenant marks a tenant WITHOUT a user — a platform's child
+// (tenants.parent_tenant_id, WP-PLAT-1) — for erasure GracePeriod from now,
+// on tenants.deletion_scheduled_at (117). Scheduling twice returns the
+// existing date. ErrNotAChild for any other tenant (a missing one too).
+func (s *Service) ScheduleTenant(ctx context.Context, tenantID string) (time.Time, error) {
+	if s.db == nil {
+		return time.Time{}, ErrNoDatabase
+	}
+	var got time.Time
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE tenants SET deletion_scheduled_at = COALESCE(deletion_scheduled_at, $1)
+		 WHERE id = $2 AND parent_tenant_id IS NOT NULL
+		 RETURNING deletion_scheduled_at`, s.now().Add(GracePeriod), tenantID).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("schedule deletion of tenant %s: %w", tenantID, ErrNotAChild)
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("schedule deletion of tenant %s: %w", tenantID, err)
+	}
+	s.logger.Info("child tenant deletion scheduled", zap.String("tenant_id", tenantID), zap.Time("scheduled_at", got))
+	return got, nil
+}
+
 // Cancel clears a scheduled deletion. A cancel that arrives while the
 // runner holds the users row (the final erase transaction) waits for it
 // and then finds no row: the account is gone and ErrNoPendingDeletion is
