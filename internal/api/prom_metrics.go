@@ -179,6 +179,13 @@ func (s *Server) initMetrics() {
 		// reads a backend failure sent to the parity.
 		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks, vaultParityOrphans,
 			vaultParityUnprotectedBytes, vaultParityUnprotectedObjects)
+		// Its scrub (WP-VAULT-2): shards read, rows re-protected, rebuilds
+		// from the parity alone, restores asked of tape; the standing
+		// gauges are read from the table.
+		reg.MustRegister(vaultParityScrubShards, vaultParityScrubRows, vaultParityRebuilds, vaultParityRestores)
+		if s.vaultParity != nil {
+			reg.MustRegister(newVaultParityScrubCollector(s.vaultParity))
+		}
 		// The pack store (Phase 37): packs sealed, GC, member reads.
 		reg.MustRegister(packstore.Collectors()...)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"strings"
@@ -231,6 +232,33 @@ type VaultParityResult struct {
 	// too large for a run (the first 20). They used to be Errors, so the
 	// admin page said "N failed" on every run (Prompt 2b.3 D2.3).
 	Notes []string `json:"notes,omitempty"`
+
+	// The scrub (WP-VAULT-2, vault_parity_scrub.go): its state, carried from
+	// run to run like the reconcile's — when it last ran and where its two
+	// walks resume — and what this run's pass did: rows read, shards that
+	// failed, rows re-protected, rows skipped (a leg unreachable), rows
+	// baselined (no digests of their etag yet), the bytes read and the
+	// pass's budget, whether the walk wrapped, the rebuild check's outcome
+	// (ok | mismatch | error | none) and the findings (the first 20).
+	ScrubAt           time.Time   `json:"scrub_at,omitempty"`
+	ScrubCursor       scrubCursor `json:"scrub_cursor"`
+	RebuildCursor     scrubCursor `json:"rebuild_cursor"`
+	ScrubDeferred     bool        `json:"scrub_deferred,omitempty"`
+	ScrubRows         int         `json:"scrub_rows,omitempty"`
+	ScrubShardsFailed int         `json:"scrub_shards_failed,omitempty"`
+	ScrubReprotect    int         `json:"scrub_reprotect,omitempty"`
+	ScrubSkipped      int         `json:"scrub_skipped,omitempty"`
+	ScrubBaselined    int         `json:"scrub_baselined,omitempty"`
+	ScrubBytes        int64       `json:"scrub_bytes,omitempty"`
+	ScrubBudget       int64       `json:"scrub_budget,omitempty"`
+	ScrubWrapped      bool        `json:"scrub_wrapped,omitempty"`
+	ScrubTooLarge     int         `json:"scrub_too_large,omitempty"`
+	Rebuild           string      `json:"rebuild,omitempty"`
+	ScrubFindings     []string    `json:"scrub_findings,omitempty"`
+	// RestoresRequested / RestoresWaiting: protects that found the object
+	// on tape and asked for its restore / found one already running (A3).
+	RestoresRequested int `json:"restores_requested,omitempty"`
+	RestoresWaiting   int `json:"restores_waiting,omitempty"`
 }
 
 // VaultParity writes, erases and reads the parity copy.
@@ -289,6 +317,19 @@ type VaultParity struct {
 	// calling RunOnce directly; a first run).
 	reconcileMem reconcileState
 
+	// The scrub (WP-VAULT-2): a pass at most every ScrubEvery
+	// (VAULT_PARITY_SCRUB_EVERY, 30 min) in its own ScrubSlice (10 min),
+	// reading the footprint's share of ScrubCycle (VAULT_PARITY_SCRUB_CYCLE,
+	// 30 d — every row once per cycle); an unreadable shard is read again
+	// after ScrubRetryAfter (30 s).
+	ScrubEvery      time.Duration
+	ScrubCycle      time.Duration
+	ScrubSlice      time.Duration
+	ScrubRetryAfter time.Duration
+	scrubMem        scrubState
+	// scrubBudgetOverride (tests): the pass's bytes, whatever the cycle says.
+	scrubBudgetOverride int64
+
 	// scopeTenant limits a run to one tenant (tests on the shared DB).
 	scopeTenant string
 	now         func() time.Time
@@ -314,7 +355,9 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 		OrphanGrace: orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
 		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun,
 		ReconcileEvery:            reconcileEveryFromEnv(os.Getenv, logger), ReconcileSlice: defaultReconcileSlice,
-		MaxReconcileListingsPerRun: defaultMaxReconcileListingsPerRun}
+		MaxReconcileListingsPerRun: defaultMaxReconcileListingsPerRun,
+		ScrubEvery:                 scrubEveryFromEnv(os.Getenv, logger), ScrubCycle: scrubCycleFromEnv(os.Getenv, logger),
+		ScrubSlice: defaultScrubSlice, ScrubRetryAfter: defaultScrubRetryAfter}
 }
 
 // Leg is the leg this deployment writes new parity to: the first registered
@@ -371,6 +414,13 @@ func (p *VaultParity) spec() jobSpec {
 			if res.ReconcileStopped != "" {
 				notes = append(notes, "reconcile stopped at its "+res.ReconcileStopped+", resumes at its cursor")
 			}
+			if res.ScrubReprotect > 0 {
+				note := fmt.Sprintf("the scrub re-protects %d row(s)", res.ScrubReprotect)
+				if len(res.ScrubFindings) > 0 {
+					note += ", first: " + res.ScrubFindings[0]
+				}
+				notes = append(notes, note)
+			}
 			if res.ChunkedSkipped > 0 {
 				notes = append(notes, fmt.Sprintf("%d chunked vault-floor row(s) — an invariant is broken, see the log", res.ChunkedSkipped))
 			}
@@ -388,6 +438,8 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 	// the scheduler records it, and an empty one wiped every leg's cursor.
 	st := p.loadReconcileState(ctx)
 	res.ReconcileAt, res.ReconcileCursors = st.At, st.cursors()
+	sst := p.loadScrubState(ctx)
+	res.ScrubAt, res.ScrubCursor, res.RebuildCursor = sst.At, sst.Cursor, sst.Rebuild
 	legName, _, ok := p.Leg()
 	if !ok {
 		return res, fmt.Errorf("no parity leg is registered (%s)", strings.Join(p.Legs, ", "))
@@ -410,6 +462,18 @@ func (p *VaultParity) RunOnce(ctx context.Context) (VaultParityResult, error) {
 		}
 	} else {
 		res.ReconcileDeferred = true
+	}
+	// The scrub (WP-VAULT-2) next, in its own slice, before the protect —
+	// which then rewrites what it found.
+	if sst.At.IsZero() || p.now().Sub(sst.At) >= p.scrubEvery() {
+		sctx, cancel := context.WithTimeout(ctx, p.scrubSlice())
+		p.scrubPass(sctx, &res, sst)
+		cancel()
+		if ctx.Err() != nil {
+			return res, ctx.Err()
+		}
+	} else {
+		res.ScrubDeferred = true
 	}
 	if err := p.eraseStale(ctx, &res); err != nil {
 		return res, err
@@ -524,6 +588,10 @@ type parityCandidate struct {
 	// records the outcome only on a row nothing touched since (Prompt 2b.2
 	// C4 — a delete marks the row and erases shards meanwhile).
 	rowAt time.Time
+	// shardDigests / objectSHA: the SHA-256 of each shard as written and of
+	// the stored bytes as read, recorded by a complete finish (WP-VAULT-2).
+	shardDigests []string
+	objectSHA    string
 }
 
 // protectPending protects the vault-floor objects without a complete row; a
@@ -565,6 +633,10 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 		case err == nil && state == "gone":
 			res.DeletedMeanwhile++
 			vaultParityObjects.WithLabelValues("erased").Inc()
+		case err == nil && state == "requested":
+			res.RestoresRequested++
+		case err == nil && state == "in_progress":
+			res.RestoresWaiting++
 		case err == nil:
 			res.Protected++
 			vaultParityObjects.WithLabelValues("complete").Inc()
@@ -715,9 +787,10 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 			       COALESCE(o.encryption_algorithm, ''), COALESCE(o.backend_name, '')`+unprotectedFrom+`
 			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.attempts < $2)
 			  AND ($3::BIGINT < 0 OR o.size_bytes <= $3::BIGINT)
+			  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.restore_checked_at IS NULL OR v.restore_checked_at < $10)
 			  AND ($4::BOOLEAN OR (o.updated_at, o.tenant_id, o.bucket, o.object_key) > ($5::TIMESTAMPTZ, $6::TEXT, $7::TEXT, $8::TEXT))
 			ORDER BY o.updated_at, o.tenant_id, o.bucket, o.object_key
-			LIMIT $9`, p.scopeTenant, vaultParityMaxAttempts, maxSize, first, curAt, curT, curB, curK, page)
+			LIMIT $9`, p.scopeTenant, vaultParityMaxAttempts, maxSize, first, curAt, curT, curB, curK, page, p.now().Add(-restoreRecheck))
 		if err != nil {
 			return nil, fmt.Errorf("vault parity: candidates: %w", err)
 		}
@@ -848,6 +921,7 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		    etag = EXCLUDED.etag, size_bytes = EXCLUDED.size_bytes, stripe_bytes = EXCLUDED.stripe_bytes,
 		    shard_bytes = EXCLUDED.shard_bytes, shard_prefix = EXCLUDED.shard_prefix, legs = EXCLUDED.legs,
 		    state = 'partial', written_at = NULL, last_error = NULL,
+		    shard_digests = NULL, object_sha256 = NULL, digest_etag = NULL, scrubbed_at = NULL, rebuilt_at = NULL,
 		    attempts = CASE WHEN vault_parity.etag = EXCLUDED.etag THEN vault_parity.attempts + 1 ELSE 1 END,
 		    updated_at = NOW()
 		RETURNING updated_at`,
@@ -885,6 +959,18 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 	srcContainer, srcBlob := objectBlobAddress(c.tenantID, c.bucket, c.key, c.storageKey)
 	// From the backend the row records, and no other (WP-R6-1).
 	src, err := p.eng.Get(engine.WithExpectedSize(engine.WithRecordedBackend(tctx, c.backend), c.size), srcContainer, srcBlob)
+	if errors.Is(err, engine.ErrArchived) {
+		// On tape (WP-VAULT-2 A3): ask for the restore, spend no attempt,
+		// protect it once the restore has landed. Nothing was written.
+		state, rerr := p.awaitRestore(ctx, c, srcContainer, srcBlob)
+		if state == "gone" {
+			return rowGone()
+		}
+		if rerr == nil {
+			return state, 0, nil
+		}
+		err = rerr
+	}
 	if err != nil {
 		// Nothing was written, but the row keeps naming every shard: an
 		// earlier attempt's shards at this prefix were kept for this write
@@ -900,12 +986,18 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 
 	writers := make([]io.Writer, l.m)
 	tolerant := make([]*tolerantWriter, l.m)
+	// The digests the scrub checks against (WP-VAULT-2): each shard as
+	// written, and the stored bytes as read — what a rebuild from the parity
+	// alone must reproduce.
+	shardHash := make([]hash.Hash, l.m)
+	objHash := sha256.New()
 	putErrs := make([]error, l.m)
 	var wg sync.WaitGroup
 	for j := 0; j < l.m; j++ {
 		pr, pw := io.Pipe()
 		tolerant[j] = &tolerantWriter{w: pw}
-		writers[j] = tolerant[j]
+		shardHash[j] = sha256.New()
+		writers[j] = io.MultiWriter(tolerant[j], shardHash[j])
 		wg.Add(1)
 		go func(j int, pr *io.PipeReader, pw *io.PipeWriter) {
 			defer wg.Done()
@@ -920,7 +1012,7 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		}(j, pr, pw)
 		defer func(pw *io.PipeWriter) { _ = pw.Close() }(pw)
 	}
-	encErr := encodeParity(l, src, writers)
+	encErr := encodeParity(l, io.TeeReader(src, objHash), writers)
 	for _, t := range tolerant {
 		if encErr != nil {
 			_ = t.w.(*io.PipeWriter).CloseWithError(encErr)
@@ -968,6 +1060,11 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 		state, ferr = "partial", p.finishRow(ctx, c, legs, "", errors.Join(errs...))
 	default:
 		vaultParityBytes.Add(float64(written))
+		c.objectSHA = hex.EncodeToString(objHash.Sum(nil))
+		c.shardDigests = make([]string, l.m)
+		for j := range shardHash {
+			c.shardDigests[j] = hex.EncodeToString(shardHash[j].Sum(nil))
+		}
 		state, ferr = "complete", p.finishRow(ctx, c, legs, "complete", nil)
 	}
 	if errors.Is(ferr, errParityRowGone) {
@@ -1022,7 +1119,9 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 	// wrote and the next run protects again.
 	var q string
 	if state == "complete" {
-		q = `UPDATE vault_parity SET legs = $4, state = 'complete', last_error = NULL, written_at = NOW(), updated_at = NOW()
+		q = `UPDATE vault_parity SET legs = $4, state = 'complete', last_error = NULL, written_at = NOW(), updated_at = NOW(),
+		            shard_digests = $7, object_sha256 = NULLIF($8, ''), digest_etag = CASE WHEN $8 <> '' THEN etag END,
+		            restore_requested_at = NULL, restore_checked_at = NULL
 		     WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND etag = $5 AND updated_at = $6`
 	} else {
 		q = `UPDATE vault_parity SET legs = $4, state = 'partial', last_error = $7, written_at = NULL, updated_at = NOW()
@@ -1031,6 +1130,8 @@ func (p *VaultParity) finishRow(ctx context.Context, c parityCandidate, legs []s
 	args := []any{c.tenantID, c.bucket, c.key, pq.Array(legs), c.etag, c.rowAt}
 	if state != "complete" {
 		args = append(args, lastErr)
+	} else {
+		args = append(args, pq.Array(c.shardDigests), c.objectSHA)
 	}
 	result, err := p.db.ExecContext(context.WithoutCancel(ctx), q, args...)
 	if err != nil {

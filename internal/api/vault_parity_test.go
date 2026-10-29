@@ -100,7 +100,9 @@ type flakyLegDriver struct {
 	failSuffix atomic.Value // string
 	failGet    atomic.Bool
 	failDelete atomic.Bool
-	puts       atomic.Int32
+	// failGets: the next N Gets fail (the scrub's transient read).
+	failGets atomic.Int32
+	puts     atomic.Int32
 	// holdPuts: every Put announces itself on putEntered and waits for
 	// putRelease to close before writing a byte — the window between the
 	// row write and the shard writes, held open for a test.
@@ -120,6 +122,10 @@ func (d *flakyLegDriver) Get(ctx context.Context, container, artifact string) (i
 	if d.failGet.Load() {
 		return nil, errors.New("permafrost: 503 service unavailable")
 	}
+	if d.failGets.Add(-1) >= 0 {
+		return nil, errors.New("permafrost: 503 service unavailable")
+	}
+	d.failGets.Store(0)
 	return d.LocalDriver.Get(ctx, container, artifact)
 }
 
