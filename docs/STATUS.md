@@ -1,6 +1,12 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 01:50 UTC (**Stage 1a Prompt 49 — WP-PRICE-1 + WP-LOG-1, after Part 0 = RP76 — DONE** (`docs/reviews/WP-STRIPE-1.md`):
+Updated: 2026-10-29 03:40 UTC — **Review RP78 of Stage 1a Prompt 49 (WP-STRIPE-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-1-REVIEW.md`):
+- **RP78-1 (P2):** the mirror's new buffer (18 MiB a mirrored PUT in the Worker, 16 MiB in the Go host) is outside the byte budgets RP72-6 / RP74-6 made the one bound. A mirrored PUT must take it from the budget or go unmirrored.
+- **RP78-2 (P2):** open question 1 decided as option (b): commit at the primary's answer and settle the mirror afterwards (`POST /api/v1/edge/mirror`, Worker 0.6.0). A healthy Lyve leg made a 64 MiB whole PUT 2.3× slower on prod.
+- **P3s:** RP78-3 (28 of 44 origin rows on prod have no request id: one `x-amz-request-id` per request), RP78-4 (`eu-west-3` is London, not the EU), RP78-5 (the copy pass leaves the customers one multiple of free egress), RP78-6 (management requests in the request log). Four P4s.
+- **Prompt 50 (WP-DX-1: test mode, `VLT_TEST_` keys, `livemode`, `stored listen`, the Docker image; migration 116)** is issued with Part 0 = RP78 in both editions (`docs/reviews/WP-STRIPE-PROMPTS.md`). The post-merge review is RP80.
+
+Before that: 2026-10-29 01:50 UTC (**Stage 1a Prompt 49 — WP-PRICE-1 + WP-LOG-1, after Part 0 = RP76 — DONE** (`docs/reviews/WP-STRIPE-1.md`):
 - **#1038 Part 0**, every RP76 finding fixed:
   - the mirror's lag bounded at 16 MiB / 5 s;
   - the leg satisfies the bucket's jurisdiction and tier (an EU bucket is a single copy);
