@@ -1,6 +1,29 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 03:40 UTC — **Review RP78 of Stage 1a Prompt 49 (WP-STRIPE-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-1-REVIEW.md`):
+Updated: 2026-10-29 07:00 UTC — **Stage 1a Prompt 50 — WP-DX-1 (test mode and the local server), after Part 0 = RP78 — DONE** (`docs/reviews/WP-STRIPE-2.md`; migration 116; next 117):
+- **#1047 Part 0** (deployed 04:52), every RP78 finding fixed:
+  - the mirror's buffer is the host's bytes (unbudgeted = unmirrored);
+  - the client is answered at the primary's pace and the mirror settles after (`POST /api/v1/edge/mirror`);
+  - one `x-amz-request-id` per S3 request (header = body = row);
+  - London is the UK (a jurisdiction per region);
+  - the copy pass leaves one multiple of free egress to the customers;
+  - 0.5.1's `edge-codec` is withdrawn (the manifest's `withdrawn` list; `translog-verify -client` and the Worker's predeploy refuse it).
+- **#1048 / #1052, the Worker 0.6.0**, deployed 06:33 UTC (version `b89a12b2`; its bytes = the rows, log entries 134–135).
+  - Proved in workerd first: a 2 MB/s mirror answered the client in 105 ms and settled 4.2 s later; a 40 s mirror was cut at 25 s; no 411.
+  - On prod: three of tenant zero's 32 MiB mirrored PUTs answered in 2.23–2.27 s (0.5.2: 2.32–2.48 s), and all three settled `ready` through the new route.
+- **#1049, the sandbox** (`tenants.sandbox_of`):
+  - `VLT_TEST_` keys on it; every write on `local`; never billed or metered; `x-stored-mode: test`;
+  - reset + the nightly `sandbox_purge` job; erased with its parent; the overview's Test data card;
+  - management requests in the request log (RP78-6).
+  - **Prod proof:** tenant zero's test key round-tripped a 3 MB object through `s3.stored.cloud` onto `local`: 4 request-log rows `host = origin`, 0 admits, 0 bandwidth rows.
+- **#1050, `livemode` and `stored listen`:** a sandbox's events go to the parent's webhooks with `livemode: false`; `GET /api/v1/events?after=&wait=` is the forward long poll; `cmd/stored listen`.
+- **#1051, the image:** the release binary on distroless; `deploy/docker/compose.yml`; the first-boot account; Deploy pushes `ghcr.io/fairforge/vaultaire` after checking its sha256 against the release artefact. Healthy 5 s after `up` on the Mac.
+- **Owner:**
+  - make the GHCR package public (it is private by default);
+  - D-STRIPE-13: the sandbox keeps its own 5 GiB counter as the local-disk cap. Keep it?
+- **Prompt 51 (WP-PLAT-1)** is written in both editions with Part 0 = RP80. The post-merge review is RP80.
+
+Before that: 2026-10-29 03:40 UTC — **Review RP78 of Stage 1a Prompt 49 (WP-STRIPE-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-1-REVIEW.md`):
 - **RP78-1 (P2):** the mirror's new buffer (18 MiB a mirrored PUT in the Worker, 16 MiB in the Go host) is outside the byte budgets RP72-6 / RP74-6 made the one bound. A mirrored PUT must take it from the budget or go unmirrored.
 - **RP78-2 (P2):** open question 1 decided as option (b): commit at the primary's answer and settle the mirror afterwards (`POST /api/v1/edge/mirror`, Worker 0.6.0). A healthy Lyve leg made a 64 MiB whole PUT 2.3× slower on prod.
 - **P3s:** RP78-3 (28 of 44 origin rows on prod have no request id: one `x-amz-request-id` per request), RP78-4 (`eu-west-3` is London, not the EU), RP78-5 (the copy pass leaves the customers one multiple of free egress), RP78-6 (management requests in the request log). Four P4s.
