@@ -56,7 +56,7 @@
             {{range .Buckets}}
             <tr>
                 <td><a href="/dashboard/buckets/{{.Name}}" class="bucket-link">{{.Name}}</a></td>
-                <td><span class="badge {{.FloorClass}}">{{.FloorWord}}</span>{{if and (eq .FloorWord "downstairs") .AtticBytes}} <span class="text-muted" title="objects put away with a storage-class header">+ {{.AtticFmt}} in the attic</span>{{end}}</td>
+                <td><span class="badge {{.FloorClass}}">{{.FloorWord}}</span>{{if and (eq .FloorWord "Standard") .AtticBytes}} <span class="text-muted" title="objects put away with a storage-class header">+ {{.AtticFmt}} on Vault</span>{{end}}</td>
                 <td>{{if $.ModesCopy}}<span class="badge {{.ModeLabel.Class}}" title="{{.ModeLabel.Sentence}}">{{.ModeLabel.Name}}</span>{{else}}{{if eq .Visibility "public-read"}}<span class="badge badge-success">Public</span>{{else}}<span class="badge badge-default">Private</span>{{end}}{{end}}</td>
                 <td>{{.ObjectCount}}</td>
                 <td>{{.SizeFmt}}{{if .VersionBytes}} <span class="text-muted" title="older versions keep their bytes and count toward storage">incl. {{.VersionFmt}} older versions</span>{{end}}</td>
@@ -72,7 +72,7 @@
 </div>
 {{else}}
 <div class="card">
-    <p class="text-muted empty-state">No buckets yet. Create one above or upload via the S3 API. A bucket is a room in your house: downstairs opens instantly, the attic is back in minutes.</p>
+    <p class="text-muted empty-state">No buckets yet. Create one above or upload via the S3 API. A bucket can live on Standard (opens instantly) or Vault (on tape, back in minutes).</p>
 </div>
 {{end}}
 

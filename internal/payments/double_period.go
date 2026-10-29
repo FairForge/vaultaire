@@ -56,7 +56,7 @@ func ReportDoublePeriod(ctx context.Context, db *sql.DB, notifier any, tenantID 
 	defer cancel()
 	body := fmt.Sprintf("Tenant %s paid twice for overlapping dates.\n\n"+
 		"%s %s (ledger %s): %s → %s\n%s %s (ledger %s): %s → %s\n\n"+
-		"The house was granted (paid is paid). Refund one of them by hand and record it with the admin refund form "+
+		"The plan was granted (paid is paid). Refund one of them by hand and record it with the admin refund form "+
 		"(POST /api/v1/admin/tenants/%s/refunds). Audit: billing.double_period.\n",
 		tenantID, d.ThisProvider, d.ThisProviderID, d.ThisID, f(d.ThisStart), f(d.ThisEnd),
 		d.OtherProvider, d.OtherProviderID, d.OtherID, f(d.OtherStart), f(d.OtherEnd), tenantID)

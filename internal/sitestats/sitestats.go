@@ -418,14 +418,15 @@ func PagePath(p string) (string, bool) {
 }
 
 // allowedEvents is the closed set of names the beacon may count, so the
-// table's cardinality is ours to decide, not a visitor's.
+// table's cardinality is ours to decide, not a visitor's. The landing page
+// since 2026-10-29: the box picker (builder.edit), the section views, the
+// copy buttons, the five tool tabs (res.*) and the two calls to action.
+// Rows counted under the retired names (the house builder's, the use-case
+// tabs') stay in the table and on /admin/stats.
 var allowedEvents = map[string]bool{
-	"builder.edit": true, "builder.attic": true, "builder.share": true, "builder.save": true, "builder.pack": true,
-	"build.view": true, "pricing.view": true, "calc.move": true, "age.scrub": true, "copy": true,
+	"builder.edit": true, "build.view": true, "pricing.view": true, "copy": true,
 	"waitlist.submit": true, "cta.register": true,
-	"uc.backup": true, "uc.app": true, "uc.media": true, "uc.worm": true, "uc.lake": true,
-	"res.rclone": true, "res.restic": true, "res.awscli": true, "res.cyberduck": true, "res.juicefs": true, "res.sdk": true,
-	"res.presign": true, "res.keys": true, "res.hooks": true, "res.public": true, "res.lock": true,
+	"res.rclone": true, "res.restic": true, "res.awscli": true, "res.cyberduck": true, "res.sdk": true,
 }
 
 // EventAllowed reports whether the beacon may count an event of this name.

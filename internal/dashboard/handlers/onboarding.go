@@ -20,7 +20,7 @@ type OnboardingStatus struct {
 	// PlanWaiting: the house built on the site is stored on the tenant and
 	// nothing is bought yet — "Your plan is waiting on Billing" (Phase 0).
 	PlanWaiting bool
-	PlanSummary string // "6 TB downstairs, 1 TB in the attic"
+	PlanSummary string // "6 TB Standard, 1 TB Vault"
 }
 
 func populateOnboarding(ctx context.Context, db *sql.DB, tenantID string, r *http.Request, data map[string]any) {

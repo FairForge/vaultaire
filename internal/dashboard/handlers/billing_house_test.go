@@ -117,7 +117,7 @@ func houseTemplate(t *testing.T) *template.Template {
 		`{{if .House.Enabled}}<div class="house" data-ready="{{.House.Ready}}" data-why="{{.House.NotReadyWhy}}">` +
 		`std={{.House.Std}} vault={{.House.Vault}} pin={{.House.PinHot}} period={{.House.Period}} ` +
 		`has={{.House.HasHouse}} minstd={{.House.MinStd}} minvault={{.House.MinVault}} ` +
-		`monthly={{.House.Quote.Monthly}} charge={{.House.Quote.Charge}} room={{.House.RoomURL}}</div>` +
+		`monthly={{.House.Quote.Monthly}} charge={{.House.Quote.Charge}}</div>` +
 		`{{else}}<div class="legacy">{{.Plan}}</div>{{end}}{{end}}`))
 	return tmpl
 }
@@ -156,7 +156,6 @@ func TestHouse_FlagOnPreselectsTheIntent(t *testing.T) {
 	assert.Contains(t, body, `data-ready="true"`)
 	assert.Contains(t, body, "std=6 vault=1 pin=0 period=annual has=false")
 	assert.Contains(t, body, "monthly=$28.94 charge=$347.28", "the same receipt as the site")
-	assert.Contains(t, body, "room=/#room=v2.abc")
 
 	// Prices not verified: the page says so instead of offering checkout.
 	fb.ready, fb.why = false, "house prices: price_std_y is 4788 cents per unit, want 5388"
@@ -328,7 +327,7 @@ func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
 	require.Equal(t, http.StatusSeeOther, w.Code)
 	cat, msg := flashOf(t, w)
 	assert.Equal(t, "error", cat)
-	assert.Contains(t, msg, "attic")
+	assert.Contains(t, msg, "Vault holds")
 	house, _, _ := qm.GetHouse(context.Background(), id)
 	assert.Equal(t, usage.HouseFromTB(3, 2, 0), house, "nothing changed")
 
@@ -346,7 +345,7 @@ func TestHandleHouseCheckout_ResizeAppliesQuotasImmediately(t *testing.T) {
 	assert.Equal(t, usage.HouseFromTB(5, 2, 0), house, "applied from the provider's answer, before the webhook")
 	cat, msg = flashOf(t, w)
 	assert.Equal(t, "success", cat)
-	assert.Contains(t, msg, "5 TB downstairs")
+	assert.Contains(t, msg, "5 TB Standard")
 }
 
 func TestOnboarding_PlanWaitingStep(t *testing.T) {
@@ -359,7 +358,7 @@ func TestOnboarding_PlanWaitingStep(t *testing.T) {
 	st, ok := data["Onboarding"].(*OnboardingStatus)
 	require.True(t, ok)
 	assert.True(t, st.PlanWaiting, "a house was built on the site and nothing is bought yet")
-	assert.Equal(t, "2 TB downstairs", st.PlanSummary)
+	assert.Equal(t, "2 TB Standard", st.PlanSummary)
 
 	grantedHouse(t, db, id, payments.Order{Std: 2, Period: payments.PeriodMonthly}, time.Now().Add(20*24*time.Hour))
 	data = map[string]any{}

@@ -46,6 +46,4 @@ func TestParseHouseIntent_ClampsAndFilters(t *testing.T) {
 		})
 	}
 	assert.True(t, ParseHouseIntent("", "", "v2.x").Empty())
-	assert.Equal(t, "/#room=v2.oat.noir..box-1-2", HouseIntent{Room: "v2.oat.noir..box-1-2"}.RoomURL())
-	assert.Equal(t, "", HouseIntent{}.RoomURL())
 }

@@ -12,15 +12,15 @@
     {{if .Resumed}}
     <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Card renewal is back on</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>. Card payments are open again, so your subscription renews by itself on that date, as it did before.
+      Your plan ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>. Card payments are open again, so your subscription renews by itself on that date, as it did before.
       Nothing else changed. To stop it, use <em>Manage Payment</em> on your billing page.
     </p>
     {{else}}
     <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your card will not be charged again</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>, and every day of it stays yours. We have switched card renewals off, so your card will not be charged again.
-      To keep the house after that date, pay the next period with bitcoin from your billing page (it starts on the paid date, so nothing is lost or paid twice), or write to {{.Support}} and we will help.
-      If nobody pays, we keep the house for a grace period after the date, and we never delete a thing.
+      Your plan ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>, and every day of it stays yours. We have switched card renewals off, so your card will not be charged again.
+      To keep the plan after that date, pay the next period with bitcoin from your billing page (it starts on the paid date, so nothing is lost or paid twice), or write to {{.Support}} and we will help.
+      If nobody pays, we keep the plan for a grace period after the date, and we never delete a thing.
     </p>
     {{end}}
     <table cellpadding="0" cellspacing="0"><tr><td style="background-color:#2563eb;border-radius:6px;">
@@ -31,7 +31,7 @@
     </p>
   </td></tr>
   <tr><td style="padding:16px 32px;background-color:#fafafa;border-top:1px solid #e4e4e7;">
-    <p style="margin:0;font-size:12px;color:#a1a1aa;">Sent to {{.Email}} about the house on your Stored account.</p>
+    <p style="margin:0;font-size:12px;color:#a1a1aa;">Sent to {{.Email}} about the plan on your Stored account.</p>
   </td></tr>
 </table>
 </td></tr>

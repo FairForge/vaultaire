@@ -10,29 +10,29 @@
   </td></tr>
   <tr><td style="padding:32px;">
     {{if .LastDay}}
-    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Last day: your house ends tomorrow</h1>
+    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Last day: your plan ends tomorrow</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) was paid through <strong>{{.PaidThrough}}</strong> and the grace period ends on <strong>{{.GraceEnds}}</strong>.
-      After that the house goes back to the free tier. <strong>Nothing is deleted</strong>: every object stays exactly where it is, you just cannot add more until you renew.
+      Your plan ({{.House}}) was paid through <strong>{{.PaidThrough}}</strong> and the grace period ends on <strong>{{.GraceEnds}}</strong>.
+      After that the account goes back to the free tier. <strong>Nothing is deleted</strong>: every object stays exactly where it is, you just cannot add more until you renew.
     </p>
     {{else if .InGrace}}
-    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your house is in its grace period</h1>
+    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your plan is in its grace period</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) was paid through <strong>{{.PaidThrough}}</strong>. We keep it as it is for <strong>{{.DaysLeft}} more days</strong>, until {{.GraceEnds}}, while payment catches up.
-      Nothing is deleted either way; after the grace period the house goes back to the free tier until you renew.
+      Your plan ({{.House}}) was paid through <strong>{{.PaidThrough}}</strong>. We keep it as it is for <strong>{{.DaysLeft}} more days</strong>, until {{.GraceEnds}}, while payment catches up.
+      Nothing is deleted either way; after the grace period the account goes back to the free tier until you renew.
     </p>
     {{else if .SwitchTo}}
-    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your house is paid for {{.DaysLeft}} more days</h1>
+    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your plan is paid for {{.DaysLeft}} more days</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>, and you chose to pay in {{.SwitchTo}} from then on — the card no longer renews it.
+      Your plan ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong>, and you chose to pay in {{.SwitchTo}} from then on — the card no longer renews it.
       The {{.SwitchTo}} invoice is on your billing page: paying it early adds the next period on from {{.PaidThrough}}, so nothing is lost or paid twice.
-      {{if .NoGrace}}Your house ends on <strong>{{.PaidThrough}}</strong> unless the {{.SwitchTo}} payment arrives — nothing is deleted, the house goes back to the free tier until you pay.{{else}}After the date we keep the house for a grace period until {{.GraceEnds}}, and never delete a thing.{{end}}
+      {{if .NoGrace}}Your plan ends on <strong>{{.PaidThrough}}</strong> unless the {{.SwitchTo}} payment arrives — nothing is deleted, the account goes back to the free tier until you pay.{{else}}After the date we keep the plan for a grace period until {{.GraceEnds}}, and never delete a thing.{{end}}
     </p>
     {{else}}
-    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your house is paid for {{.DaysLeft}} more days</h1>
+    <h1 style="margin:0 0 16px;font-size:22px;color:#18181b;">Your plan is paid for {{.DaysLeft}} more days</h1>
     <p style="margin:0 0 24px;font-size:15px;line-height:1.6;color:#3f3f46;">
-      Your house ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong> and nobody renews it automatically.
-      {{if .NoGrace}}Renew before then and nothing changes; otherwise your house ends on <strong>{{.PaidThrough}}</strong> — nothing is deleted, the house goes back to the free tier until you renew.{{else}}Renew before then and nothing changes; after the date we keep the house for a grace period until {{.GraceEnds}}, and never delete a thing.{{end}}
+      Your plan ({{.House}}) is paid through <strong>{{.PaidThrough}}</strong> and nobody renews it automatically.
+      {{if .NoGrace}}Renew before then and nothing changes; otherwise your plan ends on <strong>{{.PaidThrough}}</strong> — nothing is deleted, the account goes back to the free tier until you renew.{{else}}Renew before then and nothing changes; after the date we keep the plan for a grace period until {{.GraceEnds}}, and never delete a thing.{{end}}
     </p>
     {{end}}
     <table cellpadding="0" cellspacing="0"><tr><td style="background-color:#2563eb;border-radius:6px;">
@@ -43,7 +43,7 @@
     </p>
   </td></tr>
   <tr><td style="padding:16px 32px;background-color:#fafafa;border-top:1px solid #e4e4e7;">
-    <p style="margin:0;font-size:12px;color:#a1a1aa;">Sent to {{.Email}} about a house on your Stored account. You receive at most four of these per period.</p>
+    <p style="margin:0;font-size:12px;color:#a1a1aa;">Sent to {{.Email}} about a plan on your Stored account. You receive at most four of these per period.</p>
   </td></tr>
 </table>
 </td></tr>

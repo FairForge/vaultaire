@@ -111,7 +111,7 @@ func HandleAdminManualPayment(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 		if res.Granted {
 			what = "granted"
 		}
-		adminFragment(w, http.StatusOK, "success", fmt.Sprintf("Recorded %s (%s): the house is %s, paid through %s. Reload to see the ledger.",
+		adminFragment(w, http.StatusOK, "success", fmt.Sprintf("Recorded %s (%s): the plan is %s, paid through %s. Reload to see the ledger.",
 			res.InvoiceNumber, moneyFromCents(cents), what, res.PaidThrough.UTC().Format("2 Jan 2006")))
 	}
 }

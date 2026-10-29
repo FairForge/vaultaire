@@ -489,7 +489,7 @@ BOOLEAN (migration 042).
   links. Still ONE self-contained file: Montserrat (variable) + Silkscreen are base64 `@font-face`
   (Silkscreen skips `&`, which it draws like `$`), and all pixel art is an inline `<svg>` of
   `<symbol id="s-*">` sprites at the top of `<body>` (mascot, mascot-wave, plant, lamp, floorlamp,
-  box, crate, heart, logo, mark; dresser/bookcase/rug stay for the dashboard house) referenced via `<use>`. Sprites are generated from ASCII
+  box, crate, heart, logo, mark; dresser/bookcase/rug are drawn but no page uses them since 2026-10-29) referenced via `<use>`. Sprites are generated from ASCII
   grids (one `<path>` per colour); size a sprite with `class="px" style="--w:W;--h:H"` and `--u`
   (px per pixel). Base64 font blobs can in theory contain a `TestLanding_NoDeadProduct` banned
   substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page (an alias 301s a browser view to the canonical origin once `VAULTAIRE_ALIAS_HOSTS` is set).
@@ -515,8 +515,8 @@ BOOLEAN (migration 042).
   (markup with `__CSS__`/`__SPRITES__`/`__BUILDER__`/`__SCRIPT__` and `__PRICE_*__` tokens),
   `landing.css` (fonts as `__MONT__`/`__SILK4__`/`__SILK7__`, `/*NIGHT*/` lines expanded into both
   dark selector forms), `sprites.py` (pixel art -> `<symbol>`s), `builder.html` (the box picker;
-  `__BOX__`/`__CRATE__` sprites filled in), `house_room.html` + `vibes.json` (the DASHBOARD house's
-  two-floor room and wall/fit colours — the landing no longer shows them), `page.js` + `builder.js` (no template literals: html/template parses the
+  `__BOX__`/`__CRATE__` sprites filled in), `vibes.json` (the dashboard overview's wall/fit colours; its room is the
+  picker's, build.py `box_room`), `page.js` + `builder.js` (no template literals: html/template parses the
   script), `prices.json` (EVERY Stored price the page shows: tier rates, add-on, founders,
   competitors, derived 20 TB figures — edit here, rebuild), `fonts/`. `build.py` stamps a sha256 of the
   sources into the output's first comment and `landing_build_test.go` recomputes it, so a hand edit to

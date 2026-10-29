@@ -94,12 +94,12 @@ func (m *Mailer) SendReminder(ctx context.Context, d DueReminder) error {
 	if err != nil {
 		return fmt.Errorf("render reminder %s: %w", d.Step, err)
 	}
-	subject := fmt.Sprintf("Your Stored house is paid for %d more days", d.DaysLeft)
+	subject := fmt.Sprintf("Your Stored plan is paid for %d more days", d.DaysLeft)
 	switch d.Step {
 	case StepInGrace:
-		subject = fmt.Sprintf("Your Stored house is in its grace period: %d days left", d.DaysLeft)
+		subject = fmt.Sprintf("Your Stored plan is in its grace period: %d days left", d.DaysLeft)
 	case StepLastDay:
-		subject = "Last day: your Stored house ends tomorrow"
+		subject = "Last day: your Stored plan ends tomorrow"
 	}
 	return m.Sender.Send(ctx, d.Email, subject, html, text)
 }
@@ -119,7 +119,7 @@ func (m *Mailer) SendHouseLapsed(ctx context.Context, tenantID string, e Entitle
 	if err != nil {
 		return fmt.Errorf("render house lapsed: %w", err)
 	}
-	return m.Sender.Send(ctx, to, "Your Stored house has ended — nothing was deleted", html, text)
+	return m.Sender.Send(ctx, to, "Your Stored plan has ended — nothing was deleted", html, text)
 }
 
 // SendRenewalStopped mails the bulk stop of card renewals (resumed =
@@ -137,9 +137,9 @@ func (m *Mailer) SendRenewalStopped(ctx context.Context, tenantID string, e Enti
 	if err != nil {
 		return fmt.Errorf("render renewal stopped: %w", err)
 	}
-	subject := "Your Stored house: your card will not be charged again"
+	subject := "Your Stored plan: your card will not be charged again"
 	if resumed {
-		subject = "Your Stored house renews by card again"
+		subject = "Your Stored plan renews by card again"
 	}
 	return m.Sender.Send(ctx, to, subject, html, text)
 }

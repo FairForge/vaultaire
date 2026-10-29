@@ -87,9 +87,9 @@ func TestRevenue_HouseMRRByFloor(t *testing.T) {
 	var stdN, vaultN int
 	for _, l := range lines {
 		switch l.Tier {
-		case "downstairs (Standard)":
+		case "Standard":
 			std, stdN = l.MRRCents, l.Count
-		case "attic (Vault)":
+		case "Vault":
 			vault, vaultN = l.MRRCents, l.Count
 		}
 	}

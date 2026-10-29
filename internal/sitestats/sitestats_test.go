@@ -82,7 +82,10 @@ func TestPagePath(t *testing.T) {
 
 func TestEventAllowed(t *testing.T) {
 	assert.True(t, EventAllowed("builder.edit"))
-	assert.True(t, EventAllowed("uc.backup"))
+	assert.True(t, EventAllowed("res.rclone"))
+	// the house builder's events left with the house (2026-10-29)
+	assert.False(t, EventAllowed("builder.attic"))
+	assert.False(t, EventAllowed("uc.backup"))
 	assert.False(t, EventAllowed("uc.anything"))
 	assert.False(t, EventAllowed(""))
 	assert.False(t, EventAllowed("<script>"))

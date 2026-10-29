@@ -16,7 +16,7 @@ import (
 func testWaitlistTemplate(t *testing.T) *template.Template {
 	t.Helper()
 	return template.Must(template.New("admin").Parse(
-		`{{define "admin"}}<span class="count">{{.SignupCount}}</span>{{if .Houses}}<span class="houses">{{.Houses}} built a house: {{.TotalStdTB}} TB downstairs, {{.TotalVaultTB}} TB in the attic</span>{{end}}` +
+		`{{define "admin"}}<span class="count">{{.SignupCount}}</span>{{if .Houses}}<span class="houses">{{.Houses}} picked a plan: {{.TotalStdTB}} TB Standard, {{.TotalVaultTB}} TB Vault</span>{{end}}` +
 			`{{range .Signups}}<span class="row">{{.Email}}</span>{{end}}{{end}}`))
 }
 
@@ -51,7 +51,7 @@ func TestHandleAdminWaitlist_ListsSignups(t *testing.T) {
 	assert.Contains(t, body, `class="count">2`)
 	assert.Contains(t, body, "a@example.com")
 	assert.Contains(t, body, "b@example.com")
-	assert.Contains(t, body, "1 built a house: 6 TB downstairs, 1 TB in the attic")
+	assert.Contains(t, body, "1 picked a plan: 6 TB Standard, 1 TB Vault")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

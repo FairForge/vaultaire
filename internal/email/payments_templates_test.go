@@ -46,12 +46,12 @@ func TestRenderRenewalReminder_StepCopy(t *testing.T) {
 }
 
 func TestRenderHouseLapsed(t *testing.T) {
-	html, text, err := RenderHouseLapsed(LapsedMail{BaseURL: "https://stored.test", Email: "a@b.test", House: "1 TB in the attic",
+	html, text, err := RenderHouseLapsed(LapsedMail{BaseURL: "https://stored.test", Email: "a@b.test", House: "1 TB Vault",
 		PaidThrough: "1 Oct 2026", RenewURL: "https://stored.test/dashboard/billing"})
 	require.NoError(t, err)
 	assert.Contains(t, html, "Nothing was deleted")
-	assert.Contains(t, html, "1 TB in the attic")
-	assert.Contains(t, text, "Renew the house")
+	assert.Contains(t, html, "1 TB Vault")
+	assert.Contains(t, text, "Renew your plan")
 }
 
 // WP-PAY-5: a customer who asked to switch to bitcoin is reminded with the

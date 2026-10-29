@@ -1,6 +1,6 @@
 /* Stored billing: the house steppers. Prices come from data attributes
    the server fills from prices.json; the maths mirrors billing.QuoteHouse
-   (annual = per TB per month billed yearly; the attic's monthly price has a
+   (annual = per TB per month billed yearly; Vault's monthly price has a
    flat minimum for 1 TB). No inline handlers (CSP), works without JS. */
 (function () {
     var form = document.getElementById('house-form');
@@ -38,10 +38,10 @@
         var p = clamp(pin);
         var monthly = period() === 'monthly';
         var lines = [];
-        if (s) lines.push(['Downstairs', s, s * cents(monthly ? P.stdMonthly : P.stdAnnual)]);
+        if (s) lines.push(['Standard', s, s * cents(monthly ? P.stdMonthly : P.stdAnnual)]);
         if (v) {
             var vc = monthly ? (v === 1 ? cents(P.vaultMonthlyMin) : v * cents(P.vaultMonthly)) : v * cents(P.vaultAnnual);
-            lines.push(['Attic', v, vc]);
+            lines.push(['Vault', v, vc]);
         }
         if (p) lines.push(['Pin-hot', p, p * cents(P.pinHot)]);
         var total = 0;

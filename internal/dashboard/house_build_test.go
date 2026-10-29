@@ -29,7 +29,7 @@ func TestHouseTemplate_GeneratedFromLandingSources(t *testing.T) {
 	for _, def := range []string{`{{define "house-sprites"}}`, `{{define "house-css"}}`, `{{define "house-room"}}`} {
 		require.True(t, strings.Contains(string(src), def), "missing %s", def)
 	}
-	for _, id := range []string{`id="s-box"`, `id="s-dresser"`, `id="s-bookcase"`, `id="s-lamp"`, `id="s-mascot-wave"`, `id="nightdim"`, `id="vig"`, `id="wallgrad"`} {
+	for _, id := range []string{`id="s-box"`, `id="s-crate"`, `id="s-floorlamp"`, `id="s-plant"`, `id="s-mascot-wave"`, `id="nightdim"`, `id="vig"`, `id="wallgrad"`} {
 		require.True(t, strings.Contains(string(src), id), "missing %s", id)
 	}
 }

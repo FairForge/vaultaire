@@ -34,14 +34,14 @@ type BucketRow struct {
 	SizeFmt         string
 	LastModifiedFmt string
 
-	// The floor the bucket lives on, in the site's words (Phase 2):
-	// tier_preference archive = "attic"; standard/performance/resilient =
-	// "downstairs"; auto = "downstairs" too (auto resolves to the primary,
-	// a header can still put single objects in the attic).
+	// Where the bucket's objects go, in the site's words: tier_preference
+	// archive = "Vault"; standard/performance/resilient = "Standard"; auto =
+	// "Standard" too (auto resolves to the primary, a header can still put
+	// single objects on Vault).
 	TierPreference string
-	FloorWord      string // downstairs | attic
+	FloorWord      string // Standard | Vault
 	FloorClass     string // badge class
-	AtticBytes     int64  // bytes of this bucket recorded in the attic
+	AtticBytes     int64  // bytes of this bucket recorded on Vault
 	AtticFmt       string
 	// VersionBytes: how much of TotalSize is retained older versions
 	// (WP-R2-1 C2 — they keep their bytes and are billed).
@@ -49,12 +49,12 @@ type BucketRow struct {
 	VersionFmt   string
 }
 
-// floorWords maps a bucket tier preference onto the floor a customer reads.
+// floorWords maps a bucket tier preference onto the word a customer reads.
 func floorWords(tierPreference string) (word, class string) {
 	if tierPreference == "archive" {
-		return "attic", "badge-attic"
+		return "Vault", "badge-attic"
 	}
-	return "downstairs", "badge-downstairs"
+	return "Standard", "badge-downstairs"
 }
 
 // ObjectRow is a single object for the bucket browser template.

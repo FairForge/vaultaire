@@ -4,9 +4,9 @@
     <h1>Waitlist Signups</h1>
     <div class="dashboard-actions" style="margin-top:0">
         <a href="/admin/waitlist/export" class="btn btn-sm">Download CSV</a>
-        <a href="/admin/waitlist/export?filter=house&amp;fields=email" class="btn btn-sm btn-primary">Launch list: built a house (emails)</a>
-        <a href="/admin/waitlist/export?filter=downstairs" class="btn btn-sm">Downstairs CSV</a>
-        <a href="/admin/waitlist/export?filter=attic" class="btn btn-sm">Attic CSV</a>
+        <a href="/admin/waitlist/export?filter=house&amp;fields=email" class="btn btn-sm btn-primary">Launch list: picked a plan (emails)</a>
+        <a href="/admin/waitlist/export?filter=downstairs" class="btn btn-sm">Standard CSV</a>
+        <a href="/admin/waitlist/export?filter=attic" class="btn btn-sm">Vault CSV</a>
     </div>
 </div>
 
@@ -14,7 +14,7 @@
     <div class="card">
         <div class="card-title">Total Signups</div>
         <div class="card-value">{{.SignupCount}}</div>
-        {{if .Houses}}<div class="card-detail">{{.Houses}} built a house: {{.TotalStdTB}} TB downstairs, {{.TotalVaultTB}} TB in the attic</div>{{end}}
+        {{if .Houses}}<div class="card-detail">{{.Houses}} picked a plan: {{.TotalStdTB}} TB Standard, {{.TotalVaultTB}} TB Vault</div>{{end}}
     </div>
 </div>
 
@@ -27,8 +27,8 @@
                     <th>Email</th>
                     <th>Source</th>
                     <th>Signed Up</th>
-                    <th>Downstairs TB</th>
-                    <th>Attic TB</th>
+                    <th>Standard TB</th>
+                    <th>Vault TB</th>
                 </tr>
             </thead>
             <tbody>

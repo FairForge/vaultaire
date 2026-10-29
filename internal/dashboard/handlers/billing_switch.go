@@ -78,7 +78,7 @@ func HandleSwitchProvider(svc HouseBilling, db *sql.DB, baseURL string, logger *
 			return
 		}
 		if !st.Found || !st.Granted {
-			back(w, r, "error", "There is no house to switch yet — buy one below.")
+			back(w, r, "error", "There is no plan to switch yet — buy one below.")
 			return
 		}
 		if to == payments.ProviderStripe {
@@ -91,7 +91,7 @@ func HandleSwitchProvider(svc HouseBilling, db *sql.DB, baseURL string, logger *
 		}
 		switch {
 		case errors.Is(err, payments.ErrNothingToSwitch):
-			back(w, r, "error", "Your house is already set to be paid that way.")
+			back(w, r, "error", "Your plan is already set to be paid that way.")
 			return
 		case errors.Is(err, payments.ErrProviderUnavailable):
 			back(w, r, "error", "Switching isn't possible right now. Nothing was changed; please try again in a minute.")
@@ -103,7 +103,7 @@ func HandleSwitchProvider(svc HouseBilling, db *sql.DB, baseURL string, logger *
 		}
 		logger.Info("house switch requested", zap.String("tenant", sd.TenantID), zap.String("from", e.Provider), zap.String("to", to))
 		opens := e.PaidThrough.Add(-payments.ReminderLead)
-		back(w, r, "success", fmt.Sprintf("Card renewal is off. Your house is paid through %s; from %s you can pay the next %s in %s here — it starts on that date, so nothing is lost or paid twice.",
+		back(w, r, "success", fmt.Sprintf("Card renewal is off. Your plan is paid through %s; from %s you can pay the next %s in %s here — it starts on that date, so nothing is lost or paid twice.",
 			e.PaidThrough.UTC().Format("2 Jan 2006"), opens.UTC().Format("2 Jan 2006"), periodNoun(e.Order.Period), payWord(to)))
 	}
 }
@@ -113,7 +113,7 @@ func switchToCard(w http.ResponseWriter, r *http.Request, svc HouseBilling, sd *
 	baseURL string, logger *zap.Logger, back func(http.ResponseWriter, *http.Request, string, string)) {
 	e := st.Entitlement
 	if e.Provider == payments.ProviderStripe {
-		back(w, r, "error", "Your house is already paid by card. Manage Payment changes the card or the renewal.")
+		back(w, r, "error", "Your plan is already paid by card. Manage Payment changes the card or the renewal.")
 		return
 	}
 	base := strings.TrimRight(baseURL, "/")

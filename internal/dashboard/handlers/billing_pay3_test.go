@@ -66,7 +66,7 @@ func TestReceiptPage_RendersFromLedger(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	body := w.Body.String()
-	for _, want := range []string{paid.InvoiceNumber, "FairForge LLC", id + "@test.local", "$53.88", "Downstairs", "1 TB", "Paid",
+	for _, want := range []string{paid.InvoiceNumber, "FairForge LLC", id + "@test.local", "$53.88", "Standard", "1 TB", "Paid",
 		"State of Utah", "@media print"} {
 		assert.Contains(t, body, want)
 	}

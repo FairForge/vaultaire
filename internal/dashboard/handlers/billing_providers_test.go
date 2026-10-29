@@ -111,7 +111,7 @@ func TestBillingPage_RendersTheEntitlement(t *testing.T) {
 
 	assert.Contains(t, body, "via card (Stripe), renewal stopped.")
 	assert.Contains(t, body, "You can pay by card (Stripe).")
-	assert.Contains(t, body, "Your house") // resize mode from the record
+	assert.Contains(t, body, "Your plan") // resize mode from the record
 }
 
 // grant gives the tenant a 2 TB monthly Stripe house paid 20 days ahead.

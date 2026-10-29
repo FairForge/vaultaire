@@ -70,15 +70,15 @@ type Order struct {
 // House is the order in bytes, as the quota tables hold it.
 func (o Order) House() usage.House { return usage.HouseFromTB(o.Std, o.Vault, o.PinHot) }
 
-// Words says the house the way the site does: "5 TB downstairs, 2 TB in
-// the attic, 1 TB pinned hot".
+// Words says the plan the way the site does: "5 TB Standard, 2 TB Vault,
+// 1 TB pinned hot" (one box is one terabyte since 2026-10-29).
 func (o Order) Words() string {
 	var parts []string
 	if o.Std > 0 {
-		parts = append(parts, fmt.Sprintf("%d TB downstairs", o.Std))
+		parts = append(parts, fmt.Sprintf("%d TB Standard", o.Std))
 	}
 	if o.Vault > 0 {
-		parts = append(parts, fmt.Sprintf("%d TB in the attic", o.Vault))
+		parts = append(parts, fmt.Sprintf("%d TB Vault", o.Vault))
 	}
 	if o.PinHot > 0 {
 		parts = append(parts, fmt.Sprintf("%d TB pinned hot", o.PinHot))

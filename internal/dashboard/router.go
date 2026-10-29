@@ -1115,7 +1115,7 @@ func pageContent(page string) string {
 			`<div class="auth-page"><div class="auth-card">` +
 			`<div class="auth-brand">Stored</div>` +
 			`<h1>Create Account</h1>` +
-			`{{if .Intent}}<div class="alert alert-info house-intent"><strong>Your house:</strong> {{.Intent.StdTB}} TB downstairs, {{.Intent.VaultTB}} TB in the attic &middot; <strong>{{.Intent.Monthly}}/mo</strong> billed yearly. It will be waiting on your billing page.</div>{{end}}` +
+			`{{if .Intent}}<div class="alert alert-info house-intent"><strong>Your plan:</strong> {{.Intent.StdTB}} TB Standard, {{.Intent.VaultTB}} TB Vault &middot; <strong>{{.Intent.Monthly}}/mo</strong> billed yearly. It will be waiting on your billing page.</div>{{end}}` +
 			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}` +
 			`{{if or .HasGoogle .HasGithub}}` +
 			`<div class="oauth-buttons">` +

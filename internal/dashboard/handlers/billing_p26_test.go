@@ -175,6 +175,6 @@ func TestHouseSentence_PendingBitcoin_NoGrace_SaysEndsUnlessPaid(t *testing.T) {
 	off := houseSentence(st, endsAtDate(st, false))
 	on := houseSentence(st, endsAtDate(st, true))
 
-	assert.Contains(t, off, "Your house ends on 20 Nov 2026 unless the bitcoin payment arrives")
+	assert.Contains(t, off, "Your plan ends on 20 Nov 2026 unless the bitcoin payment arrives")
 	assert.NotContains(t, on, "unless the bitcoin payment arrives")
 }

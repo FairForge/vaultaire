@@ -33,10 +33,10 @@ type flagInfo struct {
 
 var flagInfos = map[string]flagInfo{
 	"signups":           {1, "Public account creation (web form, /auth/register, OAuth signup). Off = existing users keep signing in, nobody new gets in."},
-	"quota_checkout":    {2, "Whole-TB house checkout on the billing page (Phase 1). Needs the six STRIPE_PRICE_* env vars verified at boot; the webhook applies bought houses whether or not this is on."},
-	"house_overview":    {1, "Draws the customer's house on the dashboard overview (Phase 2) in place of the storage gauge."},
+	"quota_checkout":    {2, "Whole-TB checkout on the billing page (Phase 1). Needs the six STRIPE_PRICE_* env vars verified at boot; the webhook applies bought houses whether or not this is on."},
+	"house_overview":    {1, "Draws the customer's boxes (Standard) and crates (Vault) on the dashboard overview in place of the storage gauge."},
 	"chunking":          {2, "Content-defined chunking + dedup on the PUT path. Off = plain whole-object PUTs; reads keep working either way."},
-	"smart_demotion":    {2, "The Smart-tier demotion job: idle downstairs objects move to tape behind the scenes and come back hot on read."},
+	"smart_demotion":    {2, "The Smart-tier demotion job: idle Standard objects move to tape behind the scenes and come back hot on read."},
 	"vault_parity":      {2, "The Vault parity second copy: the vault_parity job writes RS 4+4 parity shards of every vault-floor object to the parity leg (sync, else permafrost, else lyve — VAULT_PARITY_LEGS) and a read whose tape backend fails is rebuilt from them. Off = no shards are written and none are read."},
 	"sync_backend":      {2, "Lets this tenant's buckets with tier_preference 'sync' (operator-set, SQL only) store on the Sync.com WebDAV bridge. Per tenant only, never a global row: Sync's terms forbid reselling the service without its written consent — our own data, or a customer Sync agreed to in writing."},
 	"blomp_backend":     {2, "Lets this tenant's buckets with tier_preference 'blomp' (operator-set, SQL only) store on Blomp's Swift storage (one container, ~3 writes/s, plain HTTP). Writes are sealed with SSE-S3 unless BLOMP_ALLOW_UNSEALED is set (testing). Per tenant first."},

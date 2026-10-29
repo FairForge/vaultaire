@@ -194,10 +194,10 @@ func houseRevenueLines(houses []houseRevenue) []tierRevenue {
 	for _, h := range houses {
 		for _, l := range h.quote.Lines {
 			switch l.Label {
-			case "Downstairs":
+			case "Standard":
 				stdCents += l.Cents
 				stdN++
-			case "Attic":
+			case "Vault":
 				vaultCents += l.Cents
 				vaultN++
 			case "Pin-hot":
@@ -208,10 +208,10 @@ func houseRevenueLines(houses []houseRevenue) []tierRevenue {
 	}
 	lines := []tierRevenue{}
 	if stdN > 0 {
-		lines = append(lines, tierRevenue{Tier: "downstairs (Standard)", Count: stdN, MRRCents: stdCents, MRRFmt: formatCents(stdCents)})
+		lines = append(lines, tierRevenue{Tier: "Standard", Count: stdN, MRRCents: stdCents, MRRFmt: formatCents(stdCents)})
 	}
 	if vaultN > 0 {
-		lines = append(lines, tierRevenue{Tier: "attic (Vault)", Count: vaultN, MRRCents: vaultCents, MRRFmt: formatCents(vaultCents)})
+		lines = append(lines, tierRevenue{Tier: "Vault", Count: vaultN, MRRCents: vaultCents, MRRFmt: formatCents(vaultCents)})
 	}
 	if pinN > 0 {
 		lines = append(lines, tierRevenue{Tier: "pin-hot", Count: pinN, MRRCents: pinCents, MRRFmt: formatCents(pinCents)})

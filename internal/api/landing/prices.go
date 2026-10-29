@@ -148,14 +148,6 @@ func (h HouseIntent) Monthly() string {
 	return fmt.Sprintf("$%d.%02d", c/100, c%100)
 }
 
-// RoomURL is the landing page link that reopens the house, or "" if none.
-func (h HouseIntent) RoomURL() string {
-	if h.Room == "" {
-		return ""
-	}
-	return "/#room=" + h.Room
-}
-
 // EgressTokens are the placeholders the embedded Markdown guides carry for
 // the egress rule, with their values from prices.json. build.py substitutes
 // the same names into the landing page.

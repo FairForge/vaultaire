@@ -48,7 +48,7 @@ td.num, th.num { text-align: right; }
   <h1>{{if .IsRefund}}Credit note{{else}}Receipt{{end}} {{.InvoiceNumber}} <span class="paid{{if .IsRefund}} refund{{end}}">{{if .IsRefund}}REFUNDED{{else}}PAID{{end}}</span></h1>
   <p class="meta">
     {{if .IsRefund}}Refunded{{else}}Paid{{end}} on <strong>{{.PaidAt}}</strong><br>
-    Billed to <strong>{{.Email}}</strong>{{if .House}}<br>House: {{.House}}{{end}}{{if .Period}}<br>Period: {{.Period}}{{end}}
+    Billed to <strong>{{.Email}}</strong>{{if .House}}<br>Plan: {{.House}}{{end}}{{if .Period}}<br>Period: {{.Period}}{{end}}
   </p>
   <table>
     <thead><tr><th>Line</th><th class="num">Size</th><th class="num">{{if .House}}Per month{{else}}Amount{{end}}</th></tr></thead>

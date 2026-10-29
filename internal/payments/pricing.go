@@ -39,7 +39,7 @@ func ValidateHouseOrder(o Order) error {
 		return errors.New("the house is empty: add at least one box")
 	}
 	if o.PinHot > o.Std {
-		return errors.New("pin-hot covers downstairs only, so it cannot exceed the downstairs TB")
+		return errors.New("pin-hot covers Standard only, so it cannot exceed the Standard TB")
 	}
 	return nil
 }
@@ -48,7 +48,7 @@ func ValidateHouseOrder(o Order) error {
 
 // QuoteLine is one receipt line.
 type QuoteLine struct {
-	Label  string // "Downstairs", "Attic", "Pin-hot"
+	Label  string // "Standard", "Vault", "Pin-hot"
 	TB     int
 	Cents  int64 // per month
 	Detail string
@@ -121,11 +121,11 @@ func QuoteHouse(std, vault, pinHot int, period Period) Quote {
 		q.Lines = append(q.Lines, QuoteLine{Label: label, TB: tb, Cents: c, Detail: detail})
 		q.MonthlyCents += c
 	}
-	add("Downstairs", std, int64(std)*UnitCents(LineStandard, period), "Standard")
+	add("Standard", std, int64(std)*UnitCents(LineStandard, period), "opens instantly")
 	if period == PeriodMonthly {
-		add("Attic", vault, vaultMonthlyCents(vault), "Vault, back in minutes")
+		add("Vault", vault, vaultMonthlyCents(vault), "on tape, back in minutes")
 	} else {
-		add("Attic", vault, int64(vault)*UnitCents(LineVault, period), "Vault, back in minutes")
+		add("Vault", vault, int64(vault)*UnitCents(LineVault, period), "on tape, back in minutes")
 	}
 	add("Pin-hot", pinHot, int64(pinHot)*UnitCents(LinePinHot, period), "never moves to tape")
 	q.ChargeCents = q.MonthlyCents

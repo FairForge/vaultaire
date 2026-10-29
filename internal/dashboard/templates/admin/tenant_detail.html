@@ -39,7 +39,7 @@
         <div class="card-value" style="font-size:1rem">{{.CreatedFmt}}</div>
     </div>
     <div class="card">
-        <div class="card-title">House</div>
+        <div class="card-title">Plan</div>
         <div class="card-value" style="font-size:1rem">
             <span class="badge badge-{{.HouseStateClass}}">{{.HouseStateLabel}}</span>
         </div>
@@ -149,7 +149,7 @@
 
 <div class="card" id="billing-section">
     <div class="card-title">Billing</div>
-    <p class="card-detail">{{if .BillingSentence}}{{.BillingSentence}}{{else}}No house: the free tier.{{end}}</p>
+    <p class="card-detail">{{if .BillingSentence}}{{.BillingSentence}}{{else}}No plan: the free tier.{{end}}</p>
     {{if .BillingPayments}}
     <table class="comparison-table" style="margin-bottom:1rem">
         <thead><tr><th>Number</th><th>Date</th><th>Kind</th><th>Status</th><th>Provider</th><th>Amount</th><th>For</th><th>Id</th></tr></thead>
@@ -163,7 +163,7 @@
 
     <div id="billing-payment-feedback"></div>
     <form hx-post="/admin/tenants/{{.TenantID}}/billing/payment" hx-target="#billing-payment-feedback" hx-swap="innerHTML" style="margin-top:1rem">
-        <div class="card-detail"><strong>Record a manual payment</strong> (a wire, a support credit): settles a numbered ledger row and grants or extends the house by one period. A tenant with no house must be given one (TB per floor).</div>
+        <div class="card-detail"><strong>Record a manual payment</strong> (a wire, a support credit): settles a numbered ledger row and grants or extends the plan by one period. A tenant with no house must be given one (TB per floor).</div>
         <div class="form-row">
             <label>Amount (USD)</label><input type="text" name="amount" value="" placeholder="53.88" class="form-input-sm" required>
             <label>Period</label>
@@ -175,13 +175,13 @@
         <div class="form-row">
             <label>Note</label><input type="text" name="note" placeholder="wire ref" class="form-input-sm">
             <label>Reason (required)</label><input type="text" name="reason" class="form-input-sm" required>
-            <button type="submit" class="btn btn-sm btn-primary" hx-confirm="Record this payment and extend the house?">Record payment</button>
+            <button type="submit" class="btn btn-sm btn-primary" hx-confirm="Record this payment and extend the plan?">Record payment</button>
         </div>
     </form>
 
     <div id="billing-entitlement-feedback"></div>
     <form hx-post="/admin/tenants/{{.TenantID}}/billing/entitlement" hx-target="#billing-entitlement-feedback" hx-swap="innerHTML" style="margin-top:1rem">
-        <div class="card-detail"><strong>Adjust the entitlement</strong>: set paid-through and/or the house by hand. This is the one writer that may shorten a date.</div>
+        <div class="card-detail"><strong>Adjust the entitlement</strong>: set paid-through and/or the plan by hand. This is the one writer that may shorten a date.</div>
         <div class="form-row">
             <label>Paid through (UTC)</label><input type="date" name="paid_through" class="form-input-sm">
             <label>Std TB</label><input type="number" name="std_tb" min="0" value="0" class="form-input-sm">

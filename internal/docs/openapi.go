@@ -690,8 +690,8 @@ func generateAuthPaths() map[string]*PathItem {
 			Post: withBody(publicOp("Site", "Count one named click on the public site", "SitePing",
 				"The landing page's `navigator.sendBeacon` target. Counts the event into the day's cookieless site "+
 					"statistics (page, referring host, campaign labels, country from Cloudflare, device class, totals only, no identifier). "+
-					"Event names come from a closed list (`builder.edit`, `builder.attic`, `builder.share`, `builder.save`, `builder.pack`, "+
-					"`build.view`, `pricing.view`, `calc.move`, `age.scrub`, `copy`, `waitlist.submit`, `cta.register`, `uc.*`, `res.*`); "+
+					"Event names come from a closed list (`builder.edit`, `build.view`, `pricing.view`, `copy`, `waitlist.submit`, "+
+					"`cta.register`, `res.rclone`, `res.restic`, `res.awscli`, `res.cyberduck`, `res.sdk`); "+
 					"anything else, and any non-browser user agent, is ignored with the same 204 so the page never sees an error.",
 				map[string]Response{
 					"204": {Description: "Counted, or ignored"},
@@ -2030,7 +2030,7 @@ func generateJSONSchemas() map[string]Schema {
 			"email":        str("Email address (required, at most 320 characters)"),
 			"std_tb":       str("Standard-tier TB planned on the landing page (number or numeric string)"),
 			"vault_tb":     str("Vault-tier TB planned (number or numeric string)"),
-			"room":         str("Share-link room of the house built on the landing page"),
+			"room":         str("Retired: the landing page always sends it empty since 2026-10-29 (it was the share link of the old house builder); still accepted"),
 			"referrer":     str("document.referrer host; the Referer header is the fallback"),
 			"utm_source":   str(""),
 			"utm_medium":   str(""),
@@ -2072,7 +2072,7 @@ func generateJSONSchemas() map[string]Schema {
 			"storage_limit":                   integer("Bytes"),
 			"usage_percent":                   number("used / limit × 100"),
 			"bandwidth_used":                  integer("Bytes; omitted when zero"),
-			"egress_allowance":                integer("This month's egress allowance in bytes: 0.5 × the downstairs (Standard) quota + 1 × the attic (Vault) quota, or the override an operator set"),
+			"egress_allowance":                integer("This month's egress allowance in bytes: 0.5 × the Standard quota + 1 × the Vault quota, or the override an operator set"),
 			"egress_used":                     integer("Bytes downloaded this UTC calendar month (S3 GetObject and public-bucket CDN bodies, responses in flight included). Uploads never count"),
 			"egress_throttled":                boolean("True when the allowance is used up and downloads are being rate-limited"),
 			"egress_rate_limit_bytes_per_sec": integer("The total download rate that applies to the account past the allowance"),
@@ -2434,8 +2434,8 @@ func generateJSONSchemas() map[string]Schema {
 			})),
 		}, "dry_run", "rows", "resolved", "nowhere", "ambiguous", "errors", "remaining", "by_backend", "details"),
 		"HouseOrder": object("A house: whole TB per floor", map[string]*Schema{
-			"std_tb":     {Type: "integer", Description: "Downstairs (Standard) TB"},
-			"vault_tb":   {Type: "integer", Description: "Attic (Vault) TB"},
+			"std_tb":     {Type: "integer", Description: "Standard TB"},
+			"vault_tb":   {Type: "integer", Description: "Vault TB"},
 			"pin_hot_tb": {Type: "integer", Description: "TB pinned hot (at most std_tb)"},
 			"period":     strEnum("Optional; the payment's period when absent", "annual", "monthly"),
 		}),

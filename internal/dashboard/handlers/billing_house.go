@@ -89,15 +89,14 @@ type HouseView struct {
 	UsedStdFmt, UsedVaultFmt string
 	MinStd, MinVault         int // whole-TB floors the steppers cannot go below (usage)
 
-	Quote   payments.Quote
-	Prices  landing.Prices
-	RoomURL string
+	Quote  payments.Quote
+	Prices landing.Prices
 }
 
 // populateHouse fills data["House"] and data["HouseSentence"]. With the
 // flag off the section is disabled (the sentence still shows). add is the
-// overview's "add a box" nudge: "downstairs" or "attic" pre-increments that
-// floor's stepper by one. The house comes from the entitlement record
+// overview's "add a box" nudge: "standard" or "vault" (the older
+// "downstairs" / "attic" links still work) pre-increments that stepper by one. The house comes from the entitlement record
 // (payments.Status) and nothing else (WP-PAY-7: the tenants columns are
 // no longer read — a house without a row is no house).
 func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.Service, data map[string]any, tenantID, add string) {
@@ -143,7 +142,6 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 	}
 	v.HasHouse = st.Granted
 	order, period := st.Entitlement.Order, string(st.Entitlement.Order.Period)
-	v.RoomURL = landing.HouseIntent{Room: h.intent.Room}.RoomURL()
 	v.UsedStd, v.UsedVault = h.usedStd, h.usedVault
 	v.UsedStdFmt, v.UsedVaultFmt = formatBytes(h.usedStd), formatBytes(h.usedVault)
 	if v.HasHouse {
@@ -159,9 +157,9 @@ func populateHouse(ctx context.Context, db *sql.DB, svc HouseBilling, fl *flags.
 		}
 	}
 	switch add {
-	case "downstairs":
+	case "standard", "downstairs":
 		v.Std++
-	case "attic":
+	case "vault", "attic":
 		v.Vault++
 	}
 	v.Quote = payments.QuoteHouse(v.Std, v.Vault, v.PinHot, payments.Period(v.Period))
@@ -233,7 +231,7 @@ func houseSentence(st payments.Status, endsAtDate bool) string {
 		via = e.Provider
 	}
 	if !st.Granted {
-		return fmt.Sprintf("Your house ended on %s; your data is untouched.", e.PaidThrough.UTC().Format("2 Jan 2006"))
+		return fmt.Sprintf("Your plan ended on %s; your data is untouched.", e.PaidThrough.UTC().Format("2 Jan 2006"))
 	}
 	renew := "renews automatically"
 	if e.Renewal == payments.RenewalPrepaid {
@@ -249,13 +247,13 @@ func houseSentence(st payments.Status, endsAtDate bool) string {
 			e.PaidThrough.UTC().Format("2 Jan 2006"), via, payWord(e.PendingProvider), payWord(e.PendingProvider),
 			e.PaidThrough.Add(-payments.ReminderLead).UTC().Format("2 Jan 2006"))
 		if endsAtDate {
-			s += fmt.Sprintf(" Your house ends on %s unless the %s payment arrives.", e.PaidThrough.UTC().Format("2 Jan 2006"), payWord(e.PendingProvider))
+			s += fmt.Sprintf(" Your plan ends on %s unless the %s payment arrives.", e.PaidThrough.UTC().Format("2 Jan 2006"), payWord(e.PendingProvider))
 		}
 	} else if endsAtDate {
-		s += fmt.Sprintf(" Your house ends on %s unless you renew.", e.PaidThrough.UTC().Format("2 Jan 2006"))
+		s += fmt.Sprintf(" Your plan ends on %s unless you renew.", e.PaidThrough.UTC().Format("2 Jan 2006"))
 	}
 	if st.InGrace {
-		s += fmt.Sprintf(" The date has passed: the house is kept until %s while payment catches up.", st.GraceEnds.UTC().Format("2 Jan 2006"))
+		s += fmt.Sprintf(" The date has passed: your plan is kept until %s while payment catches up.", st.GraceEnds.UTC().Format("2 Jan 2006"))
 	}
 	return s
 }
@@ -375,7 +373,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			Period: payments.Period(strings.TrimSpace(r.FormValue("period"))),
 		}
 		if err := payments.ValidateHouseOrder(order); err != nil {
-			back(w, r, "error", "That house can't be ordered: "+err.Error()+".")
+			back(w, r, "error", "That plan can't be ordered: "+err.Error()+".")
 			return
 		}
 		if svc == nil || db == nil {
@@ -406,16 +404,16 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			// Resize. The period is fixed for the life of the subscription
 			// and a floor cannot shrink below what is stored on it.
 			if string(order.Period) != period {
-				back(w, r, "error", fmt.Sprintf("Your house is billed %s; to switch, email %s.", periodWord(period), hosts.Get().SupportEmail()))
+				back(w, r, "error", fmt.Sprintf("Your plan is billed %s; to switch, email %s.", periodWord(period), hosts.Get().SupportEmail()))
 				return
 			}
 			if order.Std < wholeTBUp(h.usedStd) {
-				back(w, r, "error", fmt.Sprintf("Downstairs holds %s right now, so it can't go below %d TB. Put things in the attic or delete them first.",
+				back(w, r, "error", fmt.Sprintf("Standard holds %s right now, so it can't go below %d TB. Move things to Vault or delete them first.",
 					formatBytes(h.usedStd), wholeTBUp(h.usedStd)))
 				return
 			}
 			if order.Vault < wholeTBUp(h.usedVault) {
-				back(w, r, "error", fmt.Sprintf("The attic holds %s right now, so it can't go below %d TB. Bring things downstairs or delete them first.",
+				back(w, r, "error", fmt.Sprintf("Vault holds %s right now, so it can't go below %d TB. Move things to Standard or delete them first.",
 					formatBytes(h.usedVault), wholeTBUp(h.usedVault)))
 				return
 			}
@@ -432,14 +430,14 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 				http.Redirect(w, r, out.RedirectURL, http.StatusSeeOther) // #nosec G710 -- URL from the payment provider
 				return
 			}
-			middleware.SetFlash(w, "success", fmt.Sprintf("Your house is now %s · %s/mo billed %s.",
+			middleware.SetFlash(w, "success", fmt.Sprintf("Your plan is now %s · %s/mo billed %s.",
 				houseWords(order), quote.Monthly(), periodWord(string(order.Period))))
 			http.Redirect(w, r, "/dashboard/billing?resized=1", http.StatusSeeOther)
 			return
 		}
 
 		if h.legacy {
-			back(w, r, "error", fmt.Sprintf("This account is on a legacy plan (%s). Email %s and we will move it to a house — nothing changes until we do.", h.plan, hosts.Get().SupportEmail()))
+			back(w, r, "error", fmt.Sprintf("This account is on a legacy plan (%s). Email %s and we will move it to a per-TB plan — nothing changes until we do.", h.plan, hosts.Get().SupportEmail()))
 			return
 		}
 
@@ -460,7 +458,7 @@ func HandleHouseCheckout(svc HouseBilling, db *sql.DB, fl *flags.Service, baseUR
 			// The provider is the source of truth for "already paying": a
 			// checkout completed seconds ago (webhook not yet landed) must
 			// not get a second subscription (Review R10-05).
-			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your house below. If it does not appear, email "+hosts.Get().SupportEmail()+".")
+			back(w, r, "error", "You already have a subscription on this account — give the page a minute to catch up, then resize your plan below. If it does not appear, email "+hosts.Get().SupportEmail()+".")
 			return
 		case err != nil:
 			logger.Error("start house checkout", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("provider", provider))
@@ -503,7 +501,7 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 		provider, _ := renewOffer(r.Context(), svc, sd.TenantID, st)
 		if provider == "" {
 			if st.Found && st.Granted && st.Entitlement.Renewal == payments.RenewalAuto {
-				back(w, r, "error", "Your house renews by itself; there is nothing to renew by hand. Manage Payment changes the card or stops the renewal.")
+				back(w, r, "error", "Your plan renews by itself; there is nothing to renew by hand. Manage Payment changes the card or stops the renewal.")
 			} else {
 				back(w, r, "error", "Renewal isn't open right now. Email "+hosts.Get().SupportEmail()+" and we will help.")
 			}
@@ -550,7 +548,7 @@ func HandleRenewHouse(svc HouseBilling, db *sql.DB, baseURL string, logger *zap.
 			back(w, r, "error", "Renewal isn't open yet. Email "+hosts.Get().SupportEmail()+" and we will set it up by hand.")
 			return
 		case errors.Is(err, payments.ErrLiveSubscription):
-			back(w, r, "error", "You already have a subscription on this account that renews the house. If it does not show here, email "+hosts.Get().SupportEmail()+".")
+			back(w, r, "error", "You already have a subscription on this account that renews the plan. If it does not show here, email "+hosts.Get().SupportEmail()+".")
 			return
 		case err != nil:
 			logger.Error("start house renewal", zap.Error(err), zap.String("tenant", sd.TenantID), zap.String("provider", provider))
@@ -583,7 +581,7 @@ func refusedForProvider(w http.ResponseWriter, r *http.Request, err error) bool 
 	case errors.Is(err, payments.ErrProviderDisabled):
 		code, title, msg = "provider_disabled", "This way of paying is switched off", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
 	case errors.Is(err, payments.ErrOtherProviderLive):
-		code, title, msg = "other_provider_live", "Your house is renewed another way", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
+		code, title, msg = "other_provider_live", "Your plan is renewed another way", "Your plan is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
 	case errors.Is(err, payments.ErrCryptoInvoiceOpen):
 		until := "a day after it was opened"
 		var open *payments.OpenInvoiceError
@@ -593,7 +591,7 @@ func refusedForProvider(w http.ResponseWriter, r *http.Request, err error) bool 
 		code, title = "crypto_invoice_open", "A bitcoin invoice is still open"
 		switch {
 		case open != nil && open.Paid:
-			msg = "The bitcoin invoice on your account already holds a payment, so it can't be cancelled — it is left to settle, and its period is added to your house. " +
+			msg = "The bitcoin invoice on your account already holds a payment, so it can't be cancelled — it is left to settle, and its period is added to your plan. " +
 				"It can settle until " + until + "; wait until then before paying by card, otherwise you could pay twice. Nothing was started or charged."
 		default:
 			msg = "A bitcoin invoice on your account can still be paid until " + until +
@@ -758,14 +756,14 @@ func periodWord(p string) string {
 	return "yearly"
 }
 
-// houseWords says a house the way the site does: "5 TB downstairs, 2 TB in the attic".
+// houseWords says a plan the way the site does: "5 TB Standard, 2 TB Vault".
 func houseWords(o payments.Order) string {
 	var parts []string
 	if o.Std > 0 {
-		parts = append(parts, fmt.Sprintf("%d TB downstairs", o.Std))
+		parts = append(parts, fmt.Sprintf("%d TB Standard", o.Std))
 	}
 	if o.Vault > 0 {
-		parts = append(parts, fmt.Sprintf("%d TB in the attic", o.Vault))
+		parts = append(parts, fmt.Sprintf("%d TB Vault", o.Vault))
 	}
 	if o.PinHot > 0 {
 		parts = append(parts, fmt.Sprintf("%d TB pinned hot", o.PinHot))

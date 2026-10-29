@@ -40,11 +40,11 @@
 
     <div class="card">
         <div class="card-title">Floor</div>
-        <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 0.5rem;">Where new objects in this bucket go. Downstairs opens instantly; the attic is put away and back in minutes. Moving a bucket does not move what is already in it.</p>
+        <p class="text-muted" style="font-size: 0.85rem; margin-bottom: 0.5rem;">Where new objects in this bucket go. Standard opens instantly; Vault is kept on tape and back in minutes. Moving a bucket does not move what is already in it.</p>
         <div class="toggle-group">
             <label class="toggle-label">
                 <input type="radio" name="tier_preference" value="auto" {{if eq .TierPreference "auto"}}checked{{end}}>
-                <span class="toggle-option{{if eq .TierPreference "auto"}} toggle-active{{end}}">Auto (downstairs)</span>
+                <span class="toggle-option{{if eq .TierPreference "auto"}} toggle-active{{end}}">Auto (Standard)</span>
             </label>
             <label class="toggle-label">
                 <input type="radio" name="tier_preference" value="performance" {{if eq .TierPreference "performance"}}checked{{end}}>
@@ -52,18 +52,18 @@
             </label>
             <label class="toggle-label">
                 <input type="radio" name="tier_preference" value="standard" {{if eq .TierPreference "standard"}}checked{{end}}>
-                <span class="toggle-option{{if eq .TierPreference "standard"}} toggle-active{{end}}">Downstairs (Standard)</span>
+                <span class="toggle-option{{if eq .TierPreference "standard"}} toggle-active{{end}}">Standard</span>
             </label>
             <label class="toggle-label">
                 <input type="radio" name="tier_preference" value="archive" {{if eq .TierPreference "archive"}}checked{{end}}>
-                <span class="toggle-option{{if eq .TierPreference "archive"}} toggle-active{{end}}">Attic (Vault)</span>
+                <span class="toggle-option{{if eq .TierPreference "archive"}} toggle-active{{end}}">Vault</span>
             </label>
         </div>
         <div class="text-muted" style="margin-top: 0.5rem; font-size: 0.85rem;">
-            {{if eq .TierPreference "auto"}}Downstairs, and we tidy: rarely opened objects are parked cheaper behind the scenes and come back hot when read. Counts against your downstairs TB.
-            {{else if eq .TierPreference "performance"}}Always hot, never tidied. Not for sale until after launch; until then it behaves like downstairs.
-            {{else if eq .TierPreference "standard"}}Downstairs: opens instantly. Counts against your downstairs TB.
-            {{else if eq .TierPreference "archive"}}The attic: put away on tape, back in minutes when you open it. Counts against your attic TB.
+            {{if eq .TierPreference "auto"}}Standard, and we tidy: rarely opened objects are parked cheaper behind the scenes and come back hot when read. Counts against your Standard TB.
+            {{else if eq .TierPreference "performance"}}Always hot, never tidied. Not for sale until after launch; until then it behaves like Standard.
+            {{else if eq .TierPreference "standard"}}Standard: opens instantly. Counts against your Standard TB.
+            {{else if eq .TierPreference "archive"}}Vault: kept on tape, a restore takes minutes to start. Counts against your Vault TB.
             {{end}}
         </div>
     </div>

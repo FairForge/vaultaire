@@ -34,7 +34,7 @@
                 <th>Size</th>
                 <th>Type</th>
                 <th>Last Modified</th>
-                {{if .HasArchived}}<th>Attic</th>{{end}}
+                {{if .HasArchived}}<th>Vault</th>{{end}}
                 {{if .CDNBaseURL}}<th>Preview</th>
                 <th>CDN URL</th>{{end}}
             </tr>
@@ -61,7 +61,7 @@
                 <td>{{.LastModifiedFmt}}</td>
                 {{if $.HasArchived}}<td>{{if .IsArchived}}
                     <span hx-get="/dashboard/buckets/{{$.BucketName}}/restore-status?key={{.Key | urlquery}}"
-                          hx-trigger="load" hx-swap="innerHTML" class="text-muted">in the attic</span>
+                          hx-trigger="load" hx-swap="innerHTML" class="text-muted">on Vault</span>
                     <form method="post" action="/dashboard/buckets/{{$.BucketName}}/restore" style="display:inline;margin-left:0.4rem;">
                         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                         <input type="hidden" name="key" value="{{.Key}}">

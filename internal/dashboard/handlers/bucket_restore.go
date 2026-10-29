@@ -101,7 +101,7 @@ func HandleRestoreObject(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger)
 		}
 
 		middleware.SetFlash(w, "success",
-			"Bringing "+key+" down from the attic — it is usually back within minutes and stays downstairs for "+
+			"Restoring "+key+" from Vault — it is usually readable within minutes and stays readable for "+
 				fmt.Sprintf("%d", dashboardRestoreDays)+" days.")
 		http.Redirect(w, r, backURL, http.StatusSeeOther)
 	}
@@ -120,13 +120,13 @@ func HandleObjectRestoreStatus(eng *engine.CoreEngine, db *sql.DB, logger *zap.L
 		key := r.URL.Query().Get("key")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if key == "" || db == nil {
-			_, _ = w.Write([]byte(`<span class="text-muted">in the attic</span>`))
+			_, _ = w.Write([]byte(`<span class="text-muted">on Vault</span>`))
 			return
 		}
 
 		restorer, err := objectRestorerFor(r.Context(), eng, db, sd.TenantID, bucket, key)
 		if err != nil || restorer == nil {
-			_, _ = w.Write([]byte(`<span class="text-muted">in the attic</span>`))
+			_, _ = w.Write([]byte(`<span class="text-muted">on Vault</span>`))
 			return
 		}
 
@@ -134,16 +134,16 @@ func HandleObjectRestoreStatus(eng *engine.CoreEngine, db *sql.DB, logger *zap.L
 		st, stErr := restorer.RestoreStatus(ctx, archiveContainer(sd.TenantID, bucket), key)
 		if stErr != nil {
 			logger.Debug("dashboard restore status failed", zap.Error(stErr))
-			_, _ = w.Write([]byte(`<span class="text-muted">in the attic</span>`))
+			_, _ = w.Write([]byte(`<span class="text-muted">on Vault</span>`))
 			return
 		}
 		switch {
 		case strings.Contains(st.Restore, `ongoing-request="true"`):
-			_, _ = w.Write([]byte(`<span title="Coming down from the attic — typically minutes">coming down&hellip;</span>`))
+			_, _ = w.Write([]byte(`<span title="Restoring from Vault — typically minutes">restoring&hellip;</span>`))
 		case strings.Contains(st.Restore, `ongoing-request="false"`):
-			_, _ = w.Write([]byte(`<span title="Downstairs for now — goes back up after a while">down &#10003;</span>`))
+			_, _ = w.Write([]byte(`<span title="Readable for now — returns to tape after a while">restored &#10003;</span>`))
 		default:
-			_, _ = w.Write([]byte(`<span class="text-muted" title="Bring it down to read this object">in the attic</span>`))
+			_, _ = w.Write([]byte(`<span class="text-muted" title="Restore it to read this object">on Vault</span>`))
 		}
 	}
 }
