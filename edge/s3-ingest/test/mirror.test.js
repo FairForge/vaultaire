@@ -235,3 +235,32 @@ test("putTwo: a mirror that keeps up is not cut (both legs, the lag never past 1
     pb.s.close();
   }
 });
+
+// 0.5.1's regression (found on prod 2026-10-28 23:58 UTC, rolled back at
+// 23:59): putTwo's counting streams have no known length, so workerd sent
+// both PUTs chunked with no Content-Length and iDrive answered 411. Where
+// the runtime has FixedLengthStream, each body goes through one of the
+// admitted length (Node's fetch sends the header anyway: this stand-in
+// records that putTwo asked).
+test("putTwo: each body has the admitted length where the runtime has FixedLengthStream", async () => {
+  const made = [];
+  class FakeFixedLengthStream extends TransformStream {
+    constructor(n) { super(); made.push(n); }
+  }
+  globalThis.FixedLengthStream = FakeFixedLengthStream;
+  const a = [];
+  const b = [];
+  const pa = await listen(store(a));
+  const pb = await listen(store(b));
+  try {
+    const { bytes, stream } = body(2 << 20);
+    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    assert.equal(r.resp.status, 200);
+    assert.deepEqual(made, [bytes.length, bytes.length], "the primary's body and the mirror's, each of the admitted length");
+    assert.deepEqual(b[0], Buffer.from(bytes));
+  } finally {
+    delete globalThis.FixedLengthStream;
+    pa.s.close();
+    pb.s.close();
+  }
+});
