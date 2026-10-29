@@ -13,8 +13,14 @@ Wants=postgresql.service
 
 [Service]
 Type=simple
-User=user1
-Group=user1
+# A dedicated system user (no shell, no home; Stage 1a Prompt 52E — F-14's
+# code prerequisite: the master-key credential is decrypted for this unit
+# and readable by this user only). deploy/scripts/vaultaire-user-install.sh
+# creates it and hands it data/, bin/ and the read of configs/.env
+# (root:vaultaire 0640; user1 is a member for the deploy's migrations and
+# pg-backup.sh). Rollback: that script's --rollback (User=user1 again).
+User=vaultaire
+Group=vaultaire
 WorkingDirectory=/opt/vaultaire
 EnvironmentFile=/opt/vaultaire/configs/.env
 # The encryption master key (docs/ENCRYPTION.md "Setting the master key";
