@@ -33,6 +33,7 @@ var validEventTypes = []string{
 	"sts.token_created",
 	"webhook.test",
 	"bandwidth.alert",
+	"tenant.created", // WP-PLAT-1: a platform made a child tenant
 }
 
 func isValidEventType(t string) bool {

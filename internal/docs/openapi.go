@@ -1206,7 +1206,7 @@ func generateWebhookPaths() map[string]*PathItem {
 	eventTypes := strEnum("Event types the endpoint receives: exact names, `prefix.*`, or `*` for everything",
 		"*", "object.*", "bucket.*", "key.*", "sts.*", "webhook.*", "bandwidth.*",
 		"object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted",
-		"key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert")
+		"key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert", "tenant.*", "tenant.created")
 
 	return map[string]*PathItem{
 		"/api/v1/webhooks": {
@@ -2276,7 +2276,7 @@ func generateJSONSchemas() map[string]Schema {
 		"Event": object("A tenant event; webhooks receive `{id, type, tenant_id, data, created_at}`", map[string]*Schema{
 			"object":     strEnum("", "event"),
 			"id":         str("Event id (UUID)"),
-			"type":       strEnum("", "object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted", "key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert"),
+			"type":       strEnum("", "object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted", "key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert", "tenant.created"),
 			"data":       freeObject("Type-specific payload"),
 			"created_at": dateTime(""),
 		}, "object", "id", "type", "data", "created_at"),
