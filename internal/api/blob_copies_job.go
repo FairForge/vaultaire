@@ -88,12 +88,18 @@ const (
 	blobCopyDeleted  = "deleted"  // a stale copy removed from its leg, row gone
 	blobCopySkipped  = "skipped"  // a leg or source unregistered or its breaker open
 	blobCopyCut      = "cut"      // a host cut a mirror that fell behind the primary (RP76-2)
+	// blobCopySettled: a mirror that outlived the primary's answer settled
+	// ready after the commit (RP78-2).
+	blobCopySettled = "settled"
+	// blobCopyUnbudgeted: a host's byte budget could not spare a mirror's
+	// buffer; the PUT went unmirrored and the copy is owed (RP78-1).
+	blobCopyUnbudgeted = "unbudgeted"
 )
 
 var (
 	blobCopiesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_total",
-		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open) | cut (a host cut a mirrored write's mirror leg loose for falling 16 MiB behind the primary or not answering 5 s after it — RP76-2; the copy is then owed).",
+		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open) | cut (a host cut a mirrored write's mirror leg loose for falling 16 MiB behind the primary or not answering within its bound — RP76-2; the copy is then owed) | settled (a mirror that outlived the primary's answer settled ready after the commit through POST /api/v1/edge/mirror — RP78-2) | unbudgeted (a host's byte budget could not spare a mirror's buffer and the PUT went unmirrored; the copy is owed — RP78-1).",
 	}, []string{"outcome"})
 	blobCopiesReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_reads_total",
@@ -106,7 +112,7 @@ var (
 )
 
 func init() {
-	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped, blobCopyCut} {
+	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped, blobCopyCut, blobCopySettled, blobCopyUnbudgeted} {
 		blobCopiesTotal.WithLabelValues(o)
 	}
 	blobCopiesReads.WithLabelValues("served_mirror")

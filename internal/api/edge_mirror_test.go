@@ -29,6 +29,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/crypto"
+	"github.com/FairForge/vaultaire/internal/dataplane"
 )
 
 // edgeFakeMux routes a link to the fake backend whose host it names.
@@ -154,6 +155,7 @@ func TestEdgeMirror_TheGoHostSendsTheBodyToBothLegs(t *testing.T) {
 	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/tee.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.Relay.Status, res.Relay.Body)
+	host.WaitMirrors() // the settle runs after the answer (RP78-2)
 	sk := res.Admit.StorageKey
 	assert.True(t, f.drv.has(f.tenantID, f.container(), sk))
 	assert.True(t, m.has(f.tenantID, f.container(), sk), "the same bytes on the leg")
@@ -165,6 +167,7 @@ func TestEdgeMirror_TheGoHostSendsTheBodyToBothLegs(t *testing.T) {
 	res, err = host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/tee2.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.Relay.Status, "a failing mirror never fails the client's PUT")
+	host.WaitMirrors() // the settle runs after the answer (RP78-2)
 	_, ok := f.head("tee2.bin")
 	assert.True(t, ok)
 	var state string
@@ -355,6 +358,7 @@ func TestEdgeMirror_AReadThePrimaryCannotServeComesFromTheMirror(t *testing.T) {
 	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/r.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.Relay.Status)
+	host.WaitMirrors() // the settle runs after the answer (RP78-2)
 	sk := res.Admit.StorageKey
 	require.Equal(t, "ready", f.copyState(sk))
 
@@ -415,6 +419,7 @@ func TestRoutingTruth_SamplesMirrorCopies(t *testing.T) {
 	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/rt.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, res.Relay.Status)
+	host.WaitMirrors() // the settle runs after the answer (RP78-2)
 
 	c := NewRoutingTruthChecker(f.db, f.srv.engine, nil, zap.NewNop())
 	c.scopeTenant, c.JobName = f.tenantID, "rt_copies_"+f.tenantID
@@ -688,4 +693,123 @@ func TestBlobCopiesJob_LoopsWhileTimeRemains(t *testing.T) {
 	var pending int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM blob_copies WHERE tenant_id = $1 AND state = 'pending'`, f.tenantID).Scan(&pending))
 	assert.Zero(t, pending)
+}
+
+// settle is POST /api/v1/edge/mirror.
+func (f *edgeFixture) settle(req dataplane.MirrorSettle) (dataplane.MirrorSettleResponse, int) {
+	f.t.Helper()
+	w := f.call("/api/v1/edge/mirror", req, f.token)
+	var resp dataplane.MirrorSettleResponse
+	if w.Code == http.StatusOK {
+		require.NoError(f.t, json.Unmarshal(w.Body.Bytes(), &resp))
+	}
+	return resp, w.Code
+}
+
+// RP78-2: a mirrored PUT commits at the primary's answer (mirror_settle),
+// its copy pending; the mirror's settle after the commit makes it ready.
+// A DELETE between the commit and the settle leaves no ready row: the
+// leg's bytes are queued for the collector on the leg. A second settle is
+// idempotent; an unknown admit is 404.
+func TestEdgeMirror_SettleAfterCommit(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(9000)
+
+	resp := f.admit(f.signed("/"+f.bucket+"/settle.bin", nil, body, nil, ""))
+	require.Len(t, resp.URLs, 2)
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c := okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorSettle = true
+	relay, _ := f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Equal(t, "pending", f.copyState(resp.StorageKey), "owed until the settle")
+
+	b := m.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	before := promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopySettled))
+	got, code := f.settle(dataplane.MirrorSettle{AdmitID: resp.AdmitID, ETag: b})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "ready", got.State)
+	assert.Equal(t, "ready", f.copyState(resp.StorageKey))
+	assert.Equal(t, before+1, promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopySettled)))
+
+	got, code = f.settle(dataplane.MirrorSettle{AdmitID: resp.AdmitID, ETag: b})
+	require.Equal(t, http.StatusOK, code, "idempotent")
+	assert.Equal(t, "ready", got.State)
+	assert.Equal(t, before+1, promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopySettled)), "counted once")
+
+	// A DELETE between the commit and the settle.
+	resp = f.admit(f.signed("/"+f.bucket+"/gone.bin", nil, body, nil, ""))
+	a = f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c = okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorSettle = true
+	relay, _ = f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	w := f.s3(http.MethodDelete, "/"+f.bucket+"/gone.bin", nil, nil)
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	b = m.workerPut(f.tenantID, f.container(), resp.StorageKey, body) // the mirror lands after
+	got, code = f.settle(dataplane.MirrorSettle{AdmitID: resp.AdmitID, ETag: b})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "retired", got.State)
+	assert.NotEqual(t, "ready", f.copyState(resp.StorageKey), "no ready copy of a deleted object")
+	var reason string
+	require.NoError(t, f.db.QueryRow(`SELECT reason FROM retired_blobs WHERE backend_id = 'edgemirror' AND storage_key = $1`, resp.StorageKey).Scan(&reason),
+		"the leg's address queued on the leg")
+	assert.Equal(t, retiredOrphanWrite, reason)
+
+	// A cut mirror: nothing to settle, the copy owed.
+	resp = f.admit(f.signed("/"+f.bucket+"/cut2.bin", nil, body, nil, ""))
+	a = f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c = okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorSettle = true
+	relay, _ = f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	cutBefore := promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyCut))
+	got, code = f.settle(dataplane.MirrorSettle{AdmitID: resp.AdmitID, Cut: true})
+	require.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "pending", got.State)
+	assert.Equal(t, cutBefore+1, promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyCut)))
+
+	_, code = f.settle(dataplane.MirrorSettle{AdmitID: "00000000-0000-0000-0000-000000000000", ETag: b})
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
+// RP78-1: a host that sent a mirrored PUT unmirrored for want of budget
+// says so; the control plane counts it and the copy is owed.
+func TestEdgeMirror_AnUnbudgetedMirrorIsCountedAndTheCopyOwed(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	body := testBytes(9000)
+	before := promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyUnbudgeted))
+	resp := f.admit(f.signed("/"+f.bucket+"/nb.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c := okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorUnbudgeted = true
+	relay, _ := f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	assert.Equal(t, before+1, promtestutil.ToFloat64(blobCopiesTotal.WithLabelValues(blobCopyUnbudgeted)))
+	assert.Equal(t, "pending", f.copyState(resp.StorageKey))
+}
+
+// RP78-2: the Go host answers at the primary's pace and settles the mirror
+// after (WaitMirrors); the copy ends ready.
+func TestEdgeMirror_TheGoHostSettlesAfterTheAnswer(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	host := f.dataHost()
+	release := make(chan struct{})
+	m.answerHook = func() { <-release }
+	host.Client = &http.Client{Transport: edgeFakeMux{f.drv, m}}
+	body := testBytes(1 << 20)
+	res, err := host.Write(context.Background(), f.signedHTTP(http.MethodPut, "/"+f.bucket+"/late.bin", nil, body, nil), strings.NewReader(string(body)), int64(len(body)))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, res.Relay.Status, res.Relay.Body)
+	assert.Equal(t, "pending", f.copyState(res.Admit.StorageKey), "the client answered before the mirror")
+	close(release)
+	host.WaitMirrors()
+	assert.Equal(t, "ready", f.copyState(res.Admit.StorageKey))
 }

@@ -3,13 +3,21 @@ package dataplane
 // The mirror (WP-EDGE-4, Stage 1a Prompt 48): a mirrored write's body goes
 // to two links at once — the placement's backend and the mirror leg — read
 // ONCE from the client and teed into two request bodies (two io.Pipes). The
-// primary decides the write: a mirror that fails, trails the primary by
-// more than its buffer (mirrorMaxLag, RP76-2) or has not answered
-// mirrorAfter past the primary's answer is cut loose (its request
+// primary decides the write: a mirror that fails or trails the primary by
+// more than its buffer (mirrorMaxLag, RP76-2) is cut loose (its request
 // cancelled, its pipe closed) and the primary goes on alone; the commit
 // then reports no mirror ETag (and mirror_cut) and the copy is the
 // blob_copies job's. A primary that fails ends both. The primary's writes
 // never wait for the mirror: the mirror is fed from its own buffer.
+//
+// The buffer is the host's bytes (RP78-1): putTwo takes mirrorMaxLag +
+// mirrorBudgetSlack from the host's Budget before the tee, within
+// mirrorBudgetWait, and gives it back when the mirror ends; a budget that
+// cannot spare it sends the PUT unmirrored (never a refusal — the mirror
+// is an extra). The primary's answer is the write's (RP78-2): putTwo
+// returns at it, the mirror running on (mirrorRun) within mirrorDeadline; a
+// whole PUT settles it after the commit (POST /api/v1/edge/mirror), a codec
+// chunk waits for it within mirrorAfter (putTwoInline).
 
 import (
 	"context"
@@ -24,8 +32,28 @@ import (
 // buffered for it) before it is cut loose (RP76-2).
 var mirrorMaxLag = 16 << 20
 
-// mirrorAfter is how long the mirror may answer after the primary did.
+// mirrorAfter is how long a codec chunk's mirror may answer after the
+// primary did (putTwoInline); a whole PUT's settles after its commit.
 var mirrorAfter = 5 * time.Second
+
+// mirrorBudgetSlack is the buffer beyond the queue: the copy in flight.
+const mirrorBudgetSlack = 2 << 20
+
+// mirrorBudgetWait is how long a mirrored PUT waits for its buffer before
+// it is sent unmirrored.
+const mirrorBudgetWait = 200 * time.Millisecond
+
+// The mirror's outer bound (the Worker's mirrorDeadlineMs, D-EDGE-46): 30 s
+// plus the body at 2 MiB/s.
+const (
+	mirrorGrace   = 30 * time.Second
+	mirrorMinRate = 2 << 20
+)
+
+// mirrorDeadline is how long a mirror PUT of n bytes may take.
+func mirrorDeadline(n int64) time.Duration {
+	return mirrorGrace + time.Duration(float64(n)/mirrorMinRate*float64(time.Second))
+}
 
 // errMirrorAnswered: the mirror answered; its body is not read any more.
 var errMirrorAnswered = errors.New("data plane: the mirror leg answered")
@@ -159,15 +187,51 @@ type putPair struct {
 	Headers map[string]string
 }
 
-// putTwo PUTs body (n bytes) to both links at once: the primary's response
-// (the caller closes it), the mirror's ETag ("" when the mirror did not
-// store the body), whether the mirror was cut for falling behind (RP76-2),
-// and the primary's error.
-func putTwo(ctx context.Context, client *http.Client, method string, links [2]putPair, n int64, body io.Reader) (*http.Response, string, bool, error) {
-	pa, wa := io.Pipe()
-	pb, wb := io.Pipe()
-	mctx, cancelB := context.WithCancel(ctx)
-	defer cancelB()
+// mirrorRun is a mirror PUT that may outlive the primary's answer. done is
+// closed when it has ended (answered, failed or cut) and its buffer is
+// given back; result is read after.
+type mirrorRun struct {
+	tee  *mirrorTee
+	done chan struct{}
+	etag string
+	// unbudgeted: the budget could not spare the buffer, the PUT went
+	// unmirrored (RP78-1); done is closed.
+	unbudgeted bool
+}
+
+func (m *mirrorRun) finished() bool {
+	select {
+	case <-m.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// cut cuts the mirror loose when it is still running.
+func (m *mirrorRun) cut() {
+	if m.tee != nil {
+		m.tee.cutIfRunning()
+	}
+}
+
+// result is the mirror's ETag ("" when it did not store the body) and
+// whether it was cut; read after done.
+func (m *mirrorRun) result() (string, bool) {
+	if m.tee == nil {
+		return "", false
+	}
+	if m.tee.wasCut() {
+		return "", true
+	}
+	return m.etag, false
+}
+
+// putTwo PUTs body (n bytes) to both links at once and returns at the
+// primary's answer (the caller closes it): the mirror goes on as the
+// mirrorRun, bounded by mirrorDeadline and its lag. A primary that fails
+// cuts the mirror and returns once it has ended. budget nil = no bound.
+func putTwo(ctx context.Context, client *http.Client, method string, links [2]putPair, n int64, body io.Reader, budget Budget) (*http.Response, *mirrorRun, error) {
 	newReq := func(rctx context.Context, l putPair, r io.Reader) (*http.Request, error) {
 		req, err := http.NewRequestWithContext(rctx, method, l.URL, r)
 		if err != nil {
@@ -184,19 +248,46 @@ func putTwo(ctx context.Context, client *http.Client, method string, links [2]pu
 		}
 		return req, nil
 	}
+	alone := func(run *mirrorRun) (*http.Response, *mirrorRun, error) {
+		close(run.done)
+		ra, err := newReq(ctx, links[0], body)
+		if err != nil {
+			return nil, run, err
+		}
+		resp, err := client.Do(ra)
+		return resp, run, err
+	}
+	release := func() {}
+	if budget != nil {
+		bctx, cancel := context.WithTimeout(ctx, mirrorBudgetWait)
+		rel, err := budget.Acquire(bctx, int64(mirrorMaxLag)+mirrorBudgetSlack)
+		cancel()
+		if err != nil {
+			return alone(&mirrorRun{done: make(chan struct{}), unbudgeted: true})
+		}
+		release = rel
+	}
+	pa, wa := io.Pipe()
+	pb, wb := io.Pipe()
+	// The mirror outlives the request that started it (RP78-2): its own
+	// clock, never the client's.
+	mctx, cancelB := context.WithTimeout(context.WithoutCancel(ctx), mirrorDeadline(n))
 	ra, err := newReq(ctx, links[0], pa)
 	if err != nil {
-		return nil, "", false, err
+		cancelB()
+		release()
+		return nil, nil, err
 	}
 	rb, err := newReq(mctx, links[1], pb)
 	if err != nil {
 		// No mirror request: the primary alone.
+		cancelB()
+		release()
 		_ = pa.Close()
-		ra, _ = newReq(ctx, links[0], body)
-		resp, err := client.Do(ra)
-		return resp, "", false, err
+		return alone(&mirrorRun{done: make(chan struct{})})
 	}
 	tee := newMirrorTee(wa, wb, cancelB)
+	run := &mirrorRun{tee: tee, done: make(chan struct{})}
 	go tee.feed()
 	go func() {
 		buf := make([]byte, 1<<20)
@@ -204,45 +295,56 @@ func putTwo(ctx context.Context, client *http.Client, method string, links [2]pu
 		_ = wa.CloseWithError(err)
 		tee.end(err)
 	}()
-	mc := make(chan string, 1)
 	go func() {
+		defer close(run.done)
+		defer release()
+		defer cancelB()
 		resp, err := client.Do(rb)
 		// Answered (or not): the mirror reads no more of the body — a
 		// backend that answered before reading it must not hold the tee.
 		tee.fail()
 		_ = pb.CloseWithError(errMirrorAnswered)
 		if err != nil {
-			mc <- ""
 			return
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		_ = resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			mc <- ""
-			return
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			run.etag = resp.Header.Get("ETag")
 		}
-		mc <- resp.Header.Get("ETag")
 	}()
 	resp, err := client.Do(ra)
 	if err != nil {
 		// The primary failed: the body stops for both.
 		_ = pa.CloseWithError(err)
 		tee.cutIfRunning()
-		<-mc
-		return resp, "", false, err
+		<-run.done
+		return resp, run, err
 	}
-	// The primary answered: the mirror gets mirrorAfter more to answer.
-	timer := time.NewTimer(mirrorAfter)
-	defer timer.Stop()
-	var mirrorETag string
-	select {
-	case mirrorETag = <-mc:
-	case <-timer.C:
-		tee.cutIfRunning()
-		<-mc
+	return resp, run, nil
+}
+
+// putTwoInline is putTwo for a codec chunk: the mirror is waited for within
+// mirrorAfter of the primary's answer, then cut (the chunk's copy row is
+// written by the write's commit, which carries its ETag).
+func putTwoInline(ctx context.Context, client *http.Client, method string, links [2]putPair, n int64, body io.Reader, budget Budget) (*http.Response, MirrorResult, error) {
+	resp, run, err := putTwo(ctx, client, method, links, n, body, budget)
+	if err != nil || run == nil {
+		return resp, MirrorResult{}, err
 	}
-	if tee.wasCut() {
-		return resp, "", true, nil
+	mr := MirrorResult{Unbudgeted: run.unbudgeted}
+	if !run.unbudgeted {
+		timer := time.NewTimer(mirrorAfter)
+		select {
+		case <-run.done:
+		case <-timer.C:
+			run.cut()
+			<-run.done
+		}
+		timer.Stop()
+		// A mirror that answered as the timer fired is not cut (RP78-7):
+		// its ETag is kept.
+		mr.ETag, mr.Cut = run.result()
 	}
-	return resp, mirrorETag, false, nil
+	return resp, mr, nil
 }

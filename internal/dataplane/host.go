@@ -88,9 +88,39 @@ type Host struct {
 	// Budget bounds the chunk plaintext codec writes hold (RP74-6): a
 	// write takes min(codecBatchBytes, its declared length) before it
 	// reads a byte and gives it back at its end; ErrBusy = the client's
-	// 503. nil = no bound (the tests' hosts).
+	// 503. nil = no bound (the tests' hosts). A mirrored PUT's buffer is
+	// taken from it too (RP78-1).
 	Budget Budget
+	// mirrors counts the settles running (WaitMirrors).
+	mirrors sync.WaitGroup
 }
+
+// settleBound is a settle call's own clock.
+const settleBound = 30 * time.Second
+
+// settleMirror reports a mirror that outlived the primary's answer once it
+// has ended (RP78-2): POST /api/v1/edge/mirror with its ETag, or cut. In
+// the background: the client has its answer. A settle that is lost leaves
+// the copy pending — the blob_copies job's.
+func (h *Host) settleMirror(ctx context.Context, admitID string, run *mirrorRun) {
+	h.mirrors.Add(1)
+	go func() {
+		defer h.mirrors.Done()
+		<-run.done // bounded by mirrorDeadline
+		etag, cut := run.result()
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleBound)
+		defer cancel()
+		resp, err := h.CP.Mirror(sctx, MirrorSettle{AdmitID: admitID, ETag: etag, Cut: cut})
+		if err != nil {
+			h.log().Warn("data plane: the mirror's settle was not reported — the copy is the job's", zap.Error(err), zap.String("admit_id", admitID))
+			return
+		}
+		h.log().Info("data plane: mirror settled", zap.String("admit_id", admitID), zap.String("state", resp.State), zap.Bool("cut", cut))
+	}()
+}
+
+// WaitMirrors waits for the settles running (the tests; a node's shutdown).
+func (h *Host) WaitMirrors() { h.mirrors.Wait() }
 
 // Verify is an integrity-checking host's hooks.
 type Verify struct {
@@ -238,6 +268,7 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 	admit := res.Admit
 	started := time.Now()
 	commit := CommitRequest{AdmitID: admit.AdmitID, Outcome: OutcomeEdgeError}
+	var settle *mirrorRun // a mirror still running at the primary's answer
 	method := admit.Method
 	if method == "" {
 		method = http.MethodPut
@@ -272,18 +303,30 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 		mirrored := len(admit.URLs) == 2 && admit.Headers == nil
 		if mirrored {
 			// WP-EDGE-4: the body teed into the placement's link and the
-			// mirror leg's (the same signed headers); the mirror's ETag rides
-			// the commit, its failure only makes the copy the job's.
-			var mirrorETag string
-			var mirrorCut bool
-			resp, mirrorETag, mirrorCut, err = putTwo(ctx, h.client(), method,
+			// mirror leg's (the same signed headers). The primary's answer
+			// is the commit's (RP78-2): a mirror that has ended rides it
+			// (its ETag, or mirror_cut), one still running is settled after
+			// it (settleMirror); a mirror the budget could not take is
+			// mirror_unbudgeted (RP78-1). Its failure only makes the copy
+			// the job's.
+			var run *mirrorRun
+			resp, run, err = putTwo(ctx, h.client(), method,
 				[2]putPair{{URL: admit.URLs[0], Headers: admit.SendHeaders}, {URL: admit.URLs[1], Headers: admit.SendHeaders}},
-				breq.ContentLength, body)
+				breq.ContentLength, body, h.Budget)
 			if err == nil {
-				commit.MirrorCut = mirrorCut
 				commit.BackendETags = []string{resp.Header.Get("ETag")}
-				if mirrorETag != "" {
-					commit.BackendETags = append(commit.BackendETags, mirrorETag)
+				switch {
+				case run.unbudgeted:
+					commit.MirrorUnbudgeted = true
+				case run.finished():
+					etag, cut := run.result()
+					commit.MirrorCut = cut
+					if etag != "" {
+						commit.BackendETags = append(commit.BackendETags, etag)
+					}
+				default:
+					commit.MirrorSettle = true
+					settle = run
 				}
 			}
 		} else {
@@ -313,7 +356,15 @@ func (h *Host) move(ctx context.Context, req *http.Request, body io.Reader, size
 		}
 	}
 	commit.DurationMS = time.Since(started).Milliseconds()
+	if settle != nil && commit.Outcome != OutcomeOK {
+		// The primary did not store it: nothing for the mirror to copy.
+		settle.cut()
+		commit.MirrorSettle = false
+	}
 	res.Relay = h.commitWrite(ctx, commit, desc)
+	if commit.MirrorSettle {
+		h.settleMirror(ctx, admit.AdmitID, settle)
+	}
 	h.log().Info("data plane: move", zap.String("op", desc.Op), zap.String("admit_id", admit.AdmitID), zap.Int64("size", size),
 		zap.String("outcome", commit.Outcome), zap.Int("backend_status", commit.BackendStatus), zap.Int64("ms", commit.DurationMS))
 }
@@ -541,6 +592,7 @@ func (h *Host) storeBatch(ctx context.Context, admit AdmitResponse, batch []code
 					entries[it.idx].BackendETags = append(entries[it.idx].BackendETags, mirror.ETag)
 				}
 				entries[it.idx].MirrorCut = mirror.Cut
+				entries[it.idx].MirrorUnbudgeted = mirror.Unbudgeted
 			}
 		}(it, m)
 	}
@@ -566,6 +618,9 @@ func (h *Host) SealAndStore(ctx context.Context, grant *CodecGrant, c crypto.Chu
 type MirrorResult struct {
 	ETag string
 	Cut  bool
+	// Unbudgeted: the host's budget could not spare the mirror's buffer
+	// and the PUT went unmirrored (RP78-1).
+	Unbudgeted bool
 }
 
 // SealAndStoreMirrored is SealAndStore for a miss with a mirror link too
@@ -602,8 +657,8 @@ func (h *Host) sealAndPut(ctx context.Context, client *http.Client, grant *Codec
 	var resp *http.Response
 	var mr MirrorResult
 	if mirror != "" {
-		resp, mr.ETag, mr.Cut, err = putTwo(ctx, client, http.MethodPut,
-			[2]putPair{{URL: m.URL, Headers: m.SendHeaders}, {URL: mirror, Headers: m.SendHeaders}}, n, sealed)
+		resp, mr, err = putTwoInline(ctx, client, http.MethodPut,
+			[2]putPair{{URL: m.URL, Headers: m.SendHeaders}, {URL: mirror, Headers: m.SendHeaders}}, n, sealed, h.Budget)
 	} else {
 		var req *http.Request
 		req, err = http.NewRequestWithContext(ctx, http.MethodPut, m.URL, sealed)

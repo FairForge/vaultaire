@@ -679,6 +679,9 @@ func (s *Server) settleEdgeCodecChunks(ctx context.Context, row edgeAdmitRow, ch
 					if c.MirrorCut {
 						blobCopiesTotal.WithLabelValues(blobCopyCut).Inc()
 					}
+					if c.MirrorUnbudgeted {
+						blobCopiesTotal.WithLabelValues(blobCopyUnbudgeted).Inc()
+					}
 					state, metag := mirrorCopyState(etag, mirrorETag)
 					if cErr := recordBlobCopy(ctx, s.db, blobCopy{TenantID: row.TenantID, StorageKey: edgeCodecChunkKey(row.TenantID, keyed, version),
 						Source: s.engine.GetPrimary(), Leg: row.Attrs.MirrorLeg, State: state, ETag: metag, Size: c.SealedSize}); cErr != nil {

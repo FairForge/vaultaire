@@ -81,6 +81,9 @@ type edgeFakeDriver struct {
 	putFails atomic.Bool
 	// putHook, when set, runs around every driver Put (tests count overlap).
 	putHook func() func()
+	// answerHook, when set, runs before a presigned PUT is answered (after
+	// its body is read): a test holds a leg's answer.
+	answerHook func()
 }
 
 func newEdgeFakeDriver() *edgeFakeDriver {
@@ -619,6 +622,9 @@ func (d *edgeFakeDriver) RoundTrip(r *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 		}
+		if d.answerHook != nil {
+			d.answerHook()
+		}
 		if strings.Contains(r.Header.Get("Content-Encoding"), "aws-chunked") {
 			// A header-signed aws-chunked body: the backend stores the
 			// DECODED bytes (both backends, Step 0.3).
@@ -684,6 +690,8 @@ func (f *edgeFixture) call(path string, body any, token string) *httptest.Respon
 	switch path {
 	case "/api/v1/edge/admit":
 		f.srv.handleEdgeAdmit(w, r)
+	case "/api/v1/edge/mirror":
+		f.srv.handleEdgeMirror(w, r)
 	default:
 		f.srv.handleEdgeCommit(w, r)
 	}
@@ -836,6 +844,14 @@ func TestEdgeRoutes_NeverCapturedByTheS3Gate(t *testing.T) {
 	wi := serve(srv.httpServer.Handler, ri)
 	assert.Empty(t, *hits, "the index call never reaches the S3 API")
 	assert.NotEqual(t, http.StatusTeapot, wi.Code)
+
+	// The mirror's settle (RP78-2): the token gate's too.
+	rm := httptest.NewRequest(http.MethodPost, "/api/v1/edge/mirror", strings.NewReader(`{"admit_id":"x","etag":"\"00\""}`))
+	rm.Host = "stored.test"
+	rm.Header.Set(edgeTokenHeader, edgeTestToken)
+	wm := serve(srv.httpServer.Handler, rm)
+	assert.Empty(t, *hits, "the mirror call never reaches the S3 API")
+	assert.NotEqual(t, http.StatusTeapot, wm.Code)
 
 	// An AWS4 header ON the call: the gate's (Decision 8).
 	r2 := sigV4Signed(t, http.MethodPost, "stored.test", "/api/v1/edge/admit")

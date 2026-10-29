@@ -67,6 +67,12 @@ func (c *HTTPControlPlane) Commit(ctx context.Context, req CommitRequest) (Commi
 	return resp, c.call(cctx, "/api/v1/edge/commit", req, &resp)
 }
 
+// Mirror is POST /api/v1/edge/mirror (RP78-2).
+func (c *HTTPControlPlane) Mirror(ctx context.Context, req MirrorSettle) (MirrorSettleResponse, error) {
+	var resp MirrorSettleResponse
+	return resp, c.call(ctx, "/api/v1/edge/mirror", req, &resp)
+}
+
 // Heartbeat is POST /api/v1/edge/heartbeat: the node says it is alive.
 func (c *HTTPControlPlane) Heartbeat(ctx context.Context, hb Heartbeat) error {
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
