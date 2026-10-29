@@ -53,7 +53,7 @@ groups:
           description: "{{ $labels.job_name }} last succeeded {{ $value | humanizeDuration }} ago (a value near the age of the epoch means it has never succeeded). It is due once a day and retried hourly while it fails. GET /api/v1/admin/jobs shows the last outcome and error; journalctl -u 'vaultaire@*' | grep 'job run'."
 
       - alert: PeriodicJobStale
-        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|edge_admit_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|pack_gc|stripe_gc|swift_segment_gc|key_reencrypt|retired_blobs|blob_copies|webhook_retry|payment_reminders|renewal_stops|translog_checkpoint|translog_anchor"}) > 3 * 3600
+        expr: (time() - vaultaire_job_last_success_timestamp_seconds{job_name=~"multipart_reaper|edge_admit_reaper|cdn_rollup|idempotency_cleanup|sts_cleanup|session_cleanup|bandwidth_alerts|access_log_delivery|account_export|vault_parity|vault_tape_audit|pack_gc|stripe_gc|swift_segment_gc|key_reencrypt|retired_blobs|blob_copies|webhook_retry|payment_reminders|renewal_stops|translog_checkpoint|translog_anchor"}) > 3 * 3600
         for: 30m
         labels:
           severity: warning
@@ -163,6 +163,26 @@ groups:
         annotations:
           summary: "{{ $value }} parity row(s) not scrubbed within the cycle"
           description: "Rows the scrub has not read clean for longer than VAULT_PARITY_SCRUB_CYCLE + 7 days: the pass's budget (the footprint's share of the cycle) does not fit its 10 min slice at the leg's speed, or the leg is skipped. Lengthen VAULT_PARITY_SCRUB_CYCLE or shorten VAULT_PARITY_SCRUB_EVERY."
+      # The weekly tape audit (WP-VAULT-2 A4): one vault object a week is read
+      # back from its own copy (restored from tape first when it is there)
+      # and hashed against what protect read. A mismatch means the first copy
+      # is not what was written.
+      - alert: VaultTapeAuditFailed
+        expr: sum by (outcome) (increase(vaultaire_vault_tape_audit_total{outcome=~"mismatch|error"}[8d])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The weekly tape audit ended in {{ $labels.outcome }}"
+          description: "GET /api/v1/admin/jobs → vault_tape_audit result names the object and the detail; the Warn line 'vault tape audit:' too. mismatch: the object's own copy does not hash to what was stored — read it again, compare with a rebuild from its parity (the GET fallback serves it while Geyser fails), and raise it with Geyser. error: no answer, a refused restore, or a restore that did not land in 48 h."
+      - alert: VaultTapeAuditStale
+        expr: vaultaire_vault_parity_complete_rows > 0 and (time() - vaultaire_vault_tape_audit_last_ok_timestamp_seconds) > 9 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "No clean tape audit in 9 days"
+          description: "Vault objects have parity copies and no weekly audit has read one back clean from its own copy for 9 days: the job is not registered or not running, a restore keeps failing, or every audit mismatched. GET /api/v1/admin/jobs → vault_tape_audit."
       - alert: VaultParityRestoreStuck
         expr: vaultaire_vault_parity_restores_stuck > 0
         for: 1h

@@ -294,6 +294,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	// Assert: the jobs NewServer registers (account_deletion joins in Start).
 	want := map[string]string{
 		"vault_parity":      "every 2m0s",
+		"vault_tape_audit":  "every 1h0m0s",
 		"webhook_retry":     "every 30s",
 		"inventory":         "daily 00:30 UTC",
 		"chunk_orphans":     "daily 01:30 UTC",
@@ -351,6 +352,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 	s2 := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), hotOnly, nil, jf.db)
 	assert.Nil(t, s2.jobs.job("smart_demotion"))
 	assert.Nil(t, s2.jobs.job("vault_parity"), "no parity leg, no parity job")
+	assert.Nil(t, s2.jobs.job("vault_tape_audit"), "no parity job, no hashes to audit against")
 	assert.NotNil(t, s2.jobs.job("retention"))
 }
 

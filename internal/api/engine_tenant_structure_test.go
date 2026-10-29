@@ -43,6 +43,7 @@ var engineCallTenants = map[string]string{
 	"sse_stream.go:openSealedGet":          "HandleGet's request context",
 	"vault_parity.go:Open":                 "common.WithTenantID(ctx, tenantID) on the data ranges",
 	"vault_parity.go:protect":              "tctx = common.WithTenantID(ctx, c.tenantID)",
+	"vault_tape_audit.go:audit":            "tctx = common.WithTenantID(ctx, p.Tenant) (WP-VAULT-2 A4)",
 }
 
 // engineStorageCalls finds the storage calls on an engine in this package's

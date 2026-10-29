@@ -171,4 +171,12 @@ Where the build differs from § 1–3:
 - **`changed`:** a row a delete or overwrite moved during the read (its `updated_at`)
   is no verdict.
 
-A4 (`vault_tape_audit`) is its own job and PR.
+**A4 built (`internal/api/vault_tape_audit.go`, its own PR):** the `vault_tape_audit`
+job looks hourly and audits one object every 7 d: a random vault-floor head row whose
+parity row is complete for its etag with `object_sha256` (≤ 1 GiB — read through SLC),
+read from its RECORDED backend; on tape (`ErrArchived`) it asks for the restore (Days 1)
+and keeps the object pending in `job_runs.result`, read on the first run after it lands,
+an error after 48 h; an object overwritten or deleted meanwhile is dropped (`changed`).
+The fixed canary of § 7 is left out: the random pick already reaches tape, and a
+canary would need a write path of its own onto the vault floor. `nothing` (no
+auditable object) counts as clean, so an empty attic never reads as a stale audit.
