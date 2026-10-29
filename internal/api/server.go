@@ -64,6 +64,10 @@ var (
 )
 
 type Server struct {
+	// bootErr is what made the NewServer prologue fail (WP-R1-10): main
+	// refuses to serve with it (BootError).
+	bootErr error
+
 	config           *config.Config
 	logger           *zap.Logger
 	router           chi.Router
@@ -289,6 +293,17 @@ type QuotaManager interface {
 	GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error)
 }
 
+// bootPrologueBudget bounds the NewServer prologue's database work (flags,
+// auth and MFA state, the backfills, the tenant-key check): normally well
+// under a second; with connect_timeout 5 s a hung Postgres ends the boot
+// within about 11 s.
+var bootPrologueBudget = 6 * time.Second
+
+// BootError is what made the NewServer prologue fail (a database that hung
+// or refused the auth state), or nil. main refuses to serve with one: the
+// process exits non-zero and vaultaire-switch keeps the old slot.
+func (s *Server) BootError() error { return s.bootErr }
+
 func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, qm QuotaManager, db *sql.DB) *Server {
 	s := &Server{
 		config:       cfg,
@@ -339,7 +354,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.useFlags(flags.New(s.db, logger))
 	audit.SetLogger(logger)
 	registerFlags(s.flags)
-	if err := s.flags.Refresh(context.Background()); err != nil {
+	// The prologue's database work runs under ONE boot deadline (WP-R1-10):
+	// a Postgres that hangs after the ping held the boot 5 s per call
+	// (connect_timeout) and then served users who could not sign in.
+	bootCtx, bootCancel := context.WithTimeout(context.Background(), bootPrologueBudget)
+	defer bootCancel()
+	if err := s.flags.Refresh(bootCtx); err != nil {
 		logger.Warn("initial feature flag refresh failed — serving in-code defaults until the background refresh succeeds",
 			zap.Error(err))
 	}
@@ -352,9 +372,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// Populate in-memory maps from PostgreSQL so that existing users
 	// can authenticate immediately after a restart/deploy.
 	if s.db != nil {
-		if err := s.auth.LoadFromDB(context.Background()); err != nil {
+		if err := s.auth.LoadFromDB(bootCtx); err != nil {
 			logger.Error("failed to load auth state from DB — existing users cannot log in",
 				zap.Error(err))
+			s.bootErr = errors.Join(s.bootErr, fmt.Errorf("load auth state: %w", err))
 		} else {
 			logger.Info("auth state loaded from database")
 		}
@@ -364,26 +385,38 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// only with VAULTAIRE_BOOTSTRAP_EMAIL set and STORAGE_MODE=local — never
 	// on prod (RP80-7).
 	if email := strings.TrimSpace(os.Getenv("VAULTAIRE_BOOTSTRAP_EMAIL")); email != "" && s.db != nil {
-		if _, err := bootstrapTenant(context.Background(), s.auth, logger, email, os.Getenv("STORAGE_MODE"), os.Stdout); err != nil {
+		if _, err := bootstrapTenant(bootCtx, s.auth, logger, email, os.Getenv("STORAGE_MODE"), os.Stdout); err != nil {
 			logger.Error("first-boot account not made", zap.Error(err))
 		}
 	}
 
 	// Load MFA state from DB.
 	if s.db != nil {
-		if err := s.auth.LoadMFAFromDB(context.Background()); err != nil {
+		if err := s.auth.LoadMFAFromDB(bootCtx); err != nil {
 			logger.Error("failed to load MFA state from DB", zap.Error(err))
+			s.bootErr = errors.Join(s.bootErr, fmt.Errorf("load MFA state: %w", err))
 		}
 	}
 
 	// Backfill bucket registry and tenant slugs on startup.
 	if s.db != nil {
-		if err := auth.BackfillBuckets(context.Background(), s.db, logger); err != nil {
+		if err := auth.BackfillBuckets(bootCtx, s.db, logger); err != nil {
 			logger.Error("failed to backfill buckets", zap.Error(err))
 		}
-		if err := auth.BackfillSlugs(context.Background(), s.db, logger); err != nil {
+		if err := auth.BackfillSlugs(bootCtx, s.db, logger); err != nil {
 			logger.Error("failed to backfill slugs", zap.Error(err))
 		}
+	}
+
+	if err := bootCtx.Err(); err != nil {
+		s.bootErr = errors.Join(s.bootErr, fmt.Errorf("the boot prologue's database work did not finish in %s: %w", bootPrologueBudget, err))
+	}
+	if s.bootErr != nil {
+		// The database failed the boot: nothing below runs (more of it
+		// would wait on the same database), and the server is never
+		// served — main exits on BootError.
+		logger.Error("boot prologue failed — the server will not be served", zap.Error(s.bootErr))
+		return s
 	}
 
 	s.cdnRateLimiter = NewRateLimiter()
@@ -418,7 +451,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 			// (modes.json requires_master_key); until then every surface
 			// renders the pre-key sentence.
 			modes.SetMasterKeyLoaded(true)
-			checkTenantKeysAtBoot(context.Background(), keys, logger)
+			checkTenantKeysAtBoot(bootCtx, keys, logger)
 		}
 	}
 

@@ -71,44 +71,6 @@ func serveUntilShutdown(serve func() error, shutdownDone <-chan struct{}) error 
 	return err
 }
 
-type nilQuotaManager struct{}
-
-func (n *nilQuotaManager) GetUsage(ctx context.Context, tenantID string) (used, limit int64, err error) {
-	return 0, 1073741824, nil
-}
-
-func (n *nilQuotaManager) CheckAndReserve(ctx context.Context, tenantID string, bytes int64) (bool, error) {
-	return true, nil
-}
-
-func (n *nilQuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error {
-	return nil
-}
-
-func (n *nilQuotaManager) CreateTenant(ctx context.Context, tenantID, plan string, storageLimit int64) error {
-	return nil
-}
-
-func (n *nilQuotaManager) ListQuotas(ctx context.Context) ([]map[string]interface{}, error) {
-	return []map[string]interface{}{}, nil
-}
-
-func (n *nilQuotaManager) DeleteQuota(ctx context.Context, tenantID string) error {
-	return nil
-}
-
-func (n *nilQuotaManager) GetTier(ctx context.Context, tenantID string) (string, error) {
-	return "starter", nil
-}
-
-func (n *nilQuotaManager) UpdateTier(ctx context.Context, tenantID, newTier string) error {
-	return nil
-}
-
-func (n *nilQuotaManager) GetUsageHistory(ctx context.Context, tenantID string, days int) ([]map[string]interface{}, error) {
-	return []map[string]interface{}{}, nil
-}
-
 // isNodeRole says whether this process is a data node (WP-EDGE-3:
 // VAULTAIRE_ROLE=node — no database, no engine, no jobs; internal/node).
 func isNodeRole(getenv func(string) string) bool {
@@ -175,18 +137,20 @@ func main() {
 		SSLMode:  "disable",
 	}
 
+	// The boot DB contract (WP-R1-10): a database that does not answer a
+	// bounded ping refuses the boot — the process exits non-zero, so
+	// vaultaire-switch keeps the old slot. There is no "without a database"
+	// mode: a server with no DB would authenticate every request as the
+	// test tenant.
 	dbConn, err := database.NewPostgres(dbConfig, logger)
 	if err != nil {
-		logger.Warn("failed to connect to database, running without intelligence",
-			zap.Error(err))
-		db = nil
-	} else {
-		db = dbConn.DB()
-		defer func() { _ = db.Close() }()
-		logger.Info("connected to database",
-			zap.String("host", dbHost),
-			zap.String("database", dbName))
+		logger.Fatal("database unreachable at boot — refusing to start", zap.Error(err))
 	}
+	db = dbConn.DB()
+	defer func() { _ = db.Close() }()
+	logger.Info("connected to database",
+		zap.String("host", dbHost),
+		zap.String("database", dbName))
 
 	// Create engine with or without DB
 	eng := engine.NewEngine(db, logger, &engine.Config{DefaultBackend: "local"})
@@ -508,12 +472,9 @@ func main() {
 	eng.Seal() // every driver is registered: AddDriver is refused from here (WP-R6-2)
 
 	// Create server
-	var server *api.Server
-	if db != nil {
-		quotaManager := usage.NewQuotaManager(db)
-		server = api.NewServer(cfg, logger, eng, quotaManager, db)
-	} else {
-		server = api.NewServer(cfg, logger, eng, &nilQuotaManager{}, nil)
+	server := api.NewServer(cfg, logger, eng, usage.NewQuotaManager(db), db)
+	if err := server.BootError(); err != nil {
+		logger.Fatal("boot prologue failed — refusing to serve", zap.Error(err))
 	}
 
 	// Graceful shutdown: SIGTERM/SIGINT → drain HTTP + flush trackers →
@@ -540,11 +501,7 @@ func main() {
 	fmt.Printf("╠══════════════════════════════════════╣\n")
 	fmt.Printf("║  S3 API: http://localhost:%-10d ║\n", port)
 	fmt.Printf("║  Storage: %-26s ║\n", storageMode)
-	if db != nil {
-		fmt.Printf("║  Intelligence: ENABLED               ║\n")
-	} else {
-		fmt.Printf("║  Intelligence: DISABLED (no DB)      ║\n")
-	}
+	fmt.Printf("║  Intelligence: ENABLED               ║\n")
 	fmt.Printf("╚══════════════════════════════════════╝\n")
 	fmt.Printf("\n")
 

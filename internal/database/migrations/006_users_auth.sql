@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_id ON api_keys(key_id);
+-- idx_users_email and idx_api_keys_key_id duplicated the UNIQUE indexes of
+-- users.email and api_keys.key_id: dropped by 119_index_hygiene.sql, their
+-- CREATE removed here in the same change (the deploy re-applies every file).
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);

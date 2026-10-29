@@ -48,7 +48,8 @@ test-db:
 	psql -X -q -h localhost -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$(TEST_DB)'" | grep -q 1 || \
 		psql -X -q -h localhost -d postgres -c "CREATE DATABASE $(TEST_DB)"
 	@for f in internal/database/migrations/*.sql; do \
-		psql -X -q -v ON_ERROR_STOP=1 -h localhost -d $(TEST_DB) -f "$$f" > /dev/null || exit 1; \
+		PGOPTIONS='-c lock_timeout=5s -c statement_timeout=600s' \
+			psql -X -q -v ON_ERROR_STOP=1 -h localhost -d $(TEST_DB) -f "$$f" > /dev/null || exit 1; \
 	done
 	@echo "$(TEST_DB): migrations applied"
 
