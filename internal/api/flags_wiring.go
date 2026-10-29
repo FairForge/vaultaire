@@ -288,6 +288,22 @@ func allowUnsealedCleartextFromEnv(getenv func(string) string, logger *zap.Logge
 	return on
 }
 
+// allowUnsealedTapeFromEnv reads GEYSER_ALLOW_UNSEALED (`true`/`1`): lets
+// the archive classes (GLACIER, DEEP_ARCHIVE) and smart demotion put bytes
+// on tape that are not sealed. Labs only — a byte on tape is never erased.
+// Anything else is false (a Warn for a value that is neither).
+func allowUnsealedTapeFromEnv(getenv func(string) string, logger *zap.Logger) bool {
+	v := strings.TrimSpace(getenv("GEYSER_ALLOW_UNSEALED"))
+	on := v == "true" || v == "1"
+	if v != "" && !on && v != "false" && v != "0" {
+		logger.Warn("GEYSER_ALLOW_UNSEALED: not true/false — unsealed writes to tape stay refused", zap.String("value", v))
+	}
+	if on {
+		logger.Warn("GEYSER_ALLOW_UNSEALED is set: archive-class writes and smart demotions may reach tape unsealed, where a delete never erases them (testing only)")
+	}
+	return on
+}
+
 // allowUnsealedSiaFromEnv reads SIA_ALLOW_UNSEALED (`true`/`1`): lets the
 // SIA tier (and a `sia` Vault parity leg) take unsealed bytes. Set = one
 // Warn line at boot.

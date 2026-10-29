@@ -38,7 +38,7 @@ SYSTEMCTL=${LR_SYSTEMCTL:-systemctl}
 # The WP-DOMAIN-1 targets.
 TARGET_ENDPOINT=https://s3.stored.cloud
 TARGET_PUBLIC_HOST=https://stored.cloud
-DEFAULT_LAUNCH=master_key,translog_signing_key,dump_sealed,credentials_wrapped,plaintext_dropped,keys_rotated,blomp_sealed,sia_sealed,stripe_ready,signups_open
+DEFAULT_LAUNCH=master_key,translog_signing_key,dump_sealed,credentials_wrapped,plaintext_dropped,keys_rotated,blomp_sealed,sia_sealed,geyser_sealed,stripe_ready,signups_open
 LAUNCH_GATES=,${LR_LAUNCH_GATES:-$DEFAULT_LAUNCH},
 
 WRITE_METRICS=true
@@ -273,6 +273,7 @@ gate_plaintext_dropped
 gate_keys_rotated
 env_flag_off blomp_sealed BLOMP_ALLOW_UNSEALED
 env_flag_off sia_sealed SIA_ALLOW_UNSEALED
+env_flag_off geyser_sealed GEYSER_ALLOW_UNSEALED
 metric_is_one stripe_ready vaultaire_payment_provider_ready 'provider="stripe"'
 gate_signups_open
 gate_domain

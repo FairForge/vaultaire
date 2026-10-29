@@ -134,7 +134,8 @@ func restoreFixture(t *testing.T) (*adapterTestFixture, *stubArchiveDriver, *Ser
 		_, _ = f.db.Exec(`DELETE FROM buckets WHERE tenant_id = $1 AND name = 'test-bucket'`, f.tenantID)
 	})
 
-	s := &Server{engine: f.eng, db: f.db, logger: zap.NewNop()}
+	s := &Server{engine: f.eng, db: f.db, logger: zap.NewNop(),
+		allowUnsealedTape: true} // GEYSER_ALLOW_UNSEALED: the tape's sealed-only rule is tape_sealed_test.go's.
 	return f, stub, s
 }
 

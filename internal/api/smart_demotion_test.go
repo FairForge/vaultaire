@@ -95,6 +95,9 @@ func setupDemotionFixture(t *testing.T, quotaBytes int64, tier string) *demotion
 	r.now = func() time.Time { return now }
 	// The ledger passes too: other fixtures' rows are not this run's to settle.
 	r.scopeTenant = tenantID
+	// The fixture's blobs are fake plaintext: the selection tests below are
+	// not the tape's sealed-only rule (TestSmartDemotion_TapeTakesOnlySealedBytes).
+	r.AllowUnsealedCold = true
 	return &demotionFixture{t: t, db: db, eng: eng, hotDir: hotDir, coldDir: coldDir, tenantID: tenantID, runner: r, now: now}
 }
 
@@ -107,10 +110,10 @@ func (f *demotionFixture) object(bucket, key string, size int64, ageDays, idleDa
 	for _, o := range opts {
 		o(&h)
 	}
-	_, err := f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, is_chunked, created_at, updated_at, last_accessed)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9)`,
+	_, err := f.db.Exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name, is_chunked, created_at, updated_at, last_accessed, encryption_algorithm)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10)`,
 		f.tenantID, bucket, key, size, h.etag, h.backend, h.chunked,
-		f.now.Add(-time.Duration(ageDays*24)*time.Hour), f.now.Add(-time.Duration(idleDays*24)*time.Hour))
+		f.now.Add(-time.Duration(ageDays*24)*time.Hour), f.now.Add(-time.Duration(idleDays*24)*time.Hour), h.encAlgo)
 	require.NoError(f.t, err)
 	container := f.tenantID + "_" + bucket
 	dir := f.hotDir
@@ -124,12 +127,14 @@ func (f *demotionFixture) object(bucket, key string, size int64, ageDays, idleDa
 
 type headRow struct {
 	bucket, key, etag, backend string
+	encAlgo                    string
 	size                       int64
 	chunked                    bool
 }
 
-func chunked() func(*headRow)           { return func(h *headRow) { h.chunked = true } }
-func onBackend(b string) func(*headRow) { return func(h *headRow) { h.backend = b } }
+func chunked() func(*headRow)              { return func(h *headRow) { h.chunked = true } }
+func onBackend(b string) func(*headRow)    { return func(h *headRow) { h.backend = b } }
+func encrypted(algo string) func(*headRow) { return func(h *headRow) { h.encAlgo = algo } }
 
 func (f *demotionFixture) backendOf(bucket, key string) string {
 	var b string

@@ -45,9 +45,11 @@ func setupLedgerFixture(t *testing.T) *ledgerFixture {
 	t.Helper()
 	f := setupDemotionFixture(t, 1*tb, "standard")
 	p := newPromoter(f)
-	s := &Server{engine: f.eng, db: f.db, logger: zap.NewNop(), smartPromoter: p}
+	s := &Server{engine: f.eng, db: f.db, logger: zap.NewNop(), smartPromoter: p,
+		allowUnsealedTape: true} // GEYSER_ALLOW_UNSEALED: the tape's sealed-only rule is tape_sealed_test.go's.
 	a := NewS3ToEngine(f.eng, f.db, zap.NewNop())
 	a.smartPromoter = p
+	a.allowUnsealedTape = true
 	t.Cleanup(func() {
 		_, _ = f.db.Exec(`DELETE FROM object_versions WHERE tenant_id = $1`, f.tenantID)
 		_, _ = f.db.Exec(`DELETE FROM multipart_uploads WHERE tenant_id = $1`, f.tenantID)

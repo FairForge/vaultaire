@@ -489,6 +489,7 @@ func setupChunkingFixture(t *testing.T) *adapterTestFixture {
 	f.adapter = NewS3ToEngine(f.eng, f.db, zap.NewNop())
 	f.adapter.gci = crypto.NewGlobalContentIndex(f.db)
 	f.adapter.chunkingThreshold = 1024
+	f.adapter.allowUnsealedTape = true // GEYSER_ALLOW_UNSEALED: the tape's sealed-only rule is tape_sealed_test.go's.
 
 	t.Cleanup(func() {
 		cleanupTenantChunkRows(f.db, tenantUUID.String(), tenantUUID.String())

@@ -90,3 +90,60 @@ Verifying a parity row against the DATA (a Geyser read per row): the attic's res
 semantics make that a restore per object; the scrub trusts the digest it recorded at the
 write. A scrub of the hot copies (`idrive`, `lyve` whole objects) is `routing_truth`'s
 read probe.
+
+## 7. Amendments (2026-10-29, before the build)
+
+A review of this design against "Vault ready to sell" found four gaps. The build follows
+the design above WITH these changes; where they disagree, this section wins.
+
+- **A1 — budget by cycle, not by sample.** 20 rows and 2 GiB per 6 h is ≤ 8 GiB a day:
+  at 10 TB of Vault one full pass takes ~3½ years, and `VaultParityScrubBacklog` (30 d)
+  would fire for ever. Replace `VAULT_PARITY_SCRUB_SAMPLE` / `_MAX_BYTES` with
+  `VAULT_PARITY_SCRUB_CYCLE` (default `30d`, 1d–180d): each pass reads
+  `parity footprint × (pass interval / cycle)` bytes (the footprint is
+  `SUM(shard_bytes × stripes × 4)` of `complete` rows, read once per pass), with a floor of
+  one row and a ceiling of the pass's slice. The parity of an object is 1× its size, so
+  10 TB on a 30 d cycle is ~333 GB/day, ~4 MB/s — nothing for Lyve (no egress fee).
+  `VaultParityScrubBacklog` then means what it says: a row unscrubbed for longer than
+  the cycle + 7 d.
+- **A2 — prove the copy rebuilds, not only that the shards are unchanged.** Digests
+  recorded at protect time match whatever protect wrote; a parity computed wrong passes
+  every digest check. `protect` already reads the whole stored object to compute the
+  parity, so it records `vault_parity.object_sha256` (the STORED bytes — ciphertext for a
+  sealed object, so no key is needed and SSE-C works too). Each scrub pass takes ONE row
+  (its own keyset cursor) and rebuilds the object from the four parity shards ALONE,
+  through the same decoder the GET fallback uses, hashing the result against
+  `object_sha256`. No tape read. Verdict `rebuild_ok` | `rebuild_mismatch` (→ re-protect,
+  `VaultParityRebuildMismatch` warns) | `rebuild_error`. A row written before the
+  migration has no `object_sha256`: its first protect after the migration records it
+  (the scrub skips the rebuild check for it, `rebuild_unbaselined`).
+- **A3 — re-protect must ask for the restore itself.** `vault_parity.go` has no
+  `ErrArchived` handling: a scrub that makes a tape-resident row `partial` would wait out
+  its attempts and stay `partial` for good, because nothing submits the restore. On
+  `ErrArchived`, `protect` calls `engine.Restorer.RestoreObject` (Days 2, the default
+  tier; Vail accepts Standard and Bulk alike), records `restore_requested_at`, and leaves the row
+  `partial` WITHOUT spending an attempt; the next pass after the restore lands protects it
+  (`RestoreAlreadyInProgress` = still waiting). A restore pending > 24 h is a note and
+  `VaultParityRestoreStuck` (info). Geyser restores are free; LA2 measured 459 s for a
+  2 GiB multipart object (2026-10-24).
+- **A4 — audit the tape copy too (its own job, `vault_tape_audit`, weekly).** The scrub
+  covers the second copy, never the first. Once a week: restore and read back ONE random
+  vault-floor head row (keyset-random over `(tenant_id, bucket, object_key)`) plus the
+  fixed canary, hash the stored bytes against `object_sha256` (A2) or, for a row without
+  one, size + the backend ETag; outcome in `job_runs.result`,
+  `vaultaire_vault_tape_audit_total{outcome}`, rule `VaultTapeAuditStale` (no `ok` in
+  9 d) and `VaultTapeAuditFailed`. Promotes `cmd/tools/geyser-restore-probe` (#591) from
+  a cron line to a job; the restored copy is never served or billed.
+
+Migration (next free number): `vault_parity.shard_digests TEXT[4]`, `scrubbed_at`,
+`scrub_failures` (§ 1) + `object_sha256 TEXT`, `restore_requested_at TIMESTAMPTZ`,
+`rebuilt_at TIMESTAMPTZ`.
+
+Out of scope still: a restore-gated parity leg (AWS Deep Archive, Azure Archive — a
+shard there needs a 12–48 h restore before it can be read, so neither the GET fallback
+nor this scrub can use it as written); decided when the Lyve promotion's end (~mid-2028)
+forces the leg's next home.
+
+Paired change, already built: **tape takes only sealed bytes** (`sealedOnlyClass` +
+`coldBackendSealedOnly`, `GEYSER_ALLOW_UNSEALED`, gate `geyser_sealed`) — parity is
+computed over the stored bytes, so sealing the object seals its second copy too.
