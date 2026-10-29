@@ -85,6 +85,14 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.6.0 — the mirror is the isolate's bytes, and the client never waits for it (Stage 1a Prompt 50 Part 0, RP78-1 + RP78-2)
+
+- **The buffer is budgeted** (RP78-1): `putTwo` takes `MIRROR_BUFFER` (16 + 2 MiB) from the isolate's one byte budget (`ISOLATE_BYTES`, RP72-6) before the tee, waiting at most `MIRROR_BUDGET_WAIT_MS` (200 ms, `Semaphore.acquireWithin`); a budget that cannot spare it sends the PUT unmirrored — one link, `mirror_unbudgeted: true` on the commit (→ `vaultaire_blob_copies_total{outcome="unbudgeted"}`, the copy owed), never a refusal. The bytes are given back when the mirror ends (answer, cut or error).
+- **The client is answered at the primary's pace** (RP78-2): `putTwo` resolves at the primary's answer; the mirror runs on and its `settle` promise resolves when it ends. A whole PUT commits with `mirror_settle: true` (the copy `pending`) and `settleMirror` posts `{admit_id, etag | cut}` to **`POST /api/v1/edge/mirror`** under `ctx.waitUntil`, after the client's response; the mirror is cut `MIRROR_SETTLE_MS` (25 s) after the primary answered — inside the 30 s `waitUntil` gives a Worker after its response, with the settle call's time left. A codec chunk's mirror still answers inside its write (`putTwoInline`, cut 5 s after its primary): its copy row is the commit's. The after-primary 5 s timer of 0.5.x is gone for whole PUTs.
+- RP78-9: the cut is `ac.abort` alone (the mirror's fetch is cancelled and that reaches the tee's branch through its pipes); 0.5.x's `mirrorBody.cancel` on a locked stream is gone.
+- **Proved in workerd first** (`lab/mirror-settle/run.sh`: `wrangler dev --local` against a sink that answers 411 to a body with no `Content-Length`, the Worker's own modules unchanged): an 8 MiB PUT with a 2 MB/s mirror answered the client in 105 ms (primary 71 ms) and settled the mirror's matching ETag 4.2 s later; a 4 MiB PUT with a mirror that answers after 40 s answered in 68 ms and settled `cut` 25.0 s after the primary; no PUT lost its length.
+- The control plane's `/api/v1/edge/mirror` ships first (Part 0's Go PR); a 0.5.2 Worker never calls it.
+
 ## 0.5.2 — the mirrored PUT keeps its Content-Length (Stage 1a Prompt 49, a 0.5.1 regression)
 
 - 0.5.1's counting streams had no known length, so workerd sent both PUTs of a mirrored write chunked with no `Content-Length`. iDrive answered **411** to every mirrored whole PUT: on prod 2026-10-28 23:58 UTC, three of tenant zero's test PUTs and nothing else; 0.5.1 was live 23:57:58–23:59:49 and was rolled back to 0.5.0 (`ebb3decb`). Node's `fetch` sends the header for a stream body anyway, which is why the tests passed.

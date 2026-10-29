@@ -1,0 +1,12 @@
+# The mirror-settle lab (RP78-2, Worker 0.6.0): `wrangler dev --local` only.
+# run.sh copies worker.js and the Worker's own modules (src/*.js, unchanged)
+# into build/; published as their files, as production is (no_bundle).
+name = "mirror-settle-lab"
+main = "build/worker.js"
+compatibility_date = "2026-09-01"
+no_bundle = true
+find_additional_modules = true
+base_dir = "build"
+rules = [{ type = "ESModule", globs = ["*.js"], fallthrough = false }]
+[vars]
+SINK = "http://127.0.0.1:8788"
