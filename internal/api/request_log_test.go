@@ -278,3 +278,64 @@ func TestRequestLog_FlagOffWritesNothing(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM s3_access_log WHERE tenant_id = $1 AND error_code = $2`, f.tenantID, ErrNoSuchKey).Scan(&n))
 	assert.Equal(t, 1, n, "the bucket log's error row, now with its code")
 }
+
+// RP78-3: one request id per S3 request — the dispatcher's — on every
+// response (success or error, every op) and in its request_log row. AWS
+// answers x-amz-request-id on every response, and that id is what a
+// support ticket quotes; prod had 28 of 44 origin rows with none.
+func TestS3_EveryResponseCarriesTheLoggedRequestID(t *testing.T) {
+	f := setupRequestLogFixture(t)
+	b := "/" + f.bucket
+	type call struct {
+		name, method, path string
+		body               []byte
+		hdr                map[string]string
+		ro                 bool // the read-only key
+	}
+	calls := []call{
+		{name: "PutObject", method: http.MethodPut, path: b + "/a.txt", body: []byte("hello")},
+		{name: "PutObject denied", method: http.MethodPut, path: b + "/d.txt", body: []byte("no"), ro: true},
+		{name: "HeadObject", method: http.MethodHead, path: b + "/a.txt"},
+		{name: "HeadObject missing", method: http.MethodHead, path: b + "/missing.txt"},
+		{name: "GetObject", method: http.MethodGet, path: b + "/a.txt"},
+		{name: "GetObject missing", method: http.MethodGet, path: b + "/missing.txt"},
+		{name: "CopyObject", method: http.MethodPut, path: b + "/c.txt", hdr: map[string]string{"x-amz-copy-source": b + "/a.txt"}},
+		{name: "CopyObject missing", method: http.MethodPut, path: b + "/c2.txt", hdr: map[string]string{"x-amz-copy-source": b + "/missing.txt"}},
+		{name: "ListObjectsV2", method: http.MethodGet, path: b + "?list-type=2"},
+		{name: "ListObjectsV2 no bucket", method: http.MethodGet, path: "/nosuchbucket-rp783?list-type=2"},
+		{name: "HeadBucket", method: http.MethodHead, path: b},
+		{name: "GetBucketVersioning", method: http.MethodGet, path: b + "?versioning"},
+		{name: "CreateMultipartUpload", method: http.MethodPost, path: b + "/m.bin?uploads"},
+		{name: "AbortMultipartUpload missing", method: http.MethodDelete, path: b + "/m.bin?uploadId=nosuchupload"},
+		{name: "DeleteObject", method: http.MethodDelete, path: b + "/c.txt"},
+		{name: "DeleteObject denied", method: http.MethodDelete, path: b + "/a.txt", ro: true},
+		{name: "ListBuckets", method: http.MethodGet, path: "/"},
+	}
+	var answered []string
+	for _, c := range calls {
+		ak, sk := f.ak, f.sk
+		if c.ro {
+			ak, sk = f.scopedAK, f.scopedSK
+		}
+		w := f.do(c.method, c.path, c.body, ak, sk, c.hdr)
+		id := w.Header().Get("x-amz-request-id")
+		require.NotEmpty(t, id, "%s (%d) answered no x-amz-request-id", c.name, w.Code)
+		if w.Code >= 400 && c.method != http.MethodHead {
+			var e S3Error
+			require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &e), "%s: %s", c.name, w.Body.String())
+			assert.Equal(t, id, e.RequestID, "%s: the error body's RequestId is the header's", c.name)
+		}
+		answered = append(answered, id)
+	}
+	var logged []string
+	rows, err := f.db.Query(`SELECT request_id FROM request_log WHERE tenant_id = $1 ORDER BY logged_at, id`, f.tenantID)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		require.NoError(t, rows.Scan(&id))
+		logged = append(logged, id)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, answered, logged, "each response's id is its row's, never empty")
+}

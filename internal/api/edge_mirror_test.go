@@ -632,11 +632,11 @@ func (f *edgeFixture) pendingCopies(n, size int, prefix string) {
 	f.exec(`UPDATE blob_copies SET created_at = NOW() - interval '6 minutes' WHERE tenant_id = $1`, f.tenantID)
 }
 
-// RP76-4: the copy pass spends a source's free egress (backend_plans'
-// egress_free_multiple × what the last backend_capacity run counted
-// stored there) and no more within a UTC month; what it copied this month
-// is carried in its own job_runs.result. (Scaled: 10 KiB stored × 3 →
-// 30 KiB of 9,000-byte copies, three of them.)
+// RP76-4: the copy pass spends a source's free egress ((backend_plans'
+// egress_free_multiple − 1, RP78-5) × what the last backend_capacity run
+// counted stored there) and no more within a UTC month; what it copied
+// this month is carried in its own job_runs.result. (Scaled: 10 KiB stored
+// × (3 − 1) → 20 KiB of 9,000-byte copies, two of them.)
 func TestBlobCopiesJob_StopsAtTheVendorsEgressBudget(t *testing.T) {
 	f := setupEdgeFixture(t)
 	f.addMirrorLeg()
@@ -658,10 +658,10 @@ func TestBlobCopiesJob_StopsAtTheVendorsEgressBudget(t *testing.T) {
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, j.JobName) })
 	res, err := j.RunOnce(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 3, res.Copied, "3 × 9,000 fits in 30,720; a fourth would not")
-	assert.Equal(t, 2, res.Skipped)
+	assert.Equal(t, 2, res.Copied, "2 × 9,000 fits in 20,480; a third would not")
+	assert.Equal(t, 3, res.Skipped)
 	require.NotNil(t, res.Egress)
-	assert.Equal(t, int64(27_000), res.Egress.Spent["edgefake"])
+	assert.Equal(t, int64(18_000), res.Egress.Spent["edgefake"])
 	assert.Contains(t, strings.Join(res.Errors, " ")+res.Stopped+res.EgressNote, "egress")
 
 	// The next run in the same month reads what this one spent.
@@ -812,4 +812,55 @@ func TestEdgeMirror_TheGoHostSettlesAfterTheAnswer(t *testing.T) {
 	close(release)
 	host.WaitMirrors()
 	assert.Equal(t, "ready", f.copyState(res.Admit.StorageKey))
+}
+
+// RP78-4: a Paris bucket's copy never goes to a London leg (eu-west-3 is
+// the UK); a London bucket mirrors only to a UK leg.
+func TestMirrorLegFor_LondonIsNotTheEU(t *testing.T) {
+	f := setupEdgeFixture(t)
+	t.Setenv("IDRIVE_REGION", "us-central-1")
+	ldn := newEdgeFakeDriver()
+	ldn.name, ldn.urlHost = "idrive-eu-west-3", "ldn.backend.invalid"
+	f.srv.engine.AddDriver(ldn.name, ldn)
+	fra := newEdgeFakeDriver()
+	fra.name, fra.urlHost = "idrive-eu-central-1", "fra.backend.invalid"
+	f.srv.engine.AddDriver(fra.name, fra)
+
+	f.srv.mirrorLegs = []string{"idrive-eu-west-3"}
+	assert.Empty(t, f.srv.mirrorLegFor("idrive-eu-west-4", bucketScope{Region: "eu-west-4"}), "Paris never mirrors to London")
+	f.srv.mirrorLegs = []string{"idrive-eu-west-3", "idrive-eu-central-1"}
+	assert.Equal(t, "idrive-eu-central-1", f.srv.mirrorLegFor("idrive-eu-west-4", bucketScope{Region: "eu-west-4"}), "an EU leg")
+	assert.Empty(t, f.srv.mirrorLegFor("idrive-eu-west-3", bucketScope{Region: "eu-west-3"}), "London has no other UK leg")
+	assert.Equal(t, "uk", jurisdiction("eu-west-3"))
+	t.Setenv("LYVE_REGION", "us-east-1")
+	assert.Equal(t, "us", jurisdiction(legRegion("lyve")))
+}
+
+// RP78-5: the copy pass spends only the free egress above one multiple of
+// what the source stores — the customers' own GETs keep 1× stored before
+// the vendor's overage rate. Multiple 3, stored 10 KiB: the pass stops at
+// 20 KiB of copies.
+func TestBlobCopiesJob_LeavesTheCustomersTheirEgress(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.addMirrorLeg()
+	f.pendingCopies(5, 5000, "cust")
+	capJob := "test_cap_for_customers_" + f.tenantID
+	raw, err := json.Marshal(BackendCapacityResult{Backends: map[string]*BackendBytes{"edgefake": {Objects: 10 << 10, Total: 10 << 10}}})
+	require.NoError(t, err)
+	f.exec(`INSERT INTO job_runs (job, last_outcome, result) VALUES ($1, 'ok', $2)`, capJob, raw)
+	mult := 3.0
+	require.NoError(t, upsertBackendPlan(context.Background(), f.db, BackendPlan{Backend: "edgefake", CapacityBytes: 1 << 40, EgressFreeMultiple: &mult,
+		TermStart: time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC), TermEnd: time.Date(2027, 10, 20, 0, 0, 0, 0, time.UTC)}))
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, capJob)
+		_, _ = f.db.Exec(`DELETE FROM backend_plans WHERE backend = 'edgefake'`)
+	})
+	j := f.copiesJob()
+	j.capacityJob = capJob
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM job_runs WHERE job = $1`, j.JobName) })
+	res, err := j.RunOnce(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Copied, "4 × 5,000 = 20,000 fits in (3 − 1) × 10,240 = 20,480; a fifth would not")
+	assert.Equal(t, 1, res.Skipped)
+	assert.Equal(t, int64(20_000), res.Egress.Spent["edgefake"])
 }

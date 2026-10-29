@@ -249,6 +249,8 @@ go run ./cmd/tools/translog-verify -vkey @translog.vkey -client e2ee.wasm -clien
 
 The refusal inside a client loader — the web app checking the hash of the WASM it is about to run against the log — is **K4c-3c** and lands with the first app that serves the WASM.
 
+**A withdrawn build** (RP78-10, Stage 1a Prompt 50): a release that must never be deployed or trusted again keeps its row and its `client_build` entry (the log is append-only, and a changed row would be a new entry). The manifest's own `withdrawn` list names it — `{client, sha256, reason, withdrawn_at}`, a listed build only — and both refusers read it: `translog-verify -client` fails on its bytes ("client build withdrawn … refuse this build"), and the Worker's `npm run deploy` runs `edge/s3-ingest/scripts/check-withdrawn.mjs` first, which refuses any module of `src/` whose sha256 the list names. First entry: 0.5.1's `edge-codec` (the 411 regression); its `edge-ingest` row stays trusted — 0.5.2's `edge-ingest` is the same bytes.
+
 ## The signing key
 
 Loaded like the master key (`docs/ENCRYPTION.md`): the systemd credential `translog_signing_key` (`$CREDENTIALS_DIRECTORY/translog_signing_key`), then `TRANSLOG_SIGNING_KEY_FILE=<path>`, then `TRANSLOG_SIGNING_KEY`. A source set but unreadable or malformed — or a key named for another origin — **refuses the boot**. One Info line `translog signing key: credential|file|env` with the key ID (public: it is in every signature), never the key; a Warn names lower sources also set. **No key:** entries still append, no checkpoint is signed, `vaultaire_translog_signing_key_loaded 0` (prod until the owner's ceremony).

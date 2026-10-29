@@ -452,10 +452,7 @@ func (s *AccountExportService) renderOne(ctx context.Context, c *claimed, log *z
 // never versioned, never lock-enabled, in the default region.
 func (s *AccountExportService) ensureSystemBucket(ctx context.Context, tenantID string) error {
 	region := drivers.IDriveDefaultRegion(os.Getenv)
-	residency := "us"
-	if drivers.IsEURegion(region) {
-		residency = "eu"
-	}
+	residency := drivers.DataResidency(region) // RP78-4: London is the UK
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency, versioning_status, object_lock_enabled, metadata)
 		VALUES ($1, $2, 'private', $3, $4, $5, 'disabled', FALSE, '{"system": true, "purpose": "account exports"}'::jsonb)

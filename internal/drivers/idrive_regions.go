@@ -45,7 +45,7 @@ var regionDisplayNames = map[string]string{
 	"us-midwest-1":   "US Midwest (Chicago)",
 	"us-east-1":      "US East (Virginia)",
 	"eu-west-1":      "EU West (Ireland)",
-	"eu-west-3":      "EU West (London)",
+	"eu-west-3":      "UK (London)",
 	"eu-west-4":      "EU West (Paris)",
 	"eu-central-1":   "EU Central (Frankfurt)",
 	"eu-south-1":     "EU South (Milan)",
@@ -71,8 +71,49 @@ func IsValidRegion(region string) bool {
 	return ok
 }
 
+// regionJurisdictions is each region's jurisdiction (RP78-4): the law its
+// data sits under, which a region id's first segment does not say — iDrive's
+// eu-west-3 is London, the UK, not the EU.
+var regionJurisdictions = map[string]string{
+	"us-central-1":   "us",
+	"us-west-2":      "us",
+	"us-west-4":      "us",
+	"us-southwest-1": "us",
+	"us-southeast-1": "us",
+	"us-midwest-1":   "us",
+	"us-east-1":      "us",
+	"eu-west-1":      "eu", // Ireland
+	"eu-west-3":      "uk", // London
+	"eu-west-4":      "eu", // Paris
+	"eu-central-1":   "eu", // Frankfurt
+	"eu-south-1":     "eu", // Milan
+	"ap-northeast-1": "jp", // Tokyo
+}
+
+// RegionJurisdiction is a region's jurisdiction (us, eu, uk, jp): the
+// table's for an iDrive region, else the id's first segment (Lyve's
+// us-west-1 = us); "" for no region.
+func RegionJurisdiction(region string) string {
+	if j, ok := regionJurisdictions[region]; ok {
+		return j
+	}
+	j, _, _ := strings.Cut(region, "-")
+	return j
+}
+
+// IsEURegion: the region's data is in the EU (London is not).
 func IsEURegion(region string) bool {
-	return strings.HasPrefix(region, "eu-")
+	return RegionJurisdiction(region) == "eu"
+}
+
+// DataResidency is a bucket's residency label (buckets.data_residency, 050):
+// eu, uk, else us — the label the dashboard shows.
+func DataResidency(region string) string {
+	switch j := RegionJurisdiction(region); j {
+	case "eu", "uk":
+		return j
+	}
+	return "us"
 }
 
 func RegionDisplayName(region string) string {
@@ -94,25 +135,27 @@ type IDriveRegionGroup struct {
 	Regions []IDriveRegionOption
 }
 
-// IDriveRegionGroups returns every region grouped US / EU / Asia Pacific,
-// each group sorted by id — the single source for region pickers so the HTML
-// cannot drift from the table again.
+// IDriveRegionGroups returns every region grouped by jurisdiction — United
+// States / European Union / United Kingdom / Asia Pacific (RP78-4: London is
+// the UK's group, not the EU's) — each group sorted by id: the single source
+// for region pickers so the HTML cannot drift from the table again.
 func IDriveRegionGroups() []IDriveRegionGroup {
-	groups := map[string]*IDriveRegionGroup{
-		"us": {Label: "United States"},
-		"eu": {Label: "European Union"},
-		"ap": {Label: "Asia Pacific"},
-	}
+	labels := map[string]string{"us": "United States", "eu": "European Union", "uk": "United Kingdom", "jp": "Asia Pacific"}
+	groups := map[string]*IDriveRegionGroup{}
 	for id := range IDriveRegions {
-		key := id[:2]
+		key := RegionJurisdiction(id)
 		g, ok := groups[key]
 		if !ok {
-			g = &IDriveRegionGroup{Label: strings.ToUpper(key)}
+			label := labels[key]
+			if label == "" {
+				label = strings.ToUpper(key)
+			}
+			g = &IDriveRegionGroup{Label: label}
 			groups[key] = g
 		}
 		g.Regions = append(g.Regions, IDriveRegionOption{ID: id, Name: RegionDisplayName(id)})
 	}
-	order := []string{"us", "eu", "ap"}
+	order := []string{"us", "eu", "uk", "jp"}
 	var out []IDriveRegionGroup
 	for _, key := range order {
 		if g := groups[key]; g != nil && len(g.Regions) > 0 {

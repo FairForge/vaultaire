@@ -327,6 +327,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	// Access-Control-Allow-Origin alone (applyS3CORSPreAuth).
 	varyOrigin(w, r)
 
+	// RP78-3: the request's one id, on every response and in its row.
+	w, _ = withS3RequestID(w)
+
 	var tenantID string
 	var scope *auth.KeyScope
 	var err error
@@ -739,12 +742,9 @@ func (s *Server) recordS3Access(cw *countingResponseWriter, r *http.Request, ten
 	if status == 0 {
 		status = http.StatusOK
 	}
-	reqID := cw.errRequestID
+	reqID := s3RequestIDOf(cw, cw.errRequestID) // the request's one id (RP78-3)
 	if reqID == "" {
 		reqID = cw.Header().Get("x-amz-request-id")
-	}
-	if reqID == "" {
-		reqID = r.Header.Get("X-Request-Id")
 	}
 	ev := s3AccessEvent{
 		tenantID: tenantID, operation: r.Method, statusCode: status,

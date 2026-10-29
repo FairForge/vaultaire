@@ -200,5 +200,13 @@
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
     }
+  ],
+  "withdrawn": [
+    {
+      "client": "edge-codec",
+      "sha256": "12471231920fb23f36d0100ea658bb689d8e32ad4fa2516fc8e192b2a9fa74e1",
+      "reason": "Worker 0.5.1 (606001be): putTwo's counting streams had no known length, so workerd sent every mirrored PUT chunked with no Content-Length and iDrive answered 411 (prod 2026-10-28 23:58 UTC, rolled back at 23:59; fixed in 0.5.2). Its edge-ingest row is NOT withdrawn: 0.5.2's edge-ingest is the same bytes.",
+      "withdrawn_at": "2026-10-29"
+    }
   ]
 }

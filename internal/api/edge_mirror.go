@@ -108,10 +108,10 @@ func (b bucketScope) allows(region string) bool {
 	return jurisdiction(region) == jurisdiction(home)
 }
 
-// jurisdiction is a region's jurisdiction: its first segment (us, eu, ap).
+// jurisdiction is a region's jurisdiction (RP78-4): the region table's
+// (eu-west-3 is London, the UK), else the id's first segment (lyve's us).
 func jurisdiction(region string) string {
-	j, _, _ := strings.Cut(region, "-")
-	return j
+	return drivers.RegionJurisdiction(region)
 }
 
 // legRegion is the region a mirror leg stores in: an idrive-<region>

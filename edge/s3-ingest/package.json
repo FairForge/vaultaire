@@ -5,6 +5,7 @@
   "description": "The mover: a Cloudflare Worker on s3.stored.cloud that streams admitted PutObject/UploadPart bodies straight to the backend (WP-EDGE-1 Part A).",
   "scripts": {
     "test": "node --test",
+    "predeploy": "node scripts/check-withdrawn.mjs",
     "deploy": "npx -y wrangler@4.151.3 deploy",
     "dev": "npx -y wrangler@4.151.3 dev --local"
   }

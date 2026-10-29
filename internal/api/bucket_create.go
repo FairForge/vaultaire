@@ -161,10 +161,7 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 	// data_residency is the coarse label the dashboard settings page shows
 	// (050); the dashboard used to derive it and the S3/management paths left
 	// it NULL — one rule now (Review R15, WP-R12-10).
-	residency := "us"
-	if drivers.IsEURegion(region) {
-		residency = "eu"
-	}
+	residency := drivers.DataResidency(region) // RP78-4: London is the UK
 	// An Object Lock bucket is created with versioning Enabled (AWS: lock
 	// implies versioning, and it cannot be suspended by the create).
 	versioning := "disabled"

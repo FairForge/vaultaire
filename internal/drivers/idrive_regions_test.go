@@ -29,7 +29,8 @@ func TestIDriveRegions_MatchTheAccount(t *testing.T) {
 	for _, gone := range []string{"us-west-1", "eu-central-2", "eu-west-2"} {
 		assert.False(t, IsValidRegion(gone), "%s does not exist in the account", gone)
 	}
-	assert.True(t, IsEURegion("eu-west-3"))
+	assert.True(t, IsEURegion("eu-west-1"))
+	assert.False(t, IsEURegion("eu-west-3"), "London is the UK (RP78-4)")
 	assert.False(t, IsEURegion("us-central-1"))
 	assert.False(t, IsEURegion("ap-northeast-1"))
 }
@@ -83,8 +84,9 @@ func TestIDriveRegionEndpoint_OverrideElseDefault(t *testing.T) {
 
 func TestIDriveRegionGroups_CoverEveryRegionOnce(t *testing.T) {
 	groups := IDriveRegionGroups()
-	require.Len(t, groups, 3)
-	assert.Equal(t, []string{"United States", "European Union", "Asia Pacific"}, []string{groups[0].Label, groups[1].Label, groups[2].Label})
+	require.Len(t, groups, 4)
+	assert.Equal(t, []string{"United States", "European Union", "United Kingdom", "Asia Pacific"},
+		[]string{groups[0].Label, groups[1].Label, groups[2].Label, groups[3].Label}, "London is the UK's group (RP78-4)")
 	seen := map[string]int{}
 	for _, g := range groups {
 		for i, r := range g.Regions {
@@ -115,4 +117,26 @@ func TestIDriveRegionAvailable_EnforcedOnlyOnceSet(t *testing.T) {
 
 	SetAvailableIDriveRegions("us-central-1", nil)
 	assert.False(t, IDriveRegionAvailable("us-west-2"))
+}
+
+// RP78-4: iDrive's eu-west-3 is London — the UK, not the EU. Each region of
+// the table names its jurisdiction; a region outside it (Lyve's us-west-1)
+// is its first segment's.
+func TestIsEURegion_London(t *testing.T) {
+	assert.False(t, IsEURegion("eu-west-3"), "London is not the EU")
+	assert.Equal(t, "uk", RegionJurisdiction("eu-west-3"))
+	for _, r := range []string{"eu-west-1", "eu-west-4", "eu-central-1", "eu-south-1"} {
+		assert.True(t, IsEURegion(r), r)
+		assert.Equal(t, "eu", RegionJurisdiction(r), r)
+	}
+	assert.Equal(t, "us", RegionJurisdiction("us-central-1"))
+	assert.Equal(t, "jp", RegionJurisdiction("ap-northeast-1"))
+	assert.Equal(t, "us", RegionJurisdiction("us-west-1"), "a region outside the table (lyve): its first segment")
+	assert.Empty(t, RegionJurisdiction(""))
+	for r := range IDriveRegions {
+		assert.NotEmpty(t, regionJurisdictions[r], "every region of the table names its jurisdiction: %s", r)
+	}
+	assert.Equal(t, "uk", DataResidency("eu-west-3"))
+	assert.Equal(t, "eu", DataResidency("eu-west-1"))
+	assert.Equal(t, "us", DataResidency("us-central-1"))
 }

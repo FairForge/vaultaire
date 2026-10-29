@@ -239,6 +239,7 @@ func WriteS3Error(w http.ResponseWriter, code string, resource string, requestID
 		statusCode = http.StatusInternalServerError
 	}
 
+	requestID = s3RequestIDOf(w, requestID) // the request's one id (RP78-3)
 	errResp := S3Error{
 		Code:      code,
 		Message:   message,
@@ -346,6 +347,7 @@ func WriteS3ErrorWithContext(w http.ResponseWriter, code string, resource string
 		statusCode = http.StatusInternalServerError
 	}
 
+	requestID = s3RequestIDOf(w, requestID) // the request's one id (RP78-3)
 	errResp := S3Error{
 		Code:      code,
 		Message:   message,

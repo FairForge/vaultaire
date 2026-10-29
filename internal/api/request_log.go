@@ -45,7 +45,7 @@ var requestSuggestions = map[string]string{
 	ErrBucketNotEmpty:                    "Delete the bucket's objects (and their versions, for a versioned bucket) before the bucket.",
 	ErrInvalidBucketName:                 "Bucket names are 3-63 characters of lower-case letters, digits, dots and hyphens; some names are reserved.",
 	ErrInvalidObjectName:                 "Use a key that is valid UTF-8 and does not contain characters the API refuses.",
-	ErrAccessDenied:                      "The key may lack this operation or bucket, be limited to some IP addresses, or the object may be locked: check the key under API Keys.",
+	ErrAccessDenied:                      "The key may lack this operation or bucket, be limited to some IP addresses, or the object may be locked, or the customer key (SSE-C) differs from the one the object was written with: check the key under API Keys.",
 	ErrInvalidAccessKeyId:                "The access key id is unknown, revoked or rotated: use a current key from API Keys.",
 	ErrInvalidRequest:                    "The request's combination of headers or parameters is not accepted: read the error message for which.",
 	ErrIncompleteBody:                    "The body ended before its Content-Length: retry the upload.",

@@ -397,7 +397,12 @@ type bufferedResponse struct {
 	header http.Header
 	status int
 	body   bytes.Buffer
+	// id is the request's x-amz-request-id (RP78-3): the error the
+	// operation writes here carries it.
+	id string
 }
+
+func (b *bufferedResponse) s3RequestID() string { return b.id }
 
 func (b *bufferedResponse) Header() http.Header { return b.header }
 
@@ -444,7 +449,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 	// operation returned let it exit before the last bytes went out.
 	defer reg.remove(entry)
 
-	rec := &bufferedResponse{header: http.Header{}}
+	rec := &bufferedResponse{header: http.Header{}, id: s3RequestIDOf(w, "")}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -497,7 +502,7 @@ func (s *Server) runLongS3Op(w http.ResponseWriter, r *http.Request, info longOp
 	// Commit: 200, then whitespace until the operation is done. Write errors
 	// (the client left) are ignored — the operation finishes regardless.
 	w.Header().Set("Content-Type", "application/xml")
-	w.Header().Set("x-amz-request-id", generateRequestID())
+	w.Header().Set("x-amz-request-id", s3RequestIDOf(w, generateRequestID()))
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	_ = rc.Flush()
@@ -539,7 +544,7 @@ func committedBody(rec *bufferedResponse, resource string) []byte {
 		Code:      ErrInternalError,
 		Message:   fmt.Sprintf("%s (status %d)", errorMessages[ErrInternalError], rec.code()),
 		Resource:  resource,
-		RequestID: generateRequestID(),
+		RequestID: s3RequestIDOf(rec, generateRequestID()),
 	})
 	if err != nil {
 		return []byte("<Error><Code>InternalError</Code></Error>")

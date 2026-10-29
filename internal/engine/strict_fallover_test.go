@@ -141,3 +141,15 @@ func TestSia_StrictTargetStillWorksAsThePrimary(t *testing.T) {
 	assert.NotContains(t, eng2.buildWriteCandidateList(eng2.view(), "idrive"), "sia")
 	assert.Equal(t, []string{"sia"}, eng2.buildWriteCandidateList(eng2.view(), "sia"))
 }
+
+// RP78-8: StrictTargets is every name IsStrictTarget says yes to, sorted —
+// what a SQL filter passes as an array instead of typing the list.
+func TestStrictTargets_EveryStrictTargetSorted(t *testing.T) {
+	got := StrictTargets()
+	assert.Equal(t, []string{"blomp", "sia", "sync"}, got)
+	for _, n := range got {
+		assert.True(t, IsStrictTarget(n), n)
+	}
+	got[0] = "changed"
+	assert.Equal(t, "blomp", StrictTargets()[0], "a copy: the caller cannot change the set")
+}

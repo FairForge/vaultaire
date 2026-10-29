@@ -17,8 +17,9 @@ package api
 //     drivers, its MD5 and size checked against the row — at most
 //     blobCopiesMaxBytesPerRun a run, batch after batch while time remains
 //     (RP76-4), and never past a source's free egress this UTC month
-//     (egressLedger: backend_plans' multiple × the stored total, the
-//     month's spend carried in job_runs.result). This is the 2× lane (the bytes cross
+//     (egressLedger: backend_plans' multiple − 1 × the stored total —
+//     one multiple is the customers', RP78-5 — the month's spend carried
+//     in job_runs.result). This is the 2× lane (the bytes cross
 //     SLC twice), rare by construction: the edge writes the copy when the
 //     leg answers. A failure is the row's attempts and last_error; after
 //     blobCopiesMaxAttempts it waits for the operator (a note).
@@ -300,13 +301,13 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		FROM object_head_cache h
 		LEFT JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 		WHERE ($1 OR h.tenant_id = ANY($2)) AND NOT h.is_chunked AND h.floor <> 'vault'
-		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`', 'sync', 'blomp', 'sia')
-		  AND COALESCE(b.tier_preference, '') NOT IN ('sync', 'blomp', 'sia')
+		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`')
+		  AND NOT (COALESCE(h.backend_name, '') = ANY($4)) AND NOT (COALESCE(b.tier_preference, '') = ANY($4))
 		  AND h.size_bytes > 0
 		  AND NOT EXISTS (SELECT 1 FROM blob_copies c WHERE c.tenant_id = h.tenant_id
 		                  AND c.storage_key = COALESCE(h.storage_key, h.object_key) AND c.kind = 'mirror')
 		ORDER BY h.updated_at
-		LIMIT $3`, all, pq.Array(tenants), blobCopiesBackfillBatch)
+		LIMIT $3`, all, pq.Array(tenants), blobCopiesBackfillBatch, pq.Array(engine.StrictTargets())) // RP78-8: the engine's list
 	if err != nil {
 		return err
 	}
@@ -641,7 +642,10 @@ func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult)
 				}
 			}
 			used = max(used, l.spent[backend])
-			l.limit[backend] = max(0, int64(mult*float64(stored))-used)
+			// RP78-5: the pass spends only the allowance ABOVE one multiple
+			// of stored — the customers' own GETs keep 1× stored before
+			// the vendor's overage rate; the 2× lane is never worth that.
+			l.limit[backend] = max(0, int64((mult-1)*float64(stored))-used)
 		}
 		if err := rows.Err(); err != nil {
 			res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
@@ -701,7 +705,7 @@ func (l *egressLedger) note() string {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " (backend_plans × stored); the rest waits for next month"
+	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " ((backend_plans multiple − 1) × stored: one multiple is the customers'); the rest waits for next month"
 }
 
 // errCopySkipped: a leg or the source cannot be asked now.
