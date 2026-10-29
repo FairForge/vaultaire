@@ -186,6 +186,11 @@ func (s *Server) initMetrics() {
 		if s.vaultParity != nil {
 			reg.MustRegister(newVaultParityScrubCollector(s.vaultParity))
 		}
+		// The weekly tape audit (WP-VAULT-2 A4).
+		reg.MustRegister(vaultTapeAudits)
+		if s.tapeAudit != nil {
+			reg.MustRegister(newTapeAuditCollector(s.tapeAudit))
+		}
 		// The pack store (Phase 37): packs sealed, GC, member reads.
 		reg.MustRegister(packstore.Collectors()...)
 		// Routing truth (WP-R7-5): the counters, and a collector that reads

@@ -184,6 +184,11 @@ func (s *Server) registerJobs() {
 		if leg, _, ok := s.vaultParity.Leg(); ok {
 			s.jobs.Register(s.vaultParity.spec())
 			logger.Info("vault parity job registered", zap.String("leg", leg))
+			if s.tapeAudit != nil {
+				// It audits against the hashes the parity job records: no
+				// parity job, nothing to audit.
+				s.jobs.Register(s.tapeAudit.spec())
+			}
 		} else {
 			logger.Info("vault parity not scheduled: no parity leg (permafrost or lyve) is registered")
 		}

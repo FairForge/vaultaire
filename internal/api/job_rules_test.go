@@ -146,6 +146,8 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 		`vaultaire_vault_parity_scrub_last_timestamp_seconds`,
 		`vaultaire_vault_parity_scrub_backlog`,
 		`vaultaire_vault_parity_restores_stuck`,
+		`vaultaire_vault_tape_audit_total{outcome="mismatch"}`,
+		`vaultaire_vault_tape_audit_last_ok_timestamp_seconds`,
 	} {
 		assert.True(t, strings.Contains(body, "\n"+series+" "), "exported before any run: %s", series)
 	}
@@ -154,7 +156,8 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	}
 	// WP-VAULT-2: the parity scrub's findings warn; its standing conditions inform.
 	for name, sev := range map[string]string{"VaultParityShardUnreadable": "warning", "VaultParityRebuildMismatch": "warning",
-		"VaultParityScrubStale": "warning", "VaultParityScrubBacklog": "info", "VaultParityRestoreStuck": "info"} {
+		"VaultParityScrubStale": "warning", "VaultParityScrubBacklog": "info", "VaultParityRestoreStuck": "info",
+		"VaultTapeAuditFailed": "warning", "VaultTapeAuditStale": "warning"} {
 		require.Contains(t, rules, name)
 		assert.Equal(t, sev, rules[name].severity, name)
 	}

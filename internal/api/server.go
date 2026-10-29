@@ -161,6 +161,7 @@ type Server struct {
 	retiredBlobs       *RetiredBlobCollector // nil without a database (WP-R2-1 Part C)
 	smartDemotion      *SmartDemotionRunner
 	vaultParity        *VaultParity
+	tapeAudit          *TapeAudit
 	packGC             *packGC // the pack store GC (internal/packstore, Phase 37); nil without the sync backend
 	smartPromoter      *SmartPromoter
 	siaPromoter        *SiaPromoter // nil without the sia backend (sia_promotion.go, migration 101)
@@ -603,6 +604,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 	if s.vaultParity != nil {
 		s.vaultParity.SSE = s.sseService
+		// WP-VAULT-2 A4: the weekly read-back of one vault object from its
+		// own copy, against the hash its parity protect recorded.
+		s.tapeAudit = NewTapeAudit(s.db, s.engine, logger)
 	}
 	// The pack store GC (Phase 37): only with the `sync` backend registered.
 	s.packGC = newPackGC(s.db, s.engine, os.Getenv("PACKSTORE_STAGING_DIR"), logger)
