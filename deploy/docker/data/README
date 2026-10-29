@@ -1,0 +1,1 @@
+The local image's /data (WP-DX-1 PR C): copied into the image owned by nonroot, so the volume mounted there is the server's to write.

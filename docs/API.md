@@ -465,6 +465,25 @@ covers every bucket and is always on.
 curl -H "Authorization: Bearer $TOKEN" "https://stored.cloud/api/v1/manage/requests?status=error&limit=20"
 ```
 
+## Test mode
+
+A **test key** works like any key but writes to the account's **sandbox**, never its live data.
+
+**Making one.** `POST /api/v1/manage/keys` with `"test": true` makes a test key. Its access key id starts with `VLT_TEST_`, and the answer says `"livemode": false`. The sandbox is made with the first test key. An account may hold 10 live test keys, and they don't count against the plan's key limit.
+
+**What a test key does:**
+- It has the same S3 API on every host.
+- Every object it writes is stored on a local disk (never a paid backend), whole and as received: never chunked, sealed, mirrored or tiered.
+- Its requests never go through the edge: the origin serves them.
+- It is never billed and never metered. The sandbox's own counter is its cap, the free tier's 5 GiB.
+- Every S3 response carries `x-stored-mode: test`.
+
+**Clearing it.** Test data is deleted automatically once its last write is 7 days old. `POST /api/v1/manage/sandbox/reset` empties the sandbox now (objects, versions, uploads and buckets); the test keys stay. An account's sandbox is erased with the account.
+
+**Webhooks.** An event caused by a test key goes to the account's own webhooks with `"livemode": false` in its body. `stored listen --forward-to localhost:<port>/<path>` replays the account's events to a local endpoint.
+
+**Elsewhere.** The dashboard's overview shows a **Test data** card once a sandbox exists. To run Stored entirely on your own machine, see `docs/guides/local.md`.
+
 ## Rate limits
 
 | Surface | Limit |
