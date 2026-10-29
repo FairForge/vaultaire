@@ -256,6 +256,21 @@
       ]
     },
     {
+      "section": "members",
+      "label": "Members of the account and invitations sent",
+      "fields": [
+        "user_id",
+        "email",
+        "role",
+        "invited_by",
+        "accepted_at",
+        "id",
+        "kind",
+        "expires_at",
+        "created_at"
+      ]
+    },
+    {
       "section": "bandwidth_usage",
       "label": "Daily transfer totals",
       "fields": [
