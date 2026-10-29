@@ -60,6 +60,63 @@ func generatePlatformPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 		},
+		"/api/v1/platform/tenants/{id}/keys": {
+			Parameters: []Parameter{id},
+			Post: mut(withBody(jsonOp("Platform", "Mint a key for a child", "PlatformCreateKey",
+				"A scoped key of the child (a child has no primary pair). Its scope never exceeds the calling credential's: what the request leaves unset is the caller's "+
+					"(permissions, buckets, IP allowlist, expiry), and a wider request is 400 `scope_exceeds_parent`; a JWT is the account's own authority. "+
+					"The secret is shown once. At most 50 live keys per child. Audited `platform.key_created`.",
+				map[string]Response{
+					"201": jsonResp("The key; `secret` only here", ref("PlatformKey")),
+					"400": errResp("`invalid_json`, `invalid_permissions`, `invalid_ip_allowlist`, `unrestricted_ip_allowlist`, `invalid_expiry` or `scope_exceeds_parent`"),
+					"404": errResp("`tenant_not_found` or `not_found`"),
+					"409": errResp("`key_limit_exceeded` or `idempotency_key_reuse`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The key's scope", ref("APIKeyCreateRequest")))),
+			Get: mgmt(jsonOp("Platform", "List a child's keys", "PlatformListKeys",
+				"Every key of the child, revoked ones included, never a secret. Not paginated.",
+				map[string]Response{
+					"200": jsonResp("Keys", listSchema("", ref("PlatformKey"))),
+					"404": errResp("`tenant_not_found` or `not_found`"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
+		"/api/v1/platform/tenants/{id}/keys/{key}": {
+			Parameters: []Parameter{id, pathParam("key", "The key's id")},
+			Delete: mut(jsonOp("Platform", "Revoke a child's key", "PlatformDeleteKey",
+				"Sets `revoked_at`; the key's STS tokens die with it. Audited `platform.key_revoked`.",
+				map[string]Response{
+					"200": jsonResp("Revoked", objectPtr("", map[string]*Schema{
+						"object": strEnum("", "api_key"), "id": str(""), "deleted": boolean("Always true"), "request_id": str(""),
+					}, "object", "id", "deleted")),
+					"404": errResp("`key_not_found`, `tenant_not_found` or `not_found`"),
+					"409": errResp("`key_revoked`"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
+		"/api/v1/platform/tenants/{id}/sts": {
+			Parameters: []Parameter{id},
+			Post: mut(withBody(jsonOp("Platform", "Mint a temporary credential for a child", "PlatformCreateSTS",
+				"An STS token of the child bounded by one of its keys (`parent_key_id`, required): the scope intersection and TTL of POST /api/v1/sts/token. Audited `platform.sts_created`.",
+				map[string]Response{
+					"201": jsonResp("The token", objectPtr("", map[string]*Schema{
+						"object": strEnum("", "sts_token"), "access_key": str("ASIA…"), "secret_key": str(""),
+						"tenant_id": str("The child"), "expiration": {Type: "string", Format: "date-time"}, "request_id": str(""),
+					}, "object", "access_key", "secret_key", "expiration")),
+					"400": errResp("`invalid_json`, `parent_key_required`, `invalid_permissions`, `parent_key_revoked` or `scope_error`"),
+					"401": errResp("`parent_key_expired`"),
+					"404": errResp("`parent_key_not_found`, `tenant_not_found` or `not_found`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The token's scope", objectPtr("", map[string]*Schema{
+					"parent_key_id": str("The id of one of the child's keys"),
+					"permissions":   {Type: "array", Items: str("")},
+					"bucket_scope":  {Type: "array", Items: str("")},
+					"ip_restrict":   {Type: "array", Items: str("")},
+					"ttl":           integer("Seconds, 1-43200 (default 3600)"),
+				}, "parent_key_id")))),
+		},
 	}
 }
 
@@ -79,5 +136,20 @@ func platformSchemas() map[string]Schema {
 			}, "storage_used_bytes"),
 			"request_id": str(""),
 		}, "object", "id", "label", "residency", "created_at", "usage"),
+		"PlatformKey": object("A child's scoped key (WP-PLAT-1)", map[string]*Schema{
+			"object":       strEnum("", "api_key"),
+			"id":           str(""),
+			"name":         str(""),
+			"key":          str("The access key id"),
+			"secret":       str("Only in the create's answer"),
+			"tenant_id":    str("The child"),
+			"is_primary":   boolean("Always false: a child has no primary pair"),
+			"permissions":  {Type: "array", Items: str("")},
+			"bucket_scope": {Type: "array", Items: str("")},
+			"ip_allowlist": {Type: "array", Items: str("")},
+			"expires_at":   {Type: "string", Format: "date-time"},
+			"revoked_at":   {Type: "string", Format: "date-time"},
+			"created_at":   {Type: "string", Format: "date-time"},
+		}, "object", "id", "key", "tenant_id", "permissions"),
 	}
 }

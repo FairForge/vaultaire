@@ -640,7 +640,8 @@ func (a *AuthService) checkKeyCap(ctx context.Context, user *User) error {
 	if err := a.sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM api_keys ak
 		WHERE ak.user_id = $1 AND ak.revoked_at IS NULL AND NOT ak.is_primary
-		  AND left(ak.key_id, 9) <> '`+TestKeyPrefix+`'`, // test keys have their own cap (WP-DX-1)
+		  AND left(ak.key_id, 9) <> '`+TestKeyPrefix+`' -- test keys have their own cap (WP-DX-1)
+		  AND `+notChildKeySQL, // a platform child's keys are capped per child (WP-PLAT-1)
 		user.ID).Scan(&active); err != nil {
 		return fmt.Errorf("count api keys: %w", err)
 	}

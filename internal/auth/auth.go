@@ -271,7 +271,8 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		       COALESCE(bucket_scope, '{}'),
 		       COALESCE(ip_allowlist, '{}'),
 		       expires_at, last_used, created_at, revoked_at
-		FROM api_keys
+		FROM api_keys ak
+		WHERE `+notChildKeySQL+` -- a platform child's keys are never its platform user's (WP-PLAT-1)
 	`)
 	if err != nil {
 		return fmt.Errorf("load api keys: %w", err)
