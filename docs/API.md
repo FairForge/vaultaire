@@ -489,6 +489,33 @@ A **test key** works like any key but writes to the account's **sandbox**, never
 
 **Elsewhere.** The dashboard's overview shows a **Test data** card once a sandbox exists. To run Stored entirely on your own machine, see `docs/guides/local.md`.
 
+## Platform
+
+A **platform** account creates and runs accounts of its own — **child tenants** — by API, for the users of an app it builds on Stored (the Connect primitive). An account becomes a platform only when an operator grants it; to every other account the routes below do not exist (404).
+
+**A child** is an account with no user, no e-mail and no primary key pair. It has a `label` and, optionally, an `external_id` the app owns (unique per platform). Its buckets default to the same region as the platform's. A child of a child is refused (400 `child_of_child`).
+
+| Route | What |
+|---|---|
+| `POST /api/v1/platform/tenants` `{label, external_id?}` | Make a child (201 `{object: "tenant", id, label, external_id, residency, created_at, usage}`); 409 `external_id_taken` |
+| `GET /api/v1/platform/tenants` | The platform's children, by id (`limit`, `starting_after`), each with `usage.storage_used_bytes` |
+| `GET /api/v1/platform/tenants/{id}` | One child |
+| `DELETE /api/v1/platform/tenants/{id}` | Schedule the child's erasure: its objects, keys and rows go after the usual 30 days |
+| `POST /api/v1/platform/tenants/{id}/keys` | Mint a scoped key of the child; the secret is shown once |
+| `GET /api/v1/platform/tenants/{id}/keys` | The child's keys (never a secret) |
+| `DELETE /api/v1/platform/tenants/{id}/keys/{key}` | Revoke one (its temporary credentials die with it) |
+| `POST /api/v1/platform/tenants/{id}/sts` `{parent_key_id, permissions?, bucket_scope?, ip_restrict?, ttl?}` | A temporary credential of the child, bounded by one of its keys |
+
+Every call is a Bearer JWT of the platform, in its request log, rate limited and audited (`platform.*`).
+
+**A child's keys never exceed the credential that mints them.** What a request leaves unset is the caller's (permissions, buckets, IP allowlist, expiry); asking more is 400 `scope_exceeds_parent`. The JWT is the account's own authority. A child holds at most 50 live keys.
+
+**The pool.** A child's bytes count against its platform's quota: the platform's limit, against the sum of the platform's own stored bytes and every child's. When the pool is spent, a write by any of them — a child's or the platform's own, through any host — is 403 `QuotaExceeded`. `usage.storage_used_bytes` is each child's own share. A platform's test-mode sandbox is never in the pool.
+
+**Suspension and erasure.** A suspended platform's children answer 403 `AccountSuspended`. When a platform's account is erased, its children are erased first (objects, keys and rows), then the platform. A platform cannot be turned off while it has children.
+
+**Operator:** `PUT /api/v1/admin/tenants/{id}/platform` `{"platform": true|false}` (admin JWT; audited `admin.platform_granted` / `admin.platform_revoked`).
+
 ## Rate limits
 
 | Surface | Limit |
