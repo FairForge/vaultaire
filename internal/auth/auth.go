@@ -277,7 +277,6 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 		       COALESCE(ip_allowlist, '{}'),
 		       expires_at, last_used, created_at, revoked_at
 		FROM api_keys ak
-		WHERE `+notChildKeySQL+` -- a platform child's keys are never its platform user's (WP-PLAT-1)
 	`)
 	if err != nil {
 		return fmt.Errorf("load api keys: %w", err)
@@ -341,6 +340,11 @@ func (a *AuthService) LoadFromDB(ctx context.Context) error {
 // this service. One site covers the dashboard, the user API and the
 // management API (Review R11-09). tenantID may be empty.
 func (a *AuthService) record(ctx context.Context, e audit.Entry) {
+	if e.TenantID == "" {
+		// The active tenant the member acts on (WP-TEAM-1), before the
+		// subject's own.
+		e.TenantID = audit.TenantFromContext(ctx)
+	}
 	if e.TenantID == "" && e.UserID != "" {
 		a.cacheMu.RLock()
 		if u, ok := a.userIndex[e.UserID]; ok {

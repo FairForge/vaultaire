@@ -58,9 +58,9 @@ func TestAuthService_CredentialCacheIsRaceFree(t *testing.T) {
 	reader(func() { _, _ = svc.ValidateS3Request(ctx, primary.Key) })
 	reader(func() { _, _ = svc.ValidateS3Request(ctx, keys[0].Key) })
 	reader(func() { _, _ = svc.ValidateAPIKey(ctx, keys[1].Key, keys[1].Secret) })
-	reader(func() { _, _ = svc.ListAPIKeys(ctx, user.ID) })
+	reader(func() { _, _ = svc.ListAPIKeys(ctx, user.TenantID) })
 	reader(func() { _, _ = svc.GetPrimaryAPIKey(ctx, tenant.ID) })
-	reader(func() { _, _ = svc.GetOwnedAPIKey(ctx, user.ID, keys[2].ID) })
+	reader(func() { _, _ = svc.GetOwnedAPIKey(ctx, user.TenantID, keys[2].ID) })
 	reader(func() { _, _ = svc.GetUserByID(ctx, user.ID) })
 	reader(func() { _, _ = svc.GetUserByEmail(ctx, user.Email) })
 	reader(func() { _ = svc.GetUserIDByTenantID(ctx, tenant.ID) })
@@ -87,17 +87,17 @@ func TestAuthService_CredentialCacheIsRaceFree(t *testing.T) {
 	}
 	writer(func(i int) { // rotate a key and keep rotating its successor
 		k := keys[3]
-		if nk, err := svc.RotateAPIKey(ctx, user.ID, k.ID); err == nil {
+		if nk, err := svc.RotateAPIKey(ctx, user.TenantID, k.ID); err == nil {
 			keys[3] = nk
 		}
 	})
 	writer(func(i int) { // revoke fresh keys
 		if k, err := svc.GenerateAPIKey(ctx, user.ID, "tmp", nil); err == nil {
-			_ = svc.RevokeAPIKey(ctx, user.ID, k.ID)
+			_ = svc.RevokeAPIKey(ctx, user.TenantID, k.ID)
 		}
 	})
 	writer(func(i int) { // set expiry on a live key
-		_ = svc.SetAPIKeyExpiration(ctx, user.ID, keys[4].ID, time.Now().Add(time.Hour))
+		_ = svc.SetAPIKeyExpiration(ctx, user.TenantID, keys[4].ID, time.Now().Add(time.Hour))
 	})
 	writer(func(i int) { // registrations and evictions of other accounts (bcrypt: a few are enough)
 		if i%10 != 0 {
@@ -135,10 +135,10 @@ func TestAuthService_CredentialCacheIsRaceFree(t *testing.T) {
 	tn, err := svc.ValidateS3Request(ctx, primary.Key)
 	require.NoError(t, err)
 	require.Equal(t, tenant.ID, tn.ID)
-	live, err := svc.GetOwnedAPIKey(ctx, user.ID, keys[3].ID)
+	live, err := svc.GetOwnedAPIKey(ctx, user.TenantID, keys[3].ID)
 	require.NoError(t, err)
 	require.Nil(t, live.RevokedAt)
-	all, err := svc.ListAPIKeys(ctx, user.ID)
+	all, err := svc.ListAPIKeys(ctx, user.TenantID)
 	require.NoError(t, err)
 	var revoked int
 	for _, k := range all {

@@ -7,6 +7,30 @@
     </div>
 </div>
 
+{{if gt (len .Accounts) 1}}
+<div class="card">
+    <div class="card-title">Your accounts</div>
+    <table class="table">
+        <thead><tr><th>Account</th><th>Your role</th><th></th></tr></thead>
+        <tbody>
+        {{range .Accounts}}
+            <tr>
+                <td>{{if .Name}}{{.Name}}{{else}}{{.TenantID}}{{end}}</td>
+                <td>{{.Role}}</td>
+                <td>{{if eq .TenantID $.TenantID}}current{{else}}
+                    <form method="post" action="/dashboard/switch-tenant" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <input type="hidden" name="tenant_id" value="{{.TenantID}}">
+                        <button class="btn btn-sm" type="submit">Switch</button>
+                    </form>
+                {{end}}</td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+
 <div class="card">
     <div class="card-title">Members</div>
     <table class="table">

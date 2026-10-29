@@ -167,7 +167,7 @@ func TestKeyListings_ShowRevokedAndPrimary(t *testing.T) {
 	f := newKeyHygieneFixture(t)
 	k, err := f.s.auth.GenerateAPIKey(context.Background(), f.user.ID, "to-revoke", nil)
 	require.NoError(t, err)
-	require.NoError(t, f.s.auth.RevokeAPIKey(context.Background(), f.user.ID, k.ID))
+	require.NoError(t, f.s.auth.RevokeAPIKey(context.Background(), f.user.TenantID, k.ID))
 
 	// Management listing: revoked_at and is_primary on every item.
 	rr, _ := f.do("GET", "/keys", "")
@@ -240,7 +240,7 @@ func TestUserKeyAPI_PrimaryCannotBeExpired(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
 	assert.Equal(t, "primary_key", env.Error.Code)
 
-	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.ID)
+	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.TenantID)
 	require.NoError(t, err)
 	for _, k := range keys {
 		if k.IsPrimary {
@@ -253,7 +253,7 @@ func TestUserKeyAPI_ExpiredKeyIsNotRotated(t *testing.T) {
 	f := newKeyHygieneFixture(t)
 	k, err := f.s.auth.GenerateAPIKey(context.Background(), f.user.ID, "scoped", &auth.KeyCreateOptions{Permissions: []string{auth.OpGetObject}})
 	require.NoError(t, err)
-	require.NoError(t, f.s.auth.SetAPIKeyExpiration(context.Background(), f.user.ID, k.ID, time.Now().Add(-time.Minute)))
+	require.NoError(t, f.s.auth.SetAPIKeyExpiration(context.Background(), f.user.TenantID, k.ID, time.Now().Add(-time.Minute)))
 
 	rr, env := f.do("POST", "/apikeys/"+k.ID+"/rotate", "")
 	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
@@ -280,7 +280,7 @@ func TestMgmtKeyAPI_UnrestrictedAllowlistIs400(t *testing.T) {
 		assert.Equal(t, "ip_allowlist", env.Error.Param)
 		assert.Contains(t, env.Error.Message, "empty")
 	}
-	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.ID)
+	keys, err := f.s.auth.ListAPIKeys(context.Background(), f.user.TenantID)
 	require.NoError(t, err)
 	assert.Len(t, keys, 1, "no key was created")
 }

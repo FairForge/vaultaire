@@ -246,7 +246,7 @@ func TestR11_STS_ParentKeyNarrowsAndIsOwned(t *testing.T) {
 	assert.Equal(t, "parent_key_not_found", resp["error"].(map[string]any)["code"])
 
 	// A revoked key is not a valid parent.
-	require.NoError(t, s.auth.RevokeAPIKey(context.Background(), user.ID, key.ID))
+	require.NoError(t, s.auth.RevokeAPIKey(context.Background(), user.TenantID, key.ID))
 	rec, resp = stsCall(t, s, user, `{"parent_key_id":"`+key.ID+`"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t, "parent_key_revoked", resp["error"].(map[string]any)["code"])
@@ -452,7 +452,7 @@ func TestR11_KeyLifecycle_WritesAuditRows(t *testing.T) {
 	ctx := audit.WithRequest(context.Background(), "198.51.100.7", "r11-test")
 	key, err := authSvc.GenerateAPIKey(ctx, user.ID, "k", &auth.KeyCreateOptions{Permissions: []string{"GetObject"}})
 	require.NoError(t, err)
-	require.NoError(t, authSvc.RevokeAPIKey(ctx, user.ID, key.ID))
+	require.NoError(t, authSvc.RevokeAPIKey(ctx, user.TenantID, key.ID))
 	require.NoError(t, authSvc.ChangePassword(ctx, user.ID, "Str0ngPassw0rd!", "An0therStr0ng!"))
 
 	rows, err := db.Query(`SELECT action, resource, COALESCE(host(ip),''), COALESCE(performed_by::text,'') FROM audit_logs WHERE tenant_id = $1 ORDER BY timestamp`, tenant.ID)

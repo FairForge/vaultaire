@@ -55,7 +55,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Rotate it
-		newKey, err := auth.RotateAPIKey(ctx, user.ID, originalKey.ID)
+		newKey, err := auth.RotateAPIKey(ctx, user.TenantID, originalKey.ID)
 		require.NoError(t, err)
 
 		assert.NotEqual(t, originalKey.Key, newKey.Key)
@@ -63,7 +63,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 		assert.Contains(t, newKey.Name, "rotated")
 		// The service keeps its own copy (no secret in memory, plan 43.7;
 		// what leaves it is a copy, WP-R5-6): ask it.
-		_, err = auth.GetOwnedAPIKey(ctx, user.ID, originalKey.ID)
+		_, err = auth.GetOwnedAPIKey(ctx, user.TenantID, originalKey.ID)
 		assert.ErrorIs(t, err, ErrKeyRevoked)
 	})
 
@@ -72,7 +72,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 		require.NoError(t, err)
 
 		// Revoke key
-		err = auth.RevokeAPIKey(ctx, user.ID, key.ID)
+		err = auth.RevokeAPIKey(ctx, user.TenantID, key.ID)
 		require.NoError(t, err)
 
 		// Cannot use revoked key
@@ -87,7 +87,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 
 		// Set expiration to past
 		pastTime := time.Now().Add(-1 * time.Hour)
-		err = auth.SetAPIKeyExpiration(ctx, user.ID, key.ID, pastTime)
+		err = auth.SetAPIKeyExpiration(ctx, user.TenantID, key.ID, pastTime)
 		require.NoError(t, err)
 
 		// Cannot use expired key
@@ -103,7 +103,7 @@ func TestAPIKeyGeneration(t *testing.T) {
 		_, err = auth.GenerateAPIKey(ctx, user.ID, "Key 2", nil)
 		require.NoError(t, err)
 
-		keys, err := auth.ListAPIKeys(ctx, user.ID)
+		keys, err := auth.ListAPIKeys(ctx, user.TenantID)
 		require.NoError(t, err)
 
 		// Should have multiple keys

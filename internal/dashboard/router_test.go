@@ -80,7 +80,7 @@ func TestPostRegister(t *testing.T) {
 	// The shown access key is the real one minted for this account.
 	user, err := authSvc.GetUserByEmail(context.Background(), "test@stored.ge")
 	require.NoError(t, err)
-	keys, err := authSvc.ListAPIKeys(context.Background(), user.ID)
+	keys, err := authSvc.ListAPIKeys(context.Background(), user.TenantID)
 	require.NoError(t, err)
 	require.NotEmpty(t, keys)
 	assert.Contains(t, body, keys[0].Key, "page must show the account's actual access key")

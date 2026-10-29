@@ -44,6 +44,11 @@ func HandleMembers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http
 		data["Members"] = members
 		data["Invitations"] = invs
 		data["Now"] = time.Now()
+		// The switcher (PR C): the other tenants this user may act on.
+		data["Accounts"] = []auth.Membership{}
+		if mine, err := auth.Memberships(r.Context(), db, sd.UserID); err == nil && mine != nil {
+			data["Accounts"] = mine
+		}
 		data["CanManage"] = auth.Can(auth.Role(sd.MemberRole), auth.ActionMemberManage)
 		data["MyRole"] = sd.MemberRole
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
@@ -218,6 +223,42 @@ func HandleAcceptInvitation(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			return
 		}
 		middleware.SetFlash(w, "success", "You are now a "+string(inv.Role)+" of this account. Switch to it on the Members page.")
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
+// HandleSwitchTenant moves the session to another tenant the user is a
+// member of (WP-TEAM-1 PR C, the switcher): a new session on that tenant
+// replaces this one (the cookie is rotated; the old token is deleted).
+func HandleSwitchTenant(db *sql.DB, sessions dashauth.SessionStore, ttl time.Duration, logger *zap.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sd := dashauth.GetSession(r.Context())
+		target := r.FormValue("tenant_id")
+		if _, err := auth.MemberRole(r.Context(), db, target, sd.UserID); err != nil {
+			if !errors.Is(err, auth.ErrNotMember) {
+				logger.Error("dashboard: switch tenant", zap.Error(err))
+			}
+			middleware.SetFlash(w, "error", "You are not a member of that account.")
+			http.Redirect(w, r, "/dashboard/members", http.StatusSeeOther)
+			return
+		}
+		next := *sd
+		next.TenantID, next.MemberRole = target, ""
+		next.IPAddress = middleware.ClientIP(r)
+		next.UserAgent = dashauth.TruncateUserAgent(r.UserAgent())
+		token, err := sessions.Create(r.Context(), next, ttl)
+		if err != nil {
+			logger.Error("dashboard: switch tenant: session", zap.Error(err))
+			middleware.SetFlash(w, "error", "The switch failed. Try again.")
+			http.Redirect(w, r, "/dashboard/members", http.StatusSeeOther)
+			return
+		}
+		if c, err := r.Cookie(dashauth.SessionCookieName); err == nil {
+			_ = sessions.Delete(r.Context(), c.Value)
+		}
+		dashauth.SetSessionCookie(w, token, ttl)
+		audit.Record(r.Context(), db, audit.Entry{TenantID: target, UserID: sd.UserID, Action: "member.switched_tenant",
+			Resource: "tenant:" + target, Metadata: map[string]any{"from": sd.TenantID}})
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }

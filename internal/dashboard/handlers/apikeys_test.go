@@ -108,7 +108,7 @@ func TestHandleGenerateKey(t *testing.T) {
 	assert.Contains(t, body, "new-key")
 	assert.Contains(t, body, "new-secret")
 
-	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	// CreateUser already generates one key, so we should have 2 now.
 	require.Len(t, keys, 2)
 	// Find the one we just created.
@@ -137,7 +137,7 @@ func TestHandleGenerateKey_DefaultName(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	require.Len(t, keys, 2) // 1 from CreateUser + 1 from Generate
 }
 
@@ -162,7 +162,7 @@ func TestHandleRevokeKey(t *testing.T) {
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	assert.Equal(t, "/dashboard/apikeys", w.Header().Get("Location"))
 
-	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	require.Len(t, keys, 2) // 1 from CreateUser + 1 generated
 	var revokedFound bool
 	for _, k := range keys {
@@ -205,7 +205,7 @@ func TestHandleGenerateKey_WithTheGovernanceBypassPermission(t *testing.T) {
 	// Assert
 	require.Equal(t, http.StatusOK, w.Code)
 	require.NotContains(t, w.Body.String(), `class="error"`, w.Body.String())
-	keys, err := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, err := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	require.NoError(t, err)
 	for _, k := range keys {
 		if k.Name == "retention-admin" {
@@ -237,7 +237,7 @@ func TestHandleRotateKey_ShowsTheNewPairOnce(t *testing.T) {
 	revealed = revealed[:strings.Index(revealed, "</span>")]
 	assert.NotEqual(t, primary.Key, revealed, "the old key id is not what is revealed")
 	assert.Contains(t, body, `class="new-secret"`, "the new secret is shown once")
-	keys, _ := authSvc.ListAPIKeys(context.Background(), user.ID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), user.TenantID)
 	var live, revoked int
 	for _, k := range keys {
 		switch {
@@ -270,7 +270,7 @@ func TestHandleRevokeKey_PrimaryIsRefused(t *testing.T) {
 	assert.Equal(t, http.StatusSeeOther, rec.Code)
 	flash, _ := url.QueryUnescape(rec.Header().Get("Set-Cookie"))
 	assert.Contains(t, flash, "rotate it instead")
-	keys, _ := authSvc.ListAPIKeys(context.Background(), user.ID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), user.TenantID)
 	for _, k := range keys {
 		if k.ID == primary.ID {
 			assert.Nil(t, k.RevokedAt, "the primary is still live")
@@ -298,7 +298,7 @@ func TestHandleGenerateKey_UnrestrictedAllowlistIsRefused(t *testing.T) {
 	assert.Contains(t, body, `<span class="error">`)
 	assert.Contains(t, body, "0.0.0.0/0")
 	assert.Contains(t, body, "leave the allowlist empty")
-	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	assert.Len(t, keys, 1, "no key was created")
 }
 
@@ -308,7 +308,7 @@ func TestHandleRotateKey_ExpiredKeyIsRefused(t *testing.T) {
 	authSvc, sd := setupAuthWithUser(t)
 	k, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "old", &auth.KeyCreateOptions{Permissions: []string{auth.OpGetObject}})
 	require.NoError(t, err)
-	require.NoError(t, authSvc.SetAPIKeyExpiration(context.Background(), sd.UserID, k.ID, time.Now().Add(-time.Minute)))
+	require.NoError(t, authSvc.SetAPIKeyExpiration(context.Background(), sd.TenantID, k.ID, time.Now().Add(-time.Minute)))
 
 	r := chi.NewRouter()
 	r.Post("/dashboard/apikeys/{id}/rotate", HandleRotateKey(tmpl, authSvc, zap.NewNop()))
@@ -320,6 +320,6 @@ func TestHandleRotateKey_ExpiredKeyIsRefused(t *testing.T) {
 	assert.Equal(t, http.StatusSeeOther, w.Code)
 	flash := strings.Join(w.Header().Values("Set-Cookie"), " ")
 	assert.Contains(t, flash, "flash", "a flash cookie carries the refusal")
-	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.UserID)
+	keys, _ := authSvc.ListAPIKeys(context.Background(), sd.TenantID)
 	assert.Len(t, keys, 2, "no successor was minted")
 }

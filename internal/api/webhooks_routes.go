@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -22,20 +23,23 @@ func (s *Server) registerWebhookRoutes() {
 
 	s.router.Route("/api/v1/webhooks", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireMember) // WP-TEAM-1
 		r.Use(rl.Middleware)
 		r.Use(im.Middleware)
 
-		r.Post("/", s.handleCreateWebhook)
+		w := r.With(s.requireRole(auth.ActionWebhookWrite))
+		w.Post("/", s.handleCreateWebhook)
 		r.Get("/", s.handleListWebhooks)
-		r.Patch("/{id}", s.handleUpdateWebhook)
-		r.Delete("/{id}", s.handleDeleteWebhook)
+		w.Patch("/{id}", s.handleUpdateWebhook)
+		w.Delete("/{id}", s.handleDeleteWebhook)
 		r.Get("/{id}/deliveries", s.handleListDeliveries)
-		r.Post("/{id}/test", s.handleTestWebhook)
-		r.Post("/{id}/rotate-secret", s.handleRotateWebhookSecret)
+		w.Post("/{id}/test", s.handleTestWebhook)
+		w.Post("/{id}/rotate-secret", s.handleRotateWebhookSecret)
 	})
 
 	s.router.Route("/api/v1/events", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireMember) // WP-TEAM-1
 		r.Use(rl.Middleware)
 
 		r.Get("/", s.handleListEvents)

@@ -170,7 +170,7 @@ func TestS3Auth_RotatedPrimaryPairIsDeadAndKnown(t *testing.T) {
 
 	// Act: rotate through the service (what the dashboard, the user API
 	// and the management API call).
-	newKey, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	newKey, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 
 	// Assert: the old pair answers 403 InvalidAccessKeyId, counted as a
@@ -223,7 +223,7 @@ func TestPresign_URLMintedBeforeTheRotationIsDead(t *testing.T) {
 	require.Equal(t, 200, code, body)
 	assert.Equal(t, "bytes of doc.txt", body)
 
-	newKey, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	newKey, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 
 	code, body = fetch(link)
@@ -263,7 +263,7 @@ func TestSTSRoute_DefaultParentIsThePrimaryRowAndDiesWithIt(t *testing.T) {
 	assert.Equal(t, f.key.Key, parent, "the default parent is the primary key id, never a synthetic name")
 	require.Equal(t, "", f.put(ak, sk, "by-token.txt"))
 
-	_, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	_, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 
 	assert.Equal(t, ErrInvalidAccessKeyId, f.put(ak, sk, "by-token-after.txt"), "the token died with its parent")

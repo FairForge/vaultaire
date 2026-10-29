@@ -51,6 +51,9 @@ const (
 	ActionBucketWrite Action = "bucket.write"
 	// ActionKeyWrite: create or revoke an S3 key of the tenant.
 	ActionKeyWrite Action = "key.write"
+	// ActionWebhookWrite: create, change, test, rotate or delete a webhook
+	// endpoint.
+	ActionWebhookWrite Action = "webhook.write"
 	// ActionSandboxReset: empty the tenant's test-mode sandbox.
 	ActionSandboxReset Action = "sandbox.reset"
 	// ActionChildKey: mint or revoke a platform child's key, or its STS
@@ -73,11 +76,11 @@ const (
 // dashboard write calls through Can. A role not in it can do nothing.
 var roleActions = map[Role]map[Action]bool{
 	RoleViewer: {ActionRead: true},
-	RoleDeveloper: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true,
+	RoleDeveloper: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true, ActionWebhookWrite: true,
 		ActionSandboxReset: true, ActionChildKey: true},
-	RoleAdmin: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true,
+	RoleAdmin: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true, ActionWebhookWrite: true,
 		ActionSandboxReset: true, ActionChildKey: true, ActionChildWrite: true, ActionMemberManage: true},
-	RoleOwner: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true,
+	RoleOwner: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true, ActionWebhookWrite: true,
 		ActionSandboxReset: true, ActionChildKey: true, ActionChildWrite: true, ActionMemberManage: true,
 		ActionAccountExport: true, ActionAccountDelete: true, ActionBilling: true},
 }
@@ -87,7 +90,7 @@ func Can(role Role, action Action) bool { return roleActions[role][action] }
 
 // Actions lists every action the table names (tests walk it).
 func Actions() []Action {
-	return []Action{ActionRead, ActionBucketWrite, ActionKeyWrite, ActionSandboxReset, ActionChildKey,
+	return []Action{ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey,
 		ActionChildWrite, ActionMemberManage, ActionAccountExport, ActionAccountDelete, ActionBilling}
 }
 

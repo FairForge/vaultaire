@@ -56,6 +56,7 @@ type ctxKey int
 const (
 	requestKey ctxKey = iota
 	actorKey
+	tenantKey
 )
 
 type requestInfo struct {
@@ -88,6 +89,22 @@ func WithActor(ctx context.Context, userID string) context.Context {
 func ActorFromContext(ctx context.Context) string {
 	a, _ := ctx.Value(actorKey).(string)
 	return a
+}
+
+// WithTenant stashes the tenant the request acts on (WP-TEAM-1: the
+// member's ACTIVE tenant, from the JWT or the dashboard session): an entry
+// written with no tenant of its own is the active tenant's.
+func WithTenant(ctx context.Context, tenantID string) context.Context {
+	if tenantID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, tenantKey, tenantID)
+}
+
+// TenantFromContext returns the tenant stashed by WithTenant.
+func TenantFromContext(ctx context.Context) string {
+	t, _ := ctx.Value(tenantKey).(string)
+	return t
 }
 
 const insertTimeout = 3 * time.Second
@@ -137,6 +154,9 @@ func insert(ctx, info context.Context, q Execer, e Entry) error {
 		} else {
 			e.EventType = e.Action
 		}
+	}
+	if e.TenantID == "" {
+		e.TenantID = TenantFromContext(info)
 	}
 	result, severity := "success", e.Severity
 	var errMsg sql.NullString

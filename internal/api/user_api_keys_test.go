@@ -37,7 +37,7 @@ func TestHandleCreateUserAPIKey_PersistsRequestedScope(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, []string{"GetObject"}, resp.Permissions)
 
-	keys, err := authSvc.ListAPIKeys(context.Background(), user.ID)
+	keys, err := authSvc.ListAPIKeys(context.Background(), user.TenantID)
 	require.NoError(t, err)
 	for _, k := range keys {
 		if k.ID == resp.ID {

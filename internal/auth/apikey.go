@@ -66,9 +66,17 @@ type APIKey struct {
 	LastIP      string            `json:"last_ip,omitempty" db:"last_ip"`
 }
 
-// GenerateAPIKey creates a new API key for a user.
+// GenerateAPIKey creates a new API key of the user's own tenant.
 // opts may be nil for full-access keys.
 func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
+	return a.GenerateAPIKeyForTenant(ctx, "", userID, name, opts)
+}
+
+// GenerateAPIKeyForTenant creates a new API key of tenantID made by userID
+// — a member of it acting on its ACTIVE tenant (WP-TEAM-1; the caller has
+// checked the member's role). "" = the user's own tenant. The row's
+// user_id is the member who made it; the key is the tenant's.
+func (a *AuthService) GenerateAPIKeyForTenant(ctx context.Context, tenantID, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
 	cached, err := a.userByID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("generate api key: %w", err)
@@ -80,13 +88,16 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	snapshot := *cached
 	a.cacheMu.RUnlock()
 	user := &snapshot
+	if tenantID == "" {
+		tenantID = user.TenantID
+	}
 	// The scope is checked here, once, for every entry point (WP-R5-12):
 	// unknown permissions, allowlist entries that are not an address or a
 	// network, an expiry that has already passed.
 	if err := opts.Validate(time.Now()); err != nil {
 		return nil, err
 	}
-	if err := a.checkKeyCap(ctx, user); err != nil {
+	if err := a.checkKeyCap(ctx, tenantID); err != nil {
 		return nil, err
 	}
 
@@ -103,7 +114,7 @@ func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, o
 	apiKey := &APIKey{
 		ID:          uuid.New().String(),
 		UserID:      userID,
-		TenantID:    user.TenantID,
+		TenantID:    tenantID,
 		Name:        name,
 		Key:         accessKey,
 		Secret:      secretKey,
@@ -230,23 +241,24 @@ func (a *AuthService) markRevokedLocked(k *APIKey, at time.Time) {
 	delete(a.keyIndex, k.Key)
 }
 
-// findOwnedKeyLocked returns the in-memory key with this id owned by
-// userID. Caller holds cacheMu; the pointer is the map's own and must not
-// be read or written after the lock is released.
-func (a *AuthService) findOwnedKeyLocked(userID, keyID string) *APIKey {
+// findOwnedKeyLocked returns the in-memory key with this id of tenantID
+// (WP-TEAM-1: a key is its tenant's, whichever member made it). Caller
+// holds cacheMu; the pointer is the map's own and must not be read or
+// written after the lock is released.
+func (a *AuthService) findOwnedKeyLocked(tenantID, keyID string) *APIKey {
 	for _, key := range a.apiKeys {
-		if key.ID == keyID && key.UserID == userID {
+		if key.ID == keyID && key.TenantID == tenantID {
 			return key
 		}
 	}
 	return nil
 }
 
-// snapshotOwnedKey returns a copy of the caller's key with this id, or nil.
-func (a *AuthService) snapshotOwnedKey(userID, keyID string) *APIKey {
+// snapshotOwnedKey returns a copy of the tenant's key with this id, or nil.
+func (a *AuthService) snapshotOwnedKey(tenantID, keyID string) *APIKey {
 	a.cacheMu.RLock()
 	defer a.cacheMu.RUnlock()
-	if key := a.findOwnedKeyLocked(userID, keyID); key != nil {
+	if key := a.findOwnedKeyLocked(tenantID, keyID); key != nil {
 		cp := *key
 		return &cp
 	}
@@ -317,11 +329,11 @@ func (a *AuthService) liveSTSChildren(ctx context.Context, parentKeyID string) i
 	return n
 }
 
-// GetOwnedAPIKey returns the caller's key with this id, or ErrKeyNotFound /
+// GetOwnedAPIKey returns the tenant's key with this id, or ErrKeyNotFound /
 // ErrKeyRevoked / ErrKeyExpired. Used by STS to bound a token to a named
 // parent key: an expired parent mints nothing.
-func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*APIKey, error) {
-	key := a.snapshotOwnedKey(userID, keyID)
+func (a *AuthService) GetOwnedAPIKey(_ context.Context, tenantID, keyID string) (*APIKey, error) {
+	key := a.snapshotOwnedKey(tenantID, keyID)
 	if key == nil {
 		return nil, ErrKeyNotFound
 	}
@@ -338,14 +350,14 @@ func (a *AuthService) GetOwnedAPIKey(_ context.Context, userID, keyID string) (*
 // persistRevocation stamps revoked_at on the row. The S3 auth path reads
 // api_keys per request and filters on revoked_at IS NULL, so this — not the
 // in-memory field — is what actually stops a key (R5-01).
-func (a *AuthService) persistRevocation(ctx context.Context, userID, keyID string) error {
+func (a *AuthService) persistRevocation(ctx context.Context, tenantID, keyID string) error {
 	if a.sqlDB == nil {
 		return nil
 	}
 	_, err := a.sqlDB.ExecContext(ctx, `
 		UPDATE api_keys SET revoked_at = NOW()
-		WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
-	`, keyID, userID)
+		WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL
+	`, keyID, tenantID)
 	if err != nil {
 		return fmt.Errorf("persist api key revocation %s: %w", keyID, err)
 	}
@@ -396,10 +408,10 @@ func (a *AuthService) ValidateAPIKey(ctx context.Context, key, secret string) (*
 // read them first). The old key is dropped from the hot index in the same
 // call. STS tokens minted from the old key die with it (the credential
 // lookup joins the parent; WP-R5-5) and are counted on the audit row.
-func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*APIKey, error) {
+func (a *AuthService) RotateAPIKey(ctx context.Context, tenantID, keyID string) (*APIKey, error) {
 	// A snapshot to build the successor from; the map's own pointer is
 	// touched again only under the lock, below.
-	oldKey := a.snapshotOwnedKey(userID, keyID)
+	oldKey := a.snapshotOwnedKey(tenantID, keyID)
 	if oldKey == nil {
 		return nil, ErrKeyNotFound
 	}
@@ -452,13 +464,13 @@ func (a *AuthService) RotateAPIKey(ctx context.Context, userID, keyID string) (*
 	}
 
 	a.cacheMu.Lock()
-	if live := a.findOwnedKeyLocked(userID, keyID); live != nil && live.RevokedAt == nil {
+	if live := a.findOwnedKeyLocked(tenantID, keyID); live != nil && live.RevokedAt == nil {
 		a.markRevokedLocked(live, now)
 	}
 	a.indexAPIKeyLocked(newKey)
 	a.cacheMu.Unlock()
 
-	a.record(ctx, audit.Entry{UserID: userID, TenantID: newKey.TenantID, Action: "key.rotated", Resource: "key:" + oldKey.ID,
+	a.record(ctx, audit.Entry{UserID: oldKey.UserID, TenantID: newKey.TenantID, Action: "key.rotated", Resource: "key:" + oldKey.ID,
 		Metadata: map[string]any{"new_key_id": newKey.ID, "name": oldKey.Name, "primary": oldKey.IsPrimary,
 			"sts_tokens_invalidated": children}})
 	return newKey, nil
@@ -515,8 +527,8 @@ func rotatedName(name string) string {
 // RevokeAPIKey revokes an API key: the row gets revoked_at (the S3 auth
 // path's source of truth), the hot index forgets it, the listing copy is
 // marked. The primary pair is refused (ErrPrimaryKeyRevoke): rotate it.
-func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
-	key := a.snapshotOwnedKey(userID, keyID)
+func (a *AuthService) RevokeAPIKey(ctx context.Context, tenantID, keyID string) error {
+	key := a.snapshotOwnedKey(tenantID, keyID)
 	if key == nil {
 		return ErrKeyNotFound
 	}
@@ -527,15 +539,15 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 		return ErrPrimaryKeyRevoke
 	}
 	children := a.liveSTSChildren(ctx, key.Key)
-	if err := a.persistRevocation(ctx, userID, keyID); err != nil {
+	if err := a.persistRevocation(ctx, tenantID, keyID); err != nil {
 		return err
 	}
 	a.cacheMu.Lock()
-	if live := a.findOwnedKeyLocked(userID, keyID); live != nil {
+	if live := a.findOwnedKeyLocked(tenantID, keyID); live != nil {
 		a.markRevokedLocked(live, time.Now())
 	}
 	a.cacheMu.Unlock()
-	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.revoked", Resource: "key:" + keyID,
+	a.record(ctx, audit.Entry{UserID: key.UserID, TenantID: key.TenantID, Action: "key.revoked", Resource: "key:" + keyID,
 		Metadata: map[string]any{"name": key.Name, "sts_tokens_invalidated": children}})
 	return nil
 }
@@ -545,8 +557,8 @@ func (a *AuthService) RevokeAPIKey(ctx context.Context, userID, keyID string) er
 // primary pair is ErrPrimaryKeyExpire — it is rotated, never expired, for
 // the same reason it is never revoked (post-merge review of #584: an
 // account could expire its one way in through this call).
-func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID string, expiresAt time.Time) error {
-	key := a.snapshotOwnedKey(userID, keyID)
+func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, tenantID, keyID string, expiresAt time.Time) error {
+	key := a.snapshotOwnedKey(tenantID, keyID)
 	if key == nil {
 		return ErrKeyNotFound
 	}
@@ -558,28 +570,30 @@ func (a *AuthService) SetAPIKeyExpiration(ctx context.Context, userID, keyID str
 	}
 	if a.sqlDB != nil {
 		if _, err := a.sqlDB.ExecContext(ctx,
-			`UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND user_id = $3`,
-			expiresAt, keyID, userID); err != nil {
+			`UPDATE api_keys SET expires_at = $1 WHERE id = $2 AND tenant_id = $3`,
+			expiresAt, keyID, tenantID); err != nil {
 			return fmt.Errorf("persist api key expiration %s: %w", keyID, err)
 		}
 	}
 	a.cacheMu.Lock()
-	if live := a.findOwnedKeyLocked(userID, keyID); live != nil {
+	if live := a.findOwnedKeyLocked(tenantID, keyID); live != nil {
 		live.ExpiresAt = &expiresAt
 	}
 	a.cacheMu.Unlock()
-	a.record(ctx, audit.Entry{UserID: userID, TenantID: key.TenantID, Action: "key.expiry_set", Resource: "key:" + keyID,
+	a.record(ctx, audit.Entry{UserID: key.UserID, TenantID: key.TenantID, Action: "key.expiry_set", Resource: "key:" + keyID,
 		Metadata: map[string]any{"expires_at": expiresAt}})
 	return nil
 }
 
-// ListAPIKeys lists all API keys for a user
-func (a *AuthService) ListAPIKeys(ctx context.Context, userID string) ([]*APIKey, error) {
+// ListAPIKeys lists the tenant's API keys (WP-TEAM-1: tenant-keyed — every
+// member sees the active tenant's keys, whoever made them; a platform
+// child's keys are the child's tenant's and never in any member's list).
+func (a *AuthService) ListAPIKeys(ctx context.Context, tenantID string) ([]*APIKey, error) {
 	a.cacheMu.RLock()
 	defer a.cacheMu.RUnlock()
 	var keys []*APIKey
 	for _, key := range a.apiKeys {
-		if key.UserID == userID {
+		if key.TenantID == tenantID {
 			keyCopy := *key
 			keyCopy.Secret = ""
 			keys = append(keys, &keyCopy)
@@ -622,27 +636,27 @@ func generateSecretKey() (string, string, error) {
 	return secret, hashStr, nil
 }
 
-// checkKeyCap enforces the free-tier key cap: active (non-revoked) keys
-// other than the tenant's primary pair (the is_primary row) must stay below
-// usage.FreeTierLimits.MaxAPIKeys. Paid tiers are not capped here. Without
-// a database (tests, dev) there is no tier and no cap.
-func (a *AuthService) checkKeyCap(ctx context.Context, user *User) error {
+// checkKeyCap enforces the free-tier key cap of a tenant: its active
+// (non-revoked) keys other than the primary pair (the is_primary row) must
+// stay below usage.FreeTierLimits.MaxAPIKeys, whichever member made them
+// (WP-TEAM-1: tenant-keyed). Paid tiers are not capped here. Without a
+// database (tests, dev) there is no tier and no cap.
+func (a *AuthService) checkKeyCap(ctx context.Context, tenantID string) error {
 	if a.sqlDB == nil {
 		return nil
 	}
 	var tier string
 	err := a.sqlDB.QueryRowContext(ctx,
-		`SELECT COALESCE(tier, '') FROM tenant_quotas WHERE tenant_id = $1`, user.TenantID).Scan(&tier)
+		`SELECT COALESCE(tier, '') FROM tenant_quotas WHERE tenant_id = $1`, tenantID).Scan(&tier)
 	if err != nil || !usage.IsFreeTier(tier) {
 		return nil // no quota row → not free-tier capped; a DB error must not block key creation
 	}
 	var active int
 	if err := a.sqlDB.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM api_keys ak
-		WHERE ak.user_id = $1 AND ak.revoked_at IS NULL AND NOT ak.is_primary
-		  AND left(ak.key_id, 9) <> '`+TestKeyPrefix+`' -- test keys have their own cap (WP-DX-1)
-		  AND `+notChildKeySQL, // a platform child's keys are capped per child (WP-PLAT-1)
-		user.ID).Scan(&active); err != nil {
+		WHERE ak.tenant_id = $1 AND ak.revoked_at IS NULL AND NOT ak.is_primary
+		  AND left(ak.key_id, 9) <> '`+TestKeyPrefix+`' -- test keys have their own cap (WP-DX-1)`,
+		tenantID).Scan(&active); err != nil {
 		return fmt.Errorf("count api keys: %w", err)
 	}
 	if active >= usage.FreeTierLimits.MaxAPIKeys {

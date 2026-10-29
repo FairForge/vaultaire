@@ -108,7 +108,7 @@ func TestLookupCredential_WrappedRowSignsAWSRequest(t *testing.T) {
 	assert.Equal(t, "bytes of wrapped.txt", prr.Body.String())
 
 	// The rotation's successor is wrapped and signs with no plaintext either.
-	newKey, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	newKey, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 	w, _, _ = f.wrappedRow("api_keys", "key_id", newKey.Key)
 	assert.NotEmpty(t, w, "RotateAPIKey wraps the successor")
@@ -161,7 +161,7 @@ func TestLookupCredential_UnwrapFailureIsOursNeverPlaintext(t *testing.T) {
 	// 5. A row with no wrapped form still signs from the plaintext (a row
 	// written before 108, or by a server without a master key).
 	f.srv.tenantKeys = testTenantKeys(t, f.db, keyTestMasterA)
-	require.NoError(t, f.svc.RevokeAPIKey(context.Background(), f.user.ID, extra.ID)) // the plan's key cap
+	require.NoError(t, f.svc.RevokeAPIKey(context.Background(), f.user.TenantID, extra.ID)) // the plan's key cap
 	plain, err := f.svcWithoutKeys().GenerateAPIKey(context.Background(), f.user.ID, "plain", nil)
 	require.NoError(t, err)
 	w, _, _ := f.wrappedRow("api_keys", "key_id", plain.Key)
@@ -218,7 +218,7 @@ func TestLookupCredential_STSWrappedAndParentChecks(t *testing.T) {
 	// The parent check comes first: a token of a rotated parent is dead
 	// (InvalidAccessKeyId), wrapped or not.
 	tok2 := mint()
-	_, err := f.svc.RotateAPIKey(ctx, f.user.ID, f.key.ID)
+	_, err := f.svc.RotateAPIKey(ctx, f.user.TenantID, f.key.ID)
 	require.NoError(t, err)
 	_, code = f.get(tok2["access_key"].(string), tok2["secret_key"].(string), "", "sts.txt")
 	assert.Equal(t, ErrInvalidAccessKeyId, code)

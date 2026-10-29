@@ -156,6 +156,7 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /members/{user}/remove":           auth.ActionMemberManage,
 	"POST /members/invitations/{id}/revoke": auth.ActionMemberManage,
 	"POST /invitations/{token}/accept":      personalWrite, // the invited address decides
+	"POST /switch-tenant":                   personalWrite, // a member of the target, checked by the handler
 	"POST /billing/crypto-invoice/cancel":   auth.ActionBilling,
 }
 
@@ -404,6 +405,8 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		invitationTmpl := template.Must(baseTmpl.Clone())
 		template.Must(invitationTmpl.ParseFS(Templates, "templates/customer/invitation.html"))
 		dr.Get("/invitations/{token}", handlers.HandleInvitationPage(invitationTmpl, deps.DB, deps.Logger))
+		// PR C: the switcher — the session moves to another of the user's tenants.
+		dr.With(act("POST /switch-tenant")).Post("/switch-tenant", handlers.HandleSwitchTenant(deps.DB, deps.Sessions, sessionTTL, deps.Logger))
 		dr.With(act("POST /invitations/{token}/accept")).Post("/invitations/{token}/accept", handlers.HandleAcceptInvitation(deps.DB, deps.Logger))
 
 		// "Access to your account" (Stage 1a Prompt 34b): the tenant's own
@@ -741,11 +744,14 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 			return
 		}
 		role := handlers.ResolveRole(r.Context(), deps.DB, user.ID)
+		// The session's active tenant (WP-TEAM-1): the one the user owns,
+		// else the first it joined.
+		active := handlers.SessionTenant(r.Context(), deps.DB, user.ID, user.TenantID)
 
 		// If MFA is enabled, redirect to the 2FA verification page (the same
 		// challenge the OAuth callbacks start — R5-06).
 		handled, mErr := handlers.BeginMFAChallenge(w, r, deps.Auth, mfaGate, handlers.MFAChallenge{
-			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Role: role,
+			UserID: user.ID, TenantID: active, Email: user.Email, Role: role,
 		})
 		if mErr != nil {
 			deps.Logger.Error("create mfa pending", zap.Error(mErr))
@@ -765,7 +771,7 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 
 		token, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
 			UserID:    user.ID,
-			TenantID:  user.TenantID,
+			TenantID:  active,
 			Email:     user.Email,
 			Role:      role,
 			IPAddress: middleware.ClientIP(r),

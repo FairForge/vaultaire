@@ -33,7 +33,7 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, user.TenantID, cred.TenantID)
 
-	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.ID, key.ID))
+	require.NoError(t, svc.RevokeAPIKey(context.Background(), user.TenantID, key.ID))
 
 	_, err = a.LookupCredential(context.Background(), key.Key)
 	assert.Error(t, err, "a revoked key must not authenticate on the S3 path")
@@ -41,7 +41,7 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	// Survives a restart: a fresh service loading from the DB sees the revocation.
 	fresh := NewAuthService(nil, db)
 	require.NoError(t, fresh.LoadFromDB(context.Background()))
-	keys, err := fresh.ListAPIKeys(context.Background(), user.ID)
+	keys, err := fresh.ListAPIKeys(context.Background(), user.TenantID)
 	require.NoError(t, err)
 	var found bool
 	for _, k := range keys {
@@ -53,7 +53,7 @@ func TestRevokeAPIKey_PersistsAndBlocksS3Auth(t *testing.T) {
 	assert.True(t, found)
 
 	// Revoking twice is an error, and the row is untouched.
-	assert.Error(t, svc.RevokeAPIKey(context.Background(), user.ID, key.ID))
+	assert.Error(t, svc.RevokeAPIKey(context.Background(), user.TenantID, key.ID))
 }
 
 func TestRevokeAPIKey_OtherUsersKeyIsNotFound(t *testing.T) {
@@ -64,7 +64,7 @@ func TestRevokeAPIKey_OtherUsersKeyIsNotFound(t *testing.T) {
 	key, err := svc.GenerateAPIKey(context.Background(), owner.ID, "k", nil)
 	require.NoError(t, err)
 
-	assert.Error(t, svc.RevokeAPIKey(context.Background(), other.ID, key.ID))
+	assert.Error(t, svc.RevokeAPIKey(context.Background(), other.TenantID, key.ID))
 
 	a := NewAuth(db, zap.NewNop(), nil)
 	_, err = a.LookupCredential(context.Background(), key.Key)
@@ -78,7 +78,7 @@ func TestRotateAPIKey_PersistsNewKeyAndRevokesOld(t *testing.T) {
 	old, err := svc.GenerateAPIKey(context.Background(), user.ID, "k", &KeyCreateOptions{Permissions: []string{"GetObject", "PutObject"}, BucketScope: []string{"photos"}})
 	require.NoError(t, err)
 
-	rotated, err := svc.RotateAPIKey(context.Background(), user.ID, old.ID)
+	rotated, err := svc.RotateAPIKey(context.Background(), user.TenantID, old.ID)
 	require.NoError(t, err)
 	require.NotEqual(t, old.Key, rotated.Key)
 
@@ -102,7 +102,7 @@ func TestSetAPIKeyExpiration_PersistsAndAppliesToS3Auth(t *testing.T) {
 	require.NoError(t, err)
 
 	past := time.Now().Add(-time.Minute)
-	require.NoError(t, svc.SetAPIKeyExpiration(context.Background(), user.ID, key.ID, past))
+	require.NoError(t, svc.SetAPIKeyExpiration(context.Background(), user.TenantID, key.ID, past))
 
 	a := NewAuth(db, zap.NewNop(), nil)
 	cred, err := a.LookupCredential(context.Background(), key.Key)

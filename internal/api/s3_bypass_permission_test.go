@@ -576,9 +576,9 @@ func TestIsObjectLockBypass_NoScopeInTheContextIsNoBypass(t *testing.T) {
 // table and store what was asked (the dashboard form is the third place:
 // internal/dashboard, TestAPIKeysPage_OffersTheGovernanceBypassPermission).
 func TestKeyAPIs_CreateAKeyWithTheBypassPermission(t *testing.T) {
-	stored := func(t *testing.T, svc *auth.AuthService, userID, id string) []string {
+	stored := func(t *testing.T, svc *auth.AuthService, tenantID, id string) []string {
 		t.Helper()
-		keys, err := svc.ListAPIKeys(context.Background(), userID)
+		keys, err := svc.ListAPIKeys(context.Background(), tenantID)
 		require.NoError(t, err)
 		for _, k := range keys {
 			if k.ID == id {
@@ -607,7 +607,7 @@ func TestKeyAPIs_CreateAKeyWithTheBypassPermission(t *testing.T) {
 			ID string `json:"id"`
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.Equal(t, want, stored(t, svc, user.ID, resp.ID))
+		assert.Equal(t, want, stored(t, svc, user.TenantID, resp.ID))
 	})
 
 	t.Run("management API", func(t *testing.T) {
@@ -627,10 +627,10 @@ func TestKeyAPIs_CreateAKeyWithTheBypassPermission(t *testing.T) {
 			ID string `json:"id"`
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-		assert.Equal(t, want, stored(t, svc, user.ID, resp.ID))
+		assert.Equal(t, want, stored(t, svc, user.TenantID, resp.ID))
 
 		// Rotation keeps the scope: the replacement is not a wider key.
-		rotated, err := svc.RotateAPIKey(context.Background(), user.ID, resp.ID)
+		rotated, err := svc.RotateAPIKey(context.Background(), user.TenantID, resp.ID)
 		require.NoError(t, err)
 		assert.Equal(t, want, rotated.Permissions)
 	})
