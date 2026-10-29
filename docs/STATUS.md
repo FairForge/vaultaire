@@ -1,6 +1,16 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 21:00 UTC — **Review RP82 of Stage 1a Prompt 51 (WP-PLAT-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-3-REVIEW.md`):
+Updated: 2026-10-29 22:30 UTC — **Two lanes at once.** The surface lane runs Prompt 52 (WP-TEAM-1, migration 118). The engine lane runs **Prompt 52E, the Stage 1 closeout** (`docs/reviews/STAGE1-CLOSEOUT-PROMPTS.md`, migration 119). It covers what Stage 1 still owes in code that does not touch Prompt 52's files:
+- WP-R15-1, chunk-signature verification;
+- the origin's `x-amz-checksum-*` trailer check (discarded today);
+- WP-R1-10 (the boot pings the database);
+- WP-R9-3, WP-R11-2, WP-R3-6, WP-R9-5;
+- the WP-R0-1 deletions and WP-R7-3 (0 Quotaless rows on prod);
+- the dedicated `vaultaire` service user (F-14's last code prerequisite).
+
+Review RP85.
+
+Before that: 2026-10-29 21:00 UTC — **Review RP82 of Stage 1a Prompt 51 (WP-PLAT-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-3-REVIEW.md`):
 - **RP82-1 (P2):** the pool checks the total only, so a platform's children skip its Standard / Vault floor split (11 TB Standard at the Vault price on a 1 + 10 TB house). Latent: tenant zero has no floors, and no outside platform exists. Fix: floors pooled like the total.
 - **RP82-2 (P2):** a child's downloads have no allowance (= D-STRIPE-31, already Prompt 52's Part 0).
 - **P3s for WP-ACCT-1:** RP82-3 (a per-write SUM over every child), RP82-4 (children inherit no per-tenant flag, `standard_sealed_default` included). Three P4s.
