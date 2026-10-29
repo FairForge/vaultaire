@@ -86,7 +86,10 @@ jobs:
           # so a broken migration sails through CI and only detonates on the
           # (equally strict since WP-9) prod deploy runner.
           for f in internal/database/migrations/*.sql; do
-            psql -v ON_ERROR_STOP=1 -h localhost -U viera -d vaultaire -f "$f"
+            # The deploy's runner options (WP-R9-3): a migration that waits on
+            # a lock or runs past 10 min fails here first.
+            PGOPTIONS='-c lock_timeout=5s -c statement_timeout=600s' \
+              psql -v ON_ERROR_STOP=1 -h localhost -U viera -d vaultaire -f "$f"
           done
 
       - name: Build

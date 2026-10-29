@@ -6,5 +6,6 @@ CREATE TABLE IF NOT EXISTS tenants (
     secret_key  VARCHAR(255),
     created_at  TIMESTAMP DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_tenants_access_key ON tenants(access_key);
-CREATE INDEX IF NOT EXISTS idx_tenants_email ON tenants(email);
+-- idx_tenants_access_key and idx_tenants_email duplicated the UNIQUE indexes
+-- of the same columns: dropped by 119_index_hygiene.sql, their CREATE removed
+-- here in the same change (the deploy re-applies every file).

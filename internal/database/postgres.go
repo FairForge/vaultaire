@@ -36,7 +36,14 @@ type Tenant struct {
 	SecretKey string
 }
 
-// NewPostgres creates a new PostgreSQL connection
+// BootPingTimeout bounds NewPostgres's ping (WP-R1-10): a connect is itself
+// bounded by connect_timeout, the ping by this.
+const BootPingTimeout = 10 * time.Second
+
+// NewPostgres opens the pool and proves the database answers: a ping
+// bounded by BootPingTimeout. An error means the boot must stop (WP-R1-10,
+// R9-06): the handle used to be opened lazily and never pinged, so a dead
+// Postgres logged "connected" and every DB call failed afterwards.
 func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
 	// Never an empty password field; always a connect timeout (Config.DSN).
 	dsn := cfg.DSN()
@@ -50,6 +57,13 @@ func NewPostgres(cfg Config, logger *zap.Logger) (*Postgres, error) {
 	db.SetMaxIdleConns(25)
 	db.SetConnMaxLifetime(5 * time.Minute)
 	db.SetConnMaxIdleTime(time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), BootPingTimeout)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping database %s:%d/%s: %w", cfg.Host, cfg.Port, cfg.Database, err)
+	}
 
 	return &Postgres{
 		db:     db,

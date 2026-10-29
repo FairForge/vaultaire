@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"net"
 	"strconv"
 	"testing"
@@ -31,14 +30,13 @@ func TestNewPostgres_AServerThatAcceptsAndNeverAnswersFailsTheConnectInSeconds(t
 	}()
 	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ := strconv.Atoi(portStr)
-	pg, err := NewPostgres(Config{Host: host, Port: port, Database: "x", User: "x"}, zap.NewNop())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pg.db.Close() })
-
-	// Act
+	// Act: NewPostgres pings (WP-R1-10), so the wedged handshake is its error.
 	start := time.Now()
 	done := make(chan error, 1)
-	go func() { done <- pg.db.PingContext(context.Background()) }()
+	go func() {
+		_, err := NewPostgres(Config{Host: host, Port: port, Database: "x", User: "x"}, zap.NewNop())
+		done <- err
+	}()
 
 	// Assert
 	select {

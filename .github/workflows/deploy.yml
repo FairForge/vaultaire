@@ -154,7 +154,8 @@ jobs:
             # not prompt — a prompt reads the rest of this script off stdin as
             # password attempts, silently skipping the binary swap below while
             # the job still exits 0 (observed 2026-06-08..07-09 on prod).
-            PGPASSWORD="$DB_PW" \
+            # lock_timeout / statement_timeout: as on prod (WP-R9-3).
+            PGOPTIONS='-c lock_timeout=5s -c statement_timeout=600s' PGPASSWORD="$DB_PW" \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           # Keep the previous binary for one-command rollback.
@@ -252,7 +253,10 @@ jobs:
             # after 5 s and fails the deploy instead of queueing every query on that
             # table behind it. Migrations must stay additive: the build before this
             # one keeps running against the migrated schema until the switch.
-            PGOPTIONS='-c lock_timeout=5s' PGPASSWORD="$DB_PW" \
+            # statement_timeout: no migration statement runs longer than 10 min
+            # (WP-R9-3) — a big-table index is CREATE INDEX CONCURRENTLY in its
+            # own file (internal/database/migrations/README.md).
+            PGOPTIONS='-c lock_timeout=5s -c statement_timeout=600s' PGPASSWORD="$DB_PW" \
               psql -w -v ON_ERROR_STOP=1 -h 127.0.0.1 -U vaultaire -d vaultaire -f "$f" < /dev/null
           done
           rm -rf /tmp/vaultaire-migrations
