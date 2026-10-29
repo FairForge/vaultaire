@@ -221,7 +221,8 @@ func (s *Server) registerEdgeRoutes() {
 	s.router.Post("/api/v1/edge/commit", s.handleEdgeCommit)
 	s.router.Post("/api/v1/edge/index", s.handleEdgeIndex)
 	s.router.Post("/api/v1/edge/heartbeat", s.handleEdgeHeartbeat)
-	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index, /api/v1/edge/heartbeat")
+	s.router.Post("/api/v1/edge/mirror", s.handleEdgeMirror)
+	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index, /api/v1/edge/heartbeat, /api/v1/edge/mirror")
 }
 
 // edgeNotFound answers a call that is not the Worker's: the route does not
@@ -1527,8 +1528,13 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, req edgeCo
 		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	}
-	if req.MirrorCut && row.Attrs.MirrorLeg != "" {
-		blobCopiesTotal.WithLabelValues(blobCopyCut).Inc() // RP76-2: the copy is owed
+	if row.Attrs.MirrorLeg != "" {
+		switch {
+		case req.MirrorCut:
+			blobCopiesTotal.WithLabelValues(blobCopyCut).Inc() // RP76-2: the copy is owed
+		case req.MirrorUnbudgeted:
+			blobCopiesTotal.WithLabelValues(blobCopyUnbudgeted).Inc() // RP78-1: the copy is owed
+		}
 	}
 	// The bucket's default retention and the request's lock headers,
 	// exactly as plain PUT (applyObjectLockOnPut reads the headers).

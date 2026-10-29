@@ -23,14 +23,15 @@
         <strong>{{.RegionDisplay}}</strong>
         <span class="badge badge-default">{{.Region}}</span>
         {{if eq .DataResidency "eu"}}<span class="badge badge-success">EU Data Residency</span>
+        {{else if eq .DataResidency "uk"}}<span class="badge badge-success">UK Data Residency</span>
         {{else if eq .DataResidency "us"}}<span class="badge" style="background:var(--primary);color:#fff;">US Data Residency</span>
         {{end}}
     </div>
     <p class="text-muted" style="font-size: 0.8rem; margin-top: 0.5rem;">
         Region is set at bucket creation and cannot be changed. All objects in this bucket are stored in this region.
     </p>
-    {{if .IsEURegion}}<p class="text-muted" style="font-size: 0.8rem;">
-        Objects in an EU bucket are never copied outside the EU. Where Stored keeps a second copy of an object with a second provider, an EU bucket gets none until that provider has an EU location: today each object here is a single copy.
+    {{with .SingleCopyJurisdiction}}<p class="text-muted" style="font-size: 0.8rem;">
+        Objects in this bucket are never copied outside {{.}}. Where Stored keeps a second copy of an object with a second provider, this bucket gets none until that provider has a location in {{.}}: today each object here is a single copy.
     </p>{{end}}
 </div>
 

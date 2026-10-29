@@ -21,6 +21,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/clientbuilds"
 	"github.com/FairForge/vaultaire/internal/translog/ots"
 	"github.com/FairForge/vaultaire/internal/translog/ots/otstest"
 )
@@ -323,4 +324,34 @@ func TestVerify_Client_ListedAndUnlisted(t *testing.T) {
 		client: file, clientName: "sdk-js"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not in the log")
+}
+
+// RP78-10: a build the manifest withdrew is refused even though the log
+// lists it (its entry cannot be removed).
+func TestVerify_Client_WithdrawnIsRefused(t *testing.T) {
+	skey, vkey, err := translog.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	artefact := []byte("a withdrawn worker module")
+	sum := sha256.Sum256(artefact)
+	m := logOf(t, 2, -1)
+	body, err := translog.Encode(translog.ClientBuild{Client: translog.ClientSDKWasm, Version: "0.1.0",
+		SourceCommit: strings.Repeat("ab", 20), SHA256: hex.EncodeToString(sum[:]),
+		Toolchain: "go1.26.10", Recipe: "scripts/build-client.sh"}, time.Now())
+	require.NoError(t, err)
+	_, err = m.Append(body)
+	require.NoError(t, err)
+	url := serveLog(t, m, skey)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "e2ee.wasm")
+	require.NoError(t, os.WriteFile(file, artefact, 0o600))
+	old := withdrawnOf
+	withdrawnOf = func(s string) (clientbuilds.Withdrawal, bool) {
+		return clientbuilds.Withdrawal{Client: "sdk-wasm", SHA256: s, Reason: "the 411 regression", WithdrawnAt: "2026-10-29"}, s == hex.EncodeToString(sum[:])
+	}
+	t.Cleanup(func() { withdrawnOf = old })
+	var out bytes.Buffer
+	err = run(&out, options{url: url, vkey: vkey, state: filepath.Join(dir, "st"), entry: -1, client: file, clientName: "sdk-wasm"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "withdrawn")
+	assert.Contains(t, err.Error(), "the 411 regression")
 }

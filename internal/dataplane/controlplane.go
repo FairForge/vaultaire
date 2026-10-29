@@ -33,6 +33,23 @@ type ControlPlane interface {
 	Admit(ctx context.Context, req AdmitRequest) (AdmitResponse, error)
 	Index(ctx context.Context, req IndexRequest) (IndexResponse, error)
 	Commit(ctx context.Context, req CommitRequest) (CommitResponse, error)
+	// Mirror settles a mirrored PUT's mirror after its commit (RP78-2).
+	Mirror(ctx context.Context, req MirrorSettle) (MirrorSettleResponse, error)
+}
+
+// MirrorSettle is POST /api/v1/edge/mirror: what a mirror that outlived the
+// primary's answer did — the leg's ETag, or cut (it stored nothing).
+type MirrorSettle struct {
+	AdmitID string `json:"admit_id"`
+	ETag    string `json:"etag,omitempty"`
+	Cut     bool   `json:"cut,omitempty"`
+}
+
+// MirrorSettleResponse is the copy's state after the settle: ready, pending
+// (the job's), or retired (the leg's bytes are named by nothing: queued for
+// the collector).
+type MirrorSettleResponse struct {
+	State string `json:"state"`
 }
 
 // CommitResponse is the commit's answer: the S3 answer the host relays to
@@ -225,6 +242,13 @@ type CommitRequest struct {
 	// MirrorCut (RP76-2): the mirror leg fell behind the primary by its
 	// buffer, or did not answer in time after it, and was cut loose.
 	MirrorCut bool `json:"mirror_cut,omitempty"`
+	// MirrorSettle (RP78-2): the mirror was still running at the primary's
+	// answer; its settle follows on POST /api/v1/edge/mirror. The copy is
+	// pending until it does.
+	MirrorSettle bool `json:"mirror_settle,omitempty"`
+	// MirrorUnbudgeted (RP78-1): the host's budget could not spare the
+	// mirror's buffer; the PUT went unmirrored and the copy is owed.
+	MirrorUnbudgeted bool `json:"mirror_unbudgeted,omitempty"`
 	// ShardETags (an RS write): each shard's backend ETag, in shard order;
 	// "" for a shard that did not land. BodyMD5 is the body's.
 	ShardETags []string `json:"shard_etags,omitempty"`
@@ -259,7 +283,9 @@ type CommitChunk struct {
 	// links' order; a failed mirror PUT's is omitted.
 	BackendETags []string `json:"backend_etags,omitempty"`
 	MirrorCut    bool     `json:"mirror_cut,omitempty"` // RP76-2, as CommitRequest's
-	Status       string   `json:"status"`               // stored | hit
+	// MirrorUnbudgeted (RP78-1), as CommitRequest's.
+	MirrorUnbudgeted bool   `json:"mirror_unbudgeted,omitempty"`
+	Status           string `json:"status"` // stored | hit
 }
 
 // IndexRequest is one batch of the host's chunk hashes.

@@ -181,3 +181,38 @@ func TestReproCheckClients_DefaultsToTheClosedClientList(t *testing.T) {
 	require.NotNil(t, m, "the script names its default list")
 	assert.Equal(t, translog.BuildClients(), strings.Fields(string(m[1])))
 }
+
+// RP78-10: a release can be withdrawn without touching its row or its log
+// entry (an appended client_build entry cannot be removed, and a changed
+// row would be a new entry): the manifest's `withdrawn` list names (client,
+// sha256) with a reason. Withdrawn refuses it; Load still returns the row
+// unchanged, so the boot appends nothing new; a withdrawal of a build the
+// manifest does not list is refused.
+func TestClientBuildManifest_WithdrawnIsRefused(t *testing.T) {
+	rows, err := Load()
+	require.NoError(t, err)
+	var codec051 translog.ClientBuild
+	for _, b := range rows {
+		if b.Client == "edge-codec" && b.Version == "0.5.1" {
+			codec051 = b
+		}
+	}
+	require.NotEmpty(t, codec051.SHA256, "0.5.1's edge-codec row stays listed")
+	w, ok := Withdrawn("edge-codec", codec051.SHA256)
+	require.True(t, ok, "0.5.1's edge-codec (the 411 regression) is withdrawn")
+	assert.Contains(t, w.Reason, "411")
+	_, ok = Withdrawn("edge-codec", strings.Repeat("0", 64))
+	assert.False(t, ok)
+	for _, b := range rows {
+		if b.Client == "edge-ingest" && b.Version == "0.5.2" {
+			_, ok := Withdrawn("edge-ingest", b.SHA256)
+			assert.False(t, ok, "0.5.2's edge-ingest — the same bytes as 0.5.1's — is live: never withdrawn")
+		}
+	}
+
+	raw := []byte(`{"clients":[{"client":"sdk-js","version":"0.1.0","source_commit":"` + strings.Repeat("ab", 20) + `","sha256":"` + strings.Repeat("cd", 32) + `","toolchain":"none","recipe":"scripts/build-client.sh"}],
+		"withdrawn":[{"client":"sdk-js","sha256":"` + strings.Repeat("ef", 32) + `","reason":"x","withdrawn_at":"2026-10-29"}]}`)
+	_, _, err = parseAll(raw)
+	require.Error(t, err, "a withdrawal must name a listed build")
+	assert.Contains(t, err.Error(), "not listed")
+}

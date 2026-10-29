@@ -42,6 +42,10 @@ func (c *fakeCP) Commit(_ context.Context, r CommitRequest) (CommitResponse, err
 	return Relay{Status: http.StatusOK}, nil
 }
 
+func (c *fakeCP) Mirror(context.Context, MirrorSettle) (MirrorSettleResponse, error) {
+	return MirrorSettleResponse{State: "pending"}, nil
+}
+
 // A backend that takes the body and never answers (Lyve us-east-1, 1–3 %
 // of PUTs on 2026-10-17) ends the move at the host's response deadline as
 // edge_error — the client's 503, never a request that hangs.

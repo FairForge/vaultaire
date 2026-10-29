@@ -44,6 +44,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/FairForge/vaultaire/internal/translog"
+	"github.com/FairForge/vaultaire/internal/translog/clientbuilds"
 	"github.com/FairForge/vaultaire/internal/translog/ots"
 )
 
@@ -250,6 +251,10 @@ func anchors(ctx context.Context, out io.Writer, c *translog.Client, cp translog
 	return nil
 }
 
+// withdrawnOf is the manifest's withdrawal of a build by its hash (the
+// tests replace it).
+var withdrawnOf = clientbuilds.WithdrawnSHA
+
 // clientListed proves the artefact at path is a client build the log lists
 // (K4c-3b; plan 43.6: "clients refuse an unlisted build"): its SHA-256 must
 // be in a client_build entry the verified checkpoint commits to — matching
@@ -269,6 +274,11 @@ func clientListed(ctx context.Context, out io.Writer, c *translog.Client, cp tra
 		return fmt.Errorf("hash the client artefact: %w", err)
 	}
 	sum := hex.EncodeToString(h.Sum(nil))
+	if w, ok := withdrawnOf(sum); ok {
+		// RP78-10: listed in the log, withdrawn by the manifest (an entry
+		// cannot be removed) — refused all the same.
+		return fmt.Errorf("client build withdrawn: %s sha256 %s was withdrawn on %s (%s) — refuse this build", w.Client, sum, w.WithdrawnAt, w.Reason)
+	}
 	if name == "" {
 		// Any client: try each the manifest knows.
 		var last error

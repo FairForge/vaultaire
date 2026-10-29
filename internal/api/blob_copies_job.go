@@ -17,8 +17,9 @@ package api
 //     drivers, its MD5 and size checked against the row — at most
 //     blobCopiesMaxBytesPerRun a run, batch after batch while time remains
 //     (RP76-4), and never past a source's free egress this UTC month
-//     (egressLedger: backend_plans' multiple × the stored total, the
-//     month's spend carried in job_runs.result). This is the 2× lane (the bytes cross
+//     (egressLedger: backend_plans' multiple − 1 × the stored total —
+//     one multiple is the customers', RP78-5 — the month's spend carried
+//     in job_runs.result). This is the 2× lane (the bytes cross
 //     SLC twice), rare by construction: the edge writes the copy when the
 //     leg answers. A failure is the row's attempts and last_error; after
 //     blobCopiesMaxAttempts it waits for the operator (a note).
@@ -88,12 +89,18 @@ const (
 	blobCopyDeleted  = "deleted"  // a stale copy removed from its leg, row gone
 	blobCopySkipped  = "skipped"  // a leg or source unregistered or its breaker open
 	blobCopyCut      = "cut"      // a host cut a mirror that fell behind the primary (RP76-2)
+	// blobCopySettled: a mirror that outlived the primary's answer settled
+	// ready after the commit (RP78-2).
+	blobCopySettled = "settled"
+	// blobCopyUnbudgeted: a host's byte budget could not spare a mirror's
+	// buffer; the PUT went unmirrored and the copy is owed (RP78-1).
+	blobCopyUnbudgeted = "unbudgeted"
 )
 
 var (
 	blobCopiesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_total",
-		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open) | cut (a host cut a mirrored write's mirror leg loose for falling 16 MiB behind the primary or not answering 5 s after it — RP76-2; the copy is then owed).",
+		Help: "Mirror copies (blob_copies, WP-EDGE-4) the blob_copies job handled, by outcome: enqueued (a backfill row) | copied (a pending copy written from the primary) | failed (a copy attempt failed; retried) | orphaned (its blob is named by nothing: made stale) | deleted (a stale copy removed from its leg) | skipped (a leg or source unregistered or its breaker open) | cut (a host cut a mirrored write's mirror leg loose for falling 16 MiB behind the primary or not answering within its bound — RP76-2; the copy is then owed) | settled (a mirror that outlived the primary's answer settled ready after the commit through POST /api/v1/edge/mirror — RP78-2) | unbudgeted (a host's byte budget could not spare a mirror's buffer and the PUT went unmirrored; the copy is owed — RP78-1).",
 	}, []string{"outcome"})
 	blobCopiesReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_blob_copies_reads_total",
@@ -106,7 +113,7 @@ var (
 )
 
 func init() {
-	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped, blobCopyCut} {
+	for _, o := range []string{blobCopyEnqueued, blobCopyCopied, blobCopyFailed, blobCopyOrphaned, blobCopyDeleted, blobCopySkipped, blobCopyCut, blobCopySettled, blobCopyUnbudgeted} {
 		blobCopiesTotal.WithLabelValues(o)
 	}
 	blobCopiesReads.WithLabelValues("served_mirror")
@@ -294,13 +301,13 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		FROM object_head_cache h
 		LEFT JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 		WHERE ($1 OR h.tenant_id = ANY($2)) AND NOT h.is_chunked AND h.floor <> 'vault'
-		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`', 'sync', 'blomp', 'sia')
-		  AND COALESCE(b.tier_preference, '') NOT IN ('sync', 'blomp', 'sia')
+		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`')
+		  AND NOT (COALESCE(h.backend_name, '') = ANY($4)) AND NOT (COALESCE(b.tier_preference, '') = ANY($4))
 		  AND h.size_bytes > 0
 		  AND NOT EXISTS (SELECT 1 FROM blob_copies c WHERE c.tenant_id = h.tenant_id
 		                  AND c.storage_key = COALESCE(h.storage_key, h.object_key) AND c.kind = 'mirror')
 		ORDER BY h.updated_at
-		LIMIT $3`, all, pq.Array(tenants), blobCopiesBackfillBatch)
+		LIMIT $3`, all, pq.Array(tenants), blobCopiesBackfillBatch, pq.Array(engine.StrictTargets())) // RP78-8: the engine's list
 	if err != nil {
 		return err
 	}
@@ -635,7 +642,10 @@ func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult)
 				}
 			}
 			used = max(used, l.spent[backend])
-			l.limit[backend] = max(0, int64(mult*float64(stored))-used)
+			// RP78-5: the pass spends only the allowance ABOVE one multiple
+			// of stored — the customers' own GETs keep 1× stored before
+			// the vendor's overage rate; the 2× lane is never worth that.
+			l.limit[backend] = max(0, int64((mult-1)*float64(stored))-used)
 		}
 		if err := rows.Err(); err != nil {
 			res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
@@ -695,7 +705,7 @@ func (l *egressLedger) note() string {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " (backend_plans × stored); the rest waits for next month"
+	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " ((backend_plans multiple − 1) × stored: one multiple is the customers'); the rest waits for next month"
 }
 
 // errCopySkipped: a leg or the source cannot be asked now.

@@ -687,6 +687,17 @@ func strictTarget(name string) bool { return strictTargetBackends[name] }
 // IsStrictTarget is strictTarget for the API layer.
 func IsStrictTarget(name string) bool { return strictTarget(name) }
 
+// StrictTargets is every strict target, sorted (a copy): what a SQL filter
+// passes as an array parameter instead of typing the list (RP78-8).
+func StrictTargets() []string {
+	out := make([]string, 0, len(strictTargetBackends))
+	for n := range strictTargetBackends {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // readCandidates is the Get/GetRange candidate list for an object recorded
 // on target: target alone (WP-R6-1; a strict target was already asked alone,
 // Prompt 2b.4 E1.1). A target no driver is registered under is

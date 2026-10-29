@@ -92,6 +92,14 @@ func HandleBucketSettings(tmpl *template.Template, db *sql.DB, logger *zap.Logge
 		data["ModePrivate"] = modeLabel(modes.Private)
 		data["RegionDisplay"] = drivers.RegionDisplayName(region)
 		data["IsEURegion"] = drivers.IsEURegion(region)
+		// RP78-4: the jurisdiction a pinned bucket's single-copy sentence
+		// names — "the EU", "the UK" (London is not the EU).
+		switch drivers.RegionJurisdiction(region) {
+		case "eu":
+			data["SingleCopyJurisdiction"] = "the EU"
+		case "uk":
+			data["SingleCopyJurisdiction"] = "the UK"
+		}
 		if dataResidency.Valid {
 			data["DataResidency"] = dataResidency.String
 		}

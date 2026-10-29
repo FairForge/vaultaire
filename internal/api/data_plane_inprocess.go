@@ -1,7 +1,7 @@
 package api
 
 // The origin's in-process control plane (WP-EDGE-3, Stage 1a Prompt 47):
-// the three edge calls as function calls — what a data-plane host on THIS
+// the edge calls as function calls — what a data-plane host on THIS
 // box (host=slc) asks, and what the harness's Go host asks in the tests.
 // The same decisions, rows and metrics as the HTTP routes; no token, no
 // peer rule (the caller is this process).
@@ -73,4 +73,21 @@ func (c inProcessControlPlane) Commit(ctx context.Context, req dataplane.CommitR
 		return dataplane.CommitResponse{}, &dataplane.StatusError{Status: status, Msg: err.Error()}
 	}
 	return *relay, nil
+}
+
+// Mirror settles a mirror after its commit (handleEdgeMirror's body).
+func (c inProcessControlPlane) Mirror(ctx context.Context, req dataplane.MirrorSettle) (dataplane.MirrorSettleResponse, error) {
+	if req.AdmitID == "" {
+		return dataplane.MirrorSettleResponse{}, &dataplane.StatusError{Status: http.StatusBadRequest, Msg: "admit_id_required"}
+	}
+	if c.s.db == nil {
+		return dataplane.MirrorSettleResponse{}, &dataplane.StatusError{Status: http.StatusServiceUnavailable, Msg: "no_database"}
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(c.ctx(ctx)), edgeCommitBound)
+	defer cancel()
+	resp, status, err := c.s.edgeMirrorSettle(cctx, req)
+	if err != nil {
+		return resp, &dataplane.StatusError{Status: status, Msg: err.Error()}
+	}
+	return resp, nil
 }
