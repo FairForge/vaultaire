@@ -1510,6 +1510,15 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 		return
 	}
 
+	// The rest of the body is read before anything is committed: an S3-class
+	// driver's single PutObject reads exactly the declared length and never
+	// past it (putSinglePartIfSmall), so an aws-chunked stream's terminal
+	// chunk — its last chunk signature, the signed trailer, the declared
+	// x-amz-checksum — was never reached (prod 2026-10-29: a wrong CRC32
+	// trailer stored through iDrive). Bytes past the declared length count
+	// in bodyCounter and are refused below as a length mismatch.
+	_, _ = io.Copy(io.Discard, hashingBody) // a failure is recorded on src
+
 	// A driver that stored the bytes although a read of the body failed (one
 	// that does not stop at a read error): the body is not what was signed
 	// or declared — never committed, the blob queued as an orphan.

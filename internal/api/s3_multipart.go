@@ -578,6 +578,16 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 		} else {
 			sealedHash := md5.New() // #nosec G401 — the staged ciphertext's digest
 			_, err = io.Copy(io.MultiWriter(f, sealedHash), sealed)
+			if err == nil {
+				// The sealer reads the declared length only: the rest of an
+				// aws-chunked body (its last chunk signature and trailer) is
+				// read before the part is recorded; a byte past the
+				// declared length is the sealer's length refusal below.
+				var extra int64
+				if extra, err = io.Copy(io.Discard, counter); err == nil && extra > 0 {
+					err = fmt.Errorf("%w: %d bytes past the declared length", engine.ErrCallerAborted, extra)
+				}
+			}
 			size = counter.n
 			sealedMD5 = hex.EncodeToString(sealedHash.Sum(nil))
 		}

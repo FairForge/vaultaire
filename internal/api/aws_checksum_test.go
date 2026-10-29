@@ -9,8 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/FairForge/vaultaire/internal/drivers"
+	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 // The x-amz-checksum-* a client sends — as an aws-chunked trailer
@@ -130,4 +133,29 @@ func TestAWSChunked_TrailerChecksumVerified(t *testing.T) {
 			assert.False(t, ok, "nothing committed")
 		})
 	}
+}
+
+// Prod 2026-10-29 (Stage 1a Prompt 52E PR A's proof): a wrong CRC32 trailer
+// was stored through iDrive while the local driver refused it — the decoder
+// was never read to its end. The body is drained before the commit.
+func TestAWSChunked_TrailerCheckedWhenTheDriverStopsAtTheDeclaredLength(t *testing.T) {
+	f := setupAdapterFixture(t)
+	eng := engine.NewEngine(nil, zap.NewNop(), nil)
+	// exactLengthDriver (prompt_2b3_d2_test.go) reads what putSinglePartIfSmall
+	// reads: the declared length, never past it.
+	eng.AddDriver("local", &exactLengthDriver{drivers.NewLocalDriver(f.tempDir, zap.NewNop())})
+	eng.SetPrimary("local")
+	f.adapter = NewS3ToEngine(eng, f.db, zap.NewNop())
+
+	c := loadAWSCapture(t, "awscli-trailer-crc32.json")
+	w := c.replay(t, f, "exact-ok", nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	w = c.replay(t, f, "exact-bad", func(b []byte) []byte {
+		return bytes.Replace(b, []byte("x-amz-checksum-crc32:JHOjjg=="), []byte("x-amz-checksum-crc32:AAAAAA=="), 1)
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Equal(t, ErrXAmzContentChecksumMismatch, s3Code(t, w))
+	_, _, ok := putHeadRow(t, f, "exact-bad")
+	assert.False(t, ok, "nothing committed")
 }
