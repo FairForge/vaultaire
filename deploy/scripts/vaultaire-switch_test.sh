@@ -61,5 +61,22 @@ PSQL_RC=2; expect "an older build is refused when the flag cannot be read (fail 
 PSQL_RC=0; FLAG=""; expect "an empty answer is not 'off'" 1 "$(credential_guard "$TMP/old" >/dev/null; echo $?)"
 grep -q 'why=$(credential_guard "$BIN_DIR/vaultaire-$idle") || fail "$why"' "$SCRIPT" && pass "start_and_switch (deploy, restart, rollback) runs the guard before it starts a slot" || fail "start_and_switch runs the guard"
 
+# run_user (Stage 1a Prompt 52E PR E): the slots' binaries belong to the user
+# the installed unit runs as — vaultaire since the cutover, user1 after a
+# rollback — never a constant; a unit that names no User= (it would run as
+# root) is refused. The staged build is the deploy user's upload.
+eval "$(awk '/^run_user\(\) \{/,/^\}/' "$SCRIPT")"
+UNIT_USER=vaultaire
+systemctl() { [ "$1" = show ] && printf '%s\n' "$UNIT_USER"; }
+expect "the run user is the unit's User=" vaultaire "$(run_user)"
+UNIT_USER=user1
+expect "a unit rolled back to user1 is user1's" user1 "$(run_user)"
+UNIT_USER=""
+expect "a unit with no User= is refused" 1 "$(run_user >/dev/null 2>&1; echo $?)"
+grep -q 'DEPLOY_USER=user1' "$SCRIPT" && pass "the deploy user is user1" || fail "the deploy user is user1"
+grep -q '\[ "$owner" = "$DEPLOY_USER" \]' "$SCRIPT" && pass "the staged build must be the deploy user's" || fail "the staged build must be the deploy user's"
+[ "$(grep -c 'install -o "$(run_user)" -g "$(run_user)"' "$SCRIPT")" = 2 ] && pass "deploy and restart install as the unit's user" || fail "deploy and restart install as the unit's user"
+! grep -q '^RUN_USER=' "$SCRIPT" && pass "no hard-coded run user" || fail "no hard-coded run user"
+
 if [ "$FAILED" != 0 ]; then echo "FAILED"; exit 1; fi
 echo "PASS"

@@ -82,6 +82,60 @@ deliberately not in this file — "the production host" is the one box.
 | `/etc/prometheus/rules/*.yml` | alert rules (installed by hand from `deploy/monitoring/`) |
 | `/etc/haproxy/haproxy.cfg`, `/etc/haproxy/certs/*-le.pem` | edge config and the origin cert the certbot deploy hook rebuilds |
 
+### The service user (Stage 1a Prompt 52E)
+
+The slots run as **`vaultaire`**, a system user with its own group, no shell
+and no home (`deploy/systemd/vaultaire@.service` `User=` / `Group=`). It is
+F-14's code prerequisite: the master-key credential
+(`LoadCredentialEncrypted=`, still the owner's ceremony) is decrypted for this
+unit and readable by this user only, not by the operator account. Before the
+cutover the slots ran as `user1`, which also owns the deploy, the backups and
+the Sia user units.
+
+| Path | Owner after the cutover | Why |
+|------|------------------------|-----|
+| `/opt/vaultaire/data/` (recursive) | `vaultaire:vaultaire` | multipart staging, the translog high-water file, the `local` driver's tree |
+| `/opt/vaultaire/bin/` + `vaultaire-8000`, `-8001`, `*.prev` | `vaultaire:vaultaire` | the slots' binaries; `vaultaire-switch` installs them as the unit's `User=` (it reads it with `systemctl show -P User`; a unit with none is refused) |
+| `/opt/vaultaire/configs/.env` | `root:vaultaire 0640` | `user1` is a member of the group: the deploy job's migrations, `pg-backup.sh` and `health-check.sh` read it as `user1` |
+| `/tmp/vaultaire-{stripes,packs,multipart}` | `vaultaire:vaultaire` | the Sync stripe staging, the pack store, the default multipart dir (created by the service; the tmpfs empties at boot) |
+| `backups/`, `logs/`, `metrics/`, `bin/*.sh`, `~user1` | unchanged (`user1`) | the operator's |
+
+The staged build the deploy uploads (`/tmp/vaultaire-linux`) is still
+`user1`'s: `vaultaire-switch` checks it against `DEPLOY_USER=user1`. The
+sudoers entry is unchanged. Postgres is reached over TCP with the password in
+`.env`, so the OS user does not matter to it.
+
+**Cutover** (after the PR deploys, at a quiet hour — between the script and
+the first restart the running `user1` slot cannot write `data/`):
+
+```bash
+scp deploy/scripts/vaultaire-user-install.sh deploy/scripts/vaultaire-switch vaultaire-slc:/tmp/
+ssh vaultaire-slc
+sudo install -o root -g root -m 0755 /tmp/vaultaire-switch /usr/local/sbin/vaultaire-switch   # run_user reads the unit (hand-installed, like the unit)
+sudo bash /tmp/vaultaire-user-install.sh     # idempotent
+sudo vaultaire-switch restart                # the active build into the idle slot, as vaultaire
+sudo vaultaire-switch restart                # and back: both slots' binaries are vaultaire's
+```
+
+Verify, every line green or roll back at once:
+
+- `curl -s https://stored.ge/health` → `ok`; `systemctl show -P User vaultaire@$(cat /opt/vaultaire/ACTIVE_PORT)` → `vaultaire`;
+  `ps -o user= -p $(systemctl show -P MainPID vaultaire@$(cat /opt/vaultaire/ACTIVE_PORT))` → `vaultaire`;
+- a bench-key PUT, GET and DELETE through `https://stored.ge` and through `https://s3.stored.cloud`;
+- the multipart staging path writable: `aws s3 cp` of 32 MiB (multipart at the CLI's 8 MiB threshold);
+- the next `translog_checkpoint` run `ok` (`GET /api/v1/admin/jobs`);
+- `journalctl -u 'vaultaire@*' --since -15min | grep -i 'permission denied'` → nothing.
+
+**Rollback:**
+
+```bash
+sudo bash /tmp/vaultaire-user-install.sh --rollback   # User=user1, data/ bin/ user1:user1, .env root:user1
+sudo vaultaire-switch restart && sudo vaultaire-switch restart
+```
+
+The `vaultaire` user and `user1`'s membership of its group stay (harmless);
+`userdel vaultaire` removes them once nothing on the box is theirs.
+
 ### Multipart staging
 
 Multipart parts are staged on local disk between UploadPart and
@@ -108,7 +162,7 @@ active at the switch.
 
 What to know:
 
-- The directory is created 0700 as `user1` at boot when absent.
+- The directory is created 0700 as the service user (`vaultaire` since Stage 1a Prompt 52E; `user1` before) at boot when absent.
 - **Both slots must see the same directory.** They read it from the one
   `EnvironmentFile`, run as the same user and have no `PrivateTmp=`, so a
   part staged on the old slot is there for the new one after a switch. Never

@@ -26,7 +26,8 @@
 # idle slot's previous build in place (deploy and restart restore it), so
 # `rollback` always has something good to go back to. One run at a time
 # (flock). Deploy only accepts the one staged path, as a regular file owned by
-# the deploy user: no symlink, no other file can be turned into a binary.
+# the deploy user (user1): no symlink, no other file can be turned into a
+# binary. The slots run as the unit's User= (vaultaire), which owns them.
 set -euo pipefail
 
 BIN_DIR=/opt/vaultaire/bin
@@ -36,7 +37,7 @@ CFG=/etc/haproxy/haproxy.cfg
 SOCK=/run/haproxy/admin.sock
 LOCK=/run/vaultaire-switch.lock
 BACKENDS="s3_backend api_backend dashboard_backend"
-RUN_USER=user1
+DEPLOY_USER=user1                      # who uploads the staged build (GitHub Actions' ssh user)
 CFG_BACKUPS=5                          # timestamped haproxy.cfg backups kept
 HEALTH_TIMEOUT=${HEALTH_TIMEOUT:-90}   # seconds for the new slot to answer /health/live
 UP_TIMEOUT=${UP_TIMEOUT:-30}           # seconds for HAProxy to report the new slot UP
@@ -50,6 +51,17 @@ log() { echo "[vaultaire-switch] $*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 [ "$(id -u)" = 0 ] || die "run as root (through sudo)"
+
+# run_user is the user the installed unit runs the slots as (User= of
+# vaultaire@.service: vaultaire since Stage 1a Prompt 52E, user1 after a
+# rollback — docs/DEPLOY.md "The service user"): the slots' binaries are
+# installed as theirs. A unit that names none would run as root: refused.
+run_user() {
+  local u
+  u=$(systemctl show -P User vaultaire@8000.service 2>/dev/null) || u=""
+  [ -n "$u" ] || { echo "vaultaire@.service names no User=" >&2; return 1; }
+  echo "$u"
+}
 
 name_of() { case "$1" in 8000) echo blue ;; 8001) echo green ;; *) die "unknown slot $1" ;; esac; }
 other_of() { case "$1" in 8000) echo 8001 ;; 8001) echo 8000 ;; *) die "unknown slot $1" ;; esac; }
@@ -318,12 +330,13 @@ cmd_deploy() {
   [ "$bin" = "$STAGED" ] || die "deploy only takes $STAGED"
   [ -f "$bin" ] && [ ! -L "$bin" ] || die "$bin is not a regular file"
   owner=$(stat -c %U "$bin")
-  [ "$owner" = "$RUN_USER" ] || die "$bin belongs to $owner, not $RUN_USER"
+  [ "$owner" = "$DEPLOY_USER" ] || die "$bin belongs to $owner, not $DEPLOY_USER"
   [ "$(head -c 4 "$bin" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ] || die "$bin is not an ELF binary"
   active=$(active_port); idle=$(other_of "$active")
   log "active slot :$active; installing $bin into slot :$idle"
   prev=$(stash_idle "$idle")
-  install -o "$RUN_USER" -g "$RUN_USER" -m 0755 "$bin" "$BIN_DIR/vaultaire-$idle"
+  run_user >/dev/null || die "the slots' unit names no User="
+  install -o "$(run_user)" -g "$(run_user)" -m 0755 "$bin" "$BIN_DIR/vaultaire-$idle"
   rm -f "$bin"
   start_and_switch "$idle" "$prev"
 }
@@ -334,7 +347,8 @@ cmd_restart() {
   [ -x "$BIN_DIR/vaultaire-$active" ] || die "slot :$active has no binary"
   log "restarting the active build (:$active) through slot :$idle"
   prev=$(stash_idle "$idle")
-  install -o "$RUN_USER" -g "$RUN_USER" -m 0755 "$BIN_DIR/vaultaire-$active" "$BIN_DIR/vaultaire-$idle"
+  run_user >/dev/null || die "the slots' unit names no User="
+  install -o "$(run_user)" -g "$(run_user)" -m 0755 "$BIN_DIR/vaultaire-$active" "$BIN_DIR/vaultaire-$idle"
   start_and_switch "$idle" "$prev"
 }
 
