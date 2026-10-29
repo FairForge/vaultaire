@@ -219,13 +219,17 @@ for (const [name, tee] of [["runtime tee", undefined], ["workerd-paced tee", pac
   });
 }
 
-test("putTwo: a mirror that keeps up is not cut (both legs, the lag never past 16 MiB)", async () => {
+// A mirror whose lag cannot pass the bound (a body under 16 MiB) is never
+// cut. (A 40 MiB body between two local sinks was flaky on a CI runner: a
+// mirror only slightly slower than the primary may trail by 16 MiB on a
+// large body, and is cut by design.)
+test("putTwo: a mirror whose lag stays under 16 MiB is not cut (both legs store, the ETag returned)", async () => {
   const a = [];
   const b = [];
   const pa = await listen(store(a));
   const pb = await listen(store(b));
   try {
-    const { bytes, stream } = chunked(40 << 20);
+    const { bytes, stream } = chunked(12 << 20);
     const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee: pacedTee });
     assert.equal(r.mirrorCut, false);
     assert.equal(r.mirrorETag, r.resp.headers.get("etag"));
