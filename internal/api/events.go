@@ -3,12 +3,11 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -18,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/webhooksig"
 )
 
 var validEventTypes = []string{
@@ -128,11 +129,20 @@ type recordedEvent struct {
 	id, eventType, tenantID string
 	data                    []byte
 	createdAt               time.Time
+	// test: an event of a sandbox (WP-DX-1), recorded under its parent —
+	// "livemode": false in the body. Zero = live.
+	test bool
 }
 
 // recordEvent inserts the events row; false when nothing was recorded.
 func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType, tenantID string, data map[string]interface{}) (recordedEvent, bool) {
 	ev := recordedEvent{id: uuid.New().String(), eventType: eventType, tenantID: tenantID}
+	// WP-DX-1: a sandbox's event is its parent's, with livemode false — the
+	// parent's webhooks receive it and its event log lists it.
+	if parent := sandboxParent(ctx, db, tenantID); parent != "" {
+		ev.tenantID, ev.test = parent, true
+		tenantID = parent
+	}
 	dataJSON, err := json.Marshal(data)
 	if err != nil {
 		logger.Error("marshal event data", zap.Error(err))
@@ -141,10 +151,10 @@ func recordEvent(ctx context.Context, db *sql.DB, logger *zap.Logger, eventType,
 	ev.data = dataJSON
 
 	err = db.QueryRowContext(ctx, `
-		INSERT INTO events (id, type, tenant_id, data)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO events (id, type, tenant_id, data, livemode)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING created_at`,
-		ev.id, eventType, tenantID, dataJSON).Scan(&ev.createdAt)
+		ev.id, eventType, tenantID, dataJSON, !ev.test).Scan(&ev.createdAt)
 	if err != nil {
 		logger.Error("insert event",
 			zap.Error(err),
@@ -205,6 +215,7 @@ func deliverToEndpoints(ctx context.Context, db *sql.DB, logger *zap.Logger, end
 		"tenant_id":  ev.tenantID,
 		"data":       json.RawMessage(ev.data),
 		"created_at": ev.createdAt.UTC().Format(time.RFC3339),
+		"livemode":   !ev.test, // WP-DX-1: false for a sandbox's event
 	}
 	body, err := json.Marshal(eventPayload)
 	if err != nil {
@@ -294,12 +305,7 @@ func recordDelivery(ctx context.Context, db *sql.DB, logger *zap.Logger, deliver
 // replayed for ever — rode along for one release after #791 and was dropped
 // in Prompt 18 Part 0 (RP17-6).
 func webhookSignature(body []byte, secret string, at time.Time) string {
-	t := strconv.FormatInt(at.Unix(), 10)
-	h := hmac.New(sha256.New, []byte(secret))
-	h.Write([]byte(t))
-	h.Write([]byte("."))
-	h.Write(body)
-	return "t=" + t + ",v1=" + hex.EncodeToString(h.Sum(nil))
+	return webhooksig.Sign(body, secret, at) // one signature for deliveries and `stored listen`
 }
 
 func generateWebhookSecret() (string, error) {
@@ -348,6 +354,11 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Query().Has("after") {
+		s.listEventsAfter(w, r, tenantID) // WP-DX-1: the forward cursor `stored listen` reads
+		return
+	}
+
 	limit := 20
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 100 {
@@ -362,25 +373,25 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 
 	if typeFilter != "" && cursor != "" {
 		rows, err = s.db.QueryContext(r.Context(), `
-			SELECT id, type, data, created_at FROM events
+			SELECT id, type, data, created_at, livemode FROM events
 			WHERE tenant_id = $1 AND type = $2 AND created_at < $3
 			ORDER BY created_at DESC LIMIT $4`,
 			tenantID, typeFilter, cursor, limit+1)
 	} else if typeFilter != "" {
 		rows, err = s.db.QueryContext(r.Context(), `
-			SELECT id, type, data, created_at FROM events
+			SELECT id, type, data, created_at, livemode FROM events
 			WHERE tenant_id = $1 AND type = $2
 			ORDER BY created_at DESC LIMIT $3`,
 			tenantID, typeFilter, limit+1)
 	} else if cursor != "" {
 		rows, err = s.db.QueryContext(r.Context(), `
-			SELECT id, type, data, created_at FROM events
+			SELECT id, type, data, created_at, livemode FROM events
 			WHERE tenant_id = $1 AND created_at < $2
 			ORDER BY created_at DESC LIMIT $3`,
 			tenantID, cursor, limit+1)
 	} else {
 		rows, err = s.db.QueryContext(r.Context(), `
-			SELECT id, type, data, created_at FROM events
+			SELECT id, type, data, created_at, livemode FROM events
 			WHERE tenant_id = $1
 			ORDER BY created_at DESC LIMIT $2`,
 			tenantID, limit+1)
@@ -397,7 +408,8 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		var id, eventType string
 		var data []byte
 		var createdAt time.Time
-		if err := rows.Scan(&id, &eventType, &data, &createdAt); err != nil {
+		var livemode bool
+		if err := rows.Scan(&id, &eventType, &data, &createdAt, &livemode); err != nil {
 			s.logger.Error("scan event row", zap.Error(err))
 			continue
 		}
@@ -407,6 +419,7 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 			"type":       eventType,
 			"data":       json.RawMessage(data),
 			"created_at": createdAt.Format(time.RFC3339),
+			"livemode":   livemode,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -442,4 +455,104 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeListResponse(w, items, hasMore, nextCursor, total)
+}
+
+// eventsWaitMax bounds a long poll of the forward cursor.
+const eventsWaitMax = 25 * time.Second
+
+// listEventsAfter is GET /api/v1/events?after=<event id>&wait=<s> (WP-DX-1):
+// the tenant's events after that one, OLDEST first (created_at, then id), at
+// most limit; next_cursor is the last one's id (the given one when none).
+// after=now starts at the newest event: nothing is replayed, its id is the
+// cursor. With nothing to answer, wait (≤ 25 s) holds the request and asks
+// again every 500 ms — the long poll `stored listen` reads.
+func (s *Server) listEventsAfter(w http.ResponseWriter, r *http.Request, tenantID string) {
+	q := r.URL.Query()
+	after := q.Get("after")
+	limit := 100
+	if l, err := strconv.Atoi(q.Get("limit")); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+	var wait time.Duration
+	if n, err := strconv.Atoi(q.Get("wait")); err == nil && n > 0 {
+		wait = min(time.Duration(n)*time.Second, eventsWaitMax)
+	}
+	ctx := r.Context()
+	if after == "now" {
+		var id string
+		err := s.db.QueryRowContext(ctx, `SELECT id FROM events WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`, tenantID).Scan(&id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.logger.Error("list events after", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list events", "")
+			return
+		}
+		after = id
+	}
+	if after != "" {
+		var known bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM events WHERE id = $1 AND tenant_id = $2)`, after, tenantID).Scan(&known); err != nil {
+			s.logger.Error("list events after", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list events", "")
+			return
+		}
+		if !known {
+			// Not this tenant's, or past the 90-day retention: start again
+			// from after=now.
+			writeManagementError(w, ErrTypeInvalidRequest, "unknown_cursor", "no event of this account has that id (expired after 90 days?); start again with after=now", "after")
+			return
+		}
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		items, err := s.eventsAfter(ctx, tenantID, after, limit)
+		if err != nil {
+			s.logger.Error("list events after", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to list events", "")
+			return
+		}
+		if len(items) > 0 || !time.Now().Before(deadline) {
+			next := after
+			if len(items) > 0 {
+				next = items[len(items)-1]["id"].(string)
+			}
+			out := make([]interface{}, len(items))
+			for i, it := range items {
+				out[i] = it
+			}
+			writeListResponse(w, out, len(items) == limit, next, len(items))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// eventsAfter reads the events after the one with id after ("" = from the
+// first), oldest first.
+func (s *Server) eventsAfter(ctx context.Context, tenantID, after string, limit int) ([]map[string]interface{}, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.id, e.type, e.data, e.created_at, e.livemode FROM events e
+		WHERE e.tenant_id = $1
+		  AND ($2 = '' OR (e.created_at, e.id) > (SELECT a.created_at, a.id FROM events a WHERE a.id = $2 AND a.tenant_id = $1))
+		ORDER BY e.created_at, e.id LIMIT $3`, tenantID, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []map[string]interface{}
+	for rows.Next() {
+		var id, eventType string
+		var data []byte
+		var createdAt time.Time
+		var livemode bool
+		if err := rows.Scan(&id, &eventType, &data, &createdAt, &livemode); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]interface{}{"object": "event", "id": id, "type": eventType, "data": json.RawMessage(data),
+			"created_at": createdAt.UTC().Format(time.RFC3339Nano), "livemode": livemode})
+	}
+	return out, rows.Err()
 }

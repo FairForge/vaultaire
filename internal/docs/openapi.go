@@ -1316,7 +1316,9 @@ func generateWebhookPaths() map[string]*PathItem {
 				}),
 				refParam("Limit"),
 				queryParam("cursor", "Return events created before this RFC 3339 timestamp (the previous page's `next_cursor`)", &Schema{Type: "string", Format: "date-time"}),
-				queryParam("type", "Exact event type, e.g. `object.created`", &Schema{Type: "string"}))),
+				queryParam("type", "Exact event type, e.g. `object.created`", &Schema{Type: "string"}),
+				queryParam("after", "The forward cursor (WP-DX-1, what `stored listen` reads): the events after this event id, OLDEST first; `now` answers no events and the newest id as `next_cursor`. An id that is not one of the account's events is 400 `unknown_cursor`. Each event carries `livemode` (false for a test-mode key's)", &Schema{Type: "string"}),
+				queryParam("wait", "With `after`: hold the request up to this many seconds (at most 25) until an event arrives — a long poll", &Schema{Type: "integer"}))),
 		},
 	}
 }

@@ -62,15 +62,19 @@ func TestEmitEvent(t *testing.T) {
 
 	logger, _ := zap.NewDevelopment()
 
+	// WP-DX-1: is the tenant a sandbox (cached for the process: an id no
+	// other test uses)?
+	mock.ExpectQuery(`SELECT sandbox_of FROM tenants`).WithArgs("tenant-emit-1").
+		WillReturnRows(sqlmock.NewRows([]string{"sandbox_of"}).AddRow(nil))
 	mock.ExpectQuery(`INSERT INTO events`).
-		WithArgs(sqlmock.AnyArg(), "object.created", "tenant-1", sqlmock.AnyArg()).
+		WithArgs(sqlmock.AnyArg(), "object.created", "tenant-emit-1", sqlmock.AnyArg(), true).
 		WillReturnRows(sqlmock.NewRows([]string{"created_at"}).AddRow(time.Now()))
 
 	mock.ExpectQuery(`SELECT id, url, event_filter, secret FROM webhook_endpoints`).
-		WithArgs("tenant-1").
+		WithArgs("tenant-emit-1").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "url", "event_filter", "secret"}))
 
-	emitEvent(context.Background(), db, logger, "object.created", "tenant-1", map[string]interface{}{
+	emitEvent(context.Background(), db, logger, "object.created", "tenant-emit-1", map[string]interface{}{
 		"bucket": "my-bucket", "key": "file.txt", "size": 1024,
 	})
 
@@ -90,11 +94,11 @@ func TestListEvents(t *testing.T) {
 	now := time.Now().UTC()
 	earlier := now.Add(-1 * time.Hour)
 
-	mock.ExpectQuery(`SELECT id, type, data, created_at FROM events`).
+	mock.ExpectQuery(`SELECT id, type, data, created_at, livemode FROM events`).
 		WithArgs("test-tenant", 21).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at"}).
-			AddRow("evt-1", "object.created", []byte(`{"bucket":"b1"}`), now).
-			AddRow("evt-2", "object.deleted", []byte(`{"bucket":"b1"}`), earlier))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at", "livemode"}).
+			AddRow("evt-1", "object.created", []byte(`{"bucket":"b1"}`), now, true).
+			AddRow("evt-2", "object.deleted", []byte(`{"bucket":"b1"}`), earlier, true))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
@@ -125,10 +129,10 @@ func TestListEvents_TypeFilter(t *testing.T) {
 
 	now := time.Now().UTC()
 
-	mock.ExpectQuery(`SELECT id, type, data, created_at FROM events.*type = \$2`).
+	mock.ExpectQuery(`SELECT id, type, data, created_at, livemode FROM events.*type = \$2`).
 		WithArgs("test-tenant", "object.created", 21).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at"}).
-			AddRow("evt-1", "object.created", []byte(`{}`), now))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at", "livemode"}).
+			AddRow("evt-1", "object.created", []byte(`{}`), now, true))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant", "object.created").
@@ -150,9 +154,9 @@ func TestListEvents_TenantIsolation(t *testing.T) {
 	s, mock, cleanup := newWebhookTestServer(t)
 	defer cleanup()
 
-	mock.ExpectQuery(`SELECT id, type, data, created_at FROM events.*WHERE tenant_id = \$1`).
+	mock.ExpectQuery(`SELECT id, type, data, created_at, livemode FROM events.*WHERE tenant_id = \$1`).
 		WithArgs("test-tenant", 21).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at"}))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "type", "data", "created_at", "livemode"}))
 
 	mock.ExpectQuery(`SELECT COUNT`).
 		WithArgs("test-tenant").
