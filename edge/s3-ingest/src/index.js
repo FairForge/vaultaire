@@ -345,19 +345,26 @@ export function moveInit(request, admit) {
 async function moveBody(request, admit) {
   const started = Date.now();
   const result = { outcome: "edge_error", backend_status: 0, backend_code: "", backend_etag: "" };
+  let mirror = null; // a mirror that runs on after the primary's answer (RP78-2)
   try {
     let resp;
     const mirrored = Array.isArray(admit.urls) && admit.urls.length === 2 && !admit.headers;
     if (mirrored) {
       // 0.5.0 (WP-EDGE-4): the body teed to the placement's link and the
-      // mirror leg's (the same signed headers); the mirror's ETag rides the
-      // commit, its failure only leaves the copy to the blob_copies job.
+      // mirror leg's (the same signed headers). 0.6.0 (RP78-2): the commit
+      // is the primary's answer — a mirror still running is settled after
+      // the client's response (settleMirror, ctx.waitUntil); one the
+      // isolate's budget could not take is mirror_unbudgeted (RP78-1). Its
+      // failure only leaves the copy to the blob_copies job.
       const n = Number(admit.send_headers?.["content-length"] || request.headers.get("content-length") || 0);
       const two = await putTwo(fetch, admit.urls, moveInit(request, admit), n);
       resp = two.resp;
       result.backend_etags = [resp.headers.get("etag") || ""];
-      if (two.mirrorETag) result.backend_etags.push(two.mirrorETag);
-      if (two.mirrorCut) result.mirror_cut = true; // RP76-2: counted by the control plane
+      if (two.mirrorUnbudgeted) result.mirror_unbudgeted = true;
+      else if (resp.ok) {
+        result.mirror_settle = true;
+        mirror = two;
+      } else two.cut();
     } else {
       resp = await fetch(admit.url, moveInit(request, admit));
     }
@@ -378,7 +385,24 @@ async function moveBody(request, admit) {
     result.backend_code = String(e && e.message ? e.message : e).slice(0, 120);
   }
   result.duration_ms = Date.now() - started;
-  return result;
+  return { result, mirror };
+}
+
+/**
+ * settleMirror reports a mirror that outlived the primary's answer once it
+ * has ended (RP78-2): POST /api/v1/edge/mirror with its ETag, or cut. Under
+ * ctx.waitUntil — the client has its answer; a settle that is lost leaves
+ * the copy pending, the blob_copies job's.
+ */
+export async function settleMirror(env, admitId, mirror, requestId, cp = controlPlane) {
+  const { etag, cut } = await mirror.settle;
+  try {
+    const r = await cp(env, "/api/v1/edge/mirror", cut || !etag ? { admit_id: admitId, cut: !!cut } : { admit_id: admitId, etag }, ORIGIN_TIMEOUT_MS);
+    console.log(JSON.stringify({ edge: "mirror_settled", request_id: requestId, status: r.status, cut: !!cut }));
+    await r.body?.cancel();
+  } catch (e) {
+    console.log(JSON.stringify({ edge: "mirror_settle_failed", error: String(e && e.message ? e.message : e), request_id: requestId }));
+  }
 }
 
 /**
@@ -651,7 +675,7 @@ export default {
     if (kind.kind === "get") return admit.window ? serveWindow(request, env, ctx, admit, requestId) : serveRead(request, env, ctx, admit, requestId);
     if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
 
-    const moved = await moveBody(request, admit);
+    const { result: moved, mirror } = await moveBody(request, admit);
     const commitBody = { admit_id: admit.admit_id, ...moved };
     let commit = null;
     for (let attempt = 0; attempt < 2 && !commit; attempt++) {
@@ -667,6 +691,7 @@ export default {
       }
     }
     console.log(JSON.stringify({ edge: kind.kind, request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, ms: moved.duration_ms, committed: !!commit }));
+    if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
     if (!commit) return slowDown(url.pathname, requestId);
     return relayResponse(commit);
   },

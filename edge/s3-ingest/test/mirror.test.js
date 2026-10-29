@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
-import { putTwo, mirrorDeadlineMs } from "../src/codec.js";
+import { putTwo, putTwoInline, mirrorDeadlineMs, setIsolateBudget, isolateBudget, MIRROR_MAX_LAG } from "../src/codec.js";
 import { mirrorReadInit, readFetchInit } from "../src/index.js";
 
 function listen(handler) {
@@ -40,7 +40,7 @@ test("putTwo: both legs receive identical bytes; the mirror's ETag is returned",
   const pb = await listen(store(b));
   try {
     const { bytes, stream } = body(3 << 20);
-    const r = await putTwo(fetch, [pa.url + "/k", pb.url + "/k"], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    const r = await putTwoInline(fetch, [pa.url + "/k", pb.url + "/k"], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
     assert.equal(r.resp.status, 200);
     assert.deepEqual(a[0], Buffer.from(bytes));
     assert.deepEqual(b[0], Buffer.from(bytes));
@@ -57,7 +57,7 @@ test("putTwo: a failing mirror still lets the primary commit", async () => {
   const pb = await listen(async (req, res) => { await readAll(req); res.writeHead(503); res.end(); });
   try {
     const { bytes, stream } = body(1 << 20);
-    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
     assert.equal(r.resp.status, 200);
     assert.equal(r.mirrorETag, "");
     assert.equal(a[0].length, bytes.length);
@@ -74,7 +74,7 @@ test("putTwo: a mirror past its deadline is aborted and the primary finishes", a
   try {
     const { bytes, stream } = body(256 << 10);
     const started = Date.now();
-    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, 300);
+    const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, 300);
     assert.equal(r.resp.status, 200);
     assert.equal(r.mirrorETag, "");
     assert.ok(Date.now() - started < 5000);
@@ -182,7 +182,7 @@ for (const [name, tee] of [["runtime tee", undefined], ["workerd-paced tee", pac
     const pb = await listen((req) => { req.pause(); }); // never reads, never answers
     try {
       const { bytes, stream } = chunked(32 << 20);
-      const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee });
+      const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee });
       const back = Date.now();
       assert.equal(r.resp.status, 200);
       assert.equal(r.mirrorETag, "");
@@ -204,7 +204,7 @@ for (const [name, tee] of [["runtime tee", undefined], ["workerd-paced tee", pac
     try {
       const { bytes, stream } = chunked(64 << 20);
       const started = Date.now();
-      const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee });
+      const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee });
       assert.equal(r.resp.status, 200);
       assert.deepEqual(a[0].b, Buffer.from(bytes), "every byte to the primary");
       assert.ok(a[0].at - started < 8_000, `the primary took ${a[0].at - started} ms (the mirror's pace would be 16 s)`);
@@ -230,7 +230,7 @@ test("putTwo: a mirror whose lag stays under 16 MiB is not cut (both legs store,
   const pb = await listen(store(b));
   try {
     const { bytes, stream } = chunked(12 << 20);
-    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee: pacedTee });
+    const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length, undefined, { tee: pacedTee });
     assert.equal(r.mirrorCut, false);
     assert.equal(r.mirrorETag, r.resp.headers.get("etag"));
     assert.deepEqual(b[0], Buffer.from(bytes));
@@ -258,7 +258,7 @@ test("putTwo: each body has the admitted length where the runtime has FixedLengt
   const pb = await listen(store(b));
   try {
     const { bytes, stream } = body(2 << 20);
-    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
     assert.equal(r.resp.status, 200);
     assert.deepEqual(made, [bytes.length, bytes.length], "the primary's body and the mirror's, each of the admitted length");
     assert.deepEqual(b[0], Buffer.from(bytes));
@@ -267,4 +267,102 @@ test("putTwo: each body has the admitted length where the runtime has FixedLengt
     pa.s.close();
     pb.s.close();
   }
+});
+
+// --- RP78-1: the mirror's buffer is the isolate's bytes ---------------------------
+
+test("putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored", async () => {
+  const restore = setIsolateBudget(20 << 20);
+  const a = [];
+  let mirrorCalls = 0;
+  const pa = await listen(store(a));
+  const pb = await listen(async (req, res) => {
+    mirrorCalls++;
+    await readAll(req);
+    await new Promise((r) => setTimeout(r, 1_500)); // holds its buffer past the other's wait
+    res.writeHead(200, { ETag: '"m"' });
+    res.end();
+  });
+  try {
+    const one = chunked(64 << 20);
+    const two = chunked(64 << 20);
+    const init = (st, n) => ({ method: "PUT", headers: { "content-length": String(n) }, body: st, duplex: "half" });
+    const [r1, r2] = await Promise.all([
+      putTwo(fetch, [pa.url + "/1", pb.url + "/1"], init(one.stream, one.bytes.length), one.bytes.length),
+      putTwo(fetch, [pa.url + "/2", pb.url + "/2"], init(two.stream, two.bytes.length), two.bytes.length),
+    ]);
+    const unbudgeted = [r1, r2].filter((r) => r.mirrorUnbudgeted);
+    assert.equal(unbudgeted.length, 1, "one of the two goes unmirrored");
+    assert.equal(unbudgeted[0].resp.status, 200, "and is stored on the primary");
+    await r1.settle;
+    await r2.settle;
+    assert.equal(mirrorCalls, 1, "the unmirrored PUT sent one link");
+    assert.equal(a.length, 2);
+    assert.equal(isolateBudget().held, 0, "every byte given back when the mirrors ended");
+  } finally {
+    restore();
+    pa.s.close();
+    pb.s.close();
+  }
+});
+
+// --- RP78-2: the client is answered at the primary's pace ------------------------
+
+test("putTwo: the client is answered at the primary's pace; the mirror settles after", async () => {
+  const a = [];
+  const b = [];
+  const pa = await listen(timed(a));
+  const pb = await listen(throttled(2 << 20, b)); // 2 MB/s: ~2 s for 4 MiB
+  try {
+    const { bytes, stream } = chunked(4 << 20);
+    const started = Date.now();
+    const r = await putTwo(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    const answered = Date.now() - started;
+    assert.equal(r.resp.status, 200);
+    assert.ok(answered < 1_000, `answered after ${answered} ms (the mirror's pace would be ~2 s)`);
+    assert.ok(isolateBudget().held > 0, "the mirror's buffer is charged until it ends");
+    const settled = await r.settle;
+    assert.ok(Date.now() - started > answered + 500, "the mirror settled after the answer");
+    assert.equal(settled.cut, false);
+    assert.equal(settled.etag, `"${createHash("md5").update(Buffer.from(bytes)).digest("hex")}"`);
+    assert.deepEqual(b[0], Buffer.from(bytes));
+    assert.equal(isolateBudget().held, 0);
+  } finally {
+    pa.s.close();
+    pb.s.close();
+  }
+  assert.equal(MIRROR_MAX_LAG, 16 << 20);
+});
+
+test("putTwoInline: a codec chunk waits for its mirror (both ETags)", async () => {
+  const a = [];
+  const b = [];
+  const pa = await listen(store(a));
+  const pb = await listen(store(b));
+  try {
+    const { bytes, stream } = body(1 << 20);
+    const r = await putTwoInline(fetch, [pa.url, pb.url], { method: "PUT", headers: { "content-length": String(bytes.length) }, body: stream, duplex: "half" }, bytes.length);
+    assert.equal(r.mirrorETag, r.resp.headers.get("etag"));
+    assert.equal(r.mirrorCut, false);
+  } finally {
+    pa.s.close();
+    pb.s.close();
+  }
+});
+
+test("settleMirror: posts the mirror's ETag, or cut, to /api/v1/edge/mirror", async () => {
+  const { settleMirror } = await import("../src/index.js");
+  const calls = [];
+  const cp = async (env, path, body) => {
+    calls.push({ path, body });
+    return new Response('{"state":"ready"}');
+  };
+  await settleMirror({}, "A1", { settle: Promise.resolve({ etag: '"m"', cut: false }) }, "r1", cp);
+  await settleMirror({}, "A2", { settle: Promise.resolve({ etag: "", cut: true }) }, "r2", cp);
+  await settleMirror({}, "A3", { settle: Promise.resolve({ etag: "", cut: false }) }, "r3", cp);
+  assert.deepEqual(calls, [
+    { path: "/api/v1/edge/mirror", body: { admit_id: "A1", etag: '"m"' } },
+    { path: "/api/v1/edge/mirror", body: { admit_id: "A2", cut: true } },
+    { path: "/api/v1/edge/mirror", body: { admit_id: "A3", cut: false } },
+  ]);
 });

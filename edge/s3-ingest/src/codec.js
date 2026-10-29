@@ -165,6 +165,24 @@ export class Semaphore {
     }
     return new Promise((res) => this.waiters.push({ n, res }));
   }
+  /** acquireWithin takes n bytes of this bound if they come within ms
+   * (RP78-1: a mirror's buffer — the mirror is an extra, so a budget that
+   * cannot spare it is no wait). → true when taken. Own bound only. */
+  acquireWithin(n, ms) {
+    if (this.waiters.length === 0 && this.fits(n)) {
+      this.take(n);
+      return Promise.resolve(true);
+    }
+    return new Promise((res) => {
+      const w = { n, res: () => { clearTimeout(t); res(true); } };
+      const t = setTimeout(() => {
+        const i = this.waiters.indexOf(w);
+        if (i >= 0) this.waiters.splice(i, 1);
+        res(false);
+      }, ms);
+      this.waiters.push(w);
+    });
+  }
   release(n) {
     this.used -= n;
     if (this.used < 0) throw new Error(`edge codec: released ${-this.used} bytes more than were held`);
@@ -296,10 +314,21 @@ const MIRROR_GRACE_MS = 30_000;
 const MIRROR_MIN_RATE = 2 << 20;
 
 /** RP76-2: the mirror may trail the primary by at most MIRROR_MAX_LAG bytes
- * while both run, and may answer at most MIRROR_AFTER_MS after the primary
- * did; past either it is cut and the primary goes on alone. */
+ * while both run; past it the mirror is cut and the primary goes on alone.
+ * A codec chunk's mirror may answer at most MIRROR_AFTER_MS after its
+ * primary (putTwoInline); a whole PUT's runs on after the client's answer
+ * (RP78-2) and is cut MIRROR_SETTLE_MS after the primary answered — inside
+ * the 30 s ctx.waitUntil gives a Worker after its response, with the
+ * settle call's time left. */
 export const MIRROR_MAX_LAG = 16 << 20;
 export const MIRROR_AFTER_MS = 5_000;
+export const MIRROR_SETTLE_MS = 25_000;
+
+/** RP78-1: the mirror's buffer (MIRROR_MAX_LAG + 2 MiB) is the isolate's
+ * bytes, taken before the tee within MIRROR_BUDGET_WAIT_MS; a budget that
+ * cannot spare it sends the PUT unmirrored (the copy is the job's). */
+export const MIRROR_BUFFER = MIRROR_MAX_LAG + (2 << 20);
+export const MIRROR_BUDGET_WAIT_MS = 200;
 
 /** mirrorDeadlineMs is how long a mirror PUT of n bytes may take. */
 export function mirrorDeadlineMs(n) {
@@ -330,27 +359,34 @@ function counted(src, onBytes) {
  * mirror leg's (urls[1]) — with the runtime's own tee(): no JavaScript
  * copies the bytes. workerd paces the faster branch to the slower one
  * (Step 0.1), so the mirror's branch is given a MIRROR_MAX_LAG buffer
- * (a byte-counting TransformStream) and the bytes each fetch took are
- * counted: when the primary's lead passes MIRROR_MAX_LAG, or the primary
- * has answered and the mirror has not within MIRROR_AFTER_MS, the mirror
- * is cut (its fetch aborted, its branch cancelled — the tee then feeds the
- * primary alone). RP76-2: a mirrored write runs at the primary's pace.
- * The primary decides the write; the mirror's failure is only a missing
- * ETag — the copy is then the blob_copies job's.
- * → {resp (the primary's), mirrorETag ("" = not stored), mirrorCut}
+ * (a byte-counting TransformStream) taken from the isolate's budget first
+ * (RP78-1: none to spare = the plain PUT, mirrorUnbudgeted), and the bytes
+ * each fetch took are counted: when the primary's lead passes
+ * MIRROR_MAX_LAG the mirror is cut (its fetch aborted — the tee then feeds
+ * the primary alone). RP76-2: a mirrored write runs at the primary's pace.
+ * RP78-2: putTwo resolves at the PRIMARY's answer; the mirror runs on and
+ * `settle` resolves when it ends — cut opts.afterMs (MIRROR_SETTLE_MS)
+ * after the primary answered at the latest — with {etag ("" = not stored),
+ * cut}; the buffer is given back then. The primary decides the write.
+ * → {resp (the primary's), mirrorUnbudgeted, settle, done()}
  */
 export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadlineMs(n), opts = {}) {
+  const budget = isolateBudget();
+  if (!(await budget.acquireWithin(MIRROR_BUFFER, MIRROR_BUDGET_WAIT_MS))) {
+    const resp = await doFetch(urls[0], init);
+    return { resp, mirrorUnbudgeted: true, settle: Promise.resolve({ etag: "", cut: false }), done: () => true };
+  }
   const [a, b] = opts.tee ? opts.tee(init.body) : init.body.tee();
   const ac = new AbortController();
   let primaryBytes = 0;
   let mirrorBytes = 0;
   let cut = false;
-  let mirrorBody = null;
+  // The cut is ac.abort: the mirror's fetch is cancelled, and that
+  // propagates through its pipes to the tee's branch (RP78-9).
   const cutMirror = (why) => {
     if (cut) return;
     cut = true;
     ac.abort(new Error(why));
-    mirrorBody?.cancel(why).catch(() => {});
   };
   const watch = () => {
     if (primaryBytes - mirrorBytes > MIRROR_MAX_LAG) cutMirror("the mirror leg fell 16 MiB behind");
@@ -359,37 +395,52 @@ export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadline
   // bytes while the buffer has room, so the primary is not paced until the
   // lag is past MIRROR_MAX_LAG — where the mirror is cut.
   const buffered = b.pipeThrough(new TransformStream({}, undefined,
-    new ByteLengthQueuingStrategy({ highWaterMark: MIRROR_MAX_LAG + (2 << 20) })));
+    new ByteLengthQueuingStrategy({ highWaterMark: MIRROR_BUFFER })));
   // Each body keeps the admitted length: a stream built here has none, and
   // workerd would send it chunked with no Content-Length (0.5.1 on prod:
   // iDrive answered 411 to every mirrored PUT, rolled back in two minutes).
   const known = (st) => (n > 0 && typeof globalThis.FixedLengthStream === "function"
     ? st.pipeThrough(new globalThis.FixedLengthStream(n)) : st);
-  mirrorBody = counted(buffered, (k) => { mirrorBytes += k; });
+  const mirrorBody = counted(buffered, (k) => { mirrorBytes += k; });
   const primaryBody = counted(a, (k) => { primaryBytes += k; watch(); });
   const timer = setTimeout(() => cutMirror("the mirror leg passed its deadline"), deadlineMs);
-  const mirror = doFetch(urls[1], { ...init, body: known(mirrorBody), signal: ac.signal }).then(async (r) => {
+  let after;
+  let ended = false;
+  const settle = doFetch(urls[1], { ...init, body: known(mirrorBody), signal: ac.signal }).then(async (r) => {
     const etag = r.ok && !cut ? r.headers.get("etag") || "" : "";
     await r.body?.cancel();
     return etag;
   }, async () => {
     await mirrorBody.cancel().catch(() => {});
     return "";
-  });
-  let after;
-  try {
-    const resp = await doFetch(urls[0], { ...init, body: known(primaryBody) });
-    after = setTimeout(() => cutMirror("the mirror leg did not answer after the primary"), MIRROR_AFTER_MS);
-    const mirrorETag = await mirror;
-    return { resp, mirrorETag: cut ? "" : mirrorETag, mirrorCut: cut };
-  } catch (e) {
-    ac.abort(e);
-    await mirror;
-    throw e;
-  } finally {
+  }).then((etag) => {
+    ended = true;
     clearTimeout(timer);
     clearTimeout(after);
+    budget.release(MIRROR_BUFFER);
+    return { etag: cut ? "" : etag, cut };
+  });
+  try {
+    const resp = await doFetch(urls[0], { ...init, body: known(primaryBody) });
+    if (!ended) after = setTimeout(() => cutMirror("the mirror leg did not answer after the primary"), opts.afterMs ?? MIRROR_SETTLE_MS);
+    return { resp, mirrorUnbudgeted: false, settle, done: () => ended, cut: () => cutMirror("cut by the caller") };
+  } catch (e) {
+    ac.abort(e);
+    await settle;
+    throw e;
   }
+}
+
+/**
+ * putTwoInline is putTwo for a codec chunk: its copy row is written by the
+ * write's commit, so the mirror is waited for — cut MIRROR_AFTER_MS after
+ * the primary answered at the latest.
+ * → {resp, mirrorETag ("" = not stored), mirrorCut, mirrorUnbudgeted}
+ */
+export async function putTwoInline(doFetch, urls, init, n, deadlineMs = mirrorDeadlineMs(n), opts = {}) {
+  const two = await putTwo(doFetch, urls, init, n, deadlineMs, { ...opts, afterMs: MIRROR_AFTER_MS });
+  const { etag, cut } = await two.settle;
+  return { resp: two.resp, mirrorETag: etag, mirrorCut: cut, mirrorUnbudgeted: two.mirrorUnbudgeted };
 }
 
 // --- the public catalogue (0.5.0, WP-EDGE-4 PR D) ---------------------------
@@ -564,7 +615,9 @@ export async function runCodec(request, admit, env, ctx, deps) {
         let mirrorCut = false;
         if (Array.isArray(m.urls) && m.urls.length === 2) {
           // WP-EDGE-4: the same sealed bytes to the mirror leg too.
-          ({ resp, mirrorETag, mirrorCut } = await putTwo(doFetch, m.urls, chunkPutInit(m.send_headers || {}, sealed), sealed.length));
+          let mirrorUnbudgeted;
+          ({ resp, mirrorETag, mirrorCut, mirrorUnbudgeted } = await putTwoInline(doFetch, m.urls, chunkPutInit(m.send_headers || {}, sealed), sealed.length));
+          if (mirrorUnbudgeted) e.mirror_unbudgeted = true; // RP78-1: counted by the control plane
         } else {
           resp = await doFetch(m.url, chunkPutInit(m.send_headers || {}, sealed));
         }
