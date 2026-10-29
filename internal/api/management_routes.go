@@ -37,6 +37,7 @@ func (s *Server) registerManagementRoutes() {
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.logManagementRequest) // RP78-6: the request log
 		r.Use(rl.Middleware)
 		r.Use(im.Middleware)
 
@@ -55,6 +56,7 @@ func (s *Server) registerManagementRoutes() {
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.Post("/keys", s.handleMgmtCreateKey)
 		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
+		r.Post("/sandbox/reset", s.handleMgmtSandboxReset) // WP-DX-1: test mode
 
 		r.Get("/usage", s.handleMgmtGetUsage)
 		r.Get("/requests", s.handleMgmtRequests) // WP-LOG-1: the request log
@@ -669,6 +671,8 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		BucketScope []string   `json:"bucket_scope"`
 		IPAllowlist []string   `json:"ip_allowlist"`
 		ExpiresAt   *time.Time `json:"expires_at"`
+		// Test: a VLT_TEST_ key on the tenant's sandbox (WP-DX-1).
+		Test bool `json:"test"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
@@ -692,8 +696,18 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	key, err := s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
+	var key *auth.APIKey
+	var err error
+	if req.Test {
+		key, err = s.auth.GenerateTestKey(r.Context(), userID, req.Name, opts)
+	} else {
+		key, err = s.auth.GenerateAPIKey(r.Context(), userID, req.Name, opts)
+	}
 	if err != nil {
+		if errors.Is(err, auth.ErrSandboxOfSandbox) {
+			writeManagementError(w, ErrTypeInvalidRequest, "sandbox_of_sandbox", err.Error(), "test")
+			return
+		}
 		if !writeKeyScopeError(w, err) {
 			s.logger.Error("management create key", zap.Error(err))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")
@@ -718,6 +732,8 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 		"expires_at":   key.ExpiresAt,
 		"created_at":   key.CreatedAt,
 		"request_id":   getRequestID(w),
+		// livemode (WP-DX-1, Stripe's word): false for a test key.
+		"livemode": !auth.IsTestKey(key.Key),
 	}
 	writeJSON(w, http.StatusCreated, resp)
 }

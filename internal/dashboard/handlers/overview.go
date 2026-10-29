@@ -74,6 +74,7 @@ func HandleOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger, sto
 			populateStorageUsage(ctx, db, sd.TenantID, data)
 			populateBandwidth(ctx, db, sd.TenantID, data)
 			populateCounts(ctx, db, sd.TenantID, sd.UserID, data)
+			populateTestData(ctx, db, sd.TenantID, data)
 			populateActivity(ctx, db, sd.TenantID, data)
 			populateEmailVerified(ctx, db, sd.UserID, data)
 			populateOnboarding(ctx, db, sd.TenantID, r, data)
@@ -403,3 +404,16 @@ const bucketFloorBytesSQL = `SELECT bucket, floor, COALESCE(SUM(size_bytes), 0) 
 		     UNION ALL
 		     SELECT v.bucket, ` + usage.RetainedVersionFloor + `, v.size_bytes FROM ` + usage.RetainedVersionsFrom + ` AND v.tenant_id = $1
 		 ) billed GROUP BY bucket, floor`
+
+// populateTestData fills the "Test data" card (WP-DX-1) once the tenant has
+// a sandbox: what its VLT_TEST_ keys wrote, and how many are live.
+func populateTestData(ctx context.Context, db *sql.DB, tenantID string, data map[string]any) {
+	var sandbox string
+	if err := db.QueryRowContext(ctx, `SELECT id FROM tenants WHERE sandbox_of = $1`, tenantID).Scan(&sandbox); err != nil {
+		return // none (or unreadable: the card is not shown)
+	}
+	var objects, bytes, keys int64
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM object_head_cache WHERE tenant_id = $1`, sandbox).Scan(&objects, &bytes)
+	_ = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, sandbox).Scan(&keys)
+	data["TestData"] = map[string]any{"Objects": objects, "BytesFmt": formatBytes(bytes), "Keys": keys}
+}

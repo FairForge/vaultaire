@@ -2028,6 +2028,7 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, emailKey, claims.Email)
 		ctx = context.WithValue(ctx, tenantIDKey, claims.TenantID)
+		ctx = context.WithValue(ctx, jwtIDKey, claims.ID) // the request log's key_id (RP78-6)
 		ctx = audit.WithActor(ctx, claims.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

@@ -432,3 +432,37 @@ func TestEraseRows_RemovesTranslogSubjects(t *testing.T) {
 	assert.Equal(t, int64(1), res.Rows["translog_subjects"])
 	assert.Zero(t, f.count(`SELECT COUNT(*) FROM translog_subjects WHERE tenant_id = $1`, f.tenantID))
 }
+
+// WP-DX-1: a tenant's sandbox (tenants.sandbox_of, 116) is erased with it —
+// the sandbox's rows first (its tenants row references the parent's) — and
+// a sandbox head row refuses the erase like the parent's own.
+func TestEraseRows_ErasesTheSandboxWithItsParent(t *testing.T) {
+	f := setupEraseFixture(t)
+	f.seed(time.Now().Add(-time.Hour))
+	sb := "sandbox-" + f.suffix
+	f.exec(`INSERT INTO tenants (id, name, email, sandbox_of) VALUES ($1, 'test data', $2, $3)`, sb, "sandbox+"+f.suffix+"@sandbox.invalid", f.tenantID)
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, name, key_id, secret_hash) VALUES ($1, $2, $3, 'test', $4, 'h')`, uuid.New().String(), f.userID, sb, "VLT_TEST_"+f.suffix)
+	f.exec(`INSERT INTO tenant_quotas (tenant_id) VALUES ($1)`, sb)
+	f.exec(`INSERT INTO buckets (tenant_id, name) VALUES ($1, 'sbx')`, sb)
+	t.Cleanup(func() {
+		for _, r := range Deleted {
+			if r.Key == ByTenant {
+				_, _ = f.db.Exec(r.SQL, sb)
+			}
+		}
+	})
+	ctx := context.Background()
+
+	f.exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name) VALUES ($1, 'sbx', 'k', 1, 'e', 'local')`, sb)
+	_, err := f.svc.EraseRows(ctx, f.userID, f.tenantID, f.email, time.Now())
+	assert.ErrorIs(t, err, ErrObjectsRemain, "the sandbox's objects are bytes on local too")
+	f.exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, sb)
+
+	_, err = f.svc.EraseRows(ctx, f.userID, f.tenantID, f.email, time.Now())
+	require.NoError(t, err)
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1 OR sandbox_of = $2`, sb, f.tenantID))
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1`, sb))
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM buckets WHERE tenant_id = $1`, sb))
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM tenant_quotas WHERE tenant_id = $1`, sb))
+	assert.Zero(t, f.count(`SELECT COUNT(*) FROM tenants WHERE id = $1`, f.tenantID))
+}

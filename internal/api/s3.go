@@ -452,6 +452,13 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		defer func() { s.recordS3Access(cw, r, tenantID, s3Req, ingressBytes) }()
 	}
 
+	// WP-DX-1: a test-mode (sandbox) tenant — a VLT_TEST_ key's — is never
+	// metered, and every response says so (sandbox.go).
+	sandbox := isSandbox(r.Context(), s.db, tenantID)
+	if sandbox {
+		w.Header().Set("x-stored-mode", "test")
+	}
+
 	// The key's scope travels with the request: Object Lock reads it to
 	// decide whether x-amz-bypass-governance-retention is this key's to send
 	// (WP-R4-1 — it used to be a local of this function, and the header
@@ -600,7 +607,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if cw == nil { // an anonymous request: counted, not recorded
 		cw = &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
 	}
-	metered := tenantID != "" && tenantID != "default" && s.egress != nil
+	metered := tenantID != "" && tenantID != "default" && s.egress != nil && !sandbox
 	if metered {
 		cw.span = s.egress.span(r.Context(), tenantID)
 	}
@@ -724,7 +731,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	// Record bandwidth for authenticated requests, attributed to the backend
 	// the engine reports having served the bytes ("" if none was touched).
-	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil && !sandbox {
 		s.bandwidthTracker.recordResponse(tenantID, common.BackendUsed(r.Context()), ingressBytes, cw)
 	}
 }

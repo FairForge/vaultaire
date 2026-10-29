@@ -164,6 +164,11 @@ func (a *S3ToEngine) versionedChunkingEnabled(tenantID string) bool {
 // bucket row (versioning, region pin, sse_enabled) and the `chunking` flag
 // once.
 func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) writePlacement {
+	// WP-DX-1: a sandbox writes whole and as received to `local` (placeOn)
+	// — never chunked or sealed, no refusal for a missing master key.
+	if isSandbox(ctx, a.db, req.TenantID) {
+		return writePlacement{Kind: placeWhole}
+	}
 	chunkThreshold := a.chunkThreshold()
 	overThreshold := req.Size > chunkThreshold || req.EdgeCodec
 

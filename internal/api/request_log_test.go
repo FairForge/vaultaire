@@ -22,6 +22,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -338,4 +339,47 @@ func TestS3_EveryResponseCarriesTheLoggedRequestID(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	assert.Equal(t, answered, logged, "each response's id is its row's, never empty")
+}
+
+// RP78-6: a management request is a request_log row too — op the route
+// pattern, host "api", key_id the JWT's id or "session", the management
+// error code of a refusal, and the request id the client was answered.
+func TestRequestLog_ManagementRequestsToo(t *testing.T) {
+	f := setupRequestLogFixture(t)
+	r := chi.NewRouter()
+	r.Route("/api/v1/manage", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("X-Request-Id", "rid-"+req.Method)
+				ctx := context.WithValue(req.Context(), tenantIDKey, f.tenantID)
+				ctx = context.WithValue(ctx, userIDKey, f.userID)
+				next.ServeHTTP(w, req.WithContext(ctx))
+			})
+		})
+		r.Use(f.srv.logManagementRequest)
+		r.Get("/usage", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, http.StatusOK, map[string]any{"ok": true}) })
+		r.Post("/keys", func(w http.ResponseWriter, _ *http.Request) {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		})
+	})
+	for _, c := range []struct{ method, path string }{{http.MethodGet, "/api/v1/manage/usage"}, {http.MethodPost, "/api/v1/manage/keys"}} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(c.method, c.path, strings.NewReader("{")))
+	}
+	f.tracker.Flush()
+	code, _, rows := f.manage("")
+	require.Equal(t, http.StatusOK, code)
+	require.Len(t, rows, 2)
+	byOp := map[string]requestlog.Row{}
+	for _, row := range rows {
+		byOp[row.Op] = row
+	}
+	get, post := byOp["GET /api/v1/manage/usage"], byOp["POST /api/v1/manage/keys"]
+	assert.Equal(t, http.StatusOK, get.Status)
+	assert.Equal(t, "api", get.Host)
+	assert.Equal(t, "session", get.KeyID)
+	assert.Equal(t, "rid-GET", get.RequestID)
+	assert.Equal(t, http.StatusBadRequest, post.Status)
+	assert.Equal(t, "invalid_json", post.ErrorCode)
+	assert.Equal(t, "rid-POST", post.RequestID)
 }

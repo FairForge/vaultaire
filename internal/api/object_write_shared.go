@@ -242,6 +242,18 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap
 // placeOn is placeObject's placement: the region driver or the engine.
 func placeOn(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, blob string,
 	body io.Reader, opts ...engine.PutOption) (string, error) {
+	// WP-DX-1: a sandbox's bytes go to `local`, whatever else is asked —
+	// the first branch, before a region pin or the engine's placement.
+	if isSandbox(ctx, db, tenantID) {
+		ce, ok := eng.(*engine.CoreEngine)
+		if !ok {
+			return "", fmt.Errorf("sandbox put %s/%s: no engine to place on %s", container, blob, sandboxBackend)
+		}
+		if err := ce.PutOn(ctx, sandboxBackend, container, blob, body, opts...); err != nil {
+			return "", fmt.Errorf("sandbox put %s/%s: %w", container, blob, err)
+		}
+		return sandboxBackend, nil
+	}
 	regionDriver, err := bucketRegionDriver(ctx, db, eng, tenantID, bucket)
 	if err != nil {
 		return "", err

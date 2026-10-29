@@ -1088,9 +1088,26 @@ func generateManagementPaths() map[string]*PathItem {
 				},
 			}),
 		},
+		"/api/v1/manage/sandbox/reset": {
+			Post: mut(jsonOp("Management", "Reset the test-mode sandbox", "ManageSandboxReset",
+				"Test mode (WP-DX-1): empties the account's sandbox — the data its `VLT_TEST_` keys wrote — at once: every object, version, upload and bucket, "+
+					"its bytes off the local disk. The test keys stay. Test data is also purged nightly once its last write is 7 days old. "+
+					"An account with no sandbox answers 200 with zeros. Never touches live data.",
+				map[string]Response{
+					"200": jsonResp("Reset", objectPtr("", map[string]*Schema{
+						"object":           strEnum("", "sandbox_reset"),
+						"objects_deleted":  {Type: "integer"},
+						"versions_deleted": {Type: "integer"},
+						"uploads_aborted":  {Type: "integer"},
+						"buckets_deleted":  {Type: "integer"},
+						"request_id":       str(""),
+					})),
+					"500": errResp("`internal_error` (a delete failed; nothing reported reset — retry)"),
+				})),
+		},
 		"/api/v1/manage/requests": {
 			Get: mgmt(withParams(jsonOp("Management", "List the request log", "ManageListRequests",
-				"The developers' request log (WP-LOG-1): every S3 request of the JWT's tenant in the last 7 days, newest first — operation, bucket, key, status, "+
+				"The developers' request log (WP-LOG-1): every S3 and management request of the JWT's tenant in the last 7 days, newest first — operation (a management request's is `METHOD /route`, its host `api` and its key `session`), bucket, key, status, "+
 					"the S3 error code and its suggestion, the request id the client was answered (search by it: the id a support ticket quotes), bytes in and out, "+
 					"and the host that served it (`origin`, or the edge host). Never a body, a header, an IP address, a user agent or any secret. "+
 					"Keyset paged: pass the previous page's `next_cursor` as `cursor`. `total_count` is always 0.",
@@ -1937,6 +1954,7 @@ func generateJSONSchemas() map[string]Schema {
 		}
 		if withSecret {
 			p["secret"] = str("Secret access key, returned only by this call")
+			p["livemode"] = boolean("false for a test-mode key (`VLT_TEST_`, `test: true`): its requests are the account's sandbox — stored on a local disk, never billed or metered, purged after 7 days")
 		}
 		if withRequestID {
 			p["request_id"] = str("")
@@ -2119,6 +2137,7 @@ func generateJSONSchemas() map[string]Schema {
 			"bucket_scope": strArray("Buckets the key is limited to"),
 			"ip_allowlist": strArray("IP addresses or CIDR networks the key may be used from; validated and stored canonical"),
 			"expires_at":   dateTime("Absolute expiry; must be in the future"),
+			"test":         boolean("Test mode (WP-DX-1): a `VLT_TEST_` key on the account's sandbox, made on the first one. Every request it signs is stored on a local disk only, never billed or metered, answered with `x-stored-mode: test`, and purged after 7 days or by `POST /api/v1/manage/sandbox/reset`. Its own cap: 10 live test keys"),
 		}),
 		"WhoAmI": object("What a SigV4-signed key is (GET /api/v1/whoami)", map[string]*Schema{
 			"object":       strEnum("", "whoami"),

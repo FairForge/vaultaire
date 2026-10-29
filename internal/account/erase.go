@@ -2,6 +2,8 @@ package account
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -349,6 +351,17 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 		}
 	}
 
+	// WP-DX-1: the tenant's sandbox (tenants.sandbox_of, 116) goes with it,
+	// FIRST — its tenants row references the parent's. Its objects are bytes
+	// on `local`: a head row refuses the erase as the parent's does (the
+	// runner purges the sandbox before this). No users row is its own (its
+	// keys are the parent user's), so only the tenant-keyed rules run.
+	if tenantID != "" {
+		if err := eraseSandboxRows(ctx, tx, tenantID, &res); err != nil {
+			return res, err
+		}
+	}
+
 	for _, r := range Deleted {
 		args, ok := ruleArgs(r.Key, userID, tenantID, email)
 		if !ok {
@@ -381,6 +394,43 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 		return res, fmt.Errorf("commit erase: %w", err)
 	}
 	return res, nil
+}
+
+// eraseSandboxRows erases the sandbox of parent, if it has one: every
+// tenant-keyed rule bound to the sandbox's id, inside the erase's
+// transaction. Its rows are counted under "sandbox:<table>".
+func eraseSandboxRows(ctx context.Context, tx *sql.Tx, parent string, res *EraseResult) error {
+	var sandbox string
+	err := tx.QueryRowContext(ctx, `SELECT id FROM tenants WHERE sandbox_of = $1 FOR UPDATE`, parent).Scan(&sandbox)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find the sandbox: %w", err)
+	}
+	var remaining int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM object_head_cache WHERE tenant_id = $1`, sandbox).Scan(&remaining); err != nil {
+		return fmt.Errorf("count the sandbox's head rows: %w", err)
+	}
+	if remaining > 0 {
+		return fmt.Errorf("%w: %d object_head_cache rows of the sandbox", ErrObjectsRemain, remaining)
+	}
+	for _, r := range Deleted {
+		if r.Key != ByTenant {
+			continue
+		}
+		out, err := tx.ExecContext(ctx, r.SQL, sandbox)
+		if err != nil {
+			return fmt.Errorf("erase the sandbox's %s: %w", r.Table, err)
+		}
+		if strings.HasPrefix(r.SQL, "SELECT") {
+			continue
+		}
+		n, _ := out.RowsAffected()
+		res.Rows["sandbox:"+r.Table] += n
+		res.Total += n
+	}
+	return nil
 }
 
 // ruleArgs picks the ids a rule binds; a rule whose id is unknown (a user with

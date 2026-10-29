@@ -88,6 +88,9 @@ func (s *Server) registerJobs() {
 	if s.catalogueFilter != nil {
 		s.jobs.Register(s.catalogueFilter.spec())
 	}
+	if s.db != nil && s.engine != nil {
+		s.jobs.Register(newSandboxPurgeJob(s).spec()) // WP-DX-1: test data kept 7 days
+	}
 	if s.smartDemotion != nil {
 		// The job needs both backends. Without them (a local or CI build, a
 		// deployment with no archive) it is not a job of this process: it
