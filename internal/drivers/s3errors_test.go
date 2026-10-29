@@ -121,14 +121,6 @@ type existsDriver struct {
 func r7ExistsDrivers() []existsDriver {
 	log := zap.NewNop()
 	return []existsDriver{
-		{"s3compat", func(c *s3.Client) func(context.Context) (bool, error) {
-			d := &S3CompatDriver{client: c, bucket: "data", prefix: "personal-files/vaultaire", logger: log}
-			return func(ctx context.Context) (bool, error) { return d.Exists(ctx, "c", "a") }
-		}},
-		{"s3", func(c *s3.Client) func(context.Context) (bool, error) {
-			d := &S3Driver{client: c, logger: log}
-			return func(ctx context.Context) (bool, error) { return d.Exists(ctx, "c", "a") }
-		}},
 		{"lyve", func(c *s3.Client) func(context.Context) (bool, error) {
 			d := &LyveDriver{client: c, tenantID: "t", region: "us-west-1", logger: log}
 			return func(ctx context.Context) (bool, error) { return d.Exists(ctx, "c", "a") }

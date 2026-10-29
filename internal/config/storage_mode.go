@@ -6,14 +6,12 @@ package config
 // iDrive is unchanged by adding a Wasabi pair; switching the primary to the
 // interim Wasabi (2026-10-03) is the explicit `STORAGE_MODE=wasabi` line.
 // Lyve, R2 and permafrost are never auto-selected (tier / public / fleet
-// roles). Used by cmd/vaultaire/main.go (the engine) and the dashboard's
+// roles). The Quotaless and generic `s3` drivers were deleted (WP-R7-3). Used by cmd/vaultaire/main.go (the engine) and the dashboard's
 // Deps.StorageMode, which used to re-derive it from a list that lacked the
 // iDrive branch (docs/CONFIG.md, WP-R1-4).
 var StorageModeOrder = []struct{ Mode, EnvKey string }{
 	{"idrive", "IDRIVE_ACCESS_KEY"},
 	{"wasabi", "WASABI_ACCESS_KEY"},
-	{"quotaless", "QUOTALESS_ACCESS_KEY"},
-	{"s3", "S3_ACCESS_KEY"},
 	{"geyser", "GEYSER_ACCESS_KEY"},
 }
 

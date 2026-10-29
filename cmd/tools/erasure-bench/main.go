@@ -613,12 +613,8 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 		if bucket == "" {
 			bucket = "vt-ecbench"
 		}
-		d, err := drivers.NewS3Driver("https://"+acct+".r2.cloudflarestorage.com", os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"), "auto", logger)
-		if err == nil {
-			add("r2", s3Fixed{d, bucket, "r2"}, nil)
-		} else {
-			add("r2", nil, err)
-		}
+		d, err := drivers.NewR2Driver(acct, os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"), "", bucket, logger)
+		add("r2", d, err)
 	}
 	if ak := os.Getenv("PIXELDRAIN_API_KEY"); ak != "" {
 		add("pixeldrain", newPixeldrainLeg(ak), nil)
@@ -630,20 +626,12 @@ func buildBackends(logger *zap.Logger) map[string]engine.Driver {
 		if bucket == "" {
 			bucket = "vt-ecbench-b2"
 		}
-		d, err := drivers.NewS3Driver(os.Getenv("B2_ENDPOINT"), ak, os.Getenv("B2_SECRET_KEY"), os.Getenv("B2_REGION"), logger)
-		if err == nil {
-			add("b2", s3Fixed{d, bucket, "b2"}, nil)
-		} else {
-			add("b2", nil, err)
-		}
+		d, err := drivers.NewFixedBucketS3Driver("b2", ak, os.Getenv("B2_SECRET_KEY"), os.Getenv("B2_ENDPOINT"), os.Getenv("B2_REGION"), bucket, logger)
+		add("b2", d, err)
 	}
 	if ak := os.Getenv("WASABI_ACCESS_KEY"); ak != "" {
-		d, err := drivers.NewS3Driver(os.Getenv("WASABI_ENDPOINT"), ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_REGION"), logger)
-		if err == nil {
-			add("wasabi", s3Fixed{d, os.Getenv("WASABI_BUCKET"), "wasabi"}, nil)
-		} else {
-			add("wasabi", nil, err)
-		}
+		d, err := drivers.NewWasabiDriver(ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_ENDPOINT"), os.Getenv("WASABI_REGION"), os.Getenv("WASABI_BUCKET"), logger)
+		add("wasabi", d, err)
 	}
 	// Sync.com bridges (prod's vars: SYNC_WEBDAV_URLS + SYNC_WEBDAV_PASSWORDS,
 	// or the single SYNC_WEBDAV_PASSWORD) through the multi-bridge driver; set
@@ -770,34 +758,4 @@ func trunc(err error, n int) string {
 		s = s[:n]
 	}
 	return s
-}
-
-// s3Fixed adapts the generic S3Driver (bucket = container, no HealthCheck,
-// non-variadic Put) to engine.Driver using one fixed bucket and
-// container/artifact as the key. Used for Wasabi and R2.
-type s3Fixed struct {
-	*drivers.S3Driver
-	bucket string
-	name   string
-}
-
-func (s s3Fixed) Name() string { return s.name }
-func (s s3Fixed) HealthCheck(ctx context.Context) error {
-	_, err := s.S3Driver.List(ctx, s.bucket, "")
-	return err
-}
-func (s s3Fixed) Put(ctx context.Context, container, artifact string, data io.Reader, _ ...engine.PutOption) error {
-	return s.S3Driver.Put(ctx, s.bucket, container+"/"+artifact, data)
-}
-func (s s3Fixed) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	return s.S3Driver.Get(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3Fixed) Delete(ctx context.Context, container, artifact string) error {
-	return s.S3Driver.Delete(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3Fixed) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	return s.S3Driver.Exists(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3Fixed) List(ctx context.Context, container, prefix string) ([]string, error) {
-	return s.S3Driver.List(ctx, s.bucket, container+"/"+prefix)
 }

@@ -197,12 +197,13 @@ func TestLyveProbeCredentials_DedicatedProbeKeyWins(t *testing.T) {
 	assert.Equal(t, "v01", customer, "customer id defaults to ours")
 }
 
-func TestBuildBackendProbes_QuotalessStaysTCP(t *testing.T) {
-	env := map[string]string{"QUOTALESS_ACCESS_KEY": "qk"}
-	got := buildBackendProbes(envOf(env), &fakeDriverChecker{})
-	c := findCheck(t, got, "quotaless")
-	assert.Nil(t, c.probe)
-	assert.Equal(t, "io.quotaless.cloud:8000", c.address)
+// The Quotaless TCP probe went with its driver (WP-R7-3): its key probes
+// nothing.
+func TestBuildBackendProbes_NoQuotalessProbe(t *testing.T) {
+	got := buildBackendProbes(envOf(map[string]string{"QUOTALESS_ACCESS_KEY": "qk"}), &fakeDriverChecker{})
+	for _, c := range got {
+		assert.NotEqual(t, "quotaless", c.name)
+	}
 }
 
 func TestProbeBackendOnce_UpdatesHealthFromProbeResult(t *testing.T) {

@@ -23,8 +23,8 @@ import (
 )
 
 // Review R7-06: List must return keys relative to the container, filtered by
-// prefix, from EVERY page. s3compat stripped the wrong prefix and s3compat,
-// s3 (→ quotaless) and geyser read a single ListObjectsV2 page.
+// prefix, from EVERY page. Geyser (and the Quotaless drivers, deleted in
+// WP-R7-3) read a single ListObjectsV2 page.
 
 // pagedS3 is a fake S3 endpoint whose ListObjectsV2 answers at most pageSize
 // keys per page with a continuation token, so any single-page reader
@@ -104,54 +104,6 @@ func newPagedClient(t *testing.T, p *pagedS3) *s3.Client {
 	})
 }
 
-func TestS3CompatList_StripsKeyPrefixHonoursPrefixReadsAllPages(t *testing.T) {
-	p := &pagedS3{pageSize: 2, keys: []string{
-		"personal-files/vaultaire/c1/a/1",
-		"personal-files/vaultaire/c1/a/2",
-		"personal-files/vaultaire/c1/a/3",
-		"personal-files/vaultaire/c1/b/4",
-		"personal-files/vaultaire/c1/b/5",
-		"personal-files/vaultaire/c1-other/a/9", // sibling container sharing the prefix
-		"personal-files/vaultaire/c1/",          // the "directory" marker some vendors list
-	}}
-	d := &S3CompatDriver{client: newPagedClient(t, p), bucket: "data", prefix: "personal-files/vaultaire", logger: zap.NewNop()}
-
-	all, err := d.List(context.Background(), "c1", "")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"a/1", "a/2", "a/3", "b/4", "b/5"}, all, "relative names, no sibling container, no empty name")
-	assert.GreaterOrEqual(t, p.pages, 3, "five keys at two per page needs three pages")
-
-	onlyA, err := d.List(context.Background(), "c1", "a/")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"a/1", "a/2", "a/3"}, onlyA, "prefix is applied to the artifact part")
-
-	none, err := d.List(context.Background(), "empty", "")
-	require.NoError(t, err)
-	assert.Empty(t, none)
-}
-
-func TestS3DriverList_ReadsAllPages(t *testing.T) {
-	p := &pagedS3{pageSize: 2, keys: []string{"p/1", "p/2", "p/3", "p/4", "p/5", "q/6"}}
-	d := &S3Driver{client: newPagedClient(t, p), logger: zap.NewNop()}
-
-	got, err := d.List(context.Background(), "bucket", "p/")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"p/1", "p/2", "p/3", "p/4", "p/5"}, got, "S3Driver returns keys as stored (quotaless strips)")
-	assert.GreaterOrEqual(t, p.pages, 3)
-}
-
-func TestQuotalessList_ReadsAllPagesAndStrips(t *testing.T) {
-	p := &pagedS3{pageSize: 2, keys: []string{
-		"personal-files/c/a/1", "personal-files/c/a/2", "personal-files/c/a/3", "personal-files/c/b/4", "personal-files/c/b/5",
-	}}
-	q := &QuotalessDriver{S3Driver: &S3Driver{client: newPagedClient(t, p), logger: zap.NewNop()}, rootPath: "personal-files", maxRetries: 1, logger: zap.NewNop()}
-
-	got, err := q.List(context.Background(), "c", "")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"a/1", "a/2", "a/3", "b/4", "b/5"}, got)
-	assert.GreaterOrEqual(t, p.pages, 3)
-}
-
 func TestGeyserList_ReadsAllPages(t *testing.T) {
 	p := &pagedS3{pageSize: 2, keys: []string{
 		"t-tn/c/a/1", "t-tn/c/a/2", "t-tn/c/a/3", "t-tn/c/b/4", "t-tn/c/b/5", "t-other/c/a/1",
@@ -202,18 +154,14 @@ func TestS3List_TerminatesOnRepeatedContinuationToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Every S3-class driver goes through s3ListPaginator; two representatives.
-	sc := &S3CompatDriver{client: client, bucket: "data", prefix: "personal-files/vaultaire", logger: zap.NewNop()}
-	got, err := sc.List(ctx, "c", "")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"only", "only"}, got, "two pages were read (the second repeats), then the walk stops")
-
+	// Every S3-class driver goes through s3ListPaginator; the fixed-bucket
+	// driver is the representative.
 	id := &IDriveDriver{client: client, bucket: "vaultaire", logger: zap.NewNop()}
-	_, err = id.List(common.WithTenantID(ctx, "tn"), "c", "")
+	_, err := id.List(common.WithTenantID(ctx, "tn"), "c", "")
 	require.NoError(t, err)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	assert.LessOrEqual(t, l.pages, 4, "at most two pages per List against a token that never advances")
+	assert.LessOrEqual(t, l.pages, 2, "at most two pages per List against a token that never advances")
 	assert.NoError(t, ctx.Err(), "finished well inside the deadline — not a timeout that masked a spin")
 }

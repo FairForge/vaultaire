@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -943,8 +941,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 // A successful TCP connection on the backend port is sufficient to confirm
 // reachability — the same check works for any backend regardless of vendor.
 type backendCheck struct {
-	name    string // key in healthChecker, e.g. "quotaless"
-	address string // host:port, e.g. "io.quotaless.cloud:8000" (TCP fallback + diagnostics)
+	name    string // key in healthChecker, e.g. "lyve"
+	address string // host:port, e.g. "s3.us-west-1.global.lyve.seagate.com:443" (TCP fallback + diagnostics)
 	// probe, when set, is the authenticated check used instead of the TCP
 	// dial (signed HeadBucket via the driver, Lyve console action, …).
 	probe func(ctx context.Context) error
@@ -954,28 +952,6 @@ type backendCheck struct {
 	// initialDelay staggers the first probe (region drivers, R7-19) so a
 	// dozen signed HeadBuckets do not all fire in the same second at boot.
 	initialDelay time.Duration
-}
-
-// endpointToAddress parses an endpoint URL and returns host:port.
-// If no port is present in the URL, the default for the scheme is used
-// (443 for https, 80 for http).
-func endpointToAddress(endpoint string) (string, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return "", fmt.Errorf("parse endpoint %q: %w", endpoint, err)
-	}
-
-	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		switch u.Scheme {
-		case "https":
-			port = "443"
-		default:
-			port = "80"
-		}
-	}
-	return net.JoinHostPort(host, port), nil
 }
 
 // startHealthChecks runs one background probe loop per configured backend
@@ -1011,16 +987,6 @@ func (s *Server) startHealthChecks(ctx context.Context) {
 // disabling health checks for everything else.
 func configuredBackends(getenv func(string) string) []backendCheck {
 	var backends []backendCheck
-
-	if getenv("QUOTALESS_ACCESS_KEY") != "" {
-		endpoint := getenv("QUOTALESS_ENDPOINT")
-		if endpoint == "" {
-			endpoint = "https://io.quotaless.cloud:8000"
-		}
-		if addr, err := endpointToAddress(endpoint); err == nil {
-			backends = append(backends, backendCheck{name: "quotaless", address: addr})
-		}
-	}
 
 	if getenv("LYVE_ACCESS_KEY") != "" {
 		// Lyve Cloud 2 lives on s3.<region>.global.lyve.seagate.com. The older

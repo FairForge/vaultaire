@@ -62,7 +62,7 @@ var allocationSites = map[string]string{
 	"drivers/geyser.go:materializeSpool": "per unknown-length PUT: one 64 MiB spool, allocated once (it was a bytes.Buffer grown to ~256 MiB), then the temp file; a body under 1 MiB never takes it",
 	"drivers/geyser.go:materialize":      "per unknown-length PUT: the 1 MiB probe (materializeProbe)",
 	"api/sse_stream.go:readSealedBytes":  "per ranged 0x05 read: the 6-byte lead, the part table (≤ 160,006 bytes, the count checked first) and a part's 29-byte header (WP-SSEC-1 B.3)",
-	// The S3 uploader (idrive, lyve, wasabi, r2, s3compat): bounded per
+	// The S3 uploader (idrive, lyve, wasabi, r2): bounded per
 	// request, unbounded in number — the WP-R2-6 residual named in WP-P14.
 	"drivers/s3upload.go:putSinglePartIfSmall": "per PUT ≤ 32 MiB (a body of one part), and the manager's parts above it — 9 × 32 MiB per whole-object write (32 MiB × 8 since the SPEED bench § 8): no process budget — residual (WP-P14)",
 	// Small: a constant or a key-sized buffer that the walker cannot size.
@@ -72,7 +72,6 @@ var allocationSites = map[string]string{
 	"crypto/encryption.go:Encrypt":                "legacy whole-buffer AES-GCM (the 0x01/0x02 compatibility path; no request-path writer since WP-R8-5)",
 	"crypto/encryption.go:GenerateRandomKey":      "32 bytes: a key",
 	"crypto/tenant_keys.go:wrapKey":               "a wrapped key",
-	"drivers/wasm.go:Transform":                   "the WASM transform's buffer (inert: no caller on the data path)",
 	"drivers/xattr_unix.go:GetXAttr":              "an xattr value (the local driver)",
 	"drivers/xattr_unix.go:ListXAttrs":            "an xattr list (the local driver)",
 }

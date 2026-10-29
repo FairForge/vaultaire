@@ -29,7 +29,6 @@ clean` removes the resulting binaries from the repo root.
 | `geyser-test` | probe | `GEYSER_*` | Round-trip through the Geyser driver | current |
 | `geyser-admin-test`, `geyser-smoke` | probe | `GEYSER_*` | Local-only scratch probes (gitignored, not tracked) | local |
 | `lighthouse-bench` | bench | none (public gateway) | Lighthouse/IPFS gateway evaluation | historical (not in the stack) |
-| `loadtest` | bench | server URL + keys | Second load harness over `internal/loadtest`. The harness of record is `tests/load/` — decision D-7 (delete both) | frozen |
 | `onedrive-bench` | bench | `TENANT_N_*` | The driver-path OneDrive/permafrost benchmark (`-files`, `-size-mb`, `-concurrency`) | current |
 | `permafrost-v2`, `permafrost-v3` | bench | `TENANT_N_*` | Raw Graph API benchmarks behind `.private/PERMAFROST_TESTING_RESULTS.md` (v3 = HTTP/1.1 + Range) | historical |
 | `pack-bench` | bench | `PACKBENCH_DSN` (a lab database with migration 080 only — never prod's), `SYNC_WEBDAV_URLS`/`SYNC_WEBDAV_PASSWORDS`, `SYNC_WEBDAV_ROOT` (a lab root) | The pack store (`internal/packstore`) on the real Sync bridges: write, cold member reads, range probe, index recovery, delete + compaction GC, delete-all (`bench-results/SYNC-WORKLOADS-2026-10-07.md`) | current (2026-10-07) |

@@ -82,12 +82,8 @@ func main() {
 		fmt.Println("skip onedrive  no TENANT_1_ID")
 	}
 	if ak := os.Getenv("WASABI_ACCESS_KEY"); ak != "" {
-		d, err := drivers.NewS3Driver(os.Getenv("WASABI_ENDPOINT"), ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_REGION"), logger)
-		if err == nil {
-			add("wasabi", s3WithHealth{d, os.Getenv("WASABI_BUCKET"), "wasabi"}, nil)
-		} else {
-			add("wasabi", nil, err)
-		}
+		d, err := drivers.NewWasabiDriver(ak, os.Getenv("WASABI_SECRET_KEY"), os.Getenv("WASABI_ENDPOINT"), os.Getenv("WASABI_REGION"), os.Getenv("WASABI_BUCKET"), logger)
+		add("wasabi", d, err)
 	} else {
 		fmt.Println("skip wasabi    no WASABI_ACCESS_KEY")
 	}
@@ -96,12 +92,8 @@ func main() {
 		if bucket == "" {
 			bucket = "vt-ecbench"
 		}
-		d, err := drivers.NewS3Driver("https://"+acct+".r2.cloudflarestorage.com", os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"), "auto", logger)
-		if err == nil {
-			add("r2", s3WithHealth{d, bucket, "r2"}, nil)
-		} else {
-			add("r2", nil, err)
-		}
+		d, err := drivers.NewR2Driver(acct, os.Getenv("R2_ACCESS_KEY"), os.Getenv("R2_SECRET_KEY"), "", bucket, logger)
+		add("r2", d, err)
 	} else {
 		fmt.Println("skip r2        no R2_ACCOUNT_ID/R2_ACCESS_KEY")
 	}
@@ -265,34 +257,4 @@ func trunc(err error) string {
 		s = s[:12]
 	}
 	return s
-}
-
-// s3WithHealth adapts the generic S3Driver (bucket = container, no
-// HealthCheck, non-variadic Put) to engine.Driver using one fixed bucket
-// (WASABI_BUCKET) and container/artifact as the key.
-type s3WithHealth struct {
-	*drivers.S3Driver
-	bucket string
-	name   string
-}
-
-func (s s3WithHealth) Name() string { return s.name }
-func (s s3WithHealth) HealthCheck(ctx context.Context) error {
-	_, err := s.S3Driver.List(ctx, s.bucket, "")
-	return err
-}
-func (s s3WithHealth) Put(ctx context.Context, container, artifact string, data io.Reader, _ ...engine.PutOption) error {
-	return s.S3Driver.Put(ctx, s.bucket, container+"/"+artifact, data)
-}
-func (s s3WithHealth) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
-	return s.S3Driver.Get(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3WithHealth) Delete(ctx context.Context, container, artifact string) error {
-	return s.S3Driver.Delete(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3WithHealth) Exists(ctx context.Context, container, artifact string) (bool, error) {
-	return s.S3Driver.Exists(ctx, s.bucket, container+"/"+artifact)
-}
-func (s s3WithHealth) List(ctx context.Context, container, prefix string) ([]string, error) {
-	return s.S3Driver.List(ctx, s.bucket, container+"/"+prefix)
 }

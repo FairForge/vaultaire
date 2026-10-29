@@ -10,7 +10,7 @@ Vaultaire is the storage engine behind stored.ge: one Go binary, one PostgreSQL,
 | [DATABASE.md](DATABASE.md) | PostgreSQL schema by domain, the migration runner, invariants |
 | [CONFIG.md](CONFIG.md) | Every environment variable (the only configuration there is) and the storage-mode auto-detect |
 | [DEPLOY.md](DEPLOY.md) | What production is, the push-to-main pipeline, box layout, backups, monitoring, troubleshooting |
-| [SCALE_TESTING.md](SCALE_TESTING.md) | The launch load gates (`tests/load/`), the nightly k6 job and the `internal/loadtest` library |
+| [SCALE_TESTING.md](SCALE_TESTING.md) | The launch load gates (`tests/load/`) and the nightly k6 job |
 | [PRODUCT_FEATURES.md](PRODUCT_FEATURES.md) | Roadmap and feature notes — not customer-facing |
 | [DESIGN.md](DESIGN.md) | The visual and product language of the site and dashboard |
 | [PAYMENTS.md](PAYMENTS.md) | Payments design of record (WP-PAY, 2026-10-18): the entitlement record (`paid_through` + grace), Stripe as one provider, BTCPay as the second, switching, tax questions |

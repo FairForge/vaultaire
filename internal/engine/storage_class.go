@@ -87,7 +87,6 @@ var backendToStorageClass = map[string]string{
 	// local reports STANDARD: on a box where it is the primary (development)
 	// that is the class the object has; nowhere else is it a tier (WP-R7-5).
 	"local": "STANDARD",
-	"s3":    "STANDARD",
 	"r2":    "STANDARD",
 	"sync":  "STANDARD",
 	"blomp": "STANDARD",

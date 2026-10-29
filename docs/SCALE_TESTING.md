@@ -2,8 +2,10 @@
 
 > **The launch gate is `tests/load/README.md`.** Five authenticated scenarios
 > with pass/fail thresholds, run by hand against a live instance (CI skips
-> them). Everything else on this page — the nightly k6 job and the
-> `internal/loadtest` library — is informational.
+> them). Everything else on this page — the nightly k6 job — is
+> informational. The `internal/loadtest` library and its `cmd/tools/loadtest`
+> harness were deleted (decision D-7, WP-R0-1, Stage 1a Prompt 52E): git has
+> them.
 
 ## The gates (`tests/load/`)
 
@@ -57,89 +59,14 @@ With no backend credentials the primary is the `local` driver under
 tenant (`POST /auth/register`) and use the returned key pair; without one the
 server serves S3 on the no-DB fallback path and HEAD answers 503.
 
-## The `internal/loadtest` library
-
-A Go package for writing your own load, stress, spike, soak and chaos runs
-against any worker function. Signatures as of `internal/loadtest/framework.go`:
-
-```go
-type TestType string            // TestTypeLoad, TestTypeStress, TestTypeSpike, TestTypeSoak
-type WorkerFunc func(ctx context.Context, workerID int) Result
-
-func DefaultConfig(name string, testType TestType) *Config   // Duration, RampUp/RampDown, TargetRPS, MaxConcurrency, Timeout
-func New(config *Config, workerFunc WorkerFunc) *Framework
-func (f *Framework) Run(ctx context.Context) (*Summary, error)
-```
-
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "time"
-
-    "github.com/FairForge/vaultaire/internal/loadtest"
-)
-
-func main() {
-    cfg := loadtest.DefaultConfig("s3-put", loadtest.TestTypeLoad)
-    cfg.Duration = 10 * time.Minute
-    cfg.TargetRPS = 100
-    cfg.MaxConcurrency = 50
-
-    worker := func(ctx context.Context, id int) loadtest.Result {
-        start := time.Now()
-        err := performS3Put(ctx) // your SigV4 client
-        return loadtest.Result{StartTime: start, Duration: time.Since(start), Error: err}
-    }
-
-    summary, err := loadtest.New(cfg, worker).Run(context.Background())
-    if err != nil {
-        panic(err)
-    }
-    analysis := loadtest.NewBottleneckAnalyzer(nil).AnalyzeLoadTest(summary)
-    fmt.Println(analysis.GenerateReport())
-}
-```
-
-The other testers follow the same shape — `DefaultStressConfig(name)` /
-`NewStressTester(cfg, worker)` (ramps `StartRPS`→`MaxRPS`, stops at
-`FailureThreshold` or `LatencyThreshold`), `DefaultSpikeConfig` /
-`NewSpikeTester` (`BaselineRPS`, `SpikeRPS`, recovery time), `DefaultSoakConfig`
-/ `NewSoakTester` (memory / goroutine / GC sampling with thresholds),
-`DefaultChaosConfig` / `NewChaosTester` (latency, error, timeout and partition
-injection with a resilience score). Each `Run` returns its own result type
-that `BottleneckAnalyzer` (`AnalyzeStressTest`, `AnalyzeSoakTest`) and the
-report generators accept.
-
-Baselines and capacity models are library calls too, not a CLI:
-
-```go
-bm := loadtest.NewBaselineManager("./baselines")
-bm.CreateBaseline("v1.2.0", "Release 1.2.0", "production", "1.2.0", summary)
-_ = bm.SaveToFile("v1.2.0")
-cmp, _ := bm.Compare("v1.2.0", newSummary)     // cmp.OverallStatus, cmp.Regressions, cmp.Differences
-fmt.Println(cmp.GenerateReport())
-
-model := loadtest.BuildModelFromStress("api", stressResult)   // or BuildModelFromSoak(name, soakResult, targetRPS)
-p := loadtest.NewCapacityPlanner(model)
-_ = p.EstimateCapacity(500)          // RequiredInstances, EstimatedLatency, Confidence
-_ = p.CalculateHeadroom(currentRPS)  // Utilization, RiskLevel
-_ = p.PlanForGrowth(100, 20, 12)     // 20 %/month for 12 months
-```
-
-Default baseline thresholds: RPS −10 %, avg latency +15 %, p95 +20 %, p99
-+25 %, error rate +50 % relative (`BaselineManager.SetThreshold` to change).
-
 There is no `cmd/loadtest`, no `compare` sub-command and no pre-merge load
 workflow; a "load-test on every PR" job would need a running server and is
 not what CI does.
 
 ## SLA targets
 
-`loadtest.DefaultStorageSLA()` (`internal/loadtest/sla.go`) encodes the targets
-the launch copy promises nothing beyond ("no contractual SLA, target 99.5 %"
+These are the targets (they lived in the deleted `internal/loadtest`'s
+`DefaultStorageSLA()`); the launch copy promises nothing beyond them ("no contractual SLA, target 99.5 %"
 in the FAQ):
 
 | Objective | Target | Priority |

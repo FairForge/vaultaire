@@ -91,8 +91,7 @@ The engine maps the class to a driver name (`internal/engine/storage_class.go`):
 
 If the target driver is not registered the write falls back to the primary
 silently. The primary is `STORAGE_MODE`, or auto-detected
-(`config.DetectStorageMode`) as iDrive > Wasabi > Quotaless > S3 > Geyser >
-local (prod: `wasabi` since 2026-10-03, the interim primary while the iDrive
+(`config.DetectStorageMode`) as iDrive > Wasabi > Geyser > local (prod: `wasabi` since 2026-10-03, the interim primary while the iDrive
 account is repaired; `idrive` stays registered for its rows). The dashboard
 reads the engine's primary (WP-R1-4). STANDARD is the primary's class and is
 not pinned to a backend. No driver sets a vendor storage class on its
@@ -148,7 +147,7 @@ may lag or drift — smart demotion updates the head row only (R6-14, WP-R6-1).
   (`buildCandidateList`). Today a miss on the preferred backend still fans out
   to every backend; WP-R6-1 narrows this to the recorded location. Range reads
   use `RangeGetter` where the driver implements it — `idrive` (and every
-  `idrive-<region>`), `lyve`, `geyser`, `r2`; `local`, `s3`, `quotaless` and
+  `idrive-<region>`), `lyve`, `geyser`, `r2`; `local` and
   `permafrost` get `Get` plus a discard of the leading bytes.
 - Archived objects on Geyser return `ErrArchived`, which stops the walk (a
   fallback's 404 must not mask it) and maps to 403 `InvalidObjectState`, or to
@@ -189,8 +188,7 @@ Two models, deliberately separate:
   signed `HeadBucket` through the driver for iDrive (primary and every region
   with its own pair), Geyser and R2; the Lyve console action with the root key
   (else the Lyve driver's signed `HeadBucket`); an authenticated Graph call
-  for permafrost; `local` is probed too (a stat of `DATA_PATH`). `quotaless`
-  keeps a plain TCP dial and `s3` (s3compat) is not probed at all (rule 1 in
+  for permafrost; `local` is probed too (a stat of `DATA_PATH`) (rule 1 in
   the root `CLAUDE.md`).
 - **The circuit breaker**, fed by live request outcomes, is the **only** signal
   that alters routing.

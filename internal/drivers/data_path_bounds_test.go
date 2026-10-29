@@ -103,14 +103,6 @@ func TestDataPathBounds_NothingWaitsMoreThanThirtySeconds(t *testing.T) {
 	require.NoError(t, err)
 	assertBounded(t, "r2", sdkHTTPClient(t, r2.client), completeException)
 
-	compat, err := NewS3CompatDriver("ak", "sk", nop)
-	require.NoError(t, err)
-	assertBounded(t, "s3compat (`s3`)", sdkHTTPClient(t, compat.client), completeException)
-
-	plain, err := NewS3Driver("https://s3.example.invalid", "ak", "sk", "", nop)
-	require.NoError(t, err)
-	assertBounded(t, "s3 (quotaless's base)", sdkHTTPClient(t, plain.client), completeException)
-
 	geyser, err := NewGeyserDriver("ak", "sk", "b", "", nop)
 	require.NoError(t, err)
 	assertBounded(t, "geyser", sdkHTTPClient(t, geyser.client), map[string]time.Duration{
@@ -131,8 +123,6 @@ var boundSites = map[string]string{
 	"TunedHTTPClient idrive.go:s3ObjectHTTPClient":         "s3OpTimeouts (checked above)",
 	"TunedHTTPClient idrive.go:s3FreshHTTPClient":          "s3OpTimeouts, keep-alives off (checked above)",
 	"TunedHTTPClient r2.go:NewR2Driver":                    "s3OpTimeouts (checked above)",
-	"TunedHTTPClient s3compat.go:NewS3CompatDriver":        "s3OpTimeouts (checked above)",
-	"TunedHTTPClient s3.go:NewS3Driver":                    "s3OpTimeouts (checked above)",
 	"TunedHTTPClient geyser.go:NewGeyserDriver":            "geyserOpTimeouts: tape 5 min for GET/PUT (checked above)",
 	"TunedHTTPClient webdav.go:NewWebDAVDriver":            "the Sync bridge exception: 5 min answer, its own watchdogs",
 	"TunedHTTPClient swift.go:NewSwiftDriver":              "Blomp/Swift: 25 s to the first byte after the body (ResponseHeaderTimeout); metadata 15 s via meta; the hedge's fresh client the same bound, keep-alives off",
@@ -145,7 +135,6 @@ var boundSites = map[string]string{
 	"WithTimeout onedrive.go:NewOneDriveFleetDriver": "boot only: the fleet's first token and drive ids, 30 s",
 	"WithTimeout onedrive_fleet.go:recheckFleet":     "the probe path: one fingerprint re-check after an unknown verdict or an hour, 10 s inside the probe's 15 s (RP18-1)",
 	"WithTimeout geyser_multipart.go:abortMultipart": "the abort of a failed Geyser multipart upload, detached from the caller's context (often why it failed), 30 s",
-	"WithTimeout quotaless.go:HealthCheck":           "the quotaless probe, 10 s",
 	"WithTimeout tenant_walk.go:s3WalkPrefix":        "a job (the erasure sweep): one listing page, 60 s over a 15 s transport bound",
 	"WithTimeout list_page.go:s3ListPage":            "a job (the chunk orphan sweep, WP-R8-2 B.2): one listing page, 60 s over a 15 s transport bound",
 	"WithTimeout swift.go:authenticate":              "one Keystone token request, 15 s (swiftMetaTimeout)",

@@ -1107,7 +1107,7 @@ So the cost of a generous allowance is a routing decision, and an egress-heavy m
 **Test**: Check admin backend dashboard shows all backends with correct health/latency → verify cost tracking aggregates correctly → capacity alerts fire at threshold.
 
 ### 5.12.10: Backend-Outage Alerting ✅ SHIPPED 2026-09-22 (#457)
-**Files**: `internal/api/metrics.go`, `internal/engine/health*.go`, `deploy/monitoring/vaultaire-backends.yml`
+**Files**: `internal/api/prom_metrics.go` (the legacy `metrics.go` registry was deleted, D-4), `internal/engine/health*.go`, `deploy/monitoring/vaultaire-backends.yml`
 - Authenticated backend probes replace the TCP-only check where a vendor can answer honestly: iDrive/Geyser = signed HeadBucket via the engine; Lyve = console `RSCustomerDetails` with the root key (one 403 retry); TCP dial stays the fallback (architecture decision #1 still holds for the unauthenticated path)
 - Real Prometheus `/metrics` exposition — the legacy 2 series are kept; `vaultaire_errors_total` now counts 5xx (it was a never-incremented stub); new `vaultaire_backend_*` series (up/latency/probe result per backend)
 - `deploy/monitoring/vaultaire-backends.yml` — 6 alert rules, installed on SLC 2026-09-23 → Alertmanager (#423) → ntfy bridge. [YOU]: subscribe to the ntfy topic (Stage 5)
@@ -1749,7 +1749,7 @@ Checked 2026-10-01 against `.private/VAULTAIRE_MASTER_PLAN.md` (steps 1–1320).
 > - **SHIPPED THEN DELETED AS INERT:** 7.3/7.4 `TieringEngine` + cost optimizer, the engine read cache, access tracking (#524, WP-R6-4/5/6) — see the note under Phase 7.
 > - **BENCHED, NOT BUILT:** Phase 11 erasure coding (and with it P2–P6).
 > - **NOT STARTED, no package in the repo:** 10.0 client E2EE SDK (no `sdk/`), 10.4–10.8, 6.5 Filecoin, 6.6 own-fleet driver, R1–R6 reseller client, 12 lifecycle, 13 protocols, 14 (14.4 included), 15 (no `Dockerfile`, no `deploy/helm`), 16 agents (no `cmd/stored-*`), 17, 18, 19 IAM/bucket policy, 20 federation, 21 BYOS/credits, 22–30. `cmd/vaultaire` is the only product binary; everything else under `cmd/tools/` is a probe or bench.
-> - **Present but unlinked (never built into the binary), pending D-1/D-2/D-9:** `internal/{k8s,container,global,ha,slo,integrations,loadtest}`, `engine/{sla,disaster_recovery,analytics,capacity,replicator,load_balancer}.go`, `drivers/wasm.go`, `crypto/postquantum.go` — their existence is not evidence that Phases 15, 22, 28 or P3 started.
+> - **Deleted, never linked (WP-R0-1, Stage 1a Prompt 52E, D-1/D-2/D-4/D-7/D-9):** `internal/{k8s,container,global,ha,slo,integrations,loadtest}`, `cmd/tools/loadtest`, `engine/{sla,disaster_recovery,replicator}.go`, `drivers/wasm.go`, the legacy `api/metrics.go` (`crypto/postquantum.go` went with D-3 on 2026-10-10). Still present and unlinked: `engine/{analytics,capacity,load_balancer}.go` (D-9 names only the replicator). None of them was evidence that Phases 15, 22, 28 or P3 started; git has them.
 
 ---
 
@@ -2230,7 +2230,7 @@ Sources (read 2026-10-11): the technique survey `docs/research/PRIVACY_TECHNIQUE
 - Current fleet: 3 tenants (viera.fun, viera.pics, fromhis.com), 5TB each = 15TB total
 
 ### P3: Async Parity Replication
-**Files**: `internal/engine/replicator.go` (extends existing replicator)
+**Files**: a new replication path (the unlinked `internal/engine/replicator.go` — a 5-goroutine `[]byte` queue, not this design — was deleted, D-9 / R6; the shipped async parity is the `vault_parity` job, WP-VAULT-1)
 - After primary PUT to paid backend: queue async parity shard write to OneDrive fleet
 - Shard selection: erasure coding (Phase 11) determines which shards go to OneDrive
 - OneDrive gets 2-4 parity shards per object (never enough to reconstruct alone)
