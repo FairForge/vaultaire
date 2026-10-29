@@ -191,6 +191,14 @@
       "sha256": "12471231920fb23f36d0100ea658bb689d8e32ad4fa2516fc8e192b2a9fa74e1",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-codec",
+      "version": "0.5.2",
+      "source_commit": "f134825aae048f8d5bc980d881eb079e17ed32e3",
+      "sha256": "5a3057ade960a5453023f70738e993a7402e1bfcfbd2c0fdb9277b565a83e986",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
     }
   ]
 }
