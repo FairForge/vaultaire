@@ -87,13 +87,13 @@ jobs:
           SBOM_SERVER_BINARY=vaultaire-linux scripts/repro-check-sbom.sh bin/sbom
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: vaultaire-linux
           path: vaultaire-linux
 
       - name: Upload SBOMs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: bin/sbom/*.cdx.json
@@ -111,12 +111,12 @@ jobs:
             deploy/scripts
 
       - name: Download artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: vaultaire-linux
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
@@ -204,12 +204,12 @@ jobs:
             deploy/scripts
 
       - name: Download artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: vaultaire-linux
 
       - name: Setup SSH
-        uses: webfactory/ssh-agent@v0.9.0
+        uses: webfactory/ssh-agent@v0.10.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
@@ -302,7 +302,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Download artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: vaultaire-linux
 
