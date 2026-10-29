@@ -1,6 +1,23 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 14:00 UTC — **Review RP80 of Stage 1a Prompt 50 (WP-DX-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-2-REVIEW.md`):
+Updated: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, the Connect primitive), after Part 0 = RP80 — DONE in code, dark** (`docs/reviews/WP-STRIPE-3.md`; migration 117; next 118):
+- **#1055 Part 0**, every RP80 finding fixed:
+  - a sandbox's downloads are metered under its own id against a fixed 5 GiB a month and paced past it, never billed; its presigned links ≤ 1 h; never Public;
+  - a suspended parent's sandbox is suspended; no test key for a suspended account;
+  - the event cursor answers events ≥ 2 s old (a late commit is never skipped); ≤ 4 long polls per tenant; `stored listen` dedups;
+  - `?mode=test` on the request log and the Developers page's Live / Test toggle;
+  - a failed sandbox lookup is a 503; a settle from another host is 404; the first-boot account only on `STORAGE_MODE=local`, with a one-time password.
+- **#1056, the platform and its children** (migration 117: `tenants.platform`, `parent_tenant_id`, `external_id`, `label`, `deletion_scheduled_at`):
+  - `PUT /api/v1/admin/tenants/{id}/platform` (admin, audited);
+  - `/api/v1/platform/tenants` (create, list, read, schedule the erasure) — 404 for any tenant that is not a platform;
+  - a child: no user, no e-mail, no primary pair; suspended with its platform.
+- **#1057, the pool:** every write path (the edge admit included) reserves against the platform's limit and the sum of the platform's and its children's bytes; a sandbox is never in it.
+- **#1058, keys and the cascade:** a child's scoped keys and STS tokens, never wider than the calling credential (400 `scope_exceeds_parent`); a platform's erasure erases its children first (the runner's stage b5); a due child is erased alone.
+- **Prod: dark.** No tenant has `platform = true`. **The proof is owed and needs the owner's TOTP:** grant tenant zero, create one child, mint its key, PUT one object through `s3.stored.cloud`, read the child's usage in the pool.
+- **Owner:** open questions in WP-STRIPE-3: a platform key instead of a JWT (D-STRIPE-19), a tenant-level residency (D-STRIPE-20), a child's download allowance (RB9-2).
+- **Prompt 52 (WP-TEAM-1)** is written in both editions with Part 0 = RP82. The post-merge review is RP82.
+
+Before that: 2026-10-29 14:00 UTC — **Review RP80 of Stage 1a Prompt 50 (WP-DX-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-2-REVIEW.md`):
 - **RP80-1 (P2):** a sandbox's downloads are never metered and never paced, so a free account's `VLT_TEST_` key could serve 5 GiB through presigned links with no egress limit, from SLC. Fix: meter without billing (a small own allowance, paced past it), test-key presigned URLs at most 1 h, no Public sandbox bucket. Latent until signups open.
 - **P3s:** RP80-2 (a suspended parent's sandbox keeps working), RP80-3 (`stored listen` can skip an event committed late), RP80-4 (no bound on a tenant's long polls). Four P4s.
 - **Prod:** every origin request-log row since Part 0 carries its request id (33 / 33); 3 mirror settles, 0 cut. The GHCR image package is private (owner: make it public at launch).

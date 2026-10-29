@@ -21,10 +21,15 @@ own `UPDATE users` because importing `internal/api` was a cycle).
   date, tenant joined by e-mail — the registration contract), `StillDue` (re-read
   under `FOR UPDATE` in a short tx: the runner's cancel check before every batch).
 
+- **Children of a platform (WP-PLAT-1, 117)** have no user: `ScheduleTenant(ctx, tenantID)` puts the 30-day date on `tenants.deletion_scheduled_at` (only for a child — `ErrNotAChild`; idempotent); `ListDue` appends due children as `Due{Child: true}` (UserID ""); `StillDueTenant` is `StillDue` on the tenants row; `ScheduleChildrenNow(parent)` makes every child due now (an earlier own date kept) — the runner's cascade (stage b5) before the platform's rows.
+
 ## `erase.go` — stage c of the runner
 
 `EraseRows(ctx, userID, tenantID, email, now)` is one transaction: lock the users
-row, refuse with `ErrNotPending` if a cancel won (or the date moved), run
+row (a platform's child — `userID ""` — its tenants row: `lockedTenantStillDue`),
+refuse with `ErrNotPending` if a cancel won (or the date moved), refuse with
+`ErrChildrenRemain` while a child tenant of this tenant exists (they are erased
+first; their rows reference it), run
 `Deleted` in order, then the `Kept` scrubs, users and tenants last. Ids are
 compared as **text** everywhere (`tenant_id::text = $1`): prod tenant ids are
 `tenant-<hex>` while some scaffold tables typed the column UUID — a bare `= $1`
