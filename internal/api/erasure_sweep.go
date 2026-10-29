@@ -367,7 +367,7 @@ func (s *tenantSweep) cancelled(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	s.sinceCheck = 0
-	still, err := s.r.account.StillDue(ctx, s.d.UserID, s.r.now())
+	still, err := s.r.stillDue(ctx, s.d)
 	if err != nil {
 		return false, fmt.Errorf("re-read user: %w", err)
 	}

@@ -42,6 +42,12 @@ func (s *Server) registerPlatformRoutes() {
 		r.Get("/tenants", s.handlePlatformListTenants)
 		r.Get("/tenants/{id}", s.handlePlatformGetTenant)
 		r.Delete("/tenants/{id}", s.handlePlatformDeleteTenant)
+
+		// PR C: the child's keys and STS tokens (platform_keys.go).
+		r.Post("/tenants/{id}/keys", s.handlePlatformCreateKey)
+		r.Get("/tenants/{id}/keys", s.handlePlatformListKeys)
+		r.Delete("/tenants/{id}/keys/{key}", s.handlePlatformDeleteKey)
+		r.Post("/tenants/{id}/sts", s.handlePlatformCreateSTS)
 	})
 }
 

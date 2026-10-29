@@ -318,7 +318,10 @@ type EraseResult struct {
 // EraseRows removes every row of the account in one transaction: it locks
 // the users row, refuses with ErrNotPending when a cancel won the race (the
 // schedule is cleared or in the future), runs Deleted in order, then the
-// Kept scrubs. Nothing is committed on any error.
+// Kept scrubs. Nothing is committed on any error. A platform's child
+// (userID "", WP-PLAT-1) is locked and checked through its tenants row and
+// erased by the tenant-keyed rules and its keys; a platform is refused
+// (ErrChildrenRemain) while a child row remains.
 func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string, now time.Time) (EraseResult, error) {
 	res := EraseResult{Rows: map[string]int64{}}
 	if s.db == nil {
@@ -330,12 +333,30 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	due, err := lockedStillDue(ctx, tx, userID, now)
+	// A platform's child (WP-PLAT-1) has no user: its schedule is its
+	// tenants row's.
+	var due bool
+	if userID == "" && tenantID != "" {
+		due, err = lockedTenantStillDue(ctx, tx, tenantID, now)
+	} else {
+		due, err = lockedStillDue(ctx, tx, userID, now)
+	}
 	if err != nil {
 		return res, err
 	}
 	if !due {
 		return res, ErrNotPending
+	}
+	// A platform's children are erased first (their tenants rows reference
+	// it): the runner's cascade (stage b5); a child row here refuses.
+	if tenantID != "" {
+		var children int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants WHERE parent_tenant_id = $1`, tenantID).Scan(&children); err != nil {
+			return res, fmt.Errorf("count child tenants: %w", err)
+		}
+		if children > 0 {
+			return res, fmt.Errorf("%w: %d", ErrChildrenRemain, children)
+		}
 	}
 	// The runner's walk must have emptied the index: a head row here means
 	// bytes on a backend nobody will delete once the row is gone (a PUT
@@ -376,6 +397,17 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 		}
 		n, _ := out.RowsAffected()
 		res.Rows[r.Table] += n
+		res.Total += n
+	}
+	// A child's keys are bound to the platform user who minted them
+	// (api_keys' rule is the user's): they go with the child.
+	if userID == "" && tenantID != "" {
+		out, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE tenant_id = $1`, tenantID)
+		if err != nil {
+			return res, fmt.Errorf("erase the child's api_keys: %w", err)
+		}
+		n, _ := out.RowsAffected()
+		res.Rows["api_keys"] += n
 		res.Total += n
 	}
 	for _, r := range Kept {

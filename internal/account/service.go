@@ -47,6 +47,9 @@ var (
 	// still lists objects for the tenant: the runner's walk (stage b) has
 	// to finish first, or bytes would be orphaned on a backend.
 	ErrObjectsRemain = errors.New("objects remain in the index")
+	// ErrChildrenRemain is returned by EraseRows while the tenant (a
+	// platform) still has child tenants: they are erased first.
+	ErrChildrenRemain = errors.New("child tenants remain")
 	// ErrNoDatabase is returned when the service has no database.
 	ErrNoDatabase = errors.New("database unavailable")
 )
@@ -199,6 +202,9 @@ type Due struct {
 	TenantID    string
 	Email       string
 	ScheduledAt time.Time
+	// Child: a platform's child tenant (WP-PLAT-1) — no user: its
+	// schedule is tenants.deletion_scheduled_at, and UserID is "".
+	Child bool
 }
 
 // ListDue returns the accounts scheduled before now, oldest first. A user
@@ -228,7 +234,92 @@ func (s *Service) ListDue(ctx context.Context, now time.Time, limit int) ([]Due,
 		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// A platform's children whose own date has passed (WP-PLAT-1): erased
+	// alone, by the same runner. A child of a platform due itself is
+	// erased by the platform's cascade.
+	if left := limit - len(out); left > 0 {
+		crows, err := s.db.QueryContext(ctx, `
+			SELECT t.id, t.email, t.deletion_scheduled_at
+			  FROM tenants t
+			 WHERE t.parent_tenant_id IS NOT NULL AND t.deletion_scheduled_at < $1
+			 ORDER BY t.deletion_scheduled_at
+			 LIMIT $2`, now, left)
+		if err != nil {
+			return nil, fmt.Errorf("list due child tenants: %w", err)
+		}
+		defer func() { _ = crows.Close() }()
+		for crows.Next() {
+			d := Due{Child: true}
+			if err := crows.Scan(&d.TenantID, &d.Email, &d.ScheduledAt); err != nil {
+				return nil, fmt.Errorf("scan due child tenant: %w", err)
+			}
+			out = append(out, d)
+		}
+		if err := crows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// StillDueTenant is StillDue for a child tenant (no user): the tenants
+// row under FOR UPDATE in a short transaction, its date passed.
+func (s *Service) StillDueTenant(ctx context.Context, tenantID string, now time.Time) (bool, error) {
+	if s.db == nil {
+		return false, ErrNoDatabase
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin due check: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	due, err := lockedTenantStillDue(ctx, tx, tenantID, now)
+	if err != nil {
+		return false, err
+	}
+	return due, tx.Commit()
+}
+
+// ScheduleChildrenNow makes every child of parent due now (the cascade of
+// the parent's erasure, WP-PLAT-1): an earlier date of its own is kept.
+// Returns the children's ids.
+func (s *Service) ScheduleChildrenNow(ctx context.Context, parent string, now time.Time) ([]string, error) {
+	if s.db == nil {
+		return nil, ErrNoDatabase
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		UPDATE tenants SET deletion_scheduled_at = LEAST(COALESCE(deletion_scheduled_at, $2), $2)
+		 WHERE parent_tenant_id = $1
+		 RETURNING id`, parent, now)
+	if err != nil {
+		return nil, fmt.Errorf("schedule the children of %s: %w", parent, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func lockedTenantStillDue(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (bool, error) {
+	var at sql.NullTime
+	err := tx.QueryRowContext(ctx,
+		`SELECT deletion_scheduled_at FROM tenants WHERE id = $1 AND parent_tenant_id IS NOT NULL FOR UPDATE`, tenantID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("re-read tenant %s: %w", tenantID, err)
+	}
+	return at.Valid && !at.Time.After(now), nil
 }
 
 // StillDue re-reads the user under FOR UPDATE in a short transaction and

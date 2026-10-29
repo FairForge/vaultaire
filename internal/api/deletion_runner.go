@@ -181,15 +181,18 @@ type AccountDeletionRunner struct {
 
 // TenantErasure is one tenant's outcome in a run.
 type TenantErasure struct {
-	TenantID         string `json:"tenant_id"`
-	UserID           string `json:"user_id"`
-	Outcome          string `json:"outcome"`
-	StripeCancelled  bool   `json:"stripe_cancelled"`
-	ObjectsDeleted   int    `json:"objects_deleted"`
-	ChunkedReleased  int    `json:"chunked_released"`
-	LockedErased     int    `json:"locked_erased"`
-	ObjectFailures   int    `json:"object_failures"`
-	MultipartAborted int    `json:"multipart_aborted"`
+	TenantID string `json:"tenant_id"`
+	UserID   string `json:"user_id"`
+	// ChildrenErased are the platform's child tenants erased first, each
+	// through this same path (WP-PLAT-1, stage b5).
+	ChildrenErased   []string `json:"children_erased,omitempty"`
+	Outcome          string   `json:"outcome"`
+	StripeCancelled  bool     `json:"stripe_cancelled"`
+	ObjectsDeleted   int      `json:"objects_deleted"`
+	ChunkedReleased  int      `json:"chunked_released"`
+	LockedErased     int      `json:"locked_erased"`
+	ObjectFailures   int      `json:"object_failures"`
+	MultipartAborted int      `json:"multipart_aborted"`
 	// ParityErased counts vault objects whose parity shards were erased
 	// from the leg (WP-VAULT-1).
 	ParityErased int `json:"parity_erased,omitempty"`
@@ -393,6 +396,15 @@ func (r *AccountDeletionRunner) RunOnce(ctx context.Context) (AccountDeletionRes
 	return res, nil
 }
 
+// stillDue re-reads whether d's erasure may proceed: the user's schedule,
+// or a platform's child's own (WP-PLAT-1).
+func (r *AccountDeletionRunner) stillDue(ctx context.Context, d account.Due) (bool, error) {
+	if d.Child {
+		return r.account.StillDueTenant(ctx, d.TenantID, r.now())
+	}
+	return r.account.StillDue(ctx, d.UserID, r.now())
+}
+
 // eraseTenant runs stages a–e for one account. It never returns an error:
 // the outcome says what happened and the next run resumes.
 func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) TenantErasure {
@@ -423,7 +435,7 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 
 	// The select was not under a lock: confirm under FOR UPDATE before
 	// touching anything (a cancel between the select and here wins).
-	still, err := r.account.StillDue(ctx, d.UserID, r.now())
+	still, err := r.stillDue(ctx, d)
 	if err != nil {
 		return r.defer_(te, log, "re-read user", err)
 	}
@@ -506,8 +518,11 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 
 	// b3. The user's record at the recovery realms, while the user row exists
 	// (recovery_erasure.go): a realm that does not confirm defers the tenant.
-	if err := r.eraseRealms(ctx, d, &te); err != nil {
-		return r.defer_(te, log, "recovery realms", err)
+	// A platform's child has no user, so no record there.
+	if !d.Child {
+		if err := r.eraseRealms(ctx, d, &te); err != nil {
+			return r.defer_(te, log, "recovery realms", err)
+		}
 	}
 
 	// A backend whose listing lags cannot prove itself empty today: the walk
@@ -532,6 +547,28 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		}
 		if pErr != nil {
 			return r.defer_(te, log, "purge the sandbox", pErr)
+		}
+	}
+
+	// b5. A platform's children (WP-PLAT-1): each made due now and erased
+	// first, through this same path — objects, sweep, keys, rows — before
+	// the platform's own rows (EraseRows refuses a platform while a child
+	// row remains). A child that cannot be erased defers the platform.
+	if d.TenantID != "" && !d.Child {
+		children, cErr := r.account.ScheduleChildrenNow(ctx, d.TenantID, r.now())
+		if cErr != nil {
+			return r.defer_(te, log, "schedule the children", cErr)
+		}
+		for _, c := range children {
+			var email string
+			if err := r.db.QueryRowContext(ctx, `SELECT email FROM tenants WHERE id = $1`, c).Scan(&email); err != nil {
+				return r.defer_(te, log, "read child "+c, err)
+			}
+			ce := r.eraseTenant(ctx, account.Due{TenantID: c, Email: email, Child: true, ScheduledAt: r.now()})
+			if ce.Outcome != outcomeErased && ce.Outcome != outcomeSettling {
+				return r.defer_(te, log, "erase child "+c, fmt.Errorf("outcome %s: %s", ce.Outcome, ce.Error))
+			}
+			te.ChildrenErased = append(te.ChildrenErased, c)
 		}
 	}
 
@@ -577,7 +614,7 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 	}
 
 	// d. Sessions and the in-process cache.
-	if r.Sessions != nil {
+	if r.Sessions != nil && !d.Child {
 		if err := r.Sessions.DeleteByUserID(context.WithoutCancel(ctx), d.UserID); err != nil {
 			log.Error("account deletion: revoke sessions", zap.Error(err))
 		}
@@ -799,7 +836,7 @@ func (r *AccountDeletionRunner) walkObjects(ctx context.Context, d account.Due, 
 		if r.beforeBatch != nil {
 			r.beforeBatch()
 		}
-		still, err := r.account.StillDue(ctx, d.UserID, r.now())
+		still, err := r.stillDue(ctx, d)
 		if err != nil {
 			return false, err
 		}
