@@ -150,19 +150,21 @@ func setQuery(r *http.Request, kv ...string) {
 }
 
 // The page tells one example story everywhere it shows storage: photos and
-// projects downstairs, backups in the attic — the hero terminal's buckets, the
-// hero scene's tags, the builder's starter and its receipt all agree. The
-// beacon for the cookieless site statistics is wired in too.
+// projects on Standard (cardboard boxes), backups on Vault (steel crates) —
+// the hero terminal's buckets, the hero scene's tags, the picker's starter
+// (2 + 5 TB) and its receipt all agree. One box is one terabyte: no dresser,
+// bookcase or attic is left on the page. The beacon for the cookieless site
+// statistics is wired in too.
 func TestLanding_ExampleStory(t *testing.T) {
 	for _, page := range []string{string(landingPages(prodHosts())[0]), string(landingPages(prodHosts())[1])} {
 		for _, want := range []string{
 			"rclone copy ~/backups stored:backups", "03:00:12 backups", "21:44:08 projects", "09:15:51 photos",
-			"PHOTOS 1 TB", "PROJECTS 1 TB", `data-pack="b"`, "1 dresser of backups", "1 storage box of photos", "$18.98",
-			"navigator.sendBeacon('/api/ping'", "b: 'backups'",
+			"PHOTOS 1 TB", "PROJECTS 1 TB", "BACKUPS 3 TB", `id="pick-scene"`, `value="2"`, `value="5"`, "$18.98",
+			"navigator.sendBeacon('/api/ping'", "#s-crate",
 		} {
 			assert.Contains(t, page, want)
 		}
-		for _, gone := range []string{"stored:archive", "postgres-wal", "$28.94", "1 dresser, 1 storage box"} {
+		for _, gone := range []string{"stored:archive", "postgres-wal", "$28.94", "#s-dresser", "#s-bookcase", "Attic", "attic", "Downstairs", "downstairs"} {
 			assert.NotContains(t, page, gone)
 		}
 	}

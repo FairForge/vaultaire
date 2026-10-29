@@ -37,7 +37,7 @@ try {
     await sleep(2500);
     await js(`document.head.appendChild(Object.assign(document.createElement('style'), { textContent: '*{transition:none!important;animation:none!important}' }));
         try { localStorage.clear(); } catch (e) {}
-        document.querySelector('svg.scene[data-play] .piece[transform="translate(66 13)"]').id = 'probe'; 'ok'`);
+        document.querySelector('svg.scene[data-play] .piece[transform="translate(60 33)"]').id = 'probe'; 'ok'`);
     const probe = () => js(`(() => { const g = document.getElementById('probe'), b = g.getBoundingClientRect();
         return { t: g.getAttribute('transform'), lift: g.classList.contains('lift'), x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
 
@@ -58,16 +58,22 @@ try {
     let h = await probe();
     ok(h.t === d.t && !h.lift, 'hovering after a drag does not move it', h.t);
 
-    // ---- builder room: the same with a storage piece, read off the receipt
-    // the page scrolls smoothly: scroll instantly, then read the rect
-    await js(`document.documentElement.style.scrollBehavior = 'auto'; document.querySelector('#room-items .piece[aria-label^="Storage box: photos"]').scrollIntoView({ block: 'center', behavior: 'instant' }); 'ok'`);
+    // ---- the picker: a real click on + adds a box and re-prices
+    await js(`document.documentElement.style.scrollBehavior = 'auto'; document.getElementById('pick-scene').scrollIntoView({ block: 'center', behavior: 'instant' }); 'ok'`);
     await sleep(300);
-    const room = await js(`(() => { const g = document.querySelector('#room-items .piece[aria-label^="Storage box: photos"]'), b = g.getBoundingClientRect();
-        return { x: b.left + b.width / 2, y: b.top + b.height / 2, total: document.getElementById('r-total').textContent, u: document.getElementById('room').getBoundingClientRect().height / 115, scrollY: window.scrollY }; })()`);
-    ok(room.scrollY > 0 && room.y > 0 && room.y < 1600, 'room scrolled into view', room.scrollY + ' y=' + Math.round(room.y));
-    await hover(room.x, room.y); await press(room.x, room.y); await dragTo(room.x, room.y - 30 * room.u); await dragTo(room.x, room.y - 60 * room.u); await release(room.x, room.y - 60 * room.u); await sleep(120);
-    const after = await js(`(() => ({ total: document.getElementById('r-total').textContent, lifted: document.querySelectorAll('#room-items .piece.lift').length }))()`);
-    ok(after.total !== room.total && after.lifted === 0, 'room: a real drag to the attic re-prices and lets go', room.total + ' -> ' + after.total + ' lifted=' + after.lifted);
+    const plus = await js(`(() => { const b = document.querySelector('[data-step="std"][data-by="1"]').getBoundingClientRect();
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2, total: document.getElementById('r-total').textContent, n: document.querySelectorAll('#pick-boxes .pick-box').length, scrollY: window.scrollY }; })()`);
+    ok(plus.scrollY > 0 && plus.y > 0 && plus.y < 1600, 'picker scrolled into view', plus.scrollY + ' y=' + Math.round(plus.y));
+    await hover(plus.x, plus.y); await press(plus.x, plus.y); await release(plus.x, plus.y); await sleep(120);
+    const after = await js(`(() => ({ total: document.getElementById('r-total').textContent, n: document.querySelectorAll('#pick-boxes .pick-box').length }))()`);
+    ok(after.total !== plus.total && after.n === plus.n + 1, 'picker: a real click on + adds a box and re-prices', plus.total + ' -> ' + after.total + ' boxes ' + plus.n + ' -> ' + after.n);
+
+    // ---- the picker's boxes are pieces: a real drag moves one and lets go
+    const pb = await js(`(() => { const g = document.querySelector('#pick-boxes .pick-box[data-kind="std"]'); g.id = 'pbox'; const b = g.getBoundingClientRect();
+        return { x: b.left + b.width / 2, y: b.top + b.height / 2, t: g.getAttribute('transform') }; })()`);
+    await hover(pb.x, pb.y); await press(pb.x, pb.y); await dragTo(pb.x + 30, pb.y - 10); await dragTo(pb.x + 60, pb.y - 20); await release(pb.x + 60, pb.y - 20); await sleep(120);
+    const pa = await js(`(() => { const g = document.getElementById('pbox'); return { t: g.getAttribute('transform'), lift: g.classList.contains('lift') }; })()`);
+    ok(pa.t !== pb.t && !pa.lift, 'picker: a real drag moves a box and lets go', pb.t + ' -> ' + pa.t + ' lift=' + pa.lift);
 } catch (x) {
     out.push('FAIL exception: ' + (x.stack || x));
 } finally {

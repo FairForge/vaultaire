@@ -39,13 +39,9 @@ __SPRITES__
         <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:14;--h:14" viewBox="0 0 14 14" aria-hidden="true" focusable="false"><use href="#s-mark"/></svg><span>Stored</span></a>
         <nav aria-label="Main">
             <ul class="topnav">
-                <li class="hide-sm"><a href="/#build">Build yours</a></li>
                 <li class="hide-sm"><a href="/pricing" aria-current="page">Pricing</a></li>
                 <li class="hide-sm"><a href="/docs">Docs</a></li>
-                <li class="hide-sm"><a href="/changelog">Changelog</a></li>
-                <li class="hide-sm"><a href="/status">Status</a></li>
                 <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
-                <li><a class="help" href="/docs/faq" aria-label="? frequently asked questions" title="FAQ">?</a></li>
                 <li><a href="/login">Sign in</a></li>
                 {{if .SignupsOpen}}
                 <li><a class="btn btn-primary" href="/register">Start free</a></li>
@@ -176,8 +172,8 @@ __SPRITES__
     <div class="container">
         <div class="section-head">
             <p class="kicker"><b>04</b>Calculator</p>
-            <h2>What your house costs.</h2>
-            <p class="lede">The house builder's maths: whole TB downstairs (Standard) and in the attic (Vault), times the rate for the period.</p>
+            <h2>What it costs.</h2>
+            <p class="lede">Whole terabytes of Standard and of Vault, times the rate for the period. One box is one terabyte.</p>
         </div>
         <div class="calc">
             <form class="calc-form" id="price-calc" action="/pricing" method="get">
@@ -235,7 +231,7 @@ __SPRITES__
         <div class="footer-grid">
             <div class="footer-brand">
                 <a class="logo" href="/" aria-label="Stored home"><svg class="px" style="--w:34;--h:30" viewBox="0 0 34 30" aria-hidden="true" focusable="false"><use href="#s-logo"/></svg></a>
-                <p>S3-compatible storage orchestration across hot storage and tape. Built in the open by FairForge.</p>
+                <p>Cloud storage priced by the terabyte. Built in the open by FairForge.</p>
             </div>
             <div>
                 <h3>Product</h3>

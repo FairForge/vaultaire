@@ -16,10 +16,13 @@ Inputs (all in this directory):
                      lines marked /*NIGHT*/ are expanded into the system-dark and
                      data-theme="dark" selector forms
   sprites.py         pixel-art generator (one <symbol> per sprite)
-  builder.html       the house builder section (tray / swatches / sprites are
-                     generated here from PIECES and prices.json)
-  page.js            the page's own interactions (waitlist, tabs, sliders)
-  builder.js         the house builder, why strip and light/dark toggle
+  builder.html       the "pick your space" section: one box = 1 TB, Standard
+                     boxes and Vault crates in one room, and the receipt
+  page.js            the page's own interactions (waitlist, tabs, beacon)
+  builder.js         the scenes (pick up / put down), the box picker and the
+                     light/dark toggle
+  house_room.html    the dashboard house's two-floor room (attic + downstairs)
+  vibes.json         the dashboard house's wall and outfit colours
   prices.json        every Stored price the page shows, in one place
   fonts/*.woff2      Montserrat (variable) + Silkscreen 400/700, OFL, latin subset
 
@@ -179,70 +182,20 @@ def css():
     return c
 
 
-# ---- the builder section --------------------------------------------------
-# key: (w, h, name, what, TB) -- prices come from prices.json
-PIECES = {
-    'box': (17, 15, 'Storage box', '1 TB', 1),
-    'dresser': (31, 23, 'Dresser', '5 TB', 5),
-    'bookcase': (31, 44, 'Bookcase', '10 TB', 10),
-    'plant': (14, 23, 'Plant', 'good vibes', 0),
-    'lamp': (10, 13, 'Lamp', 'cozy light', 0),
-    'frame': (16, 12, 'Picture', 'for the wall', 0),
-    'cup': (8, 12, 'Coffee', 'fuel', 0),
-    'mat': (6, 16, 'Yoga mat', 'matches your fit', 0),
-    'rug': (32, 5, 'Rug', 'matches your wall', 0),
-    'mascot': (16, 26, 'You', 'one of you', 0),
-}
-TRAY_GROUPS = (
-    ('std', 'Storage', 'bigger holds more · $__PRICE_STD__/TB downstairs, $__PRICE_VAULT__/TB in the attic',
-     ('box', 'dresser', 'bookcase')),
-    ('decor', 'Decor', 'free, just vibes', ('plant', 'lamp', 'frame', 'cup', 'mat', 'rug', 'mascot')),
-)
-WALL_SW = [('midnight', '#125594'), ('matcha', '#b8cfb0'), ('oat', '#eee3d0'),
-           ('blush', '#f6cfd0'), ('butter', '#f8e9b3'), ('lilac', '#d7cdf1')]
-FIT_SW = [('midnight', '#1c3445'), ('matcha', '#5f7f5a'), ('oat', '#b59f7c'),
-          ('blush', '#d9828f'), ('lilac', '#8f7cc8'), ('noir', '#2b2b2b')]
-
-
-def tray():
-    out = ''
-    std, vault = P['standard']['annual'], P['vault']['annual']
-    for tier, title, blurb, keys in TRAY_GROUPS:
-        out += (f'<div class="tray-group tg-{tier}"><p class="tray-title"><i class="t-chip t-{tier}"></i><b>{title}</b>'
-                f'<span>{blurb}</span></p><div class="tray" role="group" aria-label="{title} pieces">')
-        for k in keys:
-            w, h, nm, what, tb = PIECES[k]
-            if tb:
-                price, attic, cls = money(tb * std) + '/mo', 'attic ' + money(tb * vault), f'pc-price t-{tier}'
-            else:
-                price, attic, cls = 'free', '', 'pc-price free'
-            # the button's visible text IS its accessible name (no aria-label:
-            # a spoken name must contain the visible label)
-            out += (f'<button class="piece-card" type="button" data-add="{k}">'
-                    + spr(k if k != 'mascot' else 'mascot-wave', w, h, cls='px sticker')
-                    + f'<span class="pc-name">{nm}</span><span class="pc-what">{what}</span><span class="{cls}">{price}</span>'
-                    + (f'<span class="pc-attic">{attic}</span>' if attic else '') + '</button>')
-        out += '</div></div>'
-    return out
-
-
+# ---- the box picker section -----------------------------------------------
 def builder():
     b = read('builder.html')
-    walls = ''.join(f'<button class="swatch" type="button" data-wall="{k}" style="--sw:{c}" aria-label="wall: {k}" aria-pressed="false"></button>'
-                    for k, c in WALL_SW)
-    fits = ''.join(f'<button class="swatch" type="button" data-fit="{k}" style="--sw:{c}" aria-label="fit: {k}" aria-pressed="false"></button>'
-                   for k, c in FIT_SW)
-    b = (b.replace('__TRAY__', tray()).replace('__WALLS__', walls).replace('__FITS__', fits)
-          .replace('__CUP__', spr('cup', 8, 12, 3))
-          .replace('__PHONE__', spr('phone', 9, 16)).replace('__LAPTOP__', spr('laptop', 22, 13))
-          .replace('__MASCOT__', spr('mascot-wave', 16, 26, 3)).replace('__BOX__', spr('box', 17, 15, 3)))
+    b = sub(b, '__BOX__', spr('box', 17, 15, 3, cls='px pick-art'))
+    b = sub(b, '__CRATE__', spr('crate', 17, 15, 3, cls='px pick-art'))
     return b.rstrip('\n')
 
 
 def script():
     js = read('page.js').rstrip('\n') + '\n' + read('builder.js').strip('\n')
     js = js.replace('__PRICES_JSON__', json.dumps({
-        'ground': P['standard']['annual'], 'attic': P['vault']['annual'], 'aws': P['competitors']['aws_s3'],
+        'std': P['standard']['annual'], 'std_monthly': P['standard']['monthly'],
+        'vault': P['vault']['annual'], 'vault_monthly': P['vault']['monthly'], 'vault_min': P['vault']['monthly_minimum'],
+        'aws': P['competitors']['aws_s3'],
     }))
     return js
 
@@ -301,16 +254,13 @@ HOUSE_SPRITES = ('box', 'dresser', 'bookcase', 'lamp', 'plant', 'rug', 'mascot',
 
 
 def vibes_css():
-    """Wall and outfit colours as classes, parsed from builder.js so there is
-    one table (the builder's) for both pages."""
-    js = read('builder.js')
-    walls = re.findall(r"^\s+(\w+):\s*\['(#[0-9a-f]{6})',\s*'(#[0-9a-f]{6})',\s*'(#[0-9a-f]{6})'\]", js, flags=re.M)
-    fits_line = re.search(r"var FITS = \{([^}]*)\}", js).group(1)
-    fits = re.findall(r"(\w+):\s*'(#[0-9a-f]{6})'", fits_line)
+    """Wall and outfit colours as classes, from vibes.json."""
+    v = json.loads(read('vibes.json'))
+    walls, fits = v['walls'], v['fits']
     if len(walls) != 6 or len(fits) != 6:
-        sys.exit(f'build.py: expected 6 walls and 6 fits in builder.js, found {len(walls)} / {len(fits)}')
-    out = [f'    .house-room.wall-{n} {{ --wall-a: {a}; --wall-b: {b}; --wall-deep: {c}; }}' for n, a, b, c in walls]
-    out += [f'    .house-room.fit-{n} {{ --fit: {c}; }}' for n, c in fits]
+        sys.exit(f'build.py: expected 6 walls and 6 fits in vibes.json, found {len(walls)} / {len(fits)}')
+    out = [f'    .house-room.wall-{n} {{ --wall-a: {a}; --wall-b: {b}; --wall-deep: {c}; }}' for n, (a, b, c) in walls.items()]
+    out += [f'    .house-room.fit-{n} {{ --fit: {c}; }}' for n, c in fits.items()]
     return '\n'.join(out)
 
 
@@ -333,11 +283,11 @@ def house_sprite_defs():
 
 
 def house_room():
-    """The room background from builder.html (walls, roof, ladder, sign,
+    """The room background from house_room.html (walls, roof, ladder, sign,
     windows, day/night light layers, vignette) plus the wall gradient, with
     the price labels removed — the dashboard writes its own fullness labels —
     and the sign's text handed to the template."""
-    b = read('builder.html')
+    b = read('house_room.html')
     a = b.index('<svg class="room-svg"')
     d0 = b.index('<defs>', a); d1 = b.index('</defs>', d0) + len('</defs>')
     defs = b[d0:d1]
@@ -358,36 +308,36 @@ def dashboard_page():
             sys.exit(f'build.py: stray "{{{{" in {name} (html/template would choke)')
     parts['house-room'] = parts['house-room'].replace('__HOUSE_NAME__', '{{.Name}}')
     stamp = (f'<!-- GENERATED by internal/api/landing/build.py (make landing); sources sha256:{sources_hash()}. '
-             'Edit the sources (house.css, sprites.py, builder.html), not this file. -->')
+             'Edit the sources (house.css, sprites.py, house_room.html, vibes.json), not this file. -->')
     return stamp + '\n' + ''.join(f'{{{{define "{n}"}}}}{body}{{{{end}}}}\n' for n, body in parts.items())
 
 
 def og_page():
     """A standalone 1200x630 page for the social preview (make og renders it)."""
     b = read('builder.html')
-    a = b.index('<svg class="room-svg"'); z = b.index('</svg>', a) + 6
-    room = prices(b[a:z].replace(' id="room"', ''))  # price tokens inside the floor labels
-    pieces = ''
-    # the same example house as the builder's starter (builder.js STARTER)
-    for k, x, y, tag in (('box', 16, 88, 'PHOTOS 1 TB'), ('lamp', 40, 90, ''), ('box', 58, 88, 'PROJECTS 1 TB'),
-                         ('mascot-wave', 96, 77, ''), ('plant', 113, 80, ''), ('dresser', 30, 31, 'BACKUPS 5 TB')):
-        w, h = sprites.SPRITES[k].w, sprites.SPRITES[k].h
-        pieces += f'<g transform="translate({x} {y})"><use href="#s-{k}" width="{w}" height="{h}"/></g>'
-        if tag:
-            tw = len(tag) * 3 + 3
-            tx = x + round(w / 2 - tw / 2)
-            fill = '#b9c7d2' if y < 54 else '#ffd400'
-            pieces += (f'<g transform="translate({tx} {y - 6})"><rect width="{tw}" height="5" fill="{fill}"/>'
-                       f'<text x="{tw / 2}" y="4" text-anchor="middle" font-family="Silkscreen, monospace" font-size="4" fill="#1a1a1a">{tag}</text></g>')
-    room = room.replace('<g id="room-items"></g>', f'<g color="#1c3445">{pieces}</g>')
+    a = b.index('<svg class="scene" id="pick-scene"'); z = b.index('</svg>', a) + 6
+    scene = b[a:z].replace(' id="pick-scene"', '').replace(' data-play', '')
+    # the picker's starter: 2 TB of Standard boxes, 5 TB of Vault crates (builder.js PILE / ROWS)
+    boxes, tags = '', ''
+    for sprite, xs, n, tag, fill in (('box', (3, 20, 37), 2, 'STANDARD 2 TB', '#ffd400'),
+                                     ('crate', (106, 123, 140), 5, 'VAULT 5 TB', '#b9c7d2')):
+        rows = (45, 32)
+        for i in range(n):
+            boxes += f'<g transform="translate({xs[i % 3]} {rows[i // 3]})"><use href="#s-{sprite}" width="17" height="15"/></g>'
+        top = rows[(n - 1) // 3]
+        tw = len(tag) * 3 + 3
+        tx = round(xs[0] + (min(n, 3) * 17 - 3) / 2 - tw / 2)
+        tags += (f'<g transform="translate({tx} {top - 7})"><rect width="{tw}" height="5" fill="{fill}"/>'
+                 f'<text x="{tw / 2}" y="4" text-anchor="middle" font-family="Silkscreen, monospace" font-size="4" fill="#1a1a1a">{tag}</text></g>')
+    scene = scene.replace('<g id="pick-boxes"></g><g id="pick-tags"></g>', boxes + tags)
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>og</title>
 <style>
 {css()}
 html, body {{ margin: 0; width: 1200px; height: 630px; overflow: hidden; background: #f4f1ec; }}
 .og {{ display: grid; grid-template-columns: 560px 1fr; gap: 40px; width: 1200px; height: 630px; padding: 36px 48px; box-sizing: border-box; align-items: center; }}
-.og .room-svg {{ width: 560px; height: auto; display: block; color: #1c3445; box-shadow: 0 22px 40px -24px rgba(0,0,0,.45); }}
-.og h1 {{ font: 800 44px/1.1 'Montserrat', sans-serif; letter-spacing: -0.02em; color: #2b2b2b; margin: 0 0 18px; }}
+.og .room {{ width: 560px; box-sizing: border-box; padding-top: 30px; }}
+.og h1 {{ font: 800 50px/1.1 'Montserrat', sans-serif; letter-spacing: -0.02em; color: #2b2b2b; margin: 0 0 18px; }}
 .og h1 em {{ display: block; font-style: normal; font-weight: 300; }}
 .og .line {{ font: 400 18px 'Silkscreen', monospace; text-transform: uppercase; color: #4d4d4d; margin: 10px 0; }}
 .og .tags {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }}
@@ -395,15 +345,15 @@ html, body {{ margin: 0; width: 1200px; height: 630px; overflow: hidden; backgro
 .og .brand {{ display: flex; align-items: center; gap: 12px; margin-bottom: 26px; font: 800 22px 'Montserrat', sans-serif; text-transform: uppercase; color: #2b2b2b; }}
 .og .brand .px {{ --u: 2.5px; color: #2b2b2b; }}
 </style></head>
-<body style="--wall-a:#0a3a63;--wall-b:#125594;--wall-deep:#0b2f52;--fit:#1c3445">
+<body>
 {sprite_defs()}
 <div class="og">
-  {room}
+  <div class="room">{prices(scene)}</div>
   <div>
     <div class="brand">{spr('mark', 14, 14)}<span>Stored</span></div>
-    <h1>Your photos, your projects, your backups. <em>Put away, not thrown away.</em></h1>
-    <p class="line">downstairs ${PRICE_TOKENS['__PRICE_STD__']}/TB &middot; attic ${PRICE_TOKENS['__PRICE_VAULT__']}/TB</p>
-    <div class="tags"><span class="tag">no meters</span><span class="tag">no API fees</span><span class="tag tag-green">S3 compatible</span><span class="tag">open-source engine</span></div>
+    <h1>Cloud storage, <em>priced by the terabyte.</em></h1>
+    <p class="line">standard ${PRICE_TOKENS['__PRICE_STD__']}/TB &middot; vault ${PRICE_TOKENS['__PRICE_VAULT__']}/TB</p>
+    <div class="tags"><span class="tag">one box = 1 TB</span><span class="tag">no API fees</span><span class="tag tag-green">S3 compatible</span><span class="tag">open-source engine</span></div>
   </div>
 </div>
 </body></html>"""

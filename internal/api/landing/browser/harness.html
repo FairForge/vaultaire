@@ -1,24 +1,23 @@
 <!DOCTYPE html>
 <!--
-  Browser checks for the landing page builder. Loads the rendered page
-  variants (written next to this file by `go test -run TestLanding_WriteVariants`
-  with LANDING_OUT set) and drives the house builder with synthetic pointer,
-  keyboard and click events. Prints one line per check into #out; run.sh
-  fails when any line starts with FAIL.
+  Browser checks for the landing page. Loads the rendered page variants
+  (written next to this file by `go test -run TestLanding_WriteVariants` with
+  LANDING_OUT set) and drives the box picker and the scenes with synthetic
+  pointer, keyboard and click events. Prints one line per check into #out;
+  run.sh fails when any line starts with FAIL.
 -->
 <html><body>
 <pre id="out">running</pre>
 <iframe id="f" src="closed.html" style="width:1280px;height:2400px"></iframe>
-<iframe id="g" src="closed.html#room=v1.oat.noir.Mia.safe-10-24_lockbox-40-51_box-60-51_fireplace-5-5_mascot-80-38" style="width:1280px;height:2400px"></iframe>
-<iframe id="h" src="open.html#room=v2.matcha.blush.Zo%C3%AB%3Cb%3E.box-20-88-p_dresser-40-31-v_box-60-88_evil-1-1_mascot-80-77_mascot-90-77" style="width:1280px;height:2400px"></iframe>
+<iframe id="h" src="open.html" style="width:1280px;height:2400px"></iframe>
 <script>
 var out = [], errs = [];
 function ok(cond, name, detail) { out.push((cond ? 'PASS ' : 'FAIL ') + name + (detail ? ': ' + detail : '')); }
-['f', 'g', 'h'].forEach(function (id) {
+['f', 'h'].forEach(function (id) {
     var fr = document.getElementById(id);
     fr.addEventListener('load', function () { fr.contentWindow.addEventListener('error', function (e) { errs.push(id + ': ' + e.message); }); });
 });
-function money(n) { return '$' + n.toFixed(2); }
+function money(n) { return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 
 window.onload = function () { setTimeout(run, 900); };
 
@@ -26,94 +25,72 @@ function run() {
     var fr = document.getElementById('f'), d = fr.contentDocument, w = fr.contentWindow;
     try {
         var ns = d.createElement('style'); ns.textContent = '*{transition:none!important;animation:none!important}'; d.head.appendChild(ns);
-        try { w.localStorage.clear(); } catch (e) { /* fine */ }
+        var P = { std: 4.49, std_monthly: 4.99, vault: 2.0, vault_monthly: 2.55, vault_min: 4.99, aws: 23.0 };
         function lines() { return d.getElementById('r-lines').textContent.replace(/\s+/g, ' '); }
         function total() { return d.getElementById('r-total').textContent; }
-        function pieces() { return d.querySelectorAll('#room-items .piece').length; }
-        function tags() { return Array.from(d.querySelectorAll('#room-tags text')).map(function (t) { return t.textContent; }); }
-        function pe(t, x, y, el) { el.dispatchEvent(new w.PointerEvent(t, { bubbles: true, clientX: x, clientY: y, pointerId: 1, button: 0, pointerType: 'mouse' })); }
+        function boxes(kind) { return d.querySelectorAll('#pick-boxes .pick-box[data-kind="' + kind + '"]').length; }
+        function tags() { return Array.from(d.querySelectorAll('#pick-tags text')).map(function (t) { return t.textContent; }); }
+        function step(kind, by) { d.querySelector('[data-step="' + kind + '"][data-by="' + by + '"]').click(); }
 
-        // ---- starter house: photos + projects (2 TB) downstairs, backups (5 TB) in the attic
-        var P = w.__LANDING_PRICES__ || { ground: 4.49, attic: 2.0 };
-        ok(pieces() === 6, 'starter has 6 pieces', pieces());
-        ok(total() === money(2 * P.ground + 5 * P.attic), 'starter total', total());
-        ok(/Downstairs\s*2 TB/.test(lines()) && /Attic\s*5 TB\b/.test(lines()), 'receipt has a line per floor', lines());
-        ok(/box of photos/.test(lines()) && /box of projects/.test(lines()) && /dresser of backups/.test(lines()), 'starter tells the example story', lines());
-        ok(tags().indexOf('BACKUPS 5 TB') >= 0 && tags().indexOf('PHOTOS 1 TB') >= 0, 'starter pieces are labelled', tags().join(','));
+        // ---- starter: 2 TB Standard (boxes) + 5 TB Vault (crates)
+        ok(boxes('std') === 2 && boxes('vault') === 5, 'starter: 2 boxes and 5 crates', boxes('std') + '/' + boxes('vault'));
+        ok(total() === money(2 * P.std + 5 * P.vault), 'starter total', total());
+        ok(/Standard\s*2 TB/.test(lines()) && /Vault\s*5 TB/.test(lines()), 'receipt has a line per kind', lines());
+        ok(tags().indexOf('STANDARD 2 TB') >= 0 && tags().indexOf('VAULT 5 TB') >= 0, 'piles are labelled', tags().join(','));
+        ok(/7 TB on AWS S3: \$161\.00/.test(d.getElementById('r-save').textContent), 'AWS comparison', d.getElementById('r-save').textContent);
+        ok(/1\.8 million photos/.test(d.getElementById('b-meter').textContent), 'photo meter', d.getElementById('b-meter').textContent);
         var h0 = w.sgHouse();
-        ok(h0.std === 0 && h0.vault === 0 && h0.room === '', 'an untouched starter is not reported as a house', JSON.stringify(h0));
+        ok(h0.std === 0 && h0.vault === 0, 'an untouched starter is not reported', JSON.stringify(h0));
+        ok(!/attic|downstairs|dresser|bookcase/i.test(d.getElementById('build').textContent), 'no house words in the picker');
 
-        // ---- add from the tray, drag it up, price follows the floor
-        d.querySelector('.piece-card[data-add="bookcase"]').click();
-        ok(total() === money(12 * P.ground + 5 * P.attic), 'bookcase lands downstairs', total());
+        // ---- steppers: one box per click, priced by kind
+        step('std', 1);
+        ok(boxes('std') === 3 && total() === money(3 * P.std + 5 * P.vault), 'plus adds a Standard box', boxes('std') + ' ' + total());
+        step('vault', -1); step('vault', -1);
+        ok(boxes('vault') === 3 && total() === money(3 * P.std + 3 * P.vault), 'minus takes crates away', boxes('vault') + ' ' + total());
         var h1 = w.sgHouse();
-        ok(h1.std === 12 && h1.vault === 5 && /^v2\./.test(h1.room), 'sgHouse reports the house once it is edited', JSON.stringify(h1));
-        var room = d.getElementById('room'), r = room.getBoundingClientRect(), u = r.height / 115;
-        var bc = d.querySelector('#room-items .piece[aria-label^="Bookcase"]'), b = bc.getBoundingClientRect();
-        var cx = b.left + b.width / 2, cy = b.top + b.height / 2;
-        pe('pointerdown', cx, cy, bc); pe('pointermove', cx, cy - 40 * u, bc);
-        var midTag = w.getComputedStyle(d.querySelector('#room-tags .tb-tag:last-child rect')).fill;
-        pe('pointerup', cx, cy - 40 * u, bc);
-        ok(midTag === 'rgb(185, 199, 210)', 'tag turns grey mid-drag', midTag);
-        ok(total() === money(2 * P.ground + 15 * P.attic), 'bookcase priced as attic after drag', total());
-        ok(/Attic\s*15 TB/.test(lines()) && /saves/.test(lines()), 'attic line shows saving', lines());
+        ok(h1.std === 3 && h1.vault === 3, 'sgHouse reports the TB once edited', JSON.stringify(h1));
+        // the second row of a pile stands on the first
+        var ys = Array.from(d.querySelectorAll('#pick-boxes .pick-box[data-kind="std"]')).map(function (g) { return g.getAttribute('transform'); });
+        ok(ys.join(',') === 'translate(3 45),translate(20 45),translate(37 45)', 'three boxes on the floor', ys.join(','));
+        step('std', 1);
+        ok(d.querySelector('#pick-boxes .pick-box[data-kind="std"][transform="translate(3 32)"]') !== null, 'the fourth box stacks on the first');
 
-        // ---- toolbar: move / open / remove + undo
-        var dr = d.querySelector('#room-items .piece[aria-label^="Storage box: photos"]'); dr.dispatchEvent(new w.FocusEvent('focus'));
-        var mv = d.getElementById('b-move');
-        ok(!d.getElementById('b-piece-tools').hidden && mv.textContent === 'to attic', 'toolbar shows "to attic" for a downstairs piece', mv.textContent);
-        mv.click();
-        ok(total() === money(1 * P.ground + 16 * P.attic), 'move button re-prices the box', total());
-        ok(d.getElementById('b-move').textContent === 'bring down', 'move button flips to "bring down"');
-        d.getElementById('b-open').click();
-        ok(/back in minutes/.test(Array.from(d.querySelectorAll('.float-note')).map(function (n) { return n.textContent; }).join(' ')), 'open note for an attic piece');
-        var lp = d.querySelector('#room-items .piece[aria-label^="Lamp"]'); lp.dispatchEvent(new w.FocusEvent('focus'));
-        ok(d.getElementById('b-move').hidden && !d.getElementById('b-remove').hidden, 'decor gets remove but not move');
-        var before = pieces();
-        d.getElementById('b-remove').click();
-        var toast = d.querySelector('.toast.act');
-        ok(pieces() === before - 1 && !!toast, 'remove drops the piece and offers undo');
-        toast.querySelector('button').click();
-        ok(pieces() === before, 'undo restores the piece', pieces());
+        // ---- typing a number; a big one is capped on screen, never in the price
+        var inp = d.getElementById('pick-vault');
+        inp.value = '40'; inp.dispatchEvent(new w.Event('input'));
+        ok(boxes('vault') === 12 && tags().indexOf('VAULT 40 TB (12 SHOWN)') >= 0, 'a big pile shows 12 crates and says so', boxes('vault') + ' ' + tags().join(','));
+        ok(total() === money(4 * P.std + 40 * P.vault), 'typed TB priced', total());
+        inp.value = '-3'; inp.dispatchEvent(new w.Event('change'));
+        ok(inp.value === '0' && boxes('vault') === 0 && !/Vault/.test(lines()), 'a negative number is zero and the Vault line goes', inp.value + ' ' + lines());
+        ok(d.querySelector('[data-step="vault"][data-by="-1"]').disabled, 'minus is disabled at zero');
 
-        // ---- keyboard: ArrowUp hops a storage piece to the attic, Delete removes
-        var bx = d.querySelector('#room-items .piece[aria-label^="Storage box: projects"]');
-        bx.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
-        ok(!/Downstairs/.test(lines()), 'ArrowUp moves the last downstairs box to the attic', lines());
+        // ---- monthly: monthly rates, the Vault minimum
+        step('vault', 1);
+        var mo = d.querySelector('input[name="pick-period"][value="monthly"]'); mo.checked = true; mo.dispatchEvent(new w.Event('change'));
+        ok(total() === money(4 * P.std_monthly + P.vault_min), 'monthly applies the Vault minimum', total());
+        ok(/monthly minimum/.test(lines()) && /billed monthly/.test(d.getElementById('r-period').textContent), 'the minimum is named', lines());
+        var yr = d.querySelector('input[name="pick-period"][value="annual"]'); yr.checked = true; yr.dispatchEvent(new w.Event('change'));
+        ok(total() === money(4 * P.std + 1 * P.vault), 'back to yearly', total());
 
-        // ---- why strip: pack, unpack, send to the attic with labels
-        d.querySelector('.chip[data-pack="p"]').click(); d.querySelector('.chip[data-pack="v"]').click();
-        ok(d.querySelectorAll('#packed .packed-item').length === 2 && !d.getElementById('pack-up').disabled, 'two chips packed');
-        ok(/6 TB packed/.test(d.getElementById('packed-line').textContent), 'packed line totals the TB', d.getElementById('packed-line').textContent);
-        d.querySelector('.chip[data-pack="v"]').click();
-        ok(d.querySelectorAll('#packed .packed-item').length === 1, 'unpack by chip');
-        d.querySelector('.chip[data-pack="v"]').click();
-        var n0 = pieces();
-        d.getElementById('pack-up').click();
-        ok(pieces() === n0 + 2 && d.querySelectorAll('#packed .packed-item').length === 0, 'send to attic adds the packed pieces');
-        ok(/1 dresser of videos/.test(lines()) && /storage boxes of photos/.test(lines()), 'receipt names the labelled pieces', lines());
-        ok(tags().indexOf('PHOTOS 1 TB') >= 0 && tags().indexOf('VIDEOS 5 TB') >= 0, 'tags carry labels', tags().join(','));
-        ok(/-p(_|$)/.test(w.localStorage.getItem('sg-room')) && /-v(_|$)/.test(w.localStorage.getItem('sg-room')), 'labels persist in saved state');
+        // ---- empty
+        d.getElementById('pick-std').value = '0'; d.getElementById('pick-std').dispatchEvent(new w.Event('change'));
+        step('vault', -1);
+        ok(total() === '$0.00' && /add a box/.test(lines()) && d.getElementById('r-save').textContent === '', 'nothing picked', lines());
 
-        // ---- vibe + name
-        d.querySelector('[data-wall="blush"]').click();
-        ok(d.documentElement.style.getPropertyValue('--wall-a') === '#eeb6bb', 'wall swatch sets the vibe');
-        var inp = d.getElementById('vault-name'); inp.value = 'Zoë <script>'; inp.dispatchEvent(new w.Event('input'));
-        ok(d.getElementById('room-sign').textContent === 'zoë script’s place', 'name is filtered and lettered on the sign', d.getElementById('room-sign').textContent);
+        // ---- the open variant: the plan rides into /register once edited
+        var hd = document.getElementById('h').contentDocument;
+        var cta = hd.querySelector('.r-actions a.btn-primary');
+        ok(cta.getAttribute('href') === '/register', 'untouched open variant links plain /register', cta.getAttribute('href'));
+        hd.querySelector('[data-step="std"][data-by="1"]').click();
+        ok(cta.getAttribute('href') === '/register?std_tb=3&vault_tb=5', 'receipt button carries the TB into /register', cta.getAttribute('href'));
+        ok(hd.querySelector('a[href="/register"]') !== null, 'open variant links /register');
 
-        // ---- old (v1) links map onto the house; v2 links with junk are cleaned
-        var e = document.getElementById('g').contentDocument;
-        ok(e.querySelectorAll('#room-items .piece').length === 5, 'v1 link: 5 pieces', e.querySelectorAll('#room-items .piece').length);
-        ok(/Attic\s*11 TB/.test(e.getElementById('r-lines').textContent.replace(/\s+/g, ' ')), 'v1 link: archive pieces went to the attic');
-        var hh = document.getElementById('h').contentDocument;
-        ok(hh.querySelectorAll('#room-items .piece').length === 4, 'v2 link: junk piece and second mascot dropped', hh.querySelectorAll('#room-items .piece').length);
-        ok(hh.getElementById('room-sign').textContent === 'zoëb’s place', 'v2 link: name filtered', hh.getElementById('room-sign').textContent);
-        ok(hh.querySelector('a[href="/register"]') !== null, 'open variant links /register');
-        ok(hh.querySelector('.r-actions a[href^="/register?std_tb=2&vault_tb=5&room=v2."]') !== null, 'receipt button carries the house into /register', (hh.querySelector('.r-actions a.btn-primary') || {}).getAttribute && hh.querySelector('.r-actions a.btn-primary').getAttribute('href'));
-        var hs = hh.defaultView.sgHouse(); ok(hs.std === 2 && hs.vault === 5 && /^v2\./.test(hs.room), 'sgHouse reports TB per floor for the waitlist', JSON.stringify(hs));
+        // ---- the picker's room is a scene too: a box can be picked up and put down
+        ok(d.querySelector('#pick-scene .scene-shadows') !== null, 'the picker room casts shadows');
 
         // ---- hero scene: pieces drag on touch, fall to the floor or onto what is under them
-        var hero = d.querySelector('svg.scene[data-play]'), hr = hero.getBoundingClientRect(), hu = hr.width / 160;
+        var hero = d.querySelector('svg.scene[data-play]:not(#pick-scene)'), hr = hero.getBoundingClientRect(), hu = hr.width / 160;
         function at(g) { var b = g.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; }
         function drag(g, dx, dy, type) {
             var c = at(g);
@@ -122,28 +99,30 @@ function run() {
             g.dispatchEvent(new w.PointerEvent('pointerup', { bubbles: true, clientX: c[0] + dx * hu, clientY: c[1] + dy * hu, pointerId: 2, button: 0, pointerType: type || 'mouse' }));
         }
         function posOf(g) { var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform')); return [Number(m[1]), Number(m[2])]; }
-        var hbox = hero.querySelector('.piece[transform="translate(66 13)"]'), hdr = hero.querySelector('.piece[transform="translate(50 25)"]'), hlamp = hero.querySelector('.piece[transform="translate(53 15)"]');
+        var hbox = hero.querySelector('.piece[transform="translate(60 33)"]'), htop = hero.querySelector('.piece[transform="translate(25 20)"]'), hbase = hero.querySelector('.piece[transform="translate(17 33)"]');
         ok(w.getComputedStyle(hbox).touchAction === 'none', 'hero pieces take the touch', w.getComputedStyle(hbox).touchAction);
-        drag(hbox, -36, -8, 'touch');
+        drag(hbox, 0, -20, 'touch');
         ok(posOf(hbox)[1] === 33, 'a box dropped in mid-air falls to the floor', posOf(hbox).join(','));
-        drag(hbox, 34, -28);
-        ok(posOf(hbox)[1] === 12 && posOf(hbox)[0] === 64, 'a box dropped over the dresser rests on it', posOf(hbox).join(','));
-        drag(hdr, -50, 0);
-        ok(posOf(hbox)[1] === 33 && posOf(hlamp)[1] === 35, 'what stood on the dresser falls when it leaves', posOf(hbox).join(',') + ' ' + posOf(hlamp).join(','));
+        drag(hbox, -26, -22);
+        ok(posOf(hbox)[1] === 20, 'a box dropped over a crate rests on it', posOf(hbox).join(','));
+        drag(hbase, -16, 0);
+        ok(posOf(htop)[1] === 33, 'what stood on a crate falls when it leaves', posOf(htop).join(','));
         hbox.dispatchEvent(new w.PointerEvent('pointerdown', { bubbles: true, clientX: at(hbox)[0], clientY: at(hbox)[1], pointerId: 3, button: 0, pointerType: 'mouse' }));
         hbox.dispatchEvent(new w.PointerEvent('pointerup', { bubbles: true, clientX: at(hbox)[0], clientY: at(hbox)[1], pointerId: 3, button: 0, pointerType: 'mouse' }));
-        ok(hbox.classList.contains('pop') && posOf(hbox)[1] === 33, 'a tap bounces the piece where it is');
+        ok(hbox.classList.contains('pop'), 'a tap bounces the piece where it is');
 
-        // ---- export renders a PNG of the right size
-        var got = null; w.HTMLAnchorElement.prototype.click = function () { got = this.download; };
-        var dims = null, ob = w.HTMLCanvasElement.prototype.toBlob;
-        w.HTMLCanvasElement.prototype.toBlob = function (cb) { dims = this.width + 'x' + this.height; ob.call(this, cb); };
-        d.getElementById('b-save').click();
+        // ---- the waitlist sends the picked TB along
+        var sent = null;
+        w.fetch = function (url, opts) { if (url === '/api/waitlist') sent = JSON.parse(opts.body); return Promise.resolve({}); };
+        step('std', 1); step('vault', 1); step('vault', 1);
+        var form = d.querySelector('[data-waitlist]');
+        form.querySelector('input[name=email]').value = 'a@example.com';
+        form.dispatchEvent(new w.Event('submit', { cancelable: true }));
         setTimeout(function () {
-            ok(dims === '1024x1044' && got === 'my-stored-house.png', 'save image exports 1024x1044 png', dims + ' ' + got);
+            ok(sent && sent.std_tb === 1 && sent.vault_tb === 2 && sent.email === 'a@example.com', 'waitlist carries std_tb / vault_tb', JSON.stringify(sent));
             ok(errs.length === 0, 'no script errors', errs.join('; '));
             document.getElementById('out').textContent = out.join('\n') + '\nDONE';
-        }, 1500);
+        }, 600);
     } catch (x) {
         out.push('FAIL exception: ' + (x.stack || x));
         document.getElementById('out').textContent = out.join('\n') + '\nDONE';

@@ -1,143 +1,15 @@
-
-    // ---- 02: build-your-house. Furniture is storage and the FLOOR is the
-    // tier: downstairs = Standard ($__PRICE_STD__/TB), attic = Vault ($__PRICE_VAULT__/TB). Decor is
-    // free. The house, vibe and name persist on this device and travel in
-    // #room= links.
+    // ---- scenes + 02: pick your space. One box is one terabyte: cardboard
+    // boxes are Standard ($__PRICE_STD__/TB), steel crates are Vault
+    // ($__PRICE_VAULT__/TB). Every room on the page is a scene: pick things up,
+    // put them down; they fall, stack, cast shadows and take the lamp light.
     (function () {
         var NS = 'http://www.w3.org/2000/svg';
         var PRICE = __PRICES_JSON__;
         var PHOTOS_PER_TB = 250000; // ~4 MB a photo
-        var ZONE = {
-            attic:  { tag: '#b9c7d2', floor: 54,  name: 'Attic', tier: 'Vault' },
-            ground: { tag: '#ffd400', floor: 103, name: 'Downstairs', tier: 'Standard' }
-        };
-        var W = 128, H = 115, MAX = 30;
-        var P = {
-            box:      { w: 17, h: 15, name: 'Storage box', plural: 'storage boxes', tb: 1 },
-            dresser:  { w: 31, h: 23, name: 'Dresser', plural: 'dressers', tb: 5 },
-            bookcase: { w: 31, h: 44, name: 'Bookcase', plural: 'bookcases', tb: 10 },
-            plant:    { w: 14, h: 23, name: 'Plant' },
-            lamp:     { w: 10, h: 13, name: 'Lamp', glow: [5, 3, 18, 13] },
-            frame:    { w: 16, h: 12, name: 'Picture', wall: true },
-            cup:      { w: 8,  h: 12, name: 'Coffee' },
-            mat:      { w: 6,  h: 16, name: 'Yoga mat' },
-            rug:      { w: 32, h: 5,  name: 'Rug', flat: true, deep: true },
-            mascot:   { w: 16, h: 26, name: 'You', max: 1, alt: 'mascot-wave', anim: 'wave' }
-        };
-        // what you pack: label key -> [piece, label]; labels ride on pieces, links and the image
-        var LABEL = { p: 'photos', v: 'videos', w: 'projects', e: 'everything', b: 'backups' };
-        var PACK = { p: 'box', v: 'dresser', w: 'box', e: 'bookcase', b: 'dresser' };
-        // earlier share links: the pieces they used, and the floor they land on
-        Object.keys(P).forEach(function (k) { P[k].k = k; });
-        var ALIAS = { shelf: ['bookcase', 'attic'], safe: ['bookcase', 'attic'], lockbox: ['box', 'attic'], fireplace: ['lamp'] };
-        var WALLS = {
-            midnight: ['#0a3a63', '#125594', '#0b2f52'],
-            matcha:   ['#9fbc98', '#b8cfb0', '#6f8f6a'],
-            oat:      ['#e2d3ba', '#eee3d0', '#c4a983'],
-            blush:    ['#eeb6bb', '#f6cfd0', '#d98c98'],
-            butter:   ['#f1d98a', '#f8e9b3', '#d4ae46'],
-            lilac:    ['#c2b3e6', '#d7cdf1', '#9d8ccf']
-        };
-        var FITS = { midnight: '#1c3445', matcha: '#5f7f5a', oat: '#b59f7c', blush: '#d9828f', lilac: '#8f7cc8', noir: '#2b2b2b' };
-        // the example house: the one story the whole page tells. Photos and
-        // projects downstairs (opened often), backups in the attic (kept, rarely
-        // opened); the hero terminal lists the same three names as buckets.
-        var STARTER = [['box', 16, 88, 'p'], ['lamp', 40, 90], ['box', 58, 88, 'w'], ['mascot', 96, 77], ['plant', 113, 80], ['dresser', 30, 31, 'b']];
+        var MAX_TB = 1000;
 
-        var store = {
-            get: function (k) { try { return window.localStorage.getItem(k); } catch (e) { return null; } },
-            set: function (k, v) { try { window.localStorage.setItem(k, v); } catch (e) { /* private mode: fine */ } }
-        };
         function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
         function money(n) { return '$' + n.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
-        function cleanName(s) { return String(s || '').replace(/[^\p{L}\p{N} _'-]/gu, '').slice(0, 16); }
-        function mkItem(k, x, y, l) {
-            var p = P[k], it = { k: k, x: clamp(Math.round(x), 0, W - p.w), y: clamp(Math.round(y), 0, H - p.h) };
-            if (l && LABEL[l]) it.l = l;
-            return it;
-        }
-        // which floor a piece is on: judged by its middle, so a half-dragged
-        // piece already reads as "going up" while it moves
-        function zoneOf(item) { return item.y + P[item.k].h / 2 < ZONE.attic.floor + 3 ? 'attic' : 'ground'; }
-        // storage pieces always stand on a floor; decor may float (lamp on a dresser)
-        function settle(item) {
-            var p = P[item.k];
-            if (!p.tb) return item;
-            item.y = ZONE[zoneOf(item)].floor - p.h;
-            return item;
-        }
-        function place(k, zone, l) {
-            var p = P[k], y = p.flat ? ZONE[zone].floor - 5 : (p.wall ? (zone === 'attic' ? 20 : 74) : ZONE[zone].floor - p.h);
-            return settle(mkItem(k, freeX(p, zone, null, l), y, l));
-        }
-        function starter() { return STARTER.map(function (s) { return settle(mkItem(s[0], s[1], s[2], s[3])); }); }
-        function rateOf(item) { return PRICE[zoneOf(item)]; }
-        function costOf(item) { return P[item.k].tb ? P[item.k].tb * rateOf(item) : 0; }
-        function what(item) {
-            var p = P[item.k];
-            return p.tb ? (item.l ? LABEL[item.l] + ', ' : '') + p.tb + ' TB, ' + ZONE[zoneOf(item)].name.toLowerCase() + ' (' + ZONE[zoneOf(item)].tier + ')' : 'decor, free';
-        }
-        function tagText(item) { return (item.l ? LABEL[item.l].toUpperCase() + ' ' : '') + P[item.k].tb + ' TB'; }
-
-        var state = { wall: 'midnight', fit: 'midnight', name: '', items: starter() };
-
-        // ---- vibe: wall + fit colours are site-wide CSS variables
-        function applyVibe() {
-            var w = WALLS[state.wall], r = document.documentElement.style;
-            r.setProperty('--wall-a', w[0]);
-            r.setProperty('--wall-b', w[1]);
-            r.setProperty('--wall-deep', w[2]);
-            r.setProperty('--fit', FITS[state.fit]);
-            document.querySelectorAll('[data-wall]').forEach(function (b) {
-                b.setAttribute('aria-pressed', b.getAttribute('data-wall') === state.wall ? 'true' : 'false');
-            });
-            document.querySelectorAll('[data-fit]').forEach(function (b) {
-                b.setAttribute('aria-pressed', b.getAttribute('data-fit') === state.fit ? 'true' : 'false');
-            });
-        }
-
-        // ---- share format: v2.<wall>.<fit>.<name>.<k-x-y_k-x-y...> (y in house
-        // coordinates; the floor is implied). v1 links (single room) are mapped
-        // onto the ground floor, with the old archive pieces sent to the attic.
-        function encode() {
-            return 'v2.' + state.wall + '.' + state.fit + '.' + encodeURIComponent(state.name) + '.' +
-                state.items.map(function (i) { return i.k + '-' + i.x + '-' + i.y + (i.l ? '-' + i.l : ''); }).join('_');
-        }
-        function decode(str) {
-            var parts = String(str || '').split('.');
-            if (parts.length !== 5 || (parts[0] !== 'v1' && parts[0] !== 'v2') || !WALLS[parts[1]] || !FITS[parts[2]]) return null;
-            var v1 = parts[0] === 'v1', name = '';
-            try { name = cleanName(decodeURIComponent(parts[3])); } catch (e) { name = ''; }
-            var items = [], you = 0;
-            parts[4].split('_').forEach(function (t) {
-                var m = /^([a-z]+)-(\d{1,3})-(\d{1,3})(?:-([pvweb]))?$/.exec(t);
-                if (!m) return;
-                var k = m[1], zone = null;
-                if (Object.prototype.hasOwnProperty.call(ALIAS, k)) { zone = ALIAS[k][1] || null; k = ALIAS[k][0]; }
-                if (!Object.prototype.hasOwnProperty.call(P, k) || items.length >= MAX) return;
-                if (k === 'mascot' && you++) return;
-                var y = Number(m[3]);
-                if (v1) y = zone === 'attic' ? ZONE.attic.floor - P[k].h : y + (ZONE.ground.floor - 64);
-                items.push(settle(mkItem(k, Number(m[2]), y, m[4])));
-            });
-            return { wall: parts[1], fit: parts[2], name: name, items: items };
-        }
-        function save() { store.set('sg-room', encode()); }
-
-        var fromLink = false;
-        (function load() {
-            var h = window.location.hash, got = null;
-            if (h.indexOf('#room=') === 0) { got = decode(h.slice(6)); fromLink = !!got; }
-            if (!got) got = decode(store.get('sg-room'));
-            if (got) state = got;
-        })();
-        applyVibe();
-        // the starter is an example, not a plan: only a house the visitor changed
-        // (or opened from a link) is reported to the waitlist and to /register
-        function itemsKey(items) { return items.map(function (i) { return i.k + '-' + i.x + '-' + i.y + (i.l ? '-' + i.l : ''); }).join('_'); }
-        var STARTER_KEY = itemsKey(starter());
-        var STARTER_ATTIC = (function () { var n = 0; starter().forEach(function (i) { if (P[i.k].tb && zoneOf(i) === 'attic') n += P[i.k].tb; }); return n; })();
-        function built() { return fromLink || itemsKey(state.items) !== STARTER_KEY; }
 
         // ---- SVG helpers
         function el(tag, attrs) {
@@ -151,14 +23,13 @@
             return pt.matrixTransform(svg.getScreenCTM().inverse());
         }
 
-        // Drag any .piece around its SVG, snapped to the pixel grid. opts.outside
-        // reports a drop beyond the SVG's box (the builder treats that as remove).
+        // Drag any .piece around its SVG, snapped to the pixel grid.
         function makeDraggable(svg, g, pos, w, h, vb, opts) {
             opts = opts || {};
             g.addEventListener('pointerdown', function (e) {
                 if (e.button > 0) return;
                 e.preventDefault();
-                var id = e.pointerId, start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, out = false, done = false;
+                var id = e.pointerId, start = svgPoint(svg, e.clientX, e.clientY), ox = pos.x, oy = pos.y, moved = false, done = false;
                 g.classList.add('lift');
                 if (opts.start) opts.start();
                 // Raise the piece BEFORE taking the pointer: moving a node in the
@@ -172,13 +43,10 @@
                     if (ev.pointerId !== id) return;
                     var p = svgPoint(svg, ev.clientX, ev.clientY);
                     var nx = Math.round(ox + p.x - start.x), ny = Math.round(oy + p.y - start.y);
-                    if (nx !== ox || ny !== oy) { moved = true; if (opts.moving) opts.moving(); }
-                    var r = svg.getBoundingClientRect();
-                    out = !!opts.outside && (ev.clientX < r.left - 8 || ev.clientX > r.right + 8 || ev.clientY < r.top - 8 || ev.clientY > r.bottom + 8);
-                    pos.x = out ? nx : clamp(nx, 0, vb[0] - w);
-                    pos.y = out ? ny : clamp(ny, 0, vb[1] - h);
+                    if (nx !== ox || ny !== oy) moved = true;
+                    pos.x = clamp(nx, 0, vb[0] - w);
+                    pos.y = clamp(ny, 0, vb[1] - h);
                     g.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
-                    g.style.opacity = out ? '0.35' : '';
                     if (opts.follow) opts.follow();
                 }
                 function up(ev) {
@@ -190,11 +58,6 @@
                     g.removeEventListener('lostpointercapture', up);
                     try { g.releasePointerCapture(id); } catch (err) { /* not captured */ }
                     g.classList.remove('lift');
-                    g.style.opacity = '';
-                    if (out) { opts.outside(); return; }
-                    pos.x = clamp(pos.x, 0, vb[0] - w);
-                    pos.y = clamp(pos.y, 0, vb[1] - h);
-                    g.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
                     if (moved && navigator.vibrate) { try { navigator.vibrate(6); } catch (err) { /* ignore */ } }
                     if (opts.end) opts.end(moved);
                 }
@@ -244,14 +107,17 @@
         }
         function tintFor(lvl) { return lvl > 0.45 ? 'url(#nightwarm)' : lvl > 0.12 ? 'url(#nightmid)' : 'url(#nightdim)'; }
 
-        // decorative scenes (hero room, final CTA): pick things up, put them down;
-        // pieces cast shadows and take the lamp light like the builder's do
-        document.querySelectorAll('svg[data-play]').forEach(function (svg) {
+        // A scene: every .piece in the svg can be picked up and put down. It
+        // has a floor and things stand on things: a piece dropped in mid-air
+        // falls to the floor or onto whatever is under it (a box on a box, the
+        // lamp on a box); take the box away and what stood on it falls too. A
+        // tap just bounces the piece. add/remove let the picker swap its boxes.
+        function playScene(svg) {
             var vb = svg.getAttribute('viewBox').split(' ').map(Number).slice(2), entries = [];
             var shadows = el('g', { 'class': 'scene-shadows', 'aria-hidden': 'true' });
             var first = svg.querySelector('.piece');
             if (first) first.parentNode.insertBefore(shadows, first);
-            function relightScene() {
+            function relight() {
                 var night = isNight(), lamps = [], lights = [];
                 entries.forEach(function (e) {
                     if (!e.core) return;
@@ -264,17 +130,13 @@
                     if (!e.core) e.g.style.setProperty('--nf', tintFor(night ? lampLevel(e.pos.x + e.w / 2, e.pos.y + e.h / 2, lamps) : 0));
                 });
             }
-            // The scene has a floor and things stand on things: a piece dropped
-            // in mid-air falls to the floor or onto whatever is under it (a box
-            // on the dresser, the lamp on the box); drag the dresser away and what
-            // stood on it falls too. A tap just bounces the piece.
             var floor = 0, REST = 2; // pieces sit 2 px into their support, like the art
             function overlapX(a, b) { return Math.min(a.pos.x + a.w, b.pos.x + b.w) - Math.max(a.pos.x, b.pos.x); }
             function restY(e) {
                 var y = floor - e.h;
                 entries.forEach(function (o) {
                     // only something at least as wide can hold a piece (a box on
-                    // the dresser, not a dresser on a lamp), and it must fit above it
+                    // a box, not a box on a lamp), and it must fit above it
                     if (o === e || o.lifted || o.w < e.w || overlapX(e, o) < e.w * 0.5) return;
                     var top = o.pos.y - e.h + REST;
                     if (top < 0 || top < e.pos.y - 8) return; // the support is above the piece, not under it
@@ -296,21 +158,24 @@
                 void e.g.getBoundingClientRect();
                 e.g.classList.add('pop');
             }
+            function settleAll(except) {
+                for (var pass = 0; pass < 6; pass++) {
+                    var fell = false;
+                    entries.forEach(function (o) { if (o !== except && o.grounded && settle(o)) fell = true; });
+                    if (!fell) break;
+                }
+            }
             function land(e, moved) {
                 e.lifted = false;
                 if (moved) {
                     settle(e);
                     e.grounded = true;
-                    for (var pass = 0; pass < 6; pass++) {
-                        var fell = false;
-                        entries.forEach(function (o) { if (o !== e && o.grounded && settle(o)) fell = true; });
-                        if (!fell) break;
-                    }
+                    settleAll(e);
                 }
                 bounce(e);
-                relightScene();
+                relight();
             }
-            svg.querySelectorAll('.piece').forEach(function (g) {
+            function add(g) {
                 var m = /translate\((-?\d+) (-?\d+)\)/.exec(g.getAttribute('transform') || '');
                 var hit = g.querySelector('.hit');
                 if (!m || !hit) return;
@@ -319,728 +184,147 @@
                 var e = { g: g, pos: pos, w: w, h: h, shadow: shadowNode(), core: c ? { cx: +c.getAttribute('cx'), cy: +c.getAttribute('cy'), rx: +c.getAttribute('rx'), ry: +c.getAttribute('ry') } : null };
                 entries.push(e);
                 shadows.appendChild(e.shadow);
-                makeDraggable(svg, g, pos, w, h, vb, { start: function () { e.lifted = true; }, follow: relightScene, end: function (moved) { land(e, moved); } });
-            });
+                makeDraggable(svg, g, pos, w, h, vb, { start: function () { e.lifted = true; }, follow: relight, end: function (moved) { land(e, moved); } });
+                return e;
+            }
+            svg.querySelectorAll('.piece').forEach(add);
             // the floor is where the lowest piece stands; a piece that already
             // rests on it (or on another piece) takes part in the falling
             entries.forEach(function (e) { floor = Math.max(floor, e.pos.y + e.h); });
             entries.forEach(function (e) { e.grounded = Math.abs(restY(e) - e.pos.y) <= 3; });
-            document.addEventListener('sg-theme', relightScene);
-            relightScene();
-        });
-
-        var room = document.getElementById('room');
-        if (!room) return;
-        var itemsLayer = document.getElementById('room-items');
-        var tagsLayer = document.getElementById('room-tags');
-        var lightLayer = document.getElementById('room-light');
-        var shadowLayer = document.getElementById('room-shadows');
-        var roomBox = document.querySelector('.b-room');
-        var sign = document.getElementById('room-sign');
-        var live = document.getElementById('b-live');
-        var nameInput = document.getElementById('vault-name');
-        var receipt = document.getElementById('receipt');
-        var tools = document.getElementById('b-piece-tools');
-        var moveBtn = document.getElementById('b-move');
-        var openBtn = document.getElementById('b-open');
-        var removeBtn = document.getElementById('b-remove');
-        var emptyText = document.getElementById('room-empty');
-        var selected = null;
-
-        function announce(msg) { if (live) live.textContent = msg; }
-        function roomXY(x, y) {
-            var r = room.getBoundingClientRect(), b = roomBox.getBoundingClientRect();
-            return { left: r.left - b.left + (x / W) * r.width, top: r.top - b.top + (y / H) * r.height };
-        }
-        function floatNote(text, x, y) {
-            var at = roomXY(x, y), n = document.createElement('span');
-            n.className = 'float-note';
-            n.textContent = text;
-            n.style.left = at.left + 'px';
-            n.style.top = at.top + 'px';
-            roomBox.appendChild(n);
-            setTimeout(function () { n.remove(); }, 1400);
-        }
-        function toast(msg, action, fn) {
-            document.querySelectorAll('.toast').forEach(function (t) { t.remove(); });
-            var t = document.createElement('div');
-            t.className = action ? 'toast act' : 'toast';
-            t.setAttribute('role', 'status');
-            var m = document.createElement('span');
-            m.textContent = msg;
-            t.appendChild(m);
-            if (action) {
-                var b = document.createElement('button');
-                b.type = 'button';
-                b.textContent = action;
-                b.addEventListener('click', function () { t.remove(); fn(); });
-                t.appendChild(b);
-            }
-            document.body.appendChild(t);
-            setTimeout(function () { t.remove(); }, action ? 5000 : 2500);
-        }
-
-        function signText() { return state.name ? state.name.toLowerCase() + '’s place' : 'my place'; }
-        function renderSign() {
-            if (!sign) return;
-            sign.textContent = signText();
-            if (signText().length > 11) {
-                sign.setAttribute('textLength', '38');
-                sign.setAttribute('lengthAdjust', 'spacingAndGlyphs');
-            } else {
-                sign.removeAttribute('textLength');
-                sign.removeAttribute('lengthAdjust');
-            }
-        }
-
-        // ---- the selected piece gets floating buttons: move floor (storage) + remove
-        function placeTools() {
-            if (!selected || !selected.isConnected) { tools.hidden = true; return; }
-            var it = selected._item, p = P[it.k], at = roomXY(it.x + p.w / 2, it.y);
-            tools.style.left = at.left + 'px';
-            tools.style.top = at.top + 'px';
-            moveBtn.hidden = !p.tb;
-            openBtn.hidden = !p.tb;
-            if (p.tb) {
-                var up = zoneOf(it) === 'ground';
-                moveBtn.textContent = up ? 'to attic' : 'bring down';
-                moveBtn.setAttribute('aria-label', up ? 'Move to the attic, $__PRICE_VAULT__ per TB' : 'Bring downstairs, $__PRICE_STD__ per TB');
-            }
-            tools.hidden = false;
-        }
-        function select(g) { selected = g; placeTools(); }
-        function unselect() {
-            setTimeout(function () {
-                var a = document.activeElement;
-                if (a === removeBtn || a === moveBtn || a === openBtn) return;
-                if (selected && a === selected) return;
-                selected = null;
-                tools.hidden = true;
-            }, 0);
-        }
-        [openBtn, moveBtn, removeBtn].forEach(function (b) {
-            b.addEventListener('mousedown', function (e) { e.preventDefault(); });
-            b.addEventListener('blur', unselect);
-        });
-        removeBtn.addEventListener('click', function () { if (selected) removeItem(selected._item); });
-        // "get it back any time": downstairs answers instantly, the attic in minutes
-        openBtn.addEventListener('click', function () {
-            if (!selected) return;
-            var it = selected._item, p = P[it.k], up = zoneOf(it) === 'attic';
-            floatNote(up ? 'still there \u2713 back in minutes' : 'still there \u2713 instantly', it.x + p.w / 2, it.y);
-            announce((it.l ? LABEL[it.l] : p.name) + (up ? ' is in the attic: it comes back in minutes.' : ' is downstairs: it opens instantly.'));
-        });
-        moveBtn.addEventListener('click', function () {
-            if (!selected) return;
-            var it = selected._item, p = P[it.k], from = zoneOf(it), to = from === 'ground' ? 'attic' : 'ground';
-            it.y = ZONE[to].floor - p.h;
-            it.x = freeX(p, to, it);
-            settled(it, from);
-            render(it);
-            save();
-        });
-        window.addEventListener('resize', placeTools);
-
-        // after a storage piece lands: note the floor + price change, if any
-        function settled(item, from) {
-            var p = P[item.k], to = zoneOf(item);
-            if (!p.tb || from === to) return;
-            var delta = p.tb * (PRICE[to] - PRICE[from]);
-            floatNote(ZONE[to].name.toLowerCase() + ': ' + (delta < 0 ? '−' : '+') + money(Math.abs(delta)) + '/mo', item.x + p.w / 2, item.y);
-            announce(p.name + ' moved to the ' + ZONE[to].name.toLowerCase() + ', now ' + money(costOf(item)) + ' a month. Total ' + money(totals().total) + '.');
-            if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* ignore */ } }
-        }
-
-        function order() {
-            return state.items.slice().sort(function (a, b) {
-                var fa = P[a.k].flat ? 0 : 1, fb = P[b.k].flat ? 0 : 1;
-                return fa - fb || (a.y + P[a.k].h) - (b.y + P[b.k].h);
-            });
-        }
-        function uses(g, k, p) {
-            if (p.alt) {
-                g.appendChild(el('use', { href: '#s-' + k, width: p.w, height: p.h, 'class': p.anim + '-a' }));
-                g.appendChild(el('use', { href: '#s-' + p.alt, width: p.w, height: p.h, 'class': p.anim + '-b' }));
-            } else {
-                g.appendChild(el('use', { href: '#s-' + k, width: p.w, height: p.h }));
-            }
-        }
-        // a lamp's light at night: a wide ambient pool that fills the room plus a
-        // bright core around the shade; both sit on the light layer above the furniture
-        function lightPool(p) {
-            var g = el('g', { 'class': 'light-pool', 'aria-hidden': 'true' });
-            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1] + 10, rx: p.glow[2] * 6, ry: p.glow[3] * 4.6, fill: 'url(#lampfill)' }));
-            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1] + 5, rx: p.glow[2] * 3.6, ry: p.glow[3] * 3.1, fill: 'url(#lampambient)' }));
-            g.appendChild(el('ellipse', { 'class': 'glow', cx: p.glow[0], cy: p.glow[1], rx: p.glow[2], ry: p.glow[3], fill: 'url(#lampglow)' }));
-            return g;
-        }
-        function tagNode(item) {
-            var p = P[item.k], t = tagText(item), tw = t.length * 3 + 3;
-            var tg = el('g', { 'class': 'tb-tag', 'aria-hidden': 'true' });
-            tg._dx = Math.round(p.w / 2 - tw / 2);
-            tg._rect = el('rect', { width: tw, height: 5 });
-            tg.appendChild(tg._rect);
-            var tx = el('text', { x: tw / 2, y: 4, 'text-anchor': 'middle', 'font-family': 'Silkscreen, monospace', 'font-size': '4', fill: '#1a1a1a' });
-            tx.textContent = t;
-            tg.appendChild(tx);
-            return tg;
-        }
-        function pieceNode(item) {
-            var p = P[item.k];
-            var label = p.name + ': ' + what(item) + (p.tb ? ', ' + money(costOf(item)) + ' a month' : '');
-            var g = el('g', {
-                'class': p.glow ? 'piece light' : 'piece', transform: 'translate(' + item.x + ' ' + item.y + ')',
-                tabindex: '0', role: 'button',
-                'aria-label': label + '. Drag or use arrow keys to move; Delete removes it.'
-            });
-            var title = el('title', {});
-            title.textContent = label;
-            g.appendChild(title);
-            if (p.deep) g.style.color = 'var(--wall-deep)';
-            if (p.glow) g._light = lightPool(p);
-            if (!p.flat && !p.wall) g._shadow = shadowNode();
-            g.appendChild(el('rect', { 'class': 'hit', width: p.w, height: p.h }));
-            uses(g, item.k, p);
-            if (p.tb) g._tag = tagNode(item);
-            function follow() {
-                if (g._light) g._light.setAttribute('transform', 'translate(' + item.x + ' ' + item.y + ')');
-                relight();
-                if (!g._tag) return;
-                g._tag.setAttribute('transform', 'translate(' + (item.x + g._tag._dx) + ' ' + (item.y - 6) + ')');
-                g._tag._rect.setAttribute('fill', ZONE[zoneOf(item)].tag);
-            }
-            follow();
-            var fromZone = zoneOf(item);
-            makeDraggable(room, g, item, p.w, p.h, [W, H], {
-                outside: function () { removeItem(item); },
-                moving: function () { tools.hidden = true; },
-                follow: follow,
-                end: function (moved) {
-                    if (!moved) { select(g); return; }
-                    settle(item);
-                    settled(item, fromZone);
-                    render(item);
-                    save();
-                }
-            });
-            g.addEventListener('focus', function () { select(g); });
-            g.addEventListener('blur', unselect);
-            g.addEventListener('keydown', function (e) {
-                var step = e.shiftKey ? 4 : 1, dx = 0, dy = 0;
-                if (e.key === 'ArrowLeft') dx = -step;
-                else if (e.key === 'ArrowRight') dx = step;
-                else if (e.key === 'ArrowUp') dy = -step;
-                else if (e.key === 'ArrowDown') dy = step;
-                else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); removeItem(item, true); return; }
-                else if (e.key === 'Enter' && p.tb) { e.preventDefault(); moveBtn.click(); return; }
-                else return;
-                e.preventDefault();
-                if (p.tb && dy) { // storage hops between floors instead of floating
-                    var was = zoneOf(item);
-                    item.y = ZONE[dy < 0 ? 'attic' : 'ground'].floor - p.h;
-                    item.x = clamp(item.x, 0, W - p.w);
-                    if (zoneOf(item) !== was) { settled(item, was); render(item); save(); }
-                    return;
-                }
-                item.x = clamp(item.x + dx, 0, W - p.w);
-                item.y = clamp(item.y + dy, 0, H - p.h);
-                g.setAttribute('transform', 'translate(' + item.x + ' ' + item.y + ')');
-                follow();
-                placeTools();
-                save();
-            });
-            g._item = item;
-            return g;
-        }
-        function render(focusItem, popItem) {
-            selected = null;
-            tools.hidden = true;
-            while (itemsLayer.firstChild) itemsLayer.removeChild(itemsLayer.firstChild);
-            while (tagsLayer.firstChild) tagsLayer.removeChild(tagsLayer.firstChild);
-            while (lightLayer.firstChild) lightLayer.removeChild(lightLayer.firstChild);
-            while (shadowLayer.firstChild) shadowLayer.removeChild(shadowLayer.firstChild);
-            order().forEach(function (item) {
-                var g = pieceNode(item);
-                itemsLayer.appendChild(g);
-                if (g._shadow) shadowLayer.appendChild(g._shadow);
-                if (g._light) lightLayer.appendChild(g._light);
-                if (g._tag) tagsLayer.appendChild(g._tag);
-                if (item === popItem) g.classList.add('pop');
-                if (item === focusItem) { try { g.focus({ preventScroll: true }); } catch (e) { /* ignore */ } }
-            });
-            if (emptyText) emptyText.setAttribute('display', state.items.length ? 'none' : 'inline');
+            document.addEventListener('sg-theme', relight);
             relight();
-            updateTray();
-            updateReceipt();
+            return {
+                // new pieces are already placed where they rest
+                add: function (g) { var e = add(g); if (e) e.grounded = true; },
+                remove: function (g) {
+                    entries = entries.filter(function (e) {
+                        if (e.g !== g) return true;
+                        e.shadow.remove();
+                        return false;
+                    });
+                    g.remove();
+                },
+                settle: function () { settleAll(null); relight(); }
+            };
         }
 
-        // the lights on a floor: lamps at night, the window by day (walls block the other floor)
-        var WINDOW_X = { ground: 99, attic: 104 };
-        function lampsOn(zone) {
-            var lamps = [];
-            state.items.forEach(function (o) {
-                var q = P[o.k];
-                if (!q.glow || zoneOf(o) !== zone) return;
-                lamps.push({ x: o.x + q.glow[0], y: o.y + q.glow[1] + 5, rx: q.glow[2] * 3.6, ry: q.glow[3] * 3.1, reach: q.glow[2] * 4 });
-            });
-            return lamps;
-        }
-        function lightsFor(zone, night, lamps) {
-            if (night) return lamps.map(function (L) { return { x: L.x, reach: L.reach, weight: 1 }; });
-            return [{ x: WINDOW_X[zone], reach: 80, weight: 0.5 }];
-        }
-        function pieceLight(item, night, lamps) {
-            var p = P[item.k];
-            return night && !p.glow ? lampLevel(item.x + p.w / 2, item.y + p.h / 2, lamps) : 0;
-        }
-        // shadows stretch away from the light and pieces near a lamp take a warm tint
-        function relight() {
-            var night = isNight(), cache = {};
-            itemsLayer.querySelectorAll('.piece').forEach(function (g) {
-                var it = g._item;
-                if (!it) return;
-                var p = P[it.k], zone = zoneOf(it);
-                if (!cache[zone]) { var lamps = lampsOn(zone); cache[zone] = { lamps: lamps, lights: lightsFor(zone, night, lamps) }; }
-                if (g._shadow) setShadow(g._shadow, shadowShape(it.x + p.w / 2, it.y + p.h, p.w, cache[zone].lights, night));
-                if (!p.glow) g.style.setProperty('--nf', tintFor(pieceLight(it, night, cache[zone].lamps)));
-            });
-        }
-        document.addEventListener('sg-theme', relight);
+        var scenes = {};
+        document.querySelectorAll('svg[data-play]').forEach(function (svg, i) { scenes[svg.id || i] = playScene(svg); });
 
-        // a free x on the given floor, clear of the ladder and other floor pieces;
-        // a storage piece claims the wider of itself and its tag so labels never overlap
-        function spanOf(k, l) {
-            var p = P[k], tw = p.tb ? (tagText({ k: k, l: l }).length * 3 + 3) : 0, w = Math.max(p.w, tw);
-            return { off: Math.round(p.w / 2 - w / 2), w: w };
-        }
-        function freeX(p, zone, self, l) {
-            var me = spanOf(p.k, self ? self.l : l);
-            for (var x = 16; x <= W - p.w - 2; x += 2) {
-                var a0 = x + me.off, a1 = a0 + me.w;
-                var clash = state.items.some(function (i) {
-                    var q = P[i.k];
-                    if (i === self || q.flat || q.wall || zoneOf(i) !== zone) return false;
-                    var sp = spanOf(i.k, i.l), b0 = i.x + sp.off, b1 = b0 + sp.w;
-                    return a0 < b1 + 2 && a1 + 2 > b0;
-                });
-                if (!clash) return x;
-            }
-            return 16 + Math.floor(Math.random() * (W - p.w - 20));
-        }
-        function canAdd(k) {
-            if (state.items.length >= MAX) return false;
-            if (P[k].max && state.items.filter(function (i) { return i.k === k; }).length >= P[k].max) return false;
-            return true;
-        }
-        function addItem(k, x, y, zone, l, quiet) {
-            var p = P[k];
-            if (!p) return false;
-            if (!canAdd(k)) { toast(state.items.length >= MAX ? 'house is full: remove something first' : 'there is only one you'); return false; }
-            var item = x === undefined ? place(k, zone || 'ground', l) : settle(mkItem(k, x, y, l));
-            if (quiet) { state.items.push(item); return true; }
-            state.items.push(item);
-            render(null, item);
-            floatNote(p.tb ? '+' + p.tb + ' TB ' + ZONE[zoneOf(item)].name.toLowerCase() : 'free', item.x + p.w / 2, item.y);
-            announce('Added ' + p.name + ': ' + what(item) + '. Total ' + money(totals().total) + ' a month.');
-            if (navigator.vibrate) { try { navigator.vibrate(8); } catch (e) { /* ignore */ } }
-            save();
-            return true;
-        }
-        function removeItem(item, viaKeyboard) {
-            var i = state.items.indexOf(item);
-            if (i < 0) return;
-            state.items.splice(i, 1);
-            var p = P[item.k];
-            render();
-            floatNote(p.tb ? '−' + p.tb + ' TB' : 'bye', item.x + p.w / 2, clamp(item.y, 4, H - 8));
-            announce('Removed ' + p.name + '. Total ' + money(totals().total) + ' a month.');
-            toast(p.name + ' removed', 'undo', function () {
-                state.items.push(item);
-                render(item, item);
-                save();
-                announce('Put back ' + p.name + '.');
-            });
-            if (viaKeyboard) {
-                var next = itemsLayer.querySelector('.piece');
-                if (next) next.focus(); else document.querySelector('.piece-card').focus();
-            }
-            save();
-        }
+        // ---- 02: the box picker
+        var pick = document.getElementById('pick-scene');
+        if (!pick) return;
+        var scene = scenes['pick-scene'];
+        var boxesLayer = document.getElementById('pick-boxes');
+        var tagsLayer = document.getElementById('pick-tags');
+        var receipt = document.getElementById('receipt');
+        var live = document.getElementById('b-live');
+        var inputs = { std: document.getElementById('pick-std'), vault: document.getElementById('pick-vault') };
+        // two piles of up to 3 x 4 boxes, standing on the floor (y + 15 = 60)
+        var PILE = {
+            std:   { xs: [3, 20, 37], sprite: 'box', tag: '#ffd400', name: 'Standard' },
+            vault: { xs: [106, 123, 140], sprite: 'crate', tag: '#b9c7d2', name: 'Vault' }
+        };
+        var ROWS = [45, 32, 19, 6], SHOWN = 12;
+        var state = { std: Number(inputs.std.value) || 0, vault: Number(inputs.vault.value) || 0, monthly: false, touched: false };
 
-        function totals() {
-            var t = { ground: 0, attic: 0, decor: 0, count: { ground: {}, attic: {} } };
-            state.items.forEach(function (i) {
-                var p = P[i.k];
-                if (!p.tb) { t.decor++; return; }
-                var z = zoneOf(i);
-                t[z] += p.tb;
-                var ck = i.k + (i.l ? '|' + i.l : '');
-                t.count[z][ck] = (t.count[z][ck] || 0) + 1;
-            });
-            t.total = t.ground * PRICE.ground + t.attic * PRICE.attic;
-            return t;
-        }
-        function line(list, label, qty, amt, cls) {
-            var li = document.createElement('li');
-            if (cls) li.className = cls;
-            var a = document.createElement('span'); a.textContent = label;
-            var q = document.createElement('span'); q.textContent = qty;
-            var d = document.createElement('span'); d.className = 'dots';
-            var v = document.createElement('span'); v.textContent = amt;
-            li.appendChild(a); li.appendChild(q); li.appendChild(d); li.appendChild(v);
-            list.appendChild(li);
-        }
-        function subline(list, counts, extra) {
-            var parts = [];
-            ['bookcase', 'dresser', 'box'].forEach(function (k) {
-                Object.keys(counts).forEach(function (ck) {
-                    if (ck.split('|')[0] !== k) return;
-                    var n = counts[ck], l = ck.split('|')[1];
-                    parts.push(n + ' ' + (n === 1 ? P[k].name.toLowerCase() : P[k].plural) + (l ? ' of ' + LABEL[l] : ''));
-                });
-            });
-            if (!parts.length) return;
-            var li = document.createElement('li');
-            li.className = 'sub';
-            li.textContent = parts.join(', ') + (extra ? ' \u00b7 ' + extra : '');
-            list.appendChild(li);
-        }
         function photos(tb) {
             var n = tb * PHOTOS_PER_TB;
-            if (n >= 1e6) return (Math.round(n / 1e5) / 10) + ' million';
-            return n.toLocaleString('en-US');
+            if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + ' million';
+            return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
         }
-        function updateReceipt() {
-            var t = totals(), list = document.getElementById('r-lines');
-            while (list.firstChild) list.removeChild(list.firstChild);
-            if (t.ground) { line(list, 'Downstairs', t.ground + ' TB', money(t.ground * PRICE.ground)); subline(list, t.count.ground); }
-            if (t.attic) {
-                line(list, 'Attic', t.attic + ' TB', money(t.attic * PRICE.attic));
-                subline(list, t.count.attic, 'saves ' + money(t.attic * (PRICE.ground - PRICE.attic)) + '/mo vs downstairs');
-            }
-            if (t.decor) line(list, 'decor', t.decor + (t.decor === 1 ? ' pc' : ' pcs'), 'free', 'muted');
-            if (!state.items.length) line(list, 'nothing yet', '', receipt.getAttribute('data-open') === '1' ? '5 GB free' : 'add a piece', 'muted');
-            document.getElementById('r-total').textContent = money(t.total);
-            var allTB = t.ground + t.attic;
-            document.getElementById('r-save').textContent = allTB
-                ? 'the same ' + allTB + ' TB on AWS S3: ' + money(allTB * PRICE.aws) + '/mo'
-                : '';
-            document.getElementById('r-warn').textContent = (t.ground && !t.attic)
-                ? 'Tip: anything you rarely open can go up to the attic for $__PRICE_VAULT__/TB.'
-                : '';
-            // the receipt IS the plan: the register button carries the house along
-            // (once it is the visitor's own; the attribution params already on the
-            // link are kept)
-            var cta = receipt.querySelector('.r-actions a.btn-primary'), href = cta ? (cta.getAttribute('href') || '') : '';
-            if (cta && href.indexOf('/register') === 0) {
-                var qs = new URLSearchParams(href.indexOf('?') >= 0 ? href.slice(href.indexOf('?') + 1) : '');
-                qs.delete('std_tb'); qs.delete('vault_tb'); qs.delete('room');
-                if (built()) { qs.set('std_tb', String(t.ground)); qs.set('vault_tb', String(t.attic)); qs.set('room', encode()); }
-                var q = qs.toString();
-                cta.setAttribute('href', '/register' + (q ? '?' + q : ''));
-            }
-            if (window.sgPing) {
-                if (built()) window.sgPing('builder.edit');
-                if (t.attic !== STARTER_ATTIC) window.sgPing('builder.attic');
-            }
-            var tb = t.ground + t.attic, meter = document.getElementById('b-meter');
-            if (meter) {
-                while (meter.firstChild) meter.removeChild(meter.firstChild);
-                var b = document.createElement('b');
-                b.textContent = tb + ' TB';
-                meter.appendChild(b);
-                meter.appendChild(document.createTextNode(tb
-                    ? ' in your house, about ' + photos(tb) + ' photos'
-                    : ' so far. Add a storage piece to start.'));
-                var sm = document.createElement('small');
-                sm.textContent = 'at roughly 4 MB a photo';
-                if (tb) meter.appendChild(sm);
-            }
-        }
-        function updateTray() {
-            document.querySelectorAll('.piece-card').forEach(function (c) {
-                c.setAttribute('aria-disabled', canAdd(c.getAttribute('data-add')) ? 'false' : 'true');
-            });
+        function lineCost(kind, tb) {
+            if (!tb) return 0;
+            if (kind === 'std') return tb * (state.monthly ? PRICE.std_monthly : PRICE.std);
+            return state.monthly ? Math.max(tb * PRICE.vault_monthly, PRICE.vault_min) : tb * PRICE.vault;
         }
 
-        // ---- tray: tap/click adds downstairs, mouse can drag straight onto either floor
-        var suppressClick = false;
-        document.querySelectorAll('.piece-card').forEach(function (card) {
-            var k = card.getAttribute('data-add');
-            card.addEventListener('click', function () {
-                if (suppressClick) { suppressClick = false; return; }
-                addItem(k);
-            });
-            card.addEventListener('pointerdown', function (e) {
-                if (e.pointerType === 'touch' || e.button > 0 || !canAdd(k)) return;
-                var sx = e.clientX, sy = e.clientY, ghost = null;
-                function inside(ev) {
-                    var r = room.getBoundingClientRect();
-                    return ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
-                }
-                function mv(ev) {
-                    if (!ghost && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) > 6) {
-                        ghost = document.createElement('div');
-                        ghost.className = 'drag-ghost sticker';
-                        ghost.appendChild(card.querySelector('svg').cloneNode(true));
-                        document.body.appendChild(ghost);
-                    }
-                    if (ghost) {
-                        ghost.style.left = ev.clientX + 'px';
-                        ghost.style.top = ev.clientY + 'px';
-                        roomBox.classList.toggle('drop-ok', inside(ev));
-                    }
-                }
-                function up(ev) {
-                    window.removeEventListener('pointermove', mv);
-                    roomBox.classList.remove('drop-ok');
-                    if (!ghost) return;
-                    ghost.remove();
-                    suppressClick = true;
-                    setTimeout(function () { suppressClick = false; }, 0);
-                    if (inside(ev)) {
-                        var pt = svgPoint(room, ev.clientX, ev.clientY);
-                        addItem(k, pt.x - P[k].w / 2, pt.y - P[k].h * 0.85);
-                    }
-                }
-                window.addEventListener('pointermove', mv);
-                window.addEventListener('pointerup', up, { once: true });
-            });
-        });
+        function drawPile(kind) {
+            var p = PILE[kind], tb = state[kind], n = Math.min(tb, SHOWN), top = 60;
+            for (var i = 0; i < n; i++) {
+                var x = p.xs[i % 3], y = ROWS[Math.floor(i / 3)];
+                var g = el('g', { 'class': 'piece pick-box', transform: 'translate(' + x + ' ' + y + ')', 'data-kind': kind });
+                g.appendChild(el('rect', { 'class': 'hit', width: 17, height: 15 }));
+                g.appendChild(el('use', { href: '#s-' + p.sprite, width: 17, height: 15 }));
+                boxesLayer.appendChild(g);
+                scene.add(g);
+                top = Math.min(top, y);
+            }
+            if (!tb) return;
+            var text = p.name.toUpperCase() + ' ' + tb + ' TB' + (tb > SHOWN ? ' (' + SHOWN + ' SHOWN)' : '');
+            // centred over the columns the pile uses (a box is 14 px of front + 3 of depth)
+            var cols = Math.min(n, 3), tw = text.length * 3 + 3, cx = p.xs[0] + (cols * 17 - 3) / 2, tx = clamp(Math.round(cx - tw / 2), 1, 159 - tw);
+            var t = el('g', { 'class': 'tb-tag', transform: 'translate(' + tx + ' ' + (top - 7) + ')' });
+            t.appendChild(el('rect', { width: tw, height: 5, fill: p.tag }));
+            var label = el('text', { x: tw / 2, y: 4, 'text-anchor': 'middle', 'font-family': 'Silkscreen, monospace', 'font-size': 4, fill: '#1a1a1a' });
+            label.textContent = text;
+            t.appendChild(label);
+            tagsLayer.appendChild(t);
+        }
 
-        // tier cards: the sprite is a sticker you can drop into your house
-        document.querySelectorAll('.grab-piece[data-add]').forEach(function (b) {
-            b.addEventListener('click', function () {
-                var k = b.getAttribute('data-add'), zone = b.getAttribute('data-zone') || 'ground';
-                document.getElementById('build').scrollIntoView({ behavior: 'smooth', block: 'start' });
-                setTimeout(function () { addItem(k, undefined, undefined, zone); }, 550);
-            });
-        });
+        function render() {
+            boxesLayer.querySelectorAll('.pick-box').forEach(function (g) { scene.remove(g); });
+            while (tagsLayer.firstChild) tagsLayer.removeChild(tagsLayer.firstChild);
+            drawPile('std');
+            drawPile('vault');
+            scene.settle();
 
-        document.querySelectorAll('[data-wall]').forEach(function (b) {
-            b.addEventListener('click', function () { state.wall = b.getAttribute('data-wall'); applyVibe(); save(); });
-        });
-        document.querySelectorAll('[data-fit]').forEach(function (b) {
-            b.addEventListener('click', function () { state.fit = b.getAttribute('data-fit'); applyVibe(); save(); });
-        });
-        document.getElementById('b-reset').addEventListener('click', function () {
-            state.items = starter();
+            var all = state.std + state.vault, total = lineCost('std', state.std) + lineCost('vault', state.vault);
+            var lines = '';
+            ['std', 'vault'].forEach(function (k) {
+                if (!state[k]) return;
+                lines += '<li><span>' + PILE[k].name + '</span><span>' + state[k] + ' TB</span><span class="dots"></span><span>' + money(lineCost(k, state[k])) + '</span></li>';
+                if (k === 'vault' && state.monthly && state.vault * PRICE.vault_monthly < PRICE.vault_min) {
+                    lines += '<li class="sub">Vault monthly minimum ' + money(PRICE.vault_min) + '</li>';
+                }
+            });
+            document.getElementById('r-lines').innerHTML = lines || '<li class="muted">add a box to start</li>';
+            document.getElementById('r-total').textContent = money(total);
+            document.getElementById('r-period').textContent = 'total / mo, billed ' + (state.monthly ? 'monthly' : 'yearly');
+            document.getElementById('r-save').textContent = all ? 'the same ' + all + ' TB on AWS S3: ' + money(all * PRICE.aws) + '/mo' : '';
+            document.getElementById('b-meter').innerHTML = all
+                ? '<b>' + all + ' TB</b> holds about ' + photos(all) + ' photos<small>at roughly 4 MB a photo</small>'
+                : '<b>0 TB</b> pick a box or two<small>one box is one terabyte</small>';
+            ['std', 'vault'].forEach(function (k) {
+                if (Number(inputs[k].value) !== state[k] && document.activeElement !== inputs[k]) inputs[k].value = state[k];
+                document.querySelectorAll('[data-step="' + k + '"][data-by="-1"]').forEach(function (b) { b.disabled = state[k] <= 0; });
+            });
+            // the plan rides into sign-up once the visitor has made it theirs
+            var cta = receipt.querySelector('.r-actions a.btn-primary');
+            if (cta && receipt.getAttribute('data-open') === '1') {
+                cta.setAttribute('href', state.touched ? '/register?std_tb=' + state.std + '&vault_tb=' + state.vault : '/register');
+            }
+            if (live && state.touched) live.textContent = 'Standard ' + state.std + ' TB, Vault ' + state.vault + ' TB, ' + money(total) + ' a month';
+        }
+
+        function set(kind, tb) {
+            tb = clamp(Math.floor(tb) || 0, 0, MAX_TB);
+            if (tb === state[kind]) return;
+            state[kind] = tb;
+            state.touched = true;
+            if (window.sgPing) window.sgPing('builder.edit');
             render();
-            announce('House reset.');
-            save();
-        });
-        nameInput.value = state.name;
-        nameInput.addEventListener('input', function () {
-            var c = cleanName(nameInput.value);
-            if (c !== nameInput.value) nameInput.value = c;
-            state.name = c;
-            renderSign();
-            save();
-        });
-
-        function shareURL() { return window.location.origin + window.location.pathname + '#room=' + encode(); }
-        document.getElementById('b-share').addEventListener('click', function () {
-            if (window.sgPing) window.sgPing('builder.share');
-            var url = shareURL();
-            if (navigator.share) {
-                navigator.share({ title: signText() + ' on Stored', url: url }).catch(function () { /* dismissed */ });
-                return;
-            }
-            if (navigator.clipboard) {
-                navigator.clipboard.writeText(url).then(function () { toast('link copied. go post it'); }, function () { toast('copy failed'); });
-            }
-        });
-
-        // ---- save as image: rebuild the house as a standalone SVG with its live
-        // (day or night) colours, rasterise it, then letter the sign, floor labels,
-        // TB tags and caption with the page's loaded fonts.
-        function bgMarkup(wa, wb) {
-            var src = document.getElementById('room-bg'), copy = src.cloneNode(true);
-            var from = src.querySelectorAll('*'), to = copy.querySelectorAll('*');
-            for (var i = 0; i < from.length; i++) {
-                if (from[i].tagName.toLowerCase() === 'text') continue;
-                var cs = getComputedStyle(from[i]), f = from[i].getAttribute('fill');
-                if (f) to[i].setAttribute('fill', f === 'url(#wallgrad)' ? 'url(#wg)' : (f.indexOf('url(') === 0 ? f : cs.fill));
-                to[i].setAttribute('opacity', cs.opacity);
-                to[i].removeAttribute('class');
-            }
-            return '<defs><linearGradient id="wg" x1="0" y1="0" x2="0" y2="1">' +
-                '<stop offset="0" style="stop-color:' + wa + '"/><stop offset="1" style="stop-color:' + wb + '"/></linearGradient></defs>' +
-                copy.innerHTML.replace(/<text[\s\S]*?<\/text>/g, '');
         }
-        document.getElementById('b-save').addEventListener('click', function () {
-            if (window.sgPing) window.sgPing('builder.save');
-            var cs = getComputedStyle(document.documentElement);
-            var wa = cs.getPropertyValue('--wall-a').trim(), wb = cs.getPropertyValue('--wall-b').trim();
-            var deep = cs.getPropertyValue('--wall-deep').trim(), fit = cs.getPropertyValue('--fit').trim();
-            var night = document.documentElement.classList.contains('is-dark');
-            var need = {}, body = '', lights = '', shadows = '', ordered = order(), lampCache = {};
-            ordered.forEach(function (i) {
-                var p = P[i.k], sym = p.alt || i.k, zone = zoneOf(i);
-                if (!lampCache[zone]) { var lm = lampsOn(zone); lampCache[zone] = { lamps: lm, lights: lightsFor(zone, night, lm) }; }
-                if (!p.flat && !p.wall) {
-                    var sh = shadowShape(i.x + p.w / 2, i.y + p.h, p.w, lampCache[zone].lights, night);
-                    shadows += '<ellipse cx="' + sh.cx + '" cy="' + sh.cy + '" rx="' + sh.rx + '" ry="' + sh.ry + '" fill="#000" fill-opacity="' + sh.o + '" filter="url(#soft)"/>';
-                }
-                need[sym] = 1;
-                body += '<g transform="translate(' + i.x + ' ' + i.y + ')" color="' + (p.deep ? deep : fit) + '"' +
-                    (night && !p.glow ? ' filter="' + tintFor(pieceLight(i, night, lampCache[zone].lamps)) + '"' : '') + '>' +
-                    '<use href="#s-' + sym + '" width="' + p.w + '" height="' + p.h + '"/></g>';
-                if (night && p.glow) {
-                    lights += '<g transform="translate(' + i.x + ' ' + i.y + ')" style="mix-blend-mode:screen">' +
-                        '<ellipse cx="' + p.glow[0] + '" cy="' + (p.glow[1] + 10) + '" rx="' + (p.glow[2] * 6) + '" ry="' + (p.glow[3] * 4.6) + '" fill="url(#lampfill)"/>' +
-                        '<ellipse cx="' + p.glow[0] + '" cy="' + (p.glow[1] + 5) + '" rx="' + (p.glow[2] * 3.6) + '" ry="' + (p.glow[3] * 3.1) + '" fill="url(#lampambient)"/>' +
-                        '<ellipse cx="' + p.glow[0] + '" cy="' + p.glow[1] + '" rx="' + p.glow[2] + '" ry="' + p.glow[3] + '" fill="url(#lampglow)"/></g>';
-                }
+        document.querySelectorAll('[data-step]').forEach(function (b) {
+            b.addEventListener('click', function () {
+                var k = b.getAttribute('data-step');
+                set(k, state[k] + Number(b.getAttribute('data-by')));
             });
-            body = shadows + body + lights;
-            var defs = '';
-            ['soft', 'vig'].concat(night ? ['lampglow', 'lampambient', 'lampfill', 'nightdim', 'nightmid', 'nightwarm'] : []).forEach(function (id) {
-                defs += document.getElementById(id).outerHTML;
-            });
-            Object.keys(need).forEach(function (id) { defs += document.getElementById('s-' + id).outerHTML; });
-            var S = 8, CW = W * S, CH = H * S, BAND = 124;
-            var svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + CW + '" height="' + CH + '" shape-rendering="crispEdges">' +
-                '<defs>' + defs + '</defs>' + bgMarkup(wa, wb) + body + '</svg>';
-            var img = new Image();
-            img.onload = function () {
-                var c = document.createElement('canvas');
-                c.width = CW; c.height = CH + BAND;
-                var x = c.getContext('2d');
-                x.fillStyle = '#fffaf0';
-                x.fillRect(0, 0, CW, CH + BAND);
-                x.imageSmoothingEnabled = false;
-                x.drawImage(img, 0, 0, CW, CH);
-                x.textAlign = 'center';
-                x.fillStyle = night ? '#a39c8c' : '#fdf3dc';
-                x.font = '40px Silkscreen';
-                x.fillText(signText(), 41 * S, 67.6 * S, 38 * S);
-                x.textAlign = 'right';
-                x.font = '32px Silkscreen';
-                x.fillStyle = '#e8dcc8';
-                x.fillText('ATTIC  $__PRICE_VAULT__/TB', 124 * S, 7.4 * S);
-                x.fillStyle = night ? '#e8dcc8' : '#5a3418';
-                x.fillText('DOWNSTAIRS  $__PRICE_STD__/TB', 124 * S, 112.6 * S);
-                x.textAlign = 'center';
-                ordered.forEach(function (i) {
-                    var p = P[i.k];
-                    if (!p.tb) return;
-                    var t = tagText(i), tw = t.length * 3 + 3, tx = i.x + Math.round(p.w / 2 - tw / 2), ty = i.y - 6;
-                    x.fillStyle = ZONE[zoneOf(i)].tag;
-                    x.fillRect(tx * S, ty * S, tw * S, 5 * S);
-                    x.fillStyle = '#1a1a1a';
-                    x.font = '28px Silkscreen';
-                    x.fillText(t, (tx + tw / 2) * S, (ty + 4) * S);
-                });
-                var t = totals(), tb = t.ground + t.attic;
-                x.textAlign = 'left';
-                x.fillStyle = '#2b2b2b';
-                x.font = '800 38px Montserrat';
-                x.fillText(signText(), 36, CH + 60);
-                x.font = '20px Silkscreen';
-                x.fillStyle = '#6b6b6b';
-                var dom = (document.getElementById('receipt') || { dataset: {} }).dataset.domain || '';
-                x.fillText(tb + ' TB · ' + money(t.total) + '/mo · built on Stored' + (dom ? ' · ' + dom : ''), 36, CH + 96);
-                x.textAlign = 'right';
-                x.fillStyle = '#2b2b2b';
-                x.font = '800 30px Montserrat';
-                x.fillText('STORED', CW - 36, CH + 76);
-                c.toBlob(function (blob) {
-                    if (!blob) { toast('could not save image'); return; }
-                    var a = document.createElement('a');
-                    a.href = URL.createObjectURL(blob);
-                    a.download = 'my-stored-house.png';
-                    document.body.appendChild(a);
-                    a.click();
-                    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-                    toast('saved. go post it');
-                });
-            };
-            img.onerror = function () { toast('could not save image'); };
-            img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+        });
+        Object.keys(inputs).forEach(function (k) {
+            inputs[k].addEventListener('input', function () { if (inputs[k].value !== '') set(k, Number(inputs[k].value)); });
+            inputs[k].addEventListener('change', function () { set(k, Number(inputs[k].value)); inputs[k].value = state[k]; });
+        });
+        document.querySelectorAll('input[name="pick-period"]').forEach(function (r) {
+            r.addEventListener('change', function () { state.monthly = r.value === 'monthly' && r.checked; render(); });
         });
 
-        // ---- the why strip: tap what you'd hate to lose, it packs into a labelled
-        // piece, then a button moves the packed pieces into the house on either floor
-        (function () {
-            var packed = [], area = document.getElementById('packed'), lineEl = document.getElementById('packed-line');
-            var down = document.getElementById('pack-down'), up = document.getElementById('pack-up');
-            if (!area || !down || !up) return;
-            var chips = document.querySelectorAll('.chip[data-pack]');
-            function svgFor(k) {
-                var p = P[k], svg = el('svg', { 'class': 'px sticker', viewBox: '0 0 ' + p.w + ' ' + p.h, 'aria-hidden': 'true', focusable: 'false' });
-                svg.style.setProperty('--w', p.w); svg.style.setProperty('--h', p.h);
-                svg.appendChild(el('use', { href: '#s-' + k }));
-                return svg;
-            }
-            function draw() {
-                while (area.firstChild) area.removeChild(area.firstChild);
-                var tb = 0;
-                if (!packed.length) {
-                    var e = document.createElement('span');
-                    e.className = 'packed-empty';
-                    e.textContent = 'nothing packed yet';
-                    area.appendChild(e);
-                }
-                packed.forEach(function (l) {
-                    var k = PACK[l], b = document.createElement('button');
-                    b.type = 'button';
-                    b.className = 'packed-item';
-                    b.setAttribute('aria-label', 'Unpack ' + LABEL[l]);
-                    b.appendChild(svgFor(k));
-                    var t = document.createElement('span');
-                    t.className = 'tag';
-                    t.textContent = LABEL[l] + ' ' + P[k].tb + ' TB';
-                    b.appendChild(t);
-                    b.addEventListener('click', function () { toggle(l); });
-                    area.appendChild(b);
-                    tb += P[k].tb;
-                });
-                chips.forEach(function (c) { c.setAttribute('aria-pressed', packed.indexOf(c.getAttribute('data-pack')) >= 0 ? 'true' : 'false'); });
-                down.disabled = up.disabled = !packed.length;
-                lineEl.textContent = tb
-                    ? tb + ' TB packed: ' + money(tb * PRICE.ground) + '/mo downstairs, or ' + money(tb * PRICE.attic) + '/mo in the attic.'
-                    : 'Each box is real space at a flat price. Bigger holds more.';
-            }
-            function toggle(l) {
-                var i = packed.indexOf(l);
-                if (i >= 0) packed.splice(i, 1); else packed.push(l);
-                draw();
-            }
-            chips.forEach(function (c) { c.addEventListener('click', function () { toggle(c.getAttribute('data-pack')); }); });
-            function moveIn(zone) {
-                var n = 0, last = null;
-                packed.forEach(function (l) {
-                    if (addItem(PACK[l], undefined, undefined, zone, l, true)) { n++; last = state.items[state.items.length - 1]; }
-                });
-                if (!n) return;
-                if (window.sgPing) window.sgPing('builder.pack');
-                packed = [];
-                draw();
-                render(null, last);
-                save();
-                var t = totals();
-                announce(n + (n === 1 ? ' piece' : ' pieces') + ' moved ' + (zone === 'attic' ? 'to the attic' : 'downstairs') + '. Total ' + money(t.total) + ' a month.');
-                toast(n + (n === 1 ? ' piece' : ' pieces') + ' moved ' + (zone === 'attic' ? 'up to the attic' : 'in downstairs'));
-                document.querySelector('.b-room').scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }
-            down.addEventListener('click', function () { moveIn('ground'); });
-            up.addEventListener('click', function () { moveIn('attic'); });
-            draw();
-        })();
-
-        // for the waitlist forms: what the visitor built, to store beside the email
+        // what the waitlist form sends along: the TB per tier, once chosen
         window.sgHouse = function () {
-            if (!built()) return { std: 0, vault: 0, room: '' };
-            var t = totals();
-            return { std: t.ground, vault: t.attic, room: encode() };
+            return state.touched ? { std: state.std, vault: state.vault, room: '' } : { std: 0, vault: 0, room: '' };
         };
-
-        renderSign();
         render();
-        if (fromLink) {
-            setTimeout(function () { document.getElementById('build').scrollIntoView({ block: 'start' }); }, 50);
-        }
     })();
 
     // ---- light/dark toggle: follows the system until the visitor picks one;

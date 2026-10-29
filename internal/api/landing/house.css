@@ -2,7 +2,7 @@
     /* The house on the dashboard (docs/DASHBOARD_PLAN.md Phase 2). Emitted by
        build.py into internal/dashboard/templates/generated/house.html as the
        "house-css" template; NIGHT lines are expanded the same way as landing.css.
-       The wall/fit classes are generated from builder.js's WALLS/FITS tables. */
+       The wall/fit classes are generated from vibes.json. */
     .sprite-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
     .house-room { position: relative; overflow: hidden; background: #ffffff; box-shadow: 0 22px 40px -24px rgba(0, 0, 0, 0.45); --wall-a: #0a3a63; --wall-b: #125594; --wall-deep: #0b2f52; --fit: #1c3445; }
 __VIBES__

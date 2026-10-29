@@ -240,6 +240,22 @@ def box():
     return g
 
 
+def crate():
+    """1 TB of Vault: the same box in steel with a padlock: put away, not thrown away."""
+    g = Grid(17, 15)
+    cuboid(g, 0, 0, 14, 11, 3, 'e', 'c', 'b')
+    g.rect(0, 3, 14, 1, 'e')                    # lid lip
+    g.rect(0, 4, 14, 1, 'b')                    # lid shadow
+    g.rect(0, 9, 14, 1, 'b')                    # steel band
+    g.rect(1, 5, 1, 7, 'b'); g.rect(12, 5, 1, 7, 'b')   # corner straps
+    g.rect(6, 5, 3, 1, 'K'); g.set(5, 6, 'K'); g.set(9, 6, 'K')   # shackle
+    g.rect(5, 7, 5, 4, 'N'); g.rect(5, 10, 5, 1, 'O')            # lock body
+    g.set(7, 8, 'K'); g.set(7, 9, 'K')          # keyhole
+    g.rect(0, 13, 14, 1, 'a')
+    g.rect(0, 14, 17, 1, 'o')
+    return g
+
+
 def lockbox():
     g = Grid(13, 11)
     cuboid(g, 0, 0, 10, 7, 3, 'e', 'b', 'a')
@@ -511,6 +527,7 @@ SPRITES = {
     'laptop': ascii_grid(LAPTOP),
     'floorlamp': floorlamp(),
     'box': box(),
+    'crate': crate(),
     'dresser': dresser(),
     'bookcase': bookcase(),
     'logo': logo(),

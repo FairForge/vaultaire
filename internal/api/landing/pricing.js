@@ -1,7 +1,7 @@
-    // The pricing page's calculator (WP-PRICE-1): the house builder's maths —
-    // whole TB downstairs (Standard) and in the attic (Vault) times the rate
-    // of the period, the Vault monthly minimum on a monthly attic — and the
-    // same TB at the competitors' list storage prices. Rates from prices.json.
+    // The pricing page's calculator (WP-PRICE-1): the landing picker's maths —
+    // whole TB of Standard and of Vault times the rate of the period, the
+    // Vault monthly minimum on a monthly Vault — and the same TB at the
+    // competitors' list storage prices. Rates from prices.json.
     (function () {
         var R = __PRICING_JSON__;
         var form = document.getElementById('price-calc');
