@@ -15,8 +15,9 @@ import (
 // from live data. Pieces are sized by the quota bought per floor (bookcase
 // 10 TB, dresser 5 TB, box 1 TB), their fill by the bytes used, their titles
 // and links by the buckets that occupy them. Layout, shadows and night light
-// are a port of the landing builder's rules (internal/api/landing/builder.js:
-// spanOf/freeX, shadowShape, lampLevel/tintFor) so both houses look alike;
+// are a port of the landing's former house builder (builder.js before
+// 2026-10-29: spanOf/freeX, shadowShape, lampLevel/tintFor — the scenes'
+// shadowShape/lampLevel/tintFor still live there);
 // the sprites, room background and CSS come from the generated template
 // (internal/dashboard/templates/generated/house.html).
 

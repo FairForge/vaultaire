@@ -31,12 +31,12 @@ func TestEgressCopy_OneSourceOnEveryServedPage(t *testing.T) {
 	}
 
 	// The long sentence on the pages with room for it; the short phrase on
-	// the landing page's two pricing lines and its Vault fine print.
+	// the landing page's picker receipt and its comparison table.
 	assert.Contains(t, pages["faq"], e.PastAllowance)
 	assert.Contains(t, pages["faq"], e.OneAllowance)
 	assert.Contains(t, pages["rclone"], e.PastAllowance)
 	assert.Contains(t, pages["llms.txt"], e.PastAllowance)
-	assert.Equal(t, 3, strings.Count(pages["landing"], e.PastAllowanceShort))
+	assert.Equal(t, 2, strings.Count(pages["landing"], e.PastAllowanceShort))
 
 	for name, body := range pages {
 		for _, retired := range []string{"may be throttled", "are queued", "restores beyond that", "never refused", "__EGRESS_"} {

@@ -489,57 +489,47 @@ BOOLEAN (migration 042).
   links. Still ONE self-contained file: Montserrat (variable) + Silkscreen are base64 `@font-face`
   (Silkscreen skips `&`, which it draws like `$`), and all pixel art is an inline `<svg>` of
   `<symbol id="s-*">` sprites at the top of `<body>` (mascot, mascot-wave, plant, lamp, floorlamp,
-  dresser, shelf, box, heart, logo, mark) referenced via `<use>`. Sprites are generated from ASCII
+  box, crate, heart, logo, mark; dresser/bookcase/rug stay for the dashboard house) referenced via `<use>`. Sprites are generated from ASCII
   grids (one `<path>` per colour); size a sprite with `class="px" style="--w:W;--h:H"` and `--u`
   (px per pixel). Base64 font blobs can in theory contain a `TestLanding_NoDeadProduct` banned
   substring — re-run that test after swapping fonts. Both stored.ge and stored.cloud serve this page (an alias 301s a browser view to the canonical origin once `VAULTAIRE_ALIAS_HOSTS` is set).
-- **House builder (#build, section 02) + pick-up-able pieces:** every `.piece` (`<g>` + transparent
-  `.hit` rect + `<use>`) inside an `svg[data-play]` (hero room, final CTA) can be dragged, snapped to the
-  pixel grid. The builder (`#room`, viewBox 128x115) is a house cutaway and THE FLOOR IS THE TIER:
-  downstairs = Standard $4.49/TB (floor line y=103), attic = Vault $2/TB (attic floor y=54). Storage
-  pieces (storage box 1 TB, dresser 5 TB, bookcase 10 TB) always stand on a floor (`settle`), their
-  floor is judged by their vertical middle (`zoneOf`, so a half-dragged piece already reads as moving),
-  and the price follows the floor; decor (plant, lamp, picture, coffee, mat, rug, mascot) is free and
-  may float. Colour-coded TB tags (yellow downstairs, grey attic) live in a top `#room-tags` layer and
-  recolour mid-drag; a floating toolbar on the selected piece offers "to attic"/"bring down" (storage
-  only, also Enter / ArrowUp / ArrowDown) and remove (with undo); the receipt has a line per floor
-  listing the pieces on it; a TB-to-photos line (~4 MB a photo). Wall/fit "vibes" are site-wide CSS
-  vars (`--wall-a/-b/-deep`, `--fit`). State persists in localStorage `sg-room` and travels in
-  `#room=v2.<wall>.<fit>.<name>.<k-x-y_…>` links (y in house coordinates; the floor is implied);
-  `decode` also accepts `v1` single-room links (pieces land downstairs, the old safe/lockbox/shelf
-  go to the attic, fireplace becomes a lamp), whitelists piece keys, clamps coords, caps 30 pieces /
-  one mascot, and the name is filtered to letters/digits/space/_'- (16 chars) and only ever set via
-  textContent. "Save image" rebuilds the house as a standalone SVG with its live (day or night)
-  colours, rasterises it and letters the sign, floor labels, TB tags and caption on canvas. Night:
-  both rooms follow light/dark mode (window sky/moon/stars, `.night-dim` layer, `url(#nightdim)`
-  filter on unlit pieces, `.glow` pools on `.piece.light` lamps); the CSS is written once with a
-  `/*NIGHT*/` marker that the page generator expands into the system-dark and `data-theme="dark"`
-  selector forms. **Why strip** (top of the section, replaces the text steps): tap what you'd hate
-  to lose (photos / videos / projects / everything -> box / dresser / box / bookcase), it packs into a
-  labelled piece, and "Put it downstairs" / "Send to the attic" moves the packed pieces into the
-  house. Labels ride on items as `l` (p/v/w/e), in tags ("PHOTOS 1 TB"), receipt sub-lines ("1 storage
-  box of photos"), share links (`k-x-y-l`) and the exported image; auto-placement (`freeX`) spaces
-  pieces by the wider of piece and tag so labels never overlap. The piece toolbar also has "open":
-  downstairs answers instantly, the attic in minutes (the tier promise, shown not told).
-  Sprites are 3D pixel cuboids from the scratch generator. If prices change, update
-  `PRICE` + the floor labels in the builder markup/script, the tray labels, AND the pricing section.
-  The page script has NO template literals (html/template parses `<script>`).
+- **Box picker (#build, section 02) + pick-up-able pieces (2026-10-29: the house, attic, drawers,
+  why strip, tray, vibes, share links and image export are gone — one box is one terabyte):** every
+  `.piece` (`<g>` + transparent `.hit` rect + `<use>`) inside an `svg[data-play]` (hero room, the
+  picker's room `#pick-scene`, final CTA) can be dragged, snapped to the pixel grid; a dropped piece
+  falls to the floor or onto something at least as wide, what stood on it falls when it leaves, a tap
+  bounces it (`playScene` in builder.js, which returns `add/remove/settle` so the picker swaps its
+  boxes in a live scene). The picker: two rows with steppers (and a typed number, 0–1000), Standard
+  = cardboard `box`, Vault = steel `crate` (both 17x15). Piles of up to 3 x 4 stand at x 3/20/37
+  (Standard) and 106/123/140 (Vault) on the floor at y 60; past 12 the pile tag says `(12 SHOWN)`, the
+  price never caps. The receipt: a line per kind, billed yearly / monthly (monthly = the monthly rates
+  and the Vault monthly minimum), the AWS comparison, a TB-to-photos meter (~4 MB a photo). The starter
+  (2 + 5 TB = $18.98) is an example: only a picker the visitor changed is reported (`sgHouse` →
+  waitlist `std_tb`/`vault_tb`, `room` always empty; the open variant's receipt button →
+  `/register?std_tb=&vault_tb=`). Night: every room follows light/dark mode (`.night-dim`,
+  `url(#nightdim)` tints by lamp distance, `.glow` pools on `.piece.light` lamps); the CSS is written
+  once with a `/*NIGHT*/` marker that the page generator expands into both dark selector forms. Prices
+  come from `prices.json` through `__PRICES_JSON__`. The page script has NO template literals
+  (html/template parses `<script>`).
 - **`landing/` (sources) + `make landing`** — landing.html is GENERATED (and so is `internal/dashboard/templates/generated/house.html`, the dashboard's house: `house.css` + the sprite/room subset, same stamp, see internal/dashboard/CLAUDE.md; `landing.SourcesHash` in `landing/hash.go` is the shared guard). Sources: `landing.src.html`
   (markup with `__CSS__`/`__SPRITES__`/`__BUILDER__`/`__SCRIPT__` and `__PRICE_*__` tokens),
   `landing.css` (fonts as `__MONT__`/`__SILK4__`/`__SILK7__`, `/*NIGHT*/` lines expanded into both
-  dark selector forms), `sprites.py` (pixel art -> `<symbol>`s), `builder.html` (house builder; tray /
-  swatches generated), `page.js` + `builder.js` (no template literals: html/template parses the
+  dark selector forms), `sprites.py` (pixel art -> `<symbol>`s), `builder.html` (the box picker;
+  `__BOX__`/`__CRATE__` sprites filled in), `house_room.html` + `vibes.json` (the DASHBOARD house's
+  two-floor room and wall/fit colours — the landing no longer shows them), `page.js` + `builder.js` (no template literals: html/template parses the
   script), `prices.json` (EVERY Stored price the page shows: tier rates, add-on, founders,
   competitors, derived 20 TB figures — edit here, rebuild), `fonts/`. `build.py` stamps a sha256 of the
   sources into the output's first comment and `landing_build_test.go` recomputes it, so a hand edit to
   landing.html or a stale rebuild fails CI. Never edit landing.html directly.
-- **`landing/browser/`** — headless-Chrome checks of the house builder (`harness.html`, 31 PASS/FAIL
-  lines: floors, tags, toolbar, undo, keyboard, why strip, labels, links v1/v2, export). `run.sh`
+- **`landing/browser/`** — headless-Chrome checks of the box picker and the scenes (`harness.html`, 32
+  PASS/FAIL lines: starter, steppers, stacking, typed and capped piles, monthly minimum, empty, the
+  `/register` link, the waitlist payload, falling and stacking in the hero; `pointer.mjs` 7 real-mouse
+  lines). `run.sh`
   renders both template variants via `TestLanding_WriteVariants` (env `LANDING_OUT`) then drives
   Chrome; `make landing-browser` locally, the `landing-browser` CI job on every PR.
 - **og_image.go / og.png** — `/og.png` social preview (1200x630, embedded, 1 day cache) that the
   landing's og:image / twitter:image meta point at. Re-render with `make og` (build.py `og` mode
-  writes a standalone page, Chrome screenshots it) whenever the house scene or prices change.
+  writes a standalone page, Chrome screenshots it) whenever the picker scene or prices change.
 - **site_shell.go** — shared favicon + `<style>` + pixel-mark brand bar for the /docs/* and
   /changelog shells, so the sub-pages match the landing page (system fonts, no embeds), plus the
   light/dark toggle and `siteMarkdown` (goldmark + table extension: the FAQ price table rendered as
