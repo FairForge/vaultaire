@@ -140,11 +140,23 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 		`vaultaire_key_rotation_pending{kind="chunk"}`,
 		`vaultaire_key_rotation_pending{kind="whole"}`,
 		`vaultaire_tenant_keys_unwrap_failures`,
+		`vaultaire_vault_parity_scrub_shards_total{outcome="corrupt"}`,
+		`vaultaire_vault_parity_rebuilds_total{outcome="mismatch"}`,
+		`vaultaire_vault_parity_complete_rows`,
+		`vaultaire_vault_parity_scrub_last_timestamp_seconds`,
+		`vaultaire_vault_parity_scrub_backlog`,
+		`vaultaire_vault_parity_restores_stuck`,
 	} {
 		assert.True(t, strings.Contains(body, "\n"+series+" "), "exported before any run: %s", series)
 	}
 	for _, name := range []string{"TenantKeysUnwrapFailing", "KeyReencryptBacklogStuck"} {
 		require.Contains(t, rules, name)
+	}
+	// WP-VAULT-2: the parity scrub's findings warn; its standing conditions inform.
+	for name, sev := range map[string]string{"VaultParityShardUnreadable": "warning", "VaultParityRebuildMismatch": "warning",
+		"VaultParityScrubStale": "warning", "VaultParityScrubBacklog": "info", "VaultParityRestoreStuck": "info"} {
+		require.Contains(t, rules, name)
+		assert.Equal(t, sev, rules[name].severity, name)
 	}
 	assert.Equal(t, "critical", rules["TenantKeysUnwrapFailing"].severity, "a tenant's encrypted reads are 500s")
 	for _, series := range []string{"vaultaire_job_last_success_timestamp_seconds", "vaultaire_job_runs_total", "vaultaire_account_deletion_tenants_total", "vaultaire_account_deletion_realms_total", "vaultaire_stale_copy_lost_writes_total",

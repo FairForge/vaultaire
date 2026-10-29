@@ -147,3 +147,28 @@ forces the leg's next home.
 Paired change, already built: **tape takes only sealed bytes** (`sealedOnlyClass` +
 `coldBackendSealedOnly`, `GEYSER_ALLOW_UNSEALED`, gate `geyser_sealed`) — parity is
 computed over the stored bytes, so sealing the object seals its second copy too.
+
+## 8. Built (2026-10-29) — A1, A2, A3; A4 follows
+
+Migration 118 (`shard_digests`, `object_sha256`, `digest_etag`, `scrubbed_at`,
+`scrub_failures`, `rebuilt_at`, `restore_requested_at`, `restore_checked_at`; partial
+index on complete rows' keys), `internal/api/vault_parity_scrub.go`, the protect's two
+hashes (a tee of the source, a hash per shard writer) and its tape branch, five rules.
+Where the build differs from § 1–3:
+
+- **Cadence:** `VAULT_PARITY_SCRUB_EVERY` 30 min (not 6 h) in a 10 min slice (not
+  5 min): with A1's budget a 6 h pass at 10 TB would read 83 GB, more than a slice reads
+  on the Sync leg; 30 min keeps one pass to ~7 GB.
+- **`legs` is kept on a re-protect** (§ 2 said the failed shard leaves it): the delete
+  paths then still erase what is there, and the protect replaces the shard in place
+  (`clearPriorShards`: same etag, same leg).
+- **No re-protect cap:** a row that keeps failing is found once per cycle at most;
+  `scrub_failures` counts it and the rules say so. A cap would leave it partial with no
+  copy at all.
+- **A baselined row has no `object_sha256`** until its next protect (its stored bytes
+  are on tape; reading them to hash would be a restore per row), so it is not rebuild-
+  checked before then. Prod held 0 `vault_parity` rows on 2026-10-21.
+- **`changed`:** a row a delete or overwrite moved during the read (its `updated_at`)
+  is no verdict.
+
+A4 (`vault_tape_audit`) is its own job and PR.

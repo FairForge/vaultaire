@@ -125,6 +125,53 @@ groups:
           summary: "{{ $value }} vault object(s) too large for a parity run"
           description: "The vault_parity job never starts a protect estimated longer than a whole run, so these objects have no parity copy. GET /api/v1/admin/jobs → vault_parity result.notes names the first 20. Raise VAULT_PARITY_MAX_RUN_TIME (or the rate estimate) or accept them unprotected."
 
+      # The parity scrub (WP-VAULT-2, docs/reviews/WP-VAULT-2.md): every
+      # complete row's shards are read end to end once per
+      # VAULT_PARITY_SCRUB_CYCLE and one object per pass is rebuilt from the
+      # parity alone. A failed shard or rebuild re-protects its row (the next
+      # protect rewrites four shards), so a finding is a warning, not a page —
+      # unless the leg keeps losing shards: then the second copy is not there.
+      - alert: VaultParityShardUnreadable
+        expr: sum by (outcome) (increase(vaultaire_vault_parity_scrub_shards_total{outcome=~"unreadable|missing|corrupt"}[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The parity scrub found {{ $value }} {{ $labels.outcome }} shard(s) in the last hour"
+          description: "A Vault parity shard could not be read back as written. Its row is re-protected by the next vault_parity run. journalctl -u 'vaultaire@*' | grep 'vault parity scrub: a parity shard failed' names tenant, bucket, key, leg and shard; GET /api/v1/admin/jobs → vault_parity result.scrub_findings. Repeated findings on one leg mean the leg is losing bytes: check the leg's backend (bench-results/LYVE-READ-FAULT-2026-10-21.md)."
+      - alert: VaultParityRebuildMismatch
+        expr: increase(vaultaire_vault_parity_rebuilds_total{outcome="mismatch"}[6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A Vault object did not rebuild from its parity alone"
+          description: "The scrub rebuilt an object from its four parity shards and the bytes did not hash to what protect read from tape: that parity was never a copy. The row is re-protected. If it recurs, the encoder or the leg is at fault — stop trusting the second copy until it is understood. The log line 'vault parity scrub: the parity does not rebuild the object' names the object."
+      - alert: VaultParityScrubStale
+        expr: vaultaire_vault_parity_complete_rows > 0 and (time() - vaultaire_vault_parity_scrub_last_timestamp_seconds) > 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The parity scrub has read no row clean in 24 h"
+          description: "Complete parity rows exist and no scrub pass read one clean for a day: the job is not running, its leg is unreachable (rows skipped — result.scrub_skipped), or every row fails. GET /api/v1/admin/jobs → vault_parity."
+      - alert: VaultParityScrubBacklog
+        expr: vaultaire_vault_parity_scrub_backlog > 0
+        for: 48h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $value }} parity row(s) not scrubbed within the cycle"
+          description: "Rows the scrub has not read clean for longer than VAULT_PARITY_SCRUB_CYCLE + 7 days: the pass's budget (the footprint's share of the cycle) does not fit its 10 min slice at the leg's speed, or the leg is skipped. Lengthen VAULT_PARITY_SCRUB_CYCLE or shorten VAULT_PARITY_SCRUB_EVERY."
+      - alert: VaultParityRestoreStuck
+        expr: vaultaire_vault_parity_restores_stuck > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $value }} vault object(s) waiting more than 24 h for a tape restore"
+          description: "The vault_parity job found these objects on tape, asked Geyser to restore them and still has no parity copy a day later (LA2 restored a 2 GiB object in 459 s on 2026-10-24). SELECT tenant_id, bucket, object_key, restore_requested_at, last_error FROM vault_parity WHERE state <> 'complete' AND restore_requested_at IS NOT NULL; check the restore in the Geyser console."
+
       # Tenant key versions (WP-R8-1, docs/ENCRYPTION.md). A key row that
       # opens under neither ENCRYPTION_MASTER_KEY nor _PREVIOUS makes every
       # encrypted read of its tenant a 500 (never ciphertext): the wrong master
