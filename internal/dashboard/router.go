@@ -127,31 +127,36 @@ const personalWrite auth.Action = "personal"
 // panics at boot (dashboardAction); TestDashboardRoutes_EveryWriteNamesItsAction
 // walks the router.
 var dashboardWrites = map[string]auth.Action{
-	"POST /buckets":                       auth.ActionBucketWrite,
-	"POST /buckets/{name}/restore":        auth.ActionBucketWrite,
-	"POST /buckets/{name}/settings":       auth.ActionBucketWrite,
-	"POST /apikeys":                       auth.ActionKeyWrite,
-	"POST /apikeys/{id}/revoke":           auth.ActionKeyWrite,
-	"POST /apikeys/{id}/rotate":           auth.ActionKeyWrite,
-	"POST /settings/profile":              personalWrite,
-	"POST /settings/password":             personalWrite,
-	"POST /settings/notifications":        personalWrite,
-	"POST /settings/sessions/revoke-all":  personalWrite,
-	"POST /settings/sessions/{id}/revoke": personalWrite,
-	"POST /settings/mfa/enable":           personalWrite,
-	"POST /settings/mfa/backup-codes":     personalWrite,
-	"POST /settings/mfa/disable":          personalWrite,
-	"POST /settings/resend-verify":        personalWrite,
-	"POST /onboarding/dismiss":            personalWrite,
-	"POST /settings/export":               auth.ActionAccountExport,
-	"GET /settings/export/download":       auth.ActionAccountExport,
-	"POST /settings/delete-account":       auth.ActionAccountDelete,
-	"POST /settings/cancel-deletion":      auth.ActionAccountDelete,
-	"POST /billing/house":                 auth.ActionBilling,
-	"POST /billing/portal":                auth.ActionBilling,
-	"POST /billing/renew":                 auth.ActionBilling,
-	"POST /billing/switch":                auth.ActionBilling,
-	"POST /billing/crypto-invoice/cancel": auth.ActionBilling,
+	"POST /buckets":                         auth.ActionBucketWrite,
+	"POST /buckets/{name}/restore":          auth.ActionBucketWrite,
+	"POST /buckets/{name}/settings":         auth.ActionBucketWrite,
+	"POST /apikeys":                         auth.ActionKeyWrite,
+	"POST /apikeys/{id}/revoke":             auth.ActionKeyWrite,
+	"POST /apikeys/{id}/rotate":             auth.ActionKeyWrite,
+	"POST /settings/profile":                personalWrite,
+	"POST /settings/password":               personalWrite,
+	"POST /settings/notifications":          personalWrite,
+	"POST /settings/sessions/revoke-all":    personalWrite,
+	"POST /settings/sessions/{id}/revoke":   personalWrite,
+	"POST /settings/mfa/enable":             personalWrite,
+	"POST /settings/mfa/backup-codes":       personalWrite,
+	"POST /settings/mfa/disable":            personalWrite,
+	"POST /settings/resend-verify":          personalWrite,
+	"POST /onboarding/dismiss":              personalWrite,
+	"POST /settings/export":                 auth.ActionAccountExport,
+	"GET /settings/export/download":         auth.ActionAccountExport,
+	"POST /settings/delete-account":         auth.ActionAccountDelete,
+	"POST /settings/cancel-deletion":        auth.ActionAccountDelete,
+	"POST /billing/house":                   auth.ActionBilling,
+	"POST /billing/portal":                  auth.ActionBilling,
+	"POST /billing/renew":                   auth.ActionBilling,
+	"POST /billing/switch":                  auth.ActionBilling,
+	"POST /members":                         auth.ActionMemberManage,
+	"POST /members/{user}/role":             auth.ActionMemberManage,
+	"POST /members/{user}/remove":           auth.ActionMemberManage,
+	"POST /members/invitations/{id}/revoke": auth.ActionMemberManage,
+	"POST /invitations/{token}/accept":      personalWrite, // the invited address decides
+	"POST /billing/crypto-invoice/cancel":   auth.ActionBilling,
 }
 
 // dashboardActed records the routes mounted through dashboardAction (the
@@ -248,6 +253,10 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 
 		// --- Email verification (public) ---
 		pub.Get("/verify", handleVerifyEmail(baseTmpl, deps))
+		// WP-TEAM-1: an invitation link (a new address registers through it).
+		// Under /auth/, a reserved first segment: no new reserved bucket name.
+		pub.Get("/auth/invitations/{token}", handleInvitation(baseTmpl, deps))
+		pub.Post("/auth/invitations/{token}", registerRL.Limit(handleInvitation(baseTmpl, deps)).ServeHTTP)
 
 		// --- Password reset (public) ---
 		resetRL := middleware.NewLoginRateLimiter(5, 5)
@@ -382,6 +391,20 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/settings.html",
 		))
 		dr.Get("/settings", handlers.HandleSettings(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Exports, deps.flagOn(translog.FlagTranslogCustomerView), deps.Logger))
+
+		// Members (WP-TEAM-1 PR B): every member sees the page; managing is
+		// an owner's or an admin's.
+		membersTmpl := template.Must(baseTmpl.Clone())
+		template.Must(membersTmpl.ParseFS(Templates, "templates/customer/members.html"))
+		dr.Get("/members", handlers.HandleMembers(membersTmpl, deps.DB, deps.Logger))
+		dr.With(act("POST /members")).Post("/members", handlers.HandleInviteMember(deps.DB, deps.Email, deps.BaseURL, deps.Logger))
+		dr.With(act("POST /members/{user}/role")).Post("/members/{user}/role", handlers.HandleSetMemberRole(deps.DB, deps.Logger))
+		dr.With(act("POST /members/{user}/remove")).Post("/members/{user}/remove", handlers.HandleRemoveMember(deps.DB, deps.Logger))
+		dr.With(act("POST /members/invitations/{id}/revoke")).Post("/members/invitations/{id}/revoke", handlers.HandleRevokeInvitation(deps.DB, deps.Logger))
+		invitationTmpl := template.Must(baseTmpl.Clone())
+		template.Must(invitationTmpl.ParseFS(Templates, "templates/customer/invitation.html"))
+		dr.Get("/invitations/{token}", handlers.HandleInvitationPage(invitationTmpl, deps.DB, deps.Logger))
+		dr.With(act("POST /invitations/{token}/accept")).Post("/invitations/{token}/accept", handlers.HandleAcceptInvitation(deps.DB, deps.Logger))
 
 		// "Access to your account" (Stage 1a Prompt 34b): the tenant's own
 		// transparency-log entries, behind translog_customer_view.
@@ -883,6 +906,73 @@ func handleRegister(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	}
 }
 
+// handleInvitation is the public page of an invitation link (WP-TEAM-1
+// PR B): an address with no account chooses a password and becomes a
+// member — a sign-in with NO tenant of its own (auth.RegisterInvitedUser,
+// open while signups are closed: it adds a person to an existing account);
+// an address that has an account is sent to sign in and accept from the
+// dashboard (/dashboard/invitations/{token}), so a password here can never
+// sign in past its MFA.
+func handleInvitation(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
+	tmpl := template.Must(baseTmpl.Clone())
+	template.Must(tmpl.Parse(pageContent("invitation")))
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := chi.URLParam(r, "token")
+		data := map[string]any{"Page": "invitation", "Token": token}
+		render := func() {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_ = tmpl.ExecuteTemplate(w, "base", data)
+		}
+		if deps.DB == nil {
+			data["Error"] = "This invitation link is not valid."
+			render()
+			return
+		}
+		inv, err := auth.InvitationByToken(r.Context(), deps.DB, token, time.Now())
+		if err != nil {
+			data["Error"] = handlers.InvitationMessage(err)
+			render()
+			return
+		}
+		var account string
+		_ = deps.DB.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), email) FROM tenants WHERE id = $1`, inv.TenantID).Scan(&account)
+		data["Account"], data["Role"], data["Email"] = account, string(inv.Role), inv.Email
+		existing, _ := deps.Auth.GetUserByEmail(r.Context(), inv.Email)
+		data["HasAccount"] = existing != nil
+		if r.Method != http.MethodPost || existing != nil {
+			render()
+			return
+		}
+		user, inv, err := deps.Auth.RegisterInvitedUser(r.Context(), token, r.FormValue("password"), time.Now())
+		switch {
+		case errors.Is(err, auth.ErrPasswordTooShort):
+			data["Error"] = "The password must be at least 8 characters."
+			render()
+			return
+		case err != nil:
+			deps.Logger.Warn("invitation registration failed", zap.Error(err))
+			data["Error"] = handlers.InvitationMessage(err)
+			render()
+			return
+		}
+		sess, err := deps.Sessions.Create(r.Context(), dashauth.SessionData{
+			UserID:    user.ID,
+			TenantID:  inv.TenantID,
+			Email:     user.Email,
+			Role:      "user",
+			IPAddress: middleware.ClientIP(r),
+			UserAgent: dashauth.TruncateUserAgent(r.UserAgent()),
+		}, sessionTTL)
+		if err != nil {
+			deps.Logger.Error("create session after invitation", zap.Error(err))
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		dashauth.SetSessionCookie(w, sess, sessionTTL)
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+	}
+}
+
 func handleVerifyEmail(baseTmpl *template.Template, deps Deps) http.HandlerFunc {
 	tmpl := template.Must(baseTmpl.Clone())
 	template.Must(tmpl.Parse(pageContent("verify-result")))
@@ -1235,6 +1325,26 @@ func pageContent(page string) string {
 			`<button type="submit" class="btn btn-primary btn-block">Verify</button>` +
 			`</form>` +
 			`<div class="auth-footer"><a href="/login">Back to sign in</a></div>` +
+			`</div></div>{{end}}`
+	case "invitation":
+		return `{{define "title"}}Invitation — Stored{{end}}` +
+			`{{define "nav"}}{{end}}` +
+			`{{define "content"}}` +
+			`<div class="auth-page"><div class="auth-card">` +
+			`<div class="auth-brand">Stored</div>` +
+			`<h1>Invitation</h1>` +
+			`{{if .Error}}<div class="alert alert-error">{{.Error}}</div>` +
+			`<div class="auth-footer"><a href="/login">Sign in</a></div>` +
+			`{{else if .HasAccount}}<p>You are invited to <strong>{{.Account}}</strong> as a <strong>{{.Role}}</strong>. ` +
+			`{{.Email}} already has an account: sign in, then open this link again to accept.</p>` +
+			`<div class="auth-footer"><a href="/login">Sign in</a> · <a href="/dashboard/invitations/{{.Token}}">Accept after signing in</a></div>` +
+			`{{else}}<p>You are invited to <strong>{{.Account}}</strong> as a <strong>{{.Role}}</strong>. ` +
+			`Choose a password for <strong>{{.Email}}</strong> to accept.</p>` +
+			`<form method="post" action="/auth/invitations/{{.Token}}">` +
+			`<div class="form-group"><label for="password">Password</label>` +
+			`<input type="password" id="password" name="password" required minlength="8" autocomplete="new-password"></div>` +
+			`<button type="submit" class="btn btn-primary btn-block">Accept and create my sign-in</button>` +
+			`</form>{{end}}` +
 			`</div></div>{{end}}`
 	case "verify-result":
 		return `{{define "title"}}Email Verification — Stored{{end}}` +

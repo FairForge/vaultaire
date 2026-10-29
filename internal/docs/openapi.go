@@ -1070,6 +1070,76 @@ func generateManagementPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 		},
+		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
+		// (docs/API.md § Members).
+		"/api/v1/manage/members": {
+			Get: mgmt(jsonOp("Management", "List members", "ManageListMembers",
+				"The account's members (`user_id`, `email`, `role` owner/admin/developer/viewer, `invited_by`, `accepted_at`) and its pending `invitations` (never a token). Any member may read it.",
+				map[string]Response{
+					"200": jsonResp("Members", objectPtr("", map[string]*Schema{
+						"object":      strEnum("", "list"),
+						"data":        arrayOf(objectPtr("A member", map[string]*Schema{"user_id": str(""), "email": str(""), "role": str(""), "accepted_at": str("")})),
+						"invitations": arrayOf(objectPtr("A pending invitation", map[string]*Schema{"id": str(""), "email": str(""), "role": str(""), "expires_at": str(""), "expired": boolean("")})),
+					}, "object", "data", "invitations")),
+					"500": errResp("`internal_error`"),
+				})),
+			Post: mut(withBody(jsonOp("Management", "Invite a member", "ManageInviteMember",
+				"An owner's or an admin's. E-mails the address a link that works once and expires after 7 days; only the token's SHA-256 is stored. The role is `admin`, `developer` or `viewer`, never `owner`. Audited `member.invited`.",
+				map[string]Response{
+					"201": jsonResp("Invitation sent", objectPtr("", map[string]*Schema{"object": strEnum("", "invitation"), "id": str(""), "email": str(""), "role": str(""), "expires_at": str("")}, "object", "id")),
+					"400": errResp("`invalid_json`, `invalid_role` or `invalid_email`"),
+					"403": errResp("`role_forbidden`: the caller's role may not manage members"),
+					"409": errResp("`already_a_member`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The invitation", objectPtr("", map[string]*Schema{"email": str(""), "role": strEnum("", "admin", "developer", "viewer")}, "email", "role")))),
+		},
+		"/api/v1/manage/members/{user}": {
+			Parameters: []Parameter{pathParam("user", "The member's user id")},
+			Patch: mut(withBody(jsonOp("Management", "Change a member's role", "ManageSetMemberRole",
+				"An owner's or an admin's. The owner keeps its role. Audited `member.role_changed`.",
+				map[string]Response{
+					"200": jsonResp("Changed", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "user_id": str(""), "role": str("")}, "object", "user_id", "role")),
+					"400": errResp("`invalid_json` or `invalid_role`"),
+					"403": errResp("`role_forbidden`"),
+					"404": errResp("`member_not_found`"),
+					"409": errResp("`owner_is_permanent`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The new role", objectPtr("", map[string]*Schema{"role": strEnum("", "admin", "developer", "viewer")}, "role")))),
+			Delete: mut(jsonOp("Management", "Remove a member", "ManageRemoveMember",
+				"An owner's or an admin's. Removes the membership only: never the person's sign-in, never a bucket. The owner cannot be removed. Audited `member.removed`.",
+				map[string]Response{
+					"200": jsonResp("Removed", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "user_id": str(""), "deleted": boolean("Always true")}, "object", "user_id", "deleted")),
+					"403": errResp("`role_forbidden`"),
+					"404": errResp("`member_not_found`"),
+					"409": errResp("`owner_is_permanent`"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
+		"/api/v1/manage/invitations/{id}": {
+			Parameters: []Parameter{pathParam("id", "The invitation id")},
+			Delete: mut(jsonOp("Management", "Revoke an invitation", "ManageRevokeInvitation",
+				"An owner's or an admin's: a pending invitation's link stops working. Audited `member.invitation_revoked`.",
+				map[string]Response{
+					"200": jsonResp("Revoked", objectPtr("", map[string]*Schema{"object": strEnum("", "invitation"), "id": str(""), "deleted": boolean("Always true")}, "object", "id", "deleted")),
+					"403": errResp("`role_forbidden`"),
+					"404": errResp("`invitation_not_found`"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
+		"/api/v1/manage/invitations/{token}/accept": {
+			Parameters: []Parameter{pathParam("token", "The token of the e-mailed link")},
+			Post: mut(jsonOp("Management", "Accept an invitation", "ManageAcceptInvitation",
+				"Any signed-in user whose e-mail the invitation was sent to: makes the member row, once. Audited `member.joined`. Sign in again with `tenant_id` to act on the account.",
+				map[string]Response{
+					"200": jsonResp("Joined", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "tenant_id": str(""), "user_id": str(""), "role": str("")}, "object", "tenant_id", "role")),
+					"403": errResp("`invitation_other_address`"),
+					"404": errResp("`invitation_not_found`"),
+					"410": errResp("`invitation_expired` (7 days) or `invitation_used` (single use)"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
 		"/api/v1/whoami": {
 			Get: rateLimited(&Operation{
 				Tags:    []string{"Management"},

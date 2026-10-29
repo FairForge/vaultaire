@@ -52,6 +52,17 @@ func RenderVerification(baseURL, token, email string) (string, string, error) {
 	})
 }
 
+type invitationData struct {
+	BaseURL, Token, Email, Account, Inviter, Role string
+}
+
+// RenderInvitation renders a member invitation (WP-TEAM-1): the link is
+// <baseURL>/auth/invitations/<token>, single use, 7 days.
+func RenderInvitation(baseURL, token, email, account, inviter, role string) (string, string, error) {
+	return render("invitation.html", invitationData{BaseURL: baseURL, Token: token, Email: email,
+		Account: account, Inviter: inviter, Role: role})
+}
+
 type passwordResetData struct {
 	BaseURL string
 	Token   string

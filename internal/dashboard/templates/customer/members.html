@@ -1,0 +1,84 @@
+{{define "title"}}Members, Stored{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Members</h1>
+        <p class="text-muted">The people who may act on this account, and as what. Your role: {{.MyRole}}.</p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">Members</div>
+    <table class="table">
+        <thead><tr><th>E-mail</th><th>Role</th><th>Since</th>{{if .CanManage}}<th></th>{{end}}</tr></thead>
+        <tbody>
+        {{range .Members}}
+            <tr>
+                <td>{{.Email}}</td>
+                <td>{{.Role}}</td>
+                <td><time datetime="{{.AcceptedAt.Format "2006-01-02T15:04:05Z"}}">{{.AcceptedAt.Format "2006-01-02"}}</time></td>
+                {{if $.CanManage}}<td>{{if ne .Role "owner"}}
+                    <form method="post" action="/dashboard/members/{{.UserID}}/role" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <select name="role">
+                            <option value="admin" {{if eq .Role "admin"}}selected{{end}}>admin</option>
+                            <option value="developer" {{if eq .Role "developer"}}selected{{end}}>developer</option>
+                            <option value="viewer" {{if eq .Role "viewer"}}selected{{end}}>viewer</option>
+                        </select>
+                        <button class="btn btn-sm" type="submit">Change</button>
+                    </form>
+                    <form method="post" action="/dashboard/members/{{.UserID}}/remove" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button class="btn btn-sm btn-danger" type="submit">Remove</button>
+                    </form>
+                {{end}}</td>{{end}}
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    <p class="text-muted" style="margin-top: 1rem;">A viewer reads. A developer also makes keys and buckets. An admin also invites and manages members. Only the owner deletes the account, exports it or changes billing.</p>
+</div>
+
+{{if .CanManage}}
+<div class="card">
+    <div class="card-title">Invite someone</div>
+    <form method="post" action="/dashboard/members">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <label>E-mail <input type="email" name="email" required></label>
+        <label>Role
+            <select name="role">
+                <option value="viewer">viewer</option>
+                <option value="developer">developer</option>
+                <option value="admin">admin</option>
+            </select>
+        </label>
+        <button class="btn" type="submit">Send invitation</button>
+    </form>
+    <p class="text-muted" style="margin-top: 1rem;">The invitation is a link, sent by e-mail, that works once and expires after 7 days.</p>
+</div>
+{{end}}
+
+{{if .Invitations}}
+<div class="card">
+    <div class="card-title">Pending invitations</div>
+    <table class="table">
+        <thead><tr><th>E-mail</th><th>Role</th><th>Expires</th>{{if .CanManage}}<th></th>{{end}}</tr></thead>
+        <tbody>
+        {{range .Invitations}}
+            <tr>
+                <td>{{.Email}}</td>
+                <td>{{.Role}}</td>
+                <td>{{if $.Now.Before .ExpiresAt}}{{.ExpiresAt.Format "2006-01-02 15:04"}} UTC{{else}}expired{{end}}</td>
+                {{if $.CanManage}}<td>
+                    <form method="post" action="/dashboard/members/invitations/{{.ID}}/revoke" style="display:inline">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button class="btn btn-sm" type="submit">Revoke</button>
+                    </form>
+                </td>{{end}}
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+{{end}}
