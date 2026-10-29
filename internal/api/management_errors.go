@@ -84,5 +84,6 @@ func writeManagementError(w http.ResponseWriter, errType, code, message, param s
 			RequestID: getRequestID(w),
 		},
 	}
+	noteS3Error(w, code, resp.Error.RequestID) // the request log's error code (RP78-6)
 	writeJSON(w, status, resp)
 }

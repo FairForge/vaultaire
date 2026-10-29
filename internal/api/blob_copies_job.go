@@ -304,6 +304,7 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`')
 		  AND NOT (COALESCE(h.backend_name, '') = ANY($4)) AND NOT (COALESCE(b.tier_preference, '') = ANY($4))
 		  AND h.size_bytes > 0
+		  AND `+notSandboxH+` -- WP-DX-1: a sandbox's bytes stay on local
 		  AND NOT EXISTS (SELECT 1 FROM blob_copies c WHERE c.tenant_id = h.tenant_id
 		                  AND c.storage_key = COALESCE(h.storage_key, h.object_key) AND c.kind = 'mirror')
 		ORDER BY h.updated_at

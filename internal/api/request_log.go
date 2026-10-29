@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/lib/pq"
 	"go.uber.org/zap"
 
@@ -194,4 +195,76 @@ func requestLogQueryFrom(r *http.Request, tenantID string) (requestlog.Query, st
 		q.Limit = n
 	}
 	return q, ""
+}
+
+// mgmtLogWriter keeps what a management response answered: the status, the
+// body bytes and the management error code (writeManagementError notes it).
+type mgmtLogWriter struct {
+	http.ResponseWriter
+	status  int
+	bytes   int64
+	errCode string
+}
+
+func (w *mgmtLogWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *mgmtLogWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(b)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func (w *mgmtLogWriter) noteS3Error(code, _ string) {
+	if w.errCode == "" {
+		w.errCode = code
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *mgmtLogWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// logManagementRequest is the management API's request-log middleware
+// (RP78-6, Stage 1a Prompt 50): every request of a JWT's tenant is one
+// request_log row through the access-log tracker's one sink — op the route
+// pattern (METHOD /pattern), host "api", key_id the token's id or "session"
+// (a JWT carries no access key), the management error code of a refusal,
+// the response's X-Request-Id. Never a body, a header or the token. Mounted
+// after requireJWT: a request it refused has no tenant to log under.
+func (s *Server) logManagementRequest(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenantID, _ := r.Context().Value(tenantIDKey).(string)
+		if s.accessLogTracker == nil || tenantID == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		lw := &mgmtLogWriter{ResponseWriter: w}
+		var in int64
+		if r.ContentLength > 0 {
+			in = r.ContentLength
+		}
+		next.ServeHTTP(lw, r)
+		op := r.Method + " " + r.URL.Path
+		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
+			op = r.Method + " " + rc.RoutePattern()
+		}
+		keyID, _ := r.Context().Value(jwtIDKey).(string)
+		if keyID == "" {
+			keyID = "session"
+		}
+		status := lw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		s.accessLogTracker.Record(r.Context(), s3AccessEvent{tenantID: tenantID, operation: op, statusCode: status,
+			bytesSent: lw.bytes, bytesReceived: in, requestID: w.Header().Get("X-Request-Id"), errorCode: lw.errCode,
+			keyID: keyID, host: "api", loggedAt: time.Now()})
+	})
 }

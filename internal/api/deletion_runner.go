@@ -12,6 +12,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
@@ -516,6 +517,21 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 	if len(lagging) > 0 {
 		if err := r.recordSettles(ctx, d, lagging); err != nil {
 			return r.defer_(te, log, "record the settle walk", err)
+		}
+	}
+
+	// b4. The tenant's sandbox (WP-DX-1): its test data off `local` before
+	// the rows (EraseRows erases the sandbox's rows with the tenant's, and
+	// refuses while a sandbox head row remains).
+	if sb, sErr := auth.SandboxOf(ctx, r.db, d.TenantID); sErr != nil {
+		return r.defer_(te, log, "find the sandbox", sErr)
+	} else if sb != "" {
+		res, pErr := purgeSandbox(ctx, r.db, r.eng, sb, nil)
+		if pErr == nil && len(res.Errors) > 0 {
+			pErr = fmt.Errorf("%d deletes failed: %s", len(res.Errors), res.Errors[0])
+		}
+		if pErr != nil {
+			return r.defer_(te, log, "purge the sandbox", pErr)
 		}
 	}
 

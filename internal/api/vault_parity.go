@@ -617,7 +617,8 @@ const unprotectedFrom = `
 		  ON v.tenant_id = o.tenant_id AND v.bucket = o.bucket AND v.object_key = o.object_key
 		WHERE o.floor = 'vault' AND o.size_bytes > 0
 		  AND (v.tenant_id IS NULL OR v.etag <> o.etag OR v.state <> 'complete')
-		  AND ($1 = '' OR o.tenant_id = $1)`
+		  AND ($1 = '' OR o.tenant_id = $1)
+		  AND ` + notSandboxO // WP-DX-1: a sandbox's bytes stay on local
 
 // countUnprotected sets the unprotected gauges — per tenant, so a tenant
 // whose flag is off is flag_off, not "other" (Prompt 2b.3 D2.3: with the

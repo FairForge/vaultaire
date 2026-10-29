@@ -287,6 +287,11 @@ curl -X PUT {{host "s3"}}/my-first-bucket/hello.txt \
         <div class="card-title">Plan</div>
         <div class="card-value card-value-plan">{{.Tier}}</div>
     </div>
+    {{with .TestData}}<div class="card">
+        <div class="card-title">Test data</div>
+        <div class="card-value">{{.Objects}} objects</div>
+        <div class="card-detail">{{.BytesFmt}} written with {{.Keys}} test key(s) (<code>VLT_TEST_</code>) &middot; never billed, kept on a local disk, deleted after 7 days</div>
+    </div>{{end}}
 </div>
 
 {{if .ShowUpgradeCTA}}

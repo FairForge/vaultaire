@@ -79,6 +79,9 @@ const (
 	edgeOpGet  = "get"
 	// edgeReasonSmall is the pass-through of a body under EDGE_MIN_BYTES.
 	edgeReasonSmall = "small"
+	// edgeReasonSandbox: a test-mode (sandbox) tenant's request is the
+	// origin's — its bytes go to `local` only (WP-DX-1, sandbox.go).
+	edgeReasonSandbox = "sandbox"
 )
 
 // The data-plane metrics (plan 40.10: every byte by host; Part B adds
@@ -447,6 +450,9 @@ func (s *Server) edgeAdmitPrelude(ctx context.Context, req edgeAdmitRequest) (p 
 	if isTenantSuspended(ctx, s.db, tenantID) {
 		WriteS3Error(rec, ErrAccountSuspended, sr.URL.Path, generateRequestID())
 		return decide(refusalOf(rec))
+	}
+	if isSandbox(ctx, s.db, tenantID) {
+		return decide(passThrough(edgeReasonSandbox)) // WP-DX-1: never a backend link
 	}
 
 	// The names, as the parser reads them (decoded path: bucket, key).
