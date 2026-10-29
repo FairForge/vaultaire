@@ -14,6 +14,10 @@
 //  3. no house: the Standard ratio × tenant_quotas.storage_limit_bytes
 //     (the free tier's 5 GiB gives 2.5 GiB)
 //
+// A sandbox (a test-mode tenant, tenants.sandbox_of) is none of these: its
+// allowance is SandboxEgressAllowance, a constant — never a price, never an
+// override (RP80-1: metered and paced, never billed).
+//
 // SetHouse and ClearHouse never write bandwidth_limit_bytes, so an override
 // survives a webhook replay and the end of a subscription.
 //
@@ -35,7 +39,14 @@ const (
 	EgressSourceOverride = "override"
 	EgressSourceHouse    = "house"
 	EgressSourceQuota    = "quota"
+	EgressSourceSandbox  = "sandbox"
 )
+
+// SandboxEgressAllowance is a sandbox's monthly egress allowance: 1× its
+// local-disk cap (the free tier's 5 GiB). Past it the sandbox is paced like
+// any tenant (RP80-1) — at the throttle's floor, since 5 GiB a month is
+// below it.
+const SandboxEgressAllowance int64 = 5 << 30
 
 // EgressAllowance is a tenant's monthly egress allowance, in bytes.
 type EgressAllowance struct {
@@ -66,19 +77,24 @@ func PlanEgressAllowance(stdLimit, vaultLimit int64) int64 {
 func (m *QuotaManager) EgressAllowance(ctx context.Context, tenantID string) (EgressAllowance, error) {
 	var total, override, stdLimit, vaultLimit int64
 	var floors int
+	var sandbox bool
 	err := m.db.QueryRowContext(ctx, `
 		SELECT q.storage_limit_bytes,
 		       COALESCE(q.bandwidth_limit_bytes, 0),
 		       COALESCE(SUM(f.storage_limit_bytes) FILTER (WHERE f.floor = 'standard'), 0),
 		       COALESCE(SUM(f.storage_limit_bytes) FILTER (WHERE f.floor = 'vault'), 0),
-		       COUNT(f.floor)
+		       COUNT(f.floor),
+		       EXISTS (SELECT 1 FROM tenants t WHERE t.id = q.tenant_id AND t.sandbox_of IS NOT NULL)
 		  FROM tenant_quotas q
 		  LEFT JOIN tenant_floor_quotas f ON f.tenant_id = q.tenant_id
 		 WHERE q.tenant_id = $1
-		 GROUP BY q.storage_limit_bytes, q.bandwidth_limit_bytes`,
-		tenantID).Scan(&total, &override, &stdLimit, &vaultLimit, &floors)
+		 GROUP BY q.tenant_id, q.storage_limit_bytes, q.bandwidth_limit_bytes`,
+		tenantID).Scan(&total, &override, &stdLimit, &vaultLimit, &floors, &sandbox)
 	if err != nil {
 		return EgressAllowance{}, fmt.Errorf("egress allowance for tenant %s: %w", tenantID, err)
+	}
+	if sandbox {
+		return EgressAllowance{Bytes: SandboxEgressAllowance, PlanBytes: SandboxEgressAllowance, Source: EgressSourceSandbox}, nil
 	}
 
 	a := EgressAllowance{Source: EgressSourceQuota, PlanBytes: PlanEgressAllowance(total, 0)}

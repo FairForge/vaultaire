@@ -349,6 +349,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				reqID := generateRequestID()
 				s.applyS3CORSPreAuth(w, r)
 				switch errCode {
+				case errTestPresignExpires:
+					WriteS3ErrorWithContext(w, ErrAuthorizationQueryParametersError, r.URL.Path, reqID,
+						WithMessage(testPresignExpiresMessage))
 				case ErrExpiredPresignedRequest, ErrSignatureDoesNotMatch,
 					ErrAccessDenied, ErrAuthorizationQueryParametersError,
 					ErrInvalidPresignExpires, ErrRequestTimeTooSkewed, ErrInvalidAccessKeyId:
@@ -452,8 +455,9 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		defer func() { s.recordS3Access(cw, r, tenantID, s3Req, ingressBytes) }()
 	}
 
-	// WP-DX-1: a test-mode (sandbox) tenant — a VLT_TEST_ key's — is never
-	// metered, and every response says so (sandbox.go).
+	// WP-DX-1: a test-mode (sandbox) tenant — a VLT_TEST_ key's — is
+	// metered under its own id and never billed (RP80-1), and every
+	// response says so (sandbox.go).
 	sandbox := isSandbox(r.Context(), s.db, tenantID)
 	if sandbox {
 		w.Header().Set("x-stored-mode", "test")
@@ -607,7 +611,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if cw == nil { // an anonymous request: counted, not recorded
 		cw = &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
 	}
-	metered := tenantID != "" && tenantID != "default" && s.egress != nil && !sandbox
+	metered := tenantID != "" && tenantID != "default" && s.egress != nil
 	if metered {
 		cw.span = s.egress.span(r.Context(), tenantID)
 	}
@@ -731,7 +735,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	// Record bandwidth for authenticated requests, attributed to the backend
 	// the engine reports having served the bytes ("" if none was touched).
-	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil && !sandbox {
+	if tenantID != "" && tenantID != "default" && s.bandwidthTracker != nil {
 		s.bandwidthTracker.recordResponse(tenantID, common.BackendUsed(r.Context()), ingressBytes, cw)
 	}
 }
@@ -1308,14 +1312,19 @@ func (s *Server) handleListBuckets(w http.ResponseWriter, r *http.Request, req *
 }
 
 // isTenantSuspended checks if a tenant has been suspended by an admin.
+// A sandbox is suspended with its parent (RP80-2: an account suspended for
+// abuse kept its test keys): one query reads the tenant's own row and its
+// parent's.
 func isTenantSuspended(ctx context.Context, db *sql.DB, tenantID string) bool {
-	var suspendedAt sql.NullTime
-	err := db.QueryRowContext(ctx,
-		`SELECT suspended_at FROM tenants WHERE id = $1`, tenantID).Scan(&suspendedAt)
+	var suspended bool
+	err := db.QueryRowContext(ctx, `
+		SELECT t.suspended_at IS NOT NULL OR p.suspended_at IS NOT NULL
+		  FROM tenants t LEFT JOIN tenants p ON p.id = t.sandbox_of
+		 WHERE t.id = $1`, tenantID).Scan(&suspended)
 	if err != nil {
 		return false // fail open — if we can't check, allow access
 	}
-	return suspendedAt.Valid
+	return suspended
 }
 
 // extractClientIP returns the real client IP. All proxy-header trust rules

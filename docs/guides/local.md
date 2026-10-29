@@ -22,9 +22,10 @@ aws --endpoint-url http://localhost:8000 s3 cp ./file s3://my-bucket/    # after
 ```
 
 - **The first boot** makes one account (`dev@localhost.local`) and prints its
-  key pair **once**. Later boots print no secret. Lost it? Run `down -v` and
-  start again, or rotate the key in the dashboard
-  (`http://localhost:8000/dashboard`).
+  key pair and a dashboard password **once**. Later boots print no secret.
+  Lost them? Run `down -v` and start again, or sign in to the dashboard
+  (`http://localhost:8000/dashboard`) and rotate them. The first-boot account
+  is made only with `STORAGE_MODE=local` (the image's default).
 - **Ports:** the server listens on `127.0.0.1:8000`. Set `STORED_PORT` to use
   another.
 - **Data:** objects live in the `data` volume and the database in `pgdata`.

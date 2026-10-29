@@ -864,3 +864,29 @@ func TestBlobCopiesJob_LeavesTheCustomersTheirEgress(t *testing.T) {
 	assert.Equal(t, 1, res.Skipped)
 	assert.Equal(t, int64(20_000), res.Egress.Spent["edgefake"])
 }
+
+// RP80-6: a settle is the admitting host's: another host's settle of the
+// same admit id is 404, as an unknown admit.
+func TestEdgeMirror_SettleIsTheAdmittingHostsOnly(t *testing.T) {
+	f := setupEdgeFixture(t)
+	m := f.addMirrorLeg()
+	body := testBytes(9000)
+	resp := f.admit(f.signed("/"+f.bucket+"/host.bin", nil, body, nil, ""))
+	a := f.drv.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+	c := okCommit(resp.AdmitID, body, a)
+	c.BackendETags = []string{a}
+	c.MirrorSettle = true
+	relay, _ := f.commit(c)
+	require.Equal(t, http.StatusOK, relay.Status, relay.Body)
+	b := m.workerPut(f.tenantID, f.container(), resp.StorageKey, body)
+
+	other := dataplane.WithHost(context.Background(), dataplane.HostInfo{Name: "node-elsewhere"})
+	_, code, err := f.srv.edgeMirrorSettle(other, dataplane.MirrorSettle{AdmitID: resp.AdmitID, ETag: b})
+	assert.Equal(t, http.StatusNotFound, code)
+	assert.ErrorIs(t, err, errEdgeAdmitUnknown)
+	assert.Equal(t, "pending", f.copyState(resp.StorageKey), "nothing settled")
+
+	got, code := f.settle(dataplane.MirrorSettle{AdmitID: resp.AdmitID, ETag: b})
+	require.Equal(t, http.StatusOK, code, "the admitting host settles")
+	assert.Equal(t, "ready", got.State)
+}

@@ -90,6 +90,12 @@ func (s *Server) edgeMirrorSettle(ctx context.Context, req dataplane.MirrorSettl
 	if err != nil {
 		return out, http.StatusInternalServerError, err
 	}
+	// RP80-6: a settle is the admitting host's — another host's call for
+	// the same admit id is an unknown admit (once nodes hold tokens of their
+	// own, WP-EDGE-3, one host must not settle another's copy).
+	if admitted := row.Host; (admitted == "" && admitHost(ctx) != edgeHost) || (admitted != "" && admitted != admitHost(ctx)) {
+		return out, http.StatusNotFound, errEdgeAdmitUnknown
+	}
 	leg := row.Attrs.MirrorLeg
 	if row.Op != edgeOpPut || leg == "" {
 		return out, http.StatusBadRequest, errEdgeNotMirrored

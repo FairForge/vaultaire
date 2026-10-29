@@ -27,6 +27,9 @@ var (
 	ErrNoBucket = errors.New("no_such_bucket")
 	// ErrBadVisibility: a visibility other than private / public-read.
 	ErrBadVisibility = errors.New("invalid_visibility")
+	// ErrSandboxNeverPublic: a test-mode tenant's bucket is never Public
+	// (RP80-1) — 409 sandbox_never_public.
+	ErrSandboxNeverPublic = errors.New("sandbox_never_public")
 )
 
 // FromColumns is migration 102's CASE in Go: public-read → public,
@@ -121,7 +124,8 @@ const ActionModeChanged = "bucket.mode_changed"
 // change — a public bucket never requires a key — and records the change in
 // audit_logs in the same transaction (RP33-4). Returns the mode the row now
 // has (the generated column). ErrNoBucket, ErrPublicSSEC, ErrBadVisibility,
-// ErrReadableObjects; nothing written on a refusal.
+// ErrReadableObjects, ErrSandboxNeverPublic (a test-mode tenant's bucket made
+// Public, RP80-1); nothing written on a refusal.
 //
 // The readable check is its own statement AFTER the lock: under READ
 // COMMITTED a statement's snapshot is taken when it starts, so a subquery
@@ -153,14 +157,20 @@ func SetBucket(ctx context.Context, q Querier, tenantID, bucket string, c Change
 		return "", fmt.Errorf("bucket %s: mode lock: %w", bucket, err)
 	}
 	var fromMode string
-	var fromSSEC bool
-	err := q.QueryRowContext(ctx, `SELECT mode, ssec_required FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, bucket).Scan(&fromMode, &fromSSEC)
+	var fromSSEC, sandbox bool
+	err := q.QueryRowContext(ctx, `SELECT b.mode, b.ssec_required,
+		       EXISTS (SELECT 1 FROM tenants t WHERE t.id = b.tenant_id AND t.sandbox_of IS NOT NULL)
+		  FROM buckets b WHERE b.tenant_id = $1 AND b.name = $2`,
+		tenantID, bucket).Scan(&fromMode, &fromSSEC, &sandbox)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("bucket %s: %w", bucket, ErrNoBucket)
 	}
 	if err != nil {
 		return "", fmt.Errorf("bucket %s: read the mode: %w", bucket, err)
+	}
+	if sandbox && c.Visibility != nil && *c.Visibility == VisibilityPublic {
+		// RP80-1: a test-mode tenant's data is never served to the world.
+		return "", fmt.Errorf("bucket %s: %w", bucket, ErrSandboxNeverPublic)
 	}
 	if c.SSECRequired != nil && *c.SSECRequired && !fromSSEC {
 		r := &ReadableObjectsError{Bucket: bucket}

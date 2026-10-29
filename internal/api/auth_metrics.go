@@ -87,7 +87,7 @@ func presignFailureReason(err error) (reason string, mayBeKnown bool) {
 		return "presign_signature_mismatch", true
 	case ErrRequestTimeTooSkewed:
 		return "presign_time_skewed", true
-	case ErrAuthorizationQueryParametersError, ErrInvalidPresignExpires:
+	case ErrAuthorizationQueryParametersError, ErrInvalidPresignExpires, errTestPresignExpires:
 		return "presign_malformed", false
 	default:
 		return "presign_unknown_key", false

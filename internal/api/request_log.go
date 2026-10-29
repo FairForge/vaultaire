@@ -33,6 +33,7 @@ import (
 	"github.com/lib/pq"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/requestlog"
 )
 
@@ -154,6 +155,26 @@ func (s *Server) handleMgmtRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.db == nil {
 		writeListResponse(w, nil, false, "", 0)
+		return
+	}
+	// ?mode=test reads the tenant's sandbox's rows (RB8-2: a test key's
+	// requests are the sandbox's, D-STRIPE-17); live (the default) its own.
+	switch mode := r.URL.Query().Get("mode"); mode {
+	case "", "live":
+	case "test":
+		sb, err := auth.SandboxOf(r.Context(), s.db, tenantID)
+		if err != nil {
+			s.logger.Error("manage requests: sandbox lookup failed", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "the request log could not be read", "")
+			return
+		}
+		if sb == "" {
+			writeListResponse(w, []interface{}{}, false, "", 0) // no test key was ever made
+			return
+		}
+		q.TenantID = sb
+	default:
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_parameter", "mode must be live or test", "mode")
 		return
 	}
 	rows, next, err := requestlog.Read(r.Context(), s.db, q)

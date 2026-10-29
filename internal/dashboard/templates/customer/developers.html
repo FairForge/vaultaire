@@ -7,6 +7,12 @@
     </div>
 </div>
 
+<p style="display:flex;gap:0.5rem;margin-bottom:1rem">
+    <a href="/dashboard/developers" class="btn{{if eq .Mode "live"}} btn-primary{{end}}">Live</a>
+    <a href="/dashboard/developers?mode=test" class="btn{{if eq .Mode "test"}} btn-primary{{end}}">Test</a>
+    {{if eq .Mode "test"}}<span class="text-muted" style="align-self:center">The requests signed with your test keys (VLT_TEST_…).</span>{{end}}
+</p>
+
 <form method="GET" action="/dashboard/developers" class="card" style="display:flex;flex-wrap:wrap;gap:0.75rem;align-items:flex-end;margin-bottom:1.5rem">
     <label style="display:flex;flex-direction:column;gap:0.25rem">Key
         <select name="key">
@@ -27,8 +33,9 @@
     <label style="display:flex;flex-direction:column;gap:0.25rem;flex:1;min-width:12rem">Request id
         <input type="search" name="request_id" value="{{.Filter.RequestID}}" placeholder="the RequestId of an error" autocomplete="off">
     </label>
+    {{if eq .Mode "test"}}<input type="hidden" name="mode" value="test">{{end}}
     <button type="submit" class="btn btn-primary">Search</button>
-    {{if or .Filter.Key .Filter.Status .Filter.RequestID}}<a href="/dashboard/developers" class="btn">Clear</a>{{end}}
+    {{if or .Filter.Key .Filter.Status .Filter.RequestID}}<a href="/dashboard/developers{{if eq .Mode "test"}}?mode=test{{end}}" class="btn">Clear</a>{{end}}
 </form>
 
 {{if .Requests}}

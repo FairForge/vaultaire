@@ -35,6 +35,10 @@ const maxTestKeys = 10
 // ErrSandboxOfSandbox: a sandbox has no sandbox of its own.
 var ErrSandboxOfSandbox = errors.New("a test-mode tenant has no sandbox of its own")
 
+// ErrTenantSuspended: the tenant is suspended — no test key is minted for
+// it (RP80-2: a sandbox is suspended with its parent).
+var ErrTenantSuspended = errors.New("the account is suspended")
+
 // IsTestKey reports whether an access key id is a test-mode key.
 func IsTestKey(accessKey string) bool { return strings.HasPrefix(accessKey, TestKeyPrefix) }
 
@@ -101,10 +105,17 @@ func (a *AuthService) GenerateTestKey(ctx context.Context, userID, name string, 
 	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
 		return nil, fmt.Errorf("generate test key: lock the user: %w", err)
 	}
-	if p, err := ParentOfSandbox(ctx, tx, parent); err != nil {
-		return nil, err
-	} else if p != "" {
+	var sandboxOf sql.NullString
+	var suspended bool
+	if err := tx.QueryRowContext(ctx, `SELECT sandbox_of, suspended_at IS NOT NULL FROM tenants WHERE id = $1`, parent).
+		Scan(&sandboxOf, &suspended); err != nil {
+		return nil, fmt.Errorf("generate test key: read the tenant: %w", err)
+	}
+	if sandboxOf.String != "" {
 		return nil, ErrSandboxOfSandbox
+	}
+	if suspended {
+		return nil, ErrTenantSuspended
 	}
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

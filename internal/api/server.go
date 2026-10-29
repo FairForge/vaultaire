@@ -356,9 +356,10 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	}
 
 	// The local image's first-boot account (WP-DX-1 PR C, bootstrap.go):
-	// only with VAULTAIRE_BOOTSTRAP_EMAIL set — never on prod.
+	// only with VAULTAIRE_BOOTSTRAP_EMAIL set and STORAGE_MODE=local — never
+	// on prod (RP80-7).
 	if email := strings.TrimSpace(os.Getenv("VAULTAIRE_BOOTSTRAP_EMAIL")); email != "" && s.db != nil {
-		if _, err := bootstrapTenant(context.Background(), s.auth, logger, email, os.Stdout); err != nil {
+		if _, err := bootstrapTenant(context.Background(), s.auth, logger, email, os.Getenv("STORAGE_MODE"), os.Stdout); err != nil {
 			logger.Error("first-boot account not made", zap.Error(err))
 		}
 	}

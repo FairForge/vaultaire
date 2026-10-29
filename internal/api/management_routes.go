@@ -708,6 +708,10 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 			writeManagementError(w, ErrTypeInvalidRequest, "sandbox_of_sandbox", err.Error(), "test")
 			return
 		}
+		if errors.Is(err, auth.ErrTenantSuspended) {
+			writeManagementError(w, ErrTypePermission, "account_suspended", "the account is suspended: no test key can be made", "test")
+			return
+		}
 		if !writeKeyScopeError(w, err) {
 			s.logger.Error("management create key", zap.Error(err))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create API key", "")

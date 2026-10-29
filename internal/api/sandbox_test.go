@@ -185,8 +185,9 @@ func TestTestKey_NeverReachesAPaidBackend(t *testing.T) {
 	}
 }
 
-// TestTestKey_NeverBilled: the parent's quota row and every bandwidth row are
-// untouched by the sandbox's writes and reads. The sandbox's own quota row
+// TestTestKey_NeverBilled: the parent's quota row and bandwidth rows are
+// untouched by the sandbox's writes and reads; its downloads are metered
+// under its own id (RP80-1). The sandbox's own quota row
 // counts its bytes — the cap on the `local` disk test data may use (the
 // free tier's), never a bill: a sandbox has no entitlement and no payment.
 func TestTestKey_NeverBilled(t *testing.T) {
@@ -208,8 +209,10 @@ func TestTestKey_NeverBilled(t *testing.T) {
 	assert.Equal(t, before, after, "the parent's quota untouched")
 	assert.Equal(t, int64(len(body)), sandboxUsed, "the sandbox's own allowance counts its bytes")
 	var bw int
-	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM bandwidth_usage_daily WHERE tenant_id = ANY($1)`, "{"+f.tenantID+","+f.sandboxID+"}").Scan(&bw))
-	assert.Zero(t, bw, "never metered")
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM bandwidth_usage_daily WHERE tenant_id = $1`, f.tenantID).Scan(&bw))
+	assert.Zero(t, bw, "never on the parent's meter")
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM bandwidth_usage_daily WHERE tenant_id = $1`, f.sandboxID).Scan(&bw))
+	assert.Equal(t, 1, bw, "metered under the sandbox's own id (RP80-1), never billed")
 }
 
 // A sandbox's objects are never a job's to copy onto a paid backend: the

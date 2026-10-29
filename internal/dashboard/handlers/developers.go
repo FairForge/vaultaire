@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"html/template"
 	"net/http"
 	"net/url"
@@ -17,7 +18,8 @@ import (
 // 49): the tenant's S3 requests of the last 7 days from the request log,
 // newest first, the error code's suggestion inline, filtered by key and
 // status and searchable by request id (the id a support ticket quotes),
-// paged by the reader's keyset cursor.
+// paged by the reader's keyset cursor. ?mode=test shows the requests of the
+// tenant's test keys (its sandbox's rows, RB8-2).
 func HandleDevelopers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
@@ -32,7 +34,21 @@ func HandleDevelopers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 			Key: strings.TrimSpace(v.Get("key")), Status: strings.TrimSpace(v.Get("status")), RequestID: strings.TrimSpace(v.Get("request_id")),
 		}
 		data["Filter"] = filter
-		q := requestlog.Query{TenantID: sd.TenantID, KeyID: filter.Key, RequestID: filter.RequestID,
+		// Live / Test (RB8-2): a test key's requests are the sandbox's rows
+		// (tenants.sandbox_of); test mode reads them.
+		mode := "live"
+		logTenant := sd.TenantID
+		if v.Get("mode") == "test" {
+			mode, logTenant = "test", ""
+			if db != nil {
+				if err := db.QueryRowContext(r.Context(), `SELECT id FROM tenants WHERE sandbox_of = $1`, sd.TenantID).Scan(&logTenant); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					logger.Error("developers page: sandbox lookup failed", zap.Error(err))
+					data["FlashError"] = "The request log could not be read. Try again in a minute."
+				}
+			}
+		}
+		data["Mode"] = mode
+		q := requestlog.Query{TenantID: logTenant, KeyID: filter.Key, RequestID: filter.RequestID,
 			Since: time.Now().Add(-7 * 24 * time.Hour), Limit: 50}
 		var err error
 		if q.StatusMin, q.StatusMax, err = requestlog.ParseStatus(filter.Status); err != nil {
@@ -41,7 +57,7 @@ func HandleDevelopers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		if q.After, err = requestlog.ParseCursor(v.Get("cursor")); err != nil {
 			data["FlashError"] = err.Error()
 		}
-		if db != nil && data["FlashError"] == nil {
+		if db != nil && data["FlashError"] == nil && logTenant != "" {
 			rows, next, rErr := requestlog.Read(r.Context(), db, q)
 			if rErr != nil {
 				logger.Error("developers page: request log read failed", zap.Error(rErr))
@@ -50,6 +66,9 @@ func HandleDevelopers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 			data["Requests"] = rows
 			if next != "" {
 				older := url.Values{"cursor": {next}}
+				if mode == "test" {
+					older.Set("mode", "test")
+				}
 				for k, val := range map[string]string{"key": filter.Key, "status": filter.Status, "request_id": filter.RequestID} {
 					if val != "" {
 						older.Set(k, val)
@@ -57,7 +76,7 @@ func HandleDevelopers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 				}
 				data["OlderURL"] = "/dashboard/developers?" + older.Encode()
 			}
-			data["Keys"] = developerKeys(r, db, sd.TenantID, logger)
+			data["Keys"] = developerKeys(r, db, logTenant, logger)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {
