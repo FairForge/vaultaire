@@ -622,7 +622,7 @@ func (e *CoreEngine) buildCandidateList(v view, preferred string) []string {
 //
 // Failover for a general-purpose write is therefore between the target, the
 // primary and the remaining general-purpose durable backends (idrive, lyve,
-// s3, quotaless). (R6-04) A driver may also declare itself target-only at
+// wasabi). (R6-04) A driver may also declare itself target-only at
 // run time (TargetOnlyDeclarer, WP-R7-7: a Lyve bucket with Object Lock).
 var targetOnlyBackends = map[string]bool{
 	"local":      true,

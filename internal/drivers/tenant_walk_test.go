@@ -187,14 +187,6 @@ func s3WalkCases() []s3WalkCase {
 		{"lyve", func(c *s3.Client) walkable { return &LyveDriver{client: c, region: "us-east-1", logger: log} }, tPrefixed},
 		{"geyser", func(c *s3.Client) walkable { return &GeyserDriver{client: c, bucket: "tape", logger: log} }, tPrefixed},
 		{"r2", func(c *s3.Client) walkable { return &R2Driver{client: c, bucket: "public", logger: log} }, tPrefixed},
-		{"s3compat", func(c *s3.Client) walkable {
-			return &S3CompatDriver{client: c, bucket: "data", prefix: "personal-files/vaultaire", logger: log}
-		}, func(_, container, artifact string) string {
-			return "personal-files/vaultaire/" + container + "/" + artifact
-		}},
-		{"quotaless", func(c *s3.Client) walkable {
-			return &QuotalessDriver{S3Driver: &S3Driver{client: c, logger: log}, rootPath: "personal-files", maxRetries: 1, logger: log}
-		}, func(_, container, artifact string) string { return "personal-files/" + container + "/" + artifact }},
 	}
 }
 

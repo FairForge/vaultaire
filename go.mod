@@ -26,7 +26,6 @@ require (
 	github.com/restic/chunker v0.4.0 // WP-R8-4: pinned — the chunker identity (internal/crypto/chunker.go); a bump that moves a boundary resets dedup, TestRabinChunker_GoldenBoundaries + TestChunkerIdentity_MatchesGoMod gate it
 	github.com/stretchr/testify v1.12.1
 	github.com/stripe/stripe-go/v75 v75.11.0
-	github.com/tetratelabs/wazero v1.12.0
 	github.com/yuin/goldmark v1.8.6
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.58.0

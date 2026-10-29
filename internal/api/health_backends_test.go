@@ -41,36 +41,10 @@ func TestConfiguredBackends_LyveDefaultsToUSWest1(t *testing.T) {
 		"must match the driver's us-west-1 default (closest to SLC)")
 }
 
-func TestConfiguredBackends_QuotalessOnlyWithCredentials(t *testing.T) {
-	// Endpoint alone is not enough — the backend is unused without a key.
-	env := map[string]string{"QUOTALESS_ENDPOINT": "https://io.quotaless.cloud:8000"}
-	assert.Empty(t, configuredBackends(func(k string) string { return env[k] }))
-
-	env["QUOTALESS_ACCESS_KEY"] = "qk"
-	got := configuredBackends(func(k string) string { return env[k] })
-	require.Len(t, got, 1)
-	assert.Equal(t, "quotaless", got[0].name)
-	assert.Equal(t, "io.quotaless.cloud:8000", got[0].address)
-}
-
-func TestConfiguredBackends_BadEndpointSkippedNotFatal(t *testing.T) {
+func TestConfiguredBackends_LyveRegion(t *testing.T) {
 	env := map[string]string{
-		"QUOTALESS_ACCESS_KEY": "qk",
-		"QUOTALESS_ENDPOINT":   "://not a url",
-		"LYVE_ACCESS_KEY":      "STX1AAA",
-	}
-	got := configuredBackends(func(k string) string { return env[k] })
-
-	// The bad quotaless endpoint is dropped; Lyve must still be probed.
-	require.Len(t, got, 1)
-	assert.Equal(t, "lyve", got[0].name)
-}
-
-func TestConfiguredBackends_MultipleBackends(t *testing.T) {
-	env := map[string]string{
-		"QUOTALESS_ACCESS_KEY": "qk",
-		"LYVE_ACCESS_KEY":      "STX1AAA",
-		"LYVE_REGION":          "eu-west-1",
+		"LYVE_ACCESS_KEY": "STX1AAA",
+		"LYVE_REGION":     "eu-west-1",
 	}
 	got := configuredBackends(func(k string) string { return env[k] })
 
@@ -78,6 +52,6 @@ func TestConfiguredBackends_MultipleBackends(t *testing.T) {
 	for _, b := range got {
 		names[b.name] = b.address
 	}
-	assert.Equal(t, "io.quotaless.cloud:8000", names["quotaless"])
 	assert.Equal(t, "s3.eu-west-1.global.lyve.seagate.com:443", names["lyve"])
+	assert.NotContains(t, names, "quotaless", "the Quotaless driver was deleted (WP-R7-3)")
 }

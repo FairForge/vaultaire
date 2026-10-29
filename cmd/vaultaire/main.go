@@ -179,17 +179,6 @@ func main() {
 	addDriver("local", localDriver)
 	logger.Info("local driver added", zap.String("path", dataPath))
 
-	// 2. Add S3 if credentials available
-	if accessKey := os.Getenv("S3_ACCESS_KEY"); accessKey != "" {
-		secretKey := os.Getenv("S3_SECRET_KEY")
-		if s3Driver, err := drivers.NewS3CompatDriver(accessKey, secretKey, logger); err == nil {
-			addDriver("s3", s3Driver)
-			logger.Info("S3 driver added")
-		} else {
-			logger.Warn("failed to add S3 driver", zap.Error(err))
-		}
-	}
-
 	// 3. Add Lyve if credentials available
 	if accessKey := os.Getenv("LYVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("LYVE_SECRET_KEY")
@@ -205,23 +194,6 @@ func main() {
 			logger.Info("Lyve driver added", zap.Bool("target_only", lyveDriver.TargetOnly()))
 		} else {
 			logger.Warn("failed to add Lyve driver", zap.Error(err))
-		}
-	}
-
-	// 4. Add Quotaless if credentials available
-	if accessKey := os.Getenv("QUOTALESS_ACCESS_KEY"); accessKey != "" {
-		secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
-		endpoint := os.Getenv("QUOTALESS_ENDPOINT")
-		if endpoint == "" {
-			endpoint = "https://us.quotaless.cloud:8000"
-		}
-
-		quotalessDriver, err := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger)
-		if err != nil {
-			logger.Warn("failed to create Quotaless driver", zap.Error(err))
-		} else {
-			addDriver("quotaless", quotalessDriver)
-			logger.Info("quotaless driver added", zap.String("endpoint", endpoint))
 		}
 	}
 

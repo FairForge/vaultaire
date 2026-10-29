@@ -15,9 +15,9 @@ import (
 func TestHealthHandler_AllHealthy(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("lyve")
-	s.healthChecker.RegisterBackend("quotaless")
+	s.healthChecker.RegisterBackend("wasabi")
 	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
-	s.healthChecker.UpdateHealth("quotaless", true, 15*time.Millisecond, nil)
+	s.healthChecker.UpdateHealth("wasabi", true, 15*time.Millisecond, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -38,10 +38,10 @@ func TestHealthHandler_AllHealthy(t *testing.T) {
 func TestHealthHandler_DegradedBackend(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("lyve")
-	s.healthChecker.RegisterBackend("quotaless")
+	s.healthChecker.RegisterBackend("wasabi")
 	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
-	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError)
-	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
+	s.healthChecker.UpdateHealth("wasabi", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("wasabi", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -60,11 +60,11 @@ func TestHealthHandler_DegradedBackend(t *testing.T) {
 func TestHealthHandler_AllUnhealthy(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("lyve")
-	s.healthChecker.RegisterBackend("quotaless")
+	s.healthChecker.RegisterBackend("wasabi")
 	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError)
 	s.healthChecker.UpdateHealth("lyve", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
-	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError)
-	s.healthChecker.UpdateHealth("quotaless", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
+	s.healthChecker.UpdateHealth("wasabi", false, 0, assert.AnError)
+	s.healthChecker.UpdateHealth("wasabi", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
@@ -140,10 +140,10 @@ func TestReadinessHandler_NotReady(t *testing.T) {
 func TestBackendsHealthHandler(t *testing.T) {
 	s := newTestServerWithHealthChecker(t)
 	s.healthChecker.RegisterBackend("lyve")
-	s.healthChecker.RegisterBackend("quotaless")
+	s.healthChecker.RegisterBackend("wasabi")
 	s.healthChecker.RegisterBackend("onedrive")
 	s.healthChecker.UpdateHealth("lyve", true, 10*time.Millisecond, nil)
-	s.healthChecker.UpdateHealth("quotaless", true, 15*time.Millisecond, nil)
+	s.healthChecker.UpdateHealth("wasabi", true, 15*time.Millisecond, nil)
 	s.healthChecker.UpdateHealth("onedrive", false, 0, assert.AnError)
 	s.healthChecker.UpdateHealth("onedrive", false, 0, assert.AnError) // two failed probes in a row (WP-R6-3)
 
@@ -160,7 +160,7 @@ func TestBackendsHealthHandler(t *testing.T) {
 
 	assert.Len(t, resp, 3)
 	assert.Equal(t, "healthy", resp["lyve"]["status"])
-	assert.Equal(t, "healthy", resp["quotaless"]["status"])
+	assert.Equal(t, "healthy", resp["wasabi"]["status"])
 	assert.Equal(t, "unhealthy", resp["onedrive"]["status"])
 }
 

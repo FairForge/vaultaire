@@ -85,14 +85,9 @@ func TestTunedHTTPClient_CombinedOptions(t *testing.T) {
 	assert.NotNil(t, transport.TLSNextProto)
 }
 
-func TestS3Driver_Put_Streaming(t *testing.T) {
-	// Verify S3Driver.Put uses materialize (spill-to-disk for large objects)
-	// rather than io.ReadAll (which buffers everything in memory).
-	//
-	// We can't easily test against a real S3 endpoint here, so we verify
-	// indirectly: materialize is the same function Geyser uses, and it
-	// handles objects > spillThreshold via temp files. The real assertion
-	// is that s3.go no longer imports "bytes" and no longer calls io.ReadAll.
+func TestMaterialize_SmallObject(t *testing.T) {
+	// materialize (Geyser's Put) holds a small body in memory and spills a
+	// large one to a temp file: never an unbounded io.ReadAll.
 	//
 	// Verify materialize works for small objects.
 	data := bytes.NewReader([]byte("hello world"))

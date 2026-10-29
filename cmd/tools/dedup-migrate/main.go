@@ -404,14 +404,6 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 	addDriver("local", localDriver)
 	logger.Info("local driver added", zap.String("path", dataPath))
 
-	if accessKey := os.Getenv("S3_ACCESS_KEY"); accessKey != "" {
-		secretKey := os.Getenv("S3_SECRET_KEY")
-		if d, dErr := drivers.NewS3CompatDriver(accessKey, secretKey, logger); dErr == nil {
-			addDriver("s3", d)
-			logger.Info("S3 driver added")
-		}
-	}
-
 	if accessKey := os.Getenv("LYVE_ACCESS_KEY"); accessKey != "" {
 		secretKey := os.Getenv("LYVE_SECRET_KEY")
 		region := os.Getenv("LYVE_REGION")
@@ -421,18 +413,6 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 		if d, dErr := drivers.NewLyveDriver(accessKey, secretKey, "", region, logger); dErr == nil {
 			addDriver("lyve", d)
 			logger.Info("Lyve driver added")
-		}
-	}
-
-	if accessKey := os.Getenv("QUOTALESS_ACCESS_KEY"); accessKey != "" {
-		secretKey := os.Getenv("QUOTALESS_SECRET_KEY")
-		endpoint := os.Getenv("QUOTALESS_ENDPOINT")
-		if endpoint == "" {
-			endpoint = "https://us.quotaless.cloud:8000"
-		}
-		if d, dErr := drivers.NewQuotalessDriver(accessKey, secretKey, endpoint, logger); dErr == nil {
-			addDriver("quotaless", d)
-			logger.Info("quotaless driver added")
 		}
 	}
 
@@ -490,10 +470,6 @@ func bootstrap(logger *zap.Logger) (*sql.DB, *engine.CoreEngine) {
 	if storageMode == "" {
 		if os.Getenv("IDRIVE_ACCESS_KEY") != "" {
 			storageMode = "idrive"
-		} else if os.Getenv("QUOTALESS_ACCESS_KEY") != "" {
-			storageMode = "quotaless"
-		} else if os.Getenv("S3_ACCESS_KEY") != "" {
-			storageMode = "s3"
 		} else if os.Getenv("GEYSER_ACCESS_KEY") != "" {
 			storageMode = "geyser"
 		} else {

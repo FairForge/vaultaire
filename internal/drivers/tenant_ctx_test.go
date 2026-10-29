@@ -136,8 +136,7 @@ func TestObjectKey_DependsOnTheTenantOnlyOnFixedBucketDrivers(t *testing.T) {
 	}
 
 	containerKeyed := map[string]engine.KeyAddresser{
-		"local":    NewLocalDriver(t.TempDir(), zap.NewNop()),
-		"s3compat": &S3CompatDriver{bucket: "data", prefix: "personal-files/vaultaire"},
+		"local": NewLocalDriver(t.TempDir(), zap.NewNop()),
 	}
 	for name, d := range containerKeyed {
 		assert.Equal(t, d.ObjectKey(chunk, "_global", "_chunks/h"), d.ObjectKey(a, "_global", "_chunks/h"),

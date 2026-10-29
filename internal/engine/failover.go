@@ -155,7 +155,7 @@ func isBackendFailure(err error) bool {
 		return false
 	}
 	// aws-sdk-go-v2, by type (R6-01). Every S3-class driver (idrive, lyve,
-	// r2, geyser, s3compat, quotaless) wraps the SDK error with %w. A missing
+	// r2, geyser, wasabi) wraps the SDK error with %w. A missing
 	// BUCKET is a misconfigured backend, not an absent object.
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchBucket" {

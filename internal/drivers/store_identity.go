@@ -23,16 +23,6 @@ func (d *GeyserDriver) StoreID() string { return "s3://" + hostOf(d.endpoint) + 
 
 func (d *R2Driver) StoreID() string { return "s3://" + hostOf(d.endpoint) + "/" + d.bucket }
 
-func (d *S3CompatDriver) StoreID() string {
-	return "s3://us.s3compat.cloud:8000/" + d.bucket + "/" + d.prefix
-}
-
-// S3Driver is container-keyed (one bucket per container): the store is the
-// endpoint.
-func (d *S3Driver) StoreID() string { return "s3://" + hostOf(d.endpoint) }
-
-func (d *QuotalessDriver) StoreID() string { return "s3://" + hostOf(d.endpoint) + "/" + d.rootPath }
-
 func (d *LocalDriver) StoreID() string {
 	abs, err := filepath.Abs(d.basePath)
 	if err != nil {

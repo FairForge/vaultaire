@@ -30,6 +30,34 @@ type geyserS3Mock struct {
 	deleteVersions []string
 }
 
+// listBucketResult and s3Entry are the ListObjectsV2 answer the mock writes.
+type listBucketResult struct {
+	XMLName     xml.Name  `xml:"ListBucketResult"`
+	Xmlns       string    `xml:"xmlns,attr"`
+	Name        string    `xml:"Name"`
+	Prefix      string    `xml:"Prefix"`
+	IsTruncated bool      `xml:"IsTruncated"`
+	Contents    []s3Entry `xml:"Contents"`
+}
+
+type s3Entry struct {
+	Key          string `xml:"Key"`
+	Size         int64  `xml:"Size"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	StorageClass string `xml:"StorageClass"`
+}
+
+// parseBucketKey splits a path-style S3 request path into bucket and key.
+func parseBucketKey(path string) (string, string) {
+	path = strings.TrimPrefix(path, "/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) < 2 {
+		return parts[0], ""
+	}
+	return parts[0], parts[1]
+}
+
 func newGeyserS3Mock() *geyserS3Mock {
 	return &geyserS3Mock{
 		objects: make(map[string][]byte),

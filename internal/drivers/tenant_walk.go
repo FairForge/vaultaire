@@ -23,13 +23,11 @@ import (
 // Who implements it:
 //
 //	idrive (+ every idrive-<region>), lyve, geyser, r2   t-<tenant>/…  in one fixed bucket
-//	s3compat, quotaless                                  <root>/<tenant>_<bucket>/…
 //	local                                                <base>/<tenant>_<bucket>/…
 //	sync (WebDAVDriver, webdav.go)                       <root>/t-<tenant>/… (PROPFIND walk)
 //
-// Who cannot: the plain `s3` driver (a container is a real bucket — nothing to
-// list by prefix) and permafrost (a folder tree on fifteen accounts; its List
-// is one level deep). The erasure sweep falls back to List + Delete per
+// Who cannot: permafrost (a folder tree on fifteen accounts; its List is one
+// level deep). The erasure sweep falls back to List + Delete per
 // bucket for those.
 
 var (
@@ -37,8 +35,6 @@ var (
 	_ engine.TenantWalker = (*LyveDriver)(nil)
 	_ engine.TenantWalker = (*GeyserDriver)(nil)
 	_ engine.TenantWalker = (*R2Driver)(nil)
-	_ engine.TenantWalker = (*S3CompatDriver)(nil)
-	_ engine.TenantWalker = (*QuotalessDriver)(nil)
 	_ engine.TenantWalker = (*LocalDriver)(nil)
 )
 
@@ -184,33 +180,6 @@ func (d *R2Driver) WalkTenant(ctx context.Context, tenantID string, fn func(engi
 	}
 	if err := s3WalkPrefix(ctx, d.client, d.bucket, tenantKeyPrefix(tenantID), "", false, fn); err != nil {
 		return fmt.Errorf("r2: %w", err)
-	}
-	return nil
-}
-
-// WalkTenant implements engine.TenantWalker. Keys are
-// `<root>/<tenant>_<bucket>/<artifact>`: the `_` after the tenant id is the
-// boundary (`tenant-ab_` is not a prefix of `tenant-abc_…`).
-func (d *S3CompatDriver) WalkTenant(ctx context.Context, tenantID string, fn func(engine.TenantObject) error) error {
-	if err := checkWalkTenant(tenantID); err != nil {
-		return err
-	}
-	lead := tenantID + "_"
-	if err := s3WalkPrefix(ctx, d.client, d.bucket, d.prefix+"/"+lead, lead, false, fn); err != nil {
-		return fmt.Errorf("s3compat: %w", err)
-	}
-	return nil
-}
-
-// WalkTenant implements engine.TenantWalker (same key shape as s3compat, in
-// the fixed `data` bucket under rootPath).
-func (d *QuotalessDriver) WalkTenant(ctx context.Context, tenantID string, fn func(engine.TenantObject) error) error {
-	if err := checkWalkTenant(tenantID); err != nil {
-		return err
-	}
-	lead := tenantID + "_"
-	if err := s3WalkPrefix(ctx, d.client, "data", d.rootPath+"/"+lead, lead, false, fn); err != nil {
-		return fmt.Errorf("quotaless: %w", err)
 	}
 	return nil
 }
