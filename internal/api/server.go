@@ -141,7 +141,12 @@ type Server struct {
 	// allowUnsealedSia (SIA_ALLOW_UNSEALED): the SIA tier and a `sia` Vault
 	// parity leg may take bytes that are not sealed. Off by default.
 	allowUnsealedSia bool
-	tenantKeys       *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
+	// allowUnsealedTape (GEYSER_ALLOW_UNSEALED): the archive classes and
+	// smart demotion onto tape may take bytes that are not sealed. Off by
+	// default: then a write there is SSE-S3 or refused, and only an already
+	// sealed object is demoted.
+	allowUnsealedTape bool
+	tenantKeys        *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
 	// credentialScope limits credential_plaintext_drop's unwrapped count to
 	// one tenant (tests: the database is shared); "" in production.
 	credentialScope    string
@@ -442,6 +447,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	s.allowUnsealedCleartext = allowUnsealedCleartextFromEnv(os.Getenv, logger)
 	s.allowUnsealedSia = allowUnsealedSiaFromEnv(os.Getenv, logger)
+	s.allowUnsealedTape = allowUnsealedTapeFromEnv(os.Getenv, logger)
 
 	if s.db != nil {
 		s.gci = crypto.NewGlobalContentIndex(s.db)
@@ -581,6 +587,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		fc = s.flags
 	}
 	s.smartDemotion = NewSmartDemotionRunner(s.db, s.engine, fc, logger)
+	if s.smartDemotion != nil {
+		s.smartDemotion.AllowUnsealedCold = s.allowUnsealedTape
+	}
 	s.smartPromoter = NewSmartPromoter(s.db, s.engine, logger)
 	// Hydrate-before-serve of large Sia objects (SIA_PROMOTE_*): nil
 	// without the sia backend.

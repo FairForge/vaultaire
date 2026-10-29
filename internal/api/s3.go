@@ -1177,6 +1177,7 @@ func (s *Server) writeAdapter() *S3ToEngine {
 	a.sseService = s.sseService
 	a.allowUnsealedCleartext = s.allowUnsealedCleartext
 	a.allowUnsealedSia = s.allowUnsealedSia
+	a.allowUnsealedTape = s.allowUnsealedTape
 	a.chunkEncSvc = s.chunkEncSvc
 	a.tenantKeys = s.tenantKeys
 	a.gci = s.gci

@@ -91,7 +91,7 @@ Each registered backend gets an independent `BackendCircuitBreaker`:
 ## Storage Class Routing (Phase 5.12.4)
 
 `x-amz-storage-class` header on PUT maps to a target backend:
-- STANDARD → the primary (unmapped since 2026-10-03, when Wasabi became the interim primary: a fixed `idrive` entry sent every Standard PUT to iDrive whatever the primary was), GLACIER/DEEP_ARCHIVE → geyser, RESILIENT → lyve, PUBLIC → r2; STANDARD_IA and REDUCED_REDUNDANCY unmapped (→ primary at STANDARD)
+- STANDARD → the primary (unmapped since 2026-10-03, when Wasabi became the interim primary: a fixed `idrive` entry sent every Standard PUT to iDrive whatever the primary was), GLACIER/DEEP_ARCHIVE → geyser (written sealed unless `GEYSER_ALLOW_UNSEALED` — `api.sealedOnlyClass`; tape erases nothing on delete), RESILIENT → lyve, PUBLIC → r2; STANDARD_IA and REDUCED_REDUNDANCY unmapped (→ primary at STANDARD)
 - RESILIENT → lyve (internal class — what the `resilient` bucket `tier_preference` resolves to via `tierPreferenceToStorageClass` in `api/s3_engine_adapter.go`; NOT the removed STANDARD_IA mapping: objects land on Lyve at its default class, never Lyve's IA service tier)
 - BLOMP → blomp (internal class, never sent by clients — `tier_preference = 'blomp'` + the `blomp_backend` flag; written sealed unless `BLOMP_ALLOW_UNSEALED`, its storage URL being plain HTTP — `CleartextTransportDeclarer`, interface.go)
 - SIA → sia (internal class, never sent by clients — `tier_preference = 'sia'` + the `sia_backend` flag; whole objects, written sealed unless `SIA_ALLOW_UNSEALED`; reported STANDARD. A strict target-only backend that a lab may still make the boot primary with `STORAGE_MODE=sia`)

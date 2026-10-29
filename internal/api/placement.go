@@ -39,6 +39,8 @@ import (
 	"net/http"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/engine"
 )
 
 // placementKind is where a write's bytes go.
@@ -146,6 +148,8 @@ var (
 		Suggestion: "This bucket encrypts objects at rest and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseCleartextTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket stores on a backend reached without TLS, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
+	refuseTapeTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
+		Suggestion: "This object goes to the tape archive, where deleted bytes are never erased from the cartridge, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseSealedTierNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
 		Suggestion: "This bucket stores on a third-party network, so objects are sealed before they leave the server, and the server's encryption key is not available right now. Nothing was stored; retry later."}
 	refuseSealedDefaultNoKey = &placementRefusal{Status: http.StatusServiceUnavailable, Code: ErrServiceUnavailable, RetryAfter: "30",
@@ -237,14 +241,20 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 	// is refused. BLOMP: Blomp's storage URL is plain HTTP. SIA: s3d's app
 	// key and the Sia hosts must read nothing, and an account erasure is a
 	// crypto-shred at once although s3d unpins deleted data only hourly.
-	// BLOMP_ALLOW_UNSEALED / SIA_ALLOW_UNSEALED lift it per tier (the
-	// bucket's own rules stay).
-	sealedTier := !req.SSEC && sealedOnlyClass(req.Class, a.allowUnsealedCleartext, a.allowUnsealedSia)
+	// GLACIER / DEEP_ARCHIVE (tape): a delete never erases a byte from the
+	// cartridge and Geyser's own encryption is off, so a plaintext object
+	// would stay readable there for the cartridge's life and an erasure can
+	// only be a crypto-shred. BLOMP_ALLOW_UNSEALED / SIA_ALLOW_UNSEALED /
+	// GEYSER_ALLOW_UNSEALED lift it per tier (the bucket's own rules stay).
+	sealedTier := !req.SSEC && sealedOnlyClass(req.Class, a.allowUnsealedCleartext, a.allowUnsealedSia, a.allowUnsealedTape)
 	if sealedTier && a.sseService == nil && req.Size > 0 {
 		a.logger.Error("write onto a sealed-only tier refused: ENCRYPTION_MASTER_KEY is not configured on this process",
 			zap.String("bucket", req.Bucket), zap.String("class", req.Class))
-		if req.Class == "SIA" {
+		switch {
+		case req.Class == "SIA":
 			return writePlacement{Refusal: refuseSealedTierNoKey}
+		case engine.IsArchiveClass(req.Class):
+			return writePlacement{Refusal: refuseTapeTierNoKey}
 		}
 		return writePlacement{Refusal: refuseCleartextTierNoKey}
 	}
@@ -271,13 +281,17 @@ func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) 
 
 // sealedOnlyClass reports whether a write of class must be sealed (SSE-S3
 // or the customer's key): BLOMP unless BLOMP_ALLOW_UNSEALED, SIA unless
-// SIA_ALLOW_UNSEALED. Placement and CopyObject share it.
-func sealedOnlyClass(class string, allowUnsealedBlomp, allowUnsealedSia bool) bool {
-	switch class {
-	case "BLOMP":
+// SIA_ALLOW_UNSEALED, the archive classes (tape) unless
+// GEYSER_ALLOW_UNSEALED. Placement and CopyObject share it; smart demotion
+// keeps the tape's half by coldBackendSealedOnly.
+func sealedOnlyClass(class string, allowUnsealedBlomp, allowUnsealedSia, allowUnsealedTape bool) bool {
+	switch {
+	case class == "BLOMP":
 		return !allowUnsealedBlomp
-	case "SIA":
+	case class == "SIA":
 		return !allowUnsealedSia
+	case engine.IsArchiveClass(class):
+		return !allowUnsealedTape
 	}
 	return false
 }

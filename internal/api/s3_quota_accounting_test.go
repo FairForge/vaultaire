@@ -106,6 +106,8 @@ func setupQuotaAccountingFixture(t *testing.T, limitBytes int64) *quotaAccountin
 		quotaManager: qm,
 		db:           db,
 		testMode:     true,
+		// GEYSER_ALLOW_UNSEALED: the tape's sealed-only rule is tape_sealed_test.go's.
+		allowUnsealedTape: true,
 	}
 
 	t.Cleanup(func() {

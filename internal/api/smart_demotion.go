@@ -66,6 +66,11 @@ type SmartDemotionRunner struct {
 	// second run only gets what the first left of the budget.
 	MaxObjectsPerTenant int
 	MaxBytesPerRun      int64
+	// AllowUnsealedCold (GEYSER_ALLOW_UNSEALED): a tape cold backend may take
+	// an object whose stored bytes are not sealed. Off = only an SSE-S3 or
+	// SSE-C object is a candidate (coldBackendSealedOnly): a delete never
+	// erases a byte from the cartridge, so plaintext must never reach it.
+	AllowUnsealedCold bool
 	// JobName is the job_runs name (tests use their own: the table is shared).
 	JobName string
 
@@ -349,7 +354,7 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 	// copy is sized by the stored length, and storedBlobLength cannot know
 	// a 0x05 blob's — it is in the blob's own header. The vault parity job
 	// skips them by the same rule; the copy-back refuses one too.
-	const eligible = `
+	eligible := `
 		FROM object_head_cache o
 		WHERE o.tenant_id = $1 AND o.backend_name = $2 AND NOT o.is_chunked AND o.size_bytes > 0
 		  AND COALESCE(o.encryption_algorithm, '') <> '` + crypto.SSECAlgorithmMultipart + `'
@@ -357,6 +362,11 @@ func (r *SmartDemotionRunner) planTenant(ctx context.Context, tenantID string, q
 		  AND NOT EXISTS (SELECT 1 FROM buckets b WHERE b.tenant_id = o.tenant_id AND b.name = o.bucket
 		                    AND (COALESCE(b.versioning_status,'') IN ('Enabled','Suspended')
 		                         OR COALESCE(b.tier_preference,'') = 'performance'))`
+	if coldBackendSealedOnly(r.ColdBackend, r.AllowUnsealedCold) {
+		// In the selection, never after it: a filter on the selected rows
+		// would let plaintext objects take every slot of every run.
+		eligible += sealedOnTapeSQL
+	}
 
 	var cands []demotionCandidate
 	idleRows, err := r.db.QueryContext(ctx,
@@ -597,4 +607,17 @@ func (r *SmartDemotionRunner) settlePass(ctx context.Context, what, listing stri
 func (r *SmartDemotionRunner) settler() *ledgerSettler {
 	return &ledgerSettler{db: r.db, eng: r.eng, logger: r.logger, now: r.now,
 		beforeDelete: r.beforeHotDelete, afterDelete: r.afterStaleDelete}
+}
+
+// sealedOnTapeSQL keeps a demotion onto tape to objects whose stored bytes
+// are sealed: SSE-S3 (the streaming codec) or SSE-C. The SSE-C multipart
+// container is excluded by the eligibility rule already.
+const sealedOnTapeSQL = `
+		  AND COALESCE(o.encryption_algorithm, '') IN ('` + crypto.SSEAlgorithm + `', '` + crypto.SSECAlgorithm + `', '` + crypto.SSECAlgorithmV3 + `')`
+
+// coldBackendSealedOnly reports whether demotion onto cold may move only
+// sealed bytes: a tape backend (its class is an archive class) unless
+// GEYSER_ALLOW_UNSEALED. The placement half is sealedOnlyClass.
+func coldBackendSealedOnly(cold string, allowUnsealed bool) bool {
+	return !allowUnsealed && engine.IsArchiveClass(engine.BackendToStorageClass(cold))
 }

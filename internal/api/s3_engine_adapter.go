@@ -56,7 +56,9 @@ type S3ToEngine struct {
 	allowUnsealedCleartext bool
 	// allowUnsealedSia: see Server.allowUnsealedSia.
 	allowUnsealedSia bool
-	chunkEncSvc      *crypto.ChunkEncryptionService
+	// allowUnsealedTape: see Server.allowUnsealedTape.
+	allowUnsealedTape bool
+	chunkEncSvc       *crypto.ChunkEncryptionService
 	// tenantKeys opens an edge-codec (AES256-EW, 0x06) chunk on the read
 	// path (WP-EDGE-2); nil = no master key, such a chunk cannot be served.
 	tenantKeys        *crypto.TenantKeys

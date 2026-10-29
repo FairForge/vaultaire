@@ -103,17 +103,17 @@ expect_gate() { # expect_gate CASE GATE STATUS [EVIDENCE_SUBSTRING]
   if [ "$got" = "$3" ] && { [ -z "${4:-}" ] || line_of "$2" | grep -qF -- "$4"; }; then pass "$1: $2 $3"
   else fail "$1: $2 want $3${4:+ ($4)}, got: $(line_of "$2")"; fi
 }
-GATES="master_key translog_signing_key dump_sealed credentials_wrapped plaintext_dropped keys_rotated blomp_sealed sia_sealed stripe_ready signups_open domain_switched synthetic_check tenant_zero_objects alerts_firing release_signing_key"
+GATES="master_key translog_signing_key dump_sealed credentials_wrapped plaintext_dropped keys_rotated blomp_sealed sia_sealed geyser_sealed stripe_ready signups_open domain_switched synthetic_check tenant_zero_objects alerts_firing release_signing_key"
 
 # 1. everything on: every gate GREEN, exit 0, the gauge says 1 for each.
 all_green; run
 for g in $GATES; do expect_gate "all on" "$g" GREEN; done
 check "all on: exit 0 (got $RC)" [ "$RC" = 0 ]
-check "all on: summary 15/15" grep -q 'summary: 15/15 GREEN; launch gates not GREEN: 0' "$OUT"
-check "all on: one line per gate" [ "$(grep -cE '^(GREEN|RED|UNKNOWN) ' "$OUT")" = 15 ]
+check "all on: summary 16/16" grep -q 'summary: 16/16 GREEN; launch gates not GREEN: 0' "$OUT"
+check "all on: one line per gate" [ "$(grep -cE '^(GREEN|RED|UNKNOWN) ' "$OUT")" = 16 ]
 check "all on: the Warn after the Info line is not read as a source" grep -q 'master key: credential (vaultaire@8001' "$OUT"
 PROM=$METRICS/vaultaire_launch_gate.prom
-check "all on: the gauge has 15 series at 1" [ "$(grep -c '^vaultaire_launch_gate{.*} 1$' "$PROM")" = 15 ]
+check "all on: the gauge has 16 series at 1" [ "$(grep -c '^vaultaire_launch_gate{.*} 1$' "$PROM")" = 16 ]
 check "all on: launch class on the security gates" grep -q 'vaultaire_launch_gate{gate="keys_rotated",class="launch"} 1' "$PROM"
 check "all on: info class on the rest" grep -q 'vaultaire_launch_gate{gate="alerts_firing",class="info"} 1' "$PROM"
 check "all on: the gauge is world-readable, no temp file left" [ "$(stat -c%a "$PROM" 2>/dev/null || stat -f%Lp "$PROM")" = 644 ] && [ -z "$(find "$METRICS" -name '.*' -type f)" ]
@@ -151,6 +151,7 @@ red_case keys_rotated "is off" put "$FX/sql/dropflag" false
 red_case keys_rotated "5 live key(s) and 1 live STS" put "$FX/sql/unrotated" "5 1"
 red_case blomp_sealed "BLOMP_ALLOW_UNSEALED is set" bash -c 'echo BLOMP_ALLOW_UNSEALED=true >> "$1"' _ "$ROOT/configs/.env"
 red_case sia_sealed "SIA_ALLOW_UNSEALED is set" bash -c 'echo SIA_ALLOW_UNSEALED=1 >> "$1"' _ "$ROOT/configs/.env"
+red_case geyser_sealed "GEYSER_ALLOW_UNSEALED is set" bash -c 'echo GEYSER_ALLOW_UNSEALED=true >> "$1"' _ "$ROOT/configs/.env"
 red_case stripe_ready 'provider="stripe"} 0' sed -i.bak 's/provider="stripe"} 1/provider="stripe"} 0/' "$FX/metrics"
 red_case signups_open "flag row: off" put "$FX/sql/signups" false
 red_case signups_open "SIGNUPS_ENABLED is off" bash -c 'echo none > "$1"; sed -i.bak "s/^SIGNUPS_ENABLED=true/SIGNUPS_ENABLED=false/" "$2"' _ "$FX/sql/signups" "$ROOT/configs/.env"
@@ -161,9 +162,10 @@ red_case alerts_firing "2 alert(s) firing: BackupDumpPlaintext, TranslogWitnessS
 red_case release_signing_key "no stored.cloud/release/v1 verifier key" rm -f "$ROOT/configs/release.vkey"
 
 # Off values of the unsealed flags stay GREEN.
-all_green; printf 'BLOMP_ALLOW_UNSEALED=false\nSIA_ALLOW_UNSEALED="0"\n' >> "$ROOT/configs/.env"; run
+all_green; printf 'BLOMP_ALLOW_UNSEALED=false\nSIA_ALLOW_UNSEALED="0"\nGEYSER_ALLOW_UNSEALED=false\n' >> "$ROOT/configs/.env"; run
 expect_gate "off value" blomp_sealed GREEN "set to an off value"
 expect_gate "off value" sia_sealed GREEN "set to an off value"
+expect_gate "off value" geyser_sealed GREEN "set to an off value"
 
 # 4. UNKNOWN when a source does not answer — never GREEN, and a launch gate blocks.
 all_green; touch "$FX/db-down"; run
@@ -185,7 +187,7 @@ expect_gate "Alertmanager down" alerts_firing UNKNOWN "did not answer"
 all_green; chmod 0000 "$ROOT/configs/.env"
 if [ -r "$ROOT/configs/.env" ]; then echo "SKIPPED .env unreadable: running as root"; else
   run
-  for g in blomp_sealed sia_sealed domain_switched; do expect_gate ".env unreadable" "$g" UNKNOWN "not readable"; done
+  for g in blomp_sealed sia_sealed geyser_sealed domain_switched; do expect_gate ".env unreadable" "$g" UNKNOWN "not readable"; done
 fi
 chmod 0600 "$ROOT/configs/.env"
 all_green; chmod 0000 "$METRICS"
