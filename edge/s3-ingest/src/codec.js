@@ -360,10 +360,15 @@ export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadline
   // lag is past MIRROR_MAX_LAG — where the mirror is cut.
   const buffered = b.pipeThrough(new TransformStream({}, undefined,
     new ByteLengthQueuingStrategy({ highWaterMark: MIRROR_MAX_LAG + (2 << 20) })));
+  // Each body keeps the admitted length: a stream built here has none, and
+  // workerd would send it chunked with no Content-Length (0.5.1 on prod:
+  // iDrive answered 411 to every mirrored PUT, rolled back in two minutes).
+  const known = (st) => (n > 0 && typeof globalThis.FixedLengthStream === "function"
+    ? st.pipeThrough(new globalThis.FixedLengthStream(n)) : st);
   mirrorBody = counted(buffered, (k) => { mirrorBytes += k; });
   const primaryBody = counted(a, (k) => { primaryBytes += k; watch(); });
   const timer = setTimeout(() => cutMirror("the mirror leg passed its deadline"), deadlineMs);
-  const mirror = doFetch(urls[1], { ...init, body: mirrorBody, signal: ac.signal }).then(async (r) => {
+  const mirror = doFetch(urls[1], { ...init, body: known(mirrorBody), signal: ac.signal }).then(async (r) => {
     const etag = r.ok && !cut ? r.headers.get("etag") || "" : "";
     await r.body?.cancel();
     return etag;
@@ -373,7 +378,7 @@ export async function putTwo(doFetch, urls, init, n, deadlineMs = mirrorDeadline
   });
   let after;
   try {
-    const resp = await doFetch(urls[0], { ...init, body: primaryBody });
+    const resp = await doFetch(urls[0], { ...init, body: known(primaryBody) });
     after = setTimeout(() => cutMirror("the mirror leg did not answer after the primary"), MIRROR_AFTER_MS);
     const mirrorETag = await mirror;
     return { resp, mirrorETag: cut ? "" : mirrorETag, mirrorCut: cut };

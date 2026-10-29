@@ -85,6 +85,15 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.5.2 — the mirrored PUT keeps its Content-Length (Stage 1a Prompt 49, a 0.5.1 regression)
+
+- 0.5.1's counting streams had no known length, so workerd sent both PUTs of a mirrored write chunked with no `Content-Length`. iDrive answered **411** to every mirrored whole PUT: on prod 2026-10-28 23:58 UTC, three of tenant zero's test PUTs and nothing else; 0.5.1 was live 23:57:58–23:59:49 and was rolled back to 0.5.0 (`ebb3decb`). Node's `fetch` sends the header for a stream body anyway, which is why the tests passed.
+- Both bodies now go through a `FixedLengthStream` of the admitted length where the runtime has one (the codec's chunk PUTs already did). The fix and the lag bound were checked in workerd itself (`wrangler dev --local`, a Node sink that answers 411 to a body with no length):
+  - before the fix: chunked, 411;
+  - after: `content-length` on both, 200;
+  - a 64 MiB PUT with a mirror reading at 2 MB/s: 0.74 s with the mirror cut at 1.5 MB (0.5.0's `putTwo`: 34.75 s, held to the mirror's pace).
+- 0.5.1 is never to be deployed again: its manifest rows stay in the log, and 0.5.2's rows follow.
+
 ## 0.5.1 — the mirror never slows the write (Stage 1a Prompt 49 Part 0, RP76-2)
 
 - `putTwo` still tees with the runtime's `tee()`, but the mirror's branch goes through a 16 MiB + 2 MiB byte-length buffer (`TransformStream` + `ByteLengthQueuingStrategy`) and the bytes each fetch takes are counted: the mirror is cut (its fetch aborted, its branch cancelled — the tee then feeds the primary alone) when the primary leads it by more than `MIRROR_MAX_LAG` (16 MiB), or when the primary has answered and the mirror has not within `MIRROR_AFTER_MS` (5 s). The 30 s + body at 2 MiB/s deadline stays the outer bound. A mirrored write runs at the primary's pace (0.5.0 ran at the slower leg's until the deadline — RP76-2). The check runs on every counted read of the primary's branch (the lag changes only there), not on a timer.
