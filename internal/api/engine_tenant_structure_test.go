@@ -144,6 +144,10 @@ func expectNoTenantRefusals(t *testing.T, fn func()) {
 // with no tenant other than the ones declared (A5: the counter must stay 0
 // through the suite, as on prod).
 func TestMain(m *testing.M) {
+	// The package's multipart fixtures upload 64 KiB parts; S3's 5 MiB
+	// minimum (multipartMinPartBytes) is held by TestMultipartConformance,
+	// which restores it.
+	multipartMinPartBytes = 1
 	code := m.Run()
 	if refused := noTenantRefusals() - float64(expectedNoTenantRefusals.Load()); code == 0 && refused != 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: %v engine call(s) made with no tenant in the context during the api tests (vaultaire_engine_no_tenant_refusals_total)\n", refused)

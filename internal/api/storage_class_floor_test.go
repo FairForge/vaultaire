@@ -422,7 +422,9 @@ func TestCDN_ReadKeepsAnObjectFromGoingIdle(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	// Assert: the read is recorded (at most once a day per object), so the
-	// demotion job does not move an object the public is reading.
+	// demotion job does not move an object the public is reading — through
+	// the coalescer, written at its flush (WP-R9-5).
+	accessToucherFor(f.db, zap.NewNop()).Flush(context.Background())
 	require.Eventually(t, func() bool {
 		var idle bool
 		_ = f.db.QueryRow(`SELECT last_accessed < NOW() - INTERVAL '1 hour' FROM object_head_cache

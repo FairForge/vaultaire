@@ -129,6 +129,10 @@ type S3ToEngine struct {
 	// uses it instead of resolving again so billing and placement agree.
 	storageClass         string
 	storageClassResolved bool
+
+	// touch coalesces the GET's last_accessed write (WP-R9-5): one per
+	// database, shared by every adapter.
+	touch *accessToucher
 }
 
 // errDecodedLengthMismatch signals an aws-chunked body whose decoded byte
@@ -176,6 +180,7 @@ func NewS3ToEngine(e engine.Engine, db *sql.DB, logger *zap.Logger) *S3ToEngine 
 		chunkPutBound:         chunkPutBoundDefault,
 		chunkGetPrefetch:      defaultChunkGetPrefetch,
 		largeGet:              defaultLargeGetConfig(),
+		touch:                 accessToucherFor(db, logger),
 	}
 }
 
@@ -651,13 +656,8 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// listings give.
 	storageClass := engine.CustomerStorageClass(cachedFloor, cachedBackendName)
 
-	if cacheHit && version == nil && a.db != nil {
-		go func() { // #nosec G118 -- fire-and-forget access-time touch; must outlive the request, request ctx would cancel it
-			_, _ = a.db.ExecContext(context.Background(), `
-				UPDATE object_head_cache SET last_accessed = NOW()
-				WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-				t.ID, bucket, artifact)
-		}()
+	if cacheHit && version == nil {
+		a.touch.Touch(t.ID, bucket, artifact) // coalesced, written within a minute (WP-R9-5)
 	}
 
 	contentType := cachedContentType

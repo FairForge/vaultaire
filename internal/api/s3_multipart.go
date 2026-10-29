@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,11 +209,12 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
 				 content_disposition, content_encoding, content_language, cache_control, http_expires,
-				 website_redirect_location, sse_requested, reserved_floor, ssec_key_md5)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+				 website_redirect_location, sse_requested, reserved_floor, ssec_key_md5, tagging)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NULLIF($17, ''))
 		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
 			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
-			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor, ssecKeyMD5)
+			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor, ssecKeyMD5,
+			r.Header.Get("x-amz-tagging"))
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -777,16 +780,22 @@ func (s *Server) multipartUploadAttrs(r *http.Request, uploadID string) (objectA
 	}
 	var a objectAttrs
 	var metaJSON []byte
-	var class string
+	var class, tagging string
 	var enc uploadEncryption
 	err := s.db.QueryRowContext(r.Context(), `
 		SELECT content_type, metadata, storage_class, content_disposition, content_encoding,
-		       content_language, cache_control, http_expires, website_redirect_location, sse_requested, ssec_key_md5
+		       content_language, cache_control, http_expires, website_redirect_location, sse_requested, ssec_key_md5,
+		       COALESCE(tagging, '')
 		FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(
 		&a.ContentType, &metaJSON, &class, &a.ContentDisposition, &a.ContentEncoding,
-		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &enc.SSERequested, &enc.SSECKeyMD5)
+		&a.ContentLanguage, &a.CacheControl, &a.Expires, &a.WebsiteRedirect, &enc.SSERequested, &enc.SSECKeyMD5, &tagging)
 	if err != nil {
 		return objectAttrs{}, "", uploadEncryption{}, fmt.Errorf("load upload attributes: %w", err)
+	}
+	// The tag set Create was sent (validated there, kept on the row since
+	// migration 119): the object's at Complete (WP-R3-6).
+	if tags, tagErr := parseTaggingHeader(tagging); tagErr == nil {
+		a.Tags = tags
 	}
 	if len(metaJSON) > 0 {
 		_ = json.Unmarshal(metaJSON, &a.Metadata)
@@ -950,6 +959,17 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 			selected = append(selected, up)
 		}
 		parts = selected
+	}
+
+	// Every part but the last is at least 5 MiB (S3's EntityTooSmall,
+	// R3-24): refused before anything is reserved; the upload stays, so the
+	// client can upload the part again and retry.
+	for _, p := range parts[:len(parts)-1] {
+		if p.Size < multipartMinPartBytes {
+			WriteS3ErrorWithContext(w, ErrEntityTooSmall, r.URL.Path, generateRequestID(),
+				WithSuggestion(fmt.Sprintf("Part %d is %d bytes: every part but the last must be at least %d bytes.", p.PartNumber, p.Size, multipartMinPartBytes)))
+			return
+		}
 	}
 
 	// Every selected part's bytes must be on disk with the recorded size
@@ -1339,7 +1359,7 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		zap.Int("parts", len(parts)),
 		zap.String("etag", finalETag))
 
-	location := fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object)
+	location := s.completeLocation(r, bucket, object)
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("ETag", finalETag)
 	if versionID != "" {
@@ -1387,7 +1407,7 @@ func (s *Server) answerConcurrentComplete(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("ETag", finalETag)
 	_ = xml.NewEncoder(w).Encode(CompleteMultipartUploadResult{
-		Location: fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object), Bucket: bucket, Key: object, ETag: finalETag,
+		Location: s.completeLocation(r, bucket, object), Bucket: bucket, Key: object, ETag: finalETag,
 	})
 }
 
@@ -1506,6 +1526,25 @@ func (s *Server) handleAbortMultipartUpload(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// completeLocation is CompleteMultipartUploadResult's Location: the
+// configured S3 endpoint's scheme (VAULTAIRE_ENDPOINT — https on prod; it
+// was always http, R3-23), the request's host, the key path-escaped.
+func (s *Server) completeLocation(r *http.Request, bucket, object string) string {
+	scheme := "http"
+	if u, err := url.Parse(s.hosts.S3); err == nil && u.Scheme != "" {
+		scheme = u.Scheme
+	} else if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + "/" + bucket + "/" + (&url.URL{Path: object}).EscapedPath()
+}
+
+// multipartMinPartBytes is S3's minimum size of every part but the last
+// (R3-24, WP-R3-6): a Complete naming a smaller one is 400 EntityTooSmall.
+// A variable only so the package's tests, whose fixtures upload 64 KiB
+// parts, can lower it (TestMain); the conformance test holds the 5 MiB.
+var multipartMinPartBytes int64 = 5 << 20
+
 func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket, object string) {
 	t, err := tenant.FromContext(r.Context())
 	if err != nil || t == nil {
@@ -1527,14 +1566,24 @@ func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 
+	// One page (R3-19, WP-R3-6): the parts after part-number-marker, at
+	// most max-parts (default and cap 1,000, as S3).
+	q := r.URL.Query()
+	maxParts := s3PageSize(q.Get("max-parts"))
+	marker, _ := strconv.Atoi(q.Get("part-number-marker"))
+	if marker < 0 {
+		marker = 0
+	}
+
 	// Fetch parts
 	var items []ListPartItem
 	if s.db != nil {
 		rows, err := s.db.QueryContext(r.Context(), `
 			SELECT part_number, etag, size_bytes, created_at FROM multipart_parts
-			WHERE upload_id = $1
+			WHERE upload_id = $1 AND part_number > $2
 			ORDER BY part_number ASC
-		`, uploadID)
+			LIMIT $3
+		`, uploadID, marker, maxParts+1)
 		if err != nil {
 			s.logger.Error("failed to list parts", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -1566,15 +1615,33 @@ func (s *Server) handleListParts(w http.ResponseWriter, r *http.Request, bucket,
 		}
 		memUploadsMu.RUnlock()
 		sortPartItems(items)
+		kept := items[:0]
+		for _, it := range items {
+			if it.PartNumber > marker {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
 	}
 
+	res := ListPartsResult{
+		Bucket:           bucket,
+		Key:              object,
+		UploadID:         uploadID,
+		PartNumberMarker: marker,
+		MaxParts:         maxParts,
+		StorageClass:     "STANDARD",
+	}
+	if len(items) > maxParts {
+		items = items[:maxParts]
+		res.IsTruncated = true
+	}
+	if len(items) > 0 {
+		res.NextPartNumberMarker = items[len(items)-1].PartNumber
+	}
+	res.Parts = items
 	w.Header().Set("Content-Type", "application/xml")
-	if err := xml.NewEncoder(w).Encode(ListPartsResult{
-		Bucket:   bucket,
-		Key:      object,
-		UploadID: uploadID,
-		Parts:    items,
-	}); err != nil {
+	if err := xml.NewEncoder(w).Encode(res); err != nil {
 		s.logger.Error("failed to encode list parts response", zap.Error(err))
 	}
 }
@@ -1586,13 +1653,34 @@ func (s *Server) handleListMultipartUploads(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var uploads []ListMultipartUploadItem
+	// One page (R3-19, WP-R3-6), in S3's order — key, then initiation:
+	// the uploads under prefix after (key-marker, upload-id-marker), at
+	// most max-uploads (default and cap 1,000), the keys with delimiter
+	// after the prefix rolled up into CommonPrefixes (one entry each,
+	// counted in the page as S3 counts them). upload-id-marker without a
+	// key-marker is ignored, as S3 does.
+	q := r.URL.Query()
+	page := uploadsPage{
+		prefix: q.Get("prefix"), delimiter: q.Get("delimiter"),
+		keyMarker: q.Get("key-marker"), uploadIDMarker: q.Get("upload-id-marker"),
+		max: s3PageSize(q.Get("max-uploads")),
+	}
+	if page.keyMarker == "" {
+		page.uploadIDMarker = ""
+	}
+
+	var all []ListMultipartUploadItem
 	if s.db != nil {
 		rows, err := s.db.QueryContext(r.Context(), `
-			SELECT upload_id, object_key, created_at FROM multipart_uploads
-			WHERE tenant_id = $1 AND bucket = $2 AND status = 'active'
-			ORDER BY created_at ASC
-		`, t.ID, bucket)
+			SELECT u.upload_id, u.object_key, u.created_at FROM multipart_uploads u
+			WHERE u.tenant_id = $1 AND u.bucket = $2 AND u.status = 'active'
+			  AND left(u.object_key, length($3)) = $3
+			  AND (u.object_key > $4
+			       OR (u.object_key = $4 AND $5 <> '' AND (u.created_at, u.upload_id) > (
+			           SELECT m.created_at, m.upload_id FROM multipart_uploads m
+			            WHERE m.upload_id = $5 AND m.tenant_id = $1 AND m.bucket = $2 AND m.object_key = $4)))
+			ORDER BY u.object_key, u.created_at, u.upload_id
+		`, t.ID, bucket, page.prefix, page.keyMarker, page.uploadIDMarker)
 		if err != nil {
 			s.logger.Error("failed to list multipart uploads", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -1606,7 +1694,11 @@ func (s *Server) handleListMultipartUploads(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 			item.Initiated = createdAt.UTC().Format(time.RFC3339)
-			uploads = append(uploads, item)
+			item.StorageClass = "STANDARD"
+			all = append(all, item)
+			if page.full(all) {
+				break
+			}
 		}
 		if err := rows.Err(); err != nil {
 			s.logger.Warn("iterate rows", zap.Error(err))
@@ -1614,24 +1706,104 @@ func (s *Server) handleListMultipartUploads(w http.ResponseWriter, r *http.Reque
 	} else {
 		memUploadsMu.RLock()
 		for uid, mu := range memUploads {
-			if mu.TenantID == t.ID && mu.Bucket == bucket && mu.Status == "active" {
-				uploads = append(uploads, ListMultipartUploadItem{
-					UploadID:  uid,
-					Key:       mu.Key,
-					Initiated: mu.Created.UTC().Format(time.RFC3339),
+			if mu.TenantID == t.ID && mu.Bucket == bucket && mu.Status == "active" &&
+				strings.HasPrefix(mu.Key, page.prefix) && mu.Key > page.keyMarker {
+				all = append(all, ListMultipartUploadItem{
+					UploadID:     uid,
+					Key:          mu.Key,
+					Initiated:    mu.Created.UTC().Format(time.RFC3339),
+					StorageClass: "STANDARD",
 				})
 			}
 		}
 		memUploadsMu.RUnlock()
+		sort.Slice(all, func(i, j int) bool { return all[i].Key < all[j].Key })
 	}
 
 	w.Header().Set("Content-Type", "application/xml")
-	if err := xml.NewEncoder(w).Encode(ListMultipartUploadsResult{
-		Bucket:  bucket,
-		Uploads: uploads,
-	}); err != nil {
+	if err := xml.NewEncoder(w).Encode(page.result(bucket, all)); err != nil {
 		s.logger.Error("failed to encode list uploads response", zap.Error(err))
 	}
+}
+
+// s3PageSize is a max-parts / max-uploads value: 1,000 when absent,
+// unparsable or out of 1..1,000.
+func s3PageSize(v string) int {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 1000 {
+		return 1000
+	}
+	return n
+}
+
+// uploadsPage is one ListMultipartUploads request's paging.
+type uploadsPage struct {
+	prefix, delimiter         string
+	keyMarker, uploadIDMarker string
+	max                       int
+}
+
+// commonPrefix is the CommonPrefixes entry key rolls up into, or "".
+func (p uploadsPage) commonPrefix(key string) string {
+	if p.delimiter == "" {
+		return ""
+	}
+	rest := key[len(p.prefix):]
+	if i := strings.Index(rest, p.delimiter); i >= 0 {
+		return p.prefix + rest[:i+len(p.delimiter)]
+	}
+	return ""
+}
+
+// entries counts what rows make in a page: an upload each, a common prefix
+// once.
+func (p uploadsPage) entries(rows []ListMultipartUploadItem) int {
+	n, last := 0, ""
+	for _, u := range rows {
+		if cp := p.commonPrefix(u.Key); cp != "" {
+			if cp != last {
+				n++
+				last = cp
+			}
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// full: the rows hold one entry more than a page (so the page is truncated).
+func (p uploadsPage) full(rows []ListMultipartUploadItem) bool { return p.entries(rows) > p.max }
+
+func (p uploadsPage) result(bucket string, rows []ListMultipartUploadItem) ListMultipartUploadsResult {
+	res := ListMultipartUploadsResult{
+		Bucket: bucket, Prefix: p.prefix, Delimiter: p.delimiter,
+		KeyMarker: p.keyMarker, UploadIDMarker: p.uploadIDMarker, MaxUploads: p.max,
+	}
+	n, last := 0, ""
+	for _, u := range rows {
+		cp := p.commonPrefix(u.Key)
+		if cp != "" && cp == last {
+			continue // the rest of a prefix already in the page
+		}
+		if n == p.max {
+			res.IsTruncated = true
+			break
+		}
+		n++
+		if cp != "" {
+			last = cp
+			res.CommonPrefixes = append(res.CommonPrefixes, listCommonPrefix{Prefix: cp})
+			res.NextKeyMarker, res.NextUploadIDMarker = cp, ""
+			continue
+		}
+		res.Uploads = append(res.Uploads, u)
+		res.NextKeyMarker, res.NextUploadIDMarker = u.Key, u.UploadID
+	}
+	if !res.IsTruncated {
+		res.NextKeyMarker, res.NextUploadIDMarker = "", ""
+	}
+	return res
 }
 
 // sortParts sorts partRecord slices by PartNumber ascending.
@@ -1678,11 +1850,16 @@ type CompleteMultipartUploadResult struct {
 }
 
 type ListPartsResult struct {
-	XMLName  xml.Name       `xml:"ListPartsResult"`
-	Bucket   string         `xml:"Bucket"`
-	Key      string         `xml:"Key"`
-	UploadID string         `xml:"UploadId"`
-	Parts    []ListPartItem `xml:"Part"`
+	XMLName              xml.Name       `xml:"ListPartsResult"`
+	Bucket               string         `xml:"Bucket"`
+	Key                  string         `xml:"Key"`
+	UploadID             string         `xml:"UploadId"`
+	StorageClass         string         `xml:"StorageClass,omitempty"`
+	PartNumberMarker     int            `xml:"PartNumberMarker"`
+	NextPartNumberMarker int            `xml:"NextPartNumberMarker"`
+	MaxParts             int            `xml:"MaxParts"`
+	IsTruncated          bool           `xml:"IsTruncated"`
+	Parts                []ListPartItem `xml:"Part"`
 }
 
 type ListPartItem struct {
@@ -1693,15 +1870,29 @@ type ListPartItem struct {
 }
 
 type ListMultipartUploadsResult struct {
-	XMLName xml.Name                  `xml:"ListMultipartUploadsResult"`
-	Bucket  string                    `xml:"Bucket"`
-	Uploads []ListMultipartUploadItem `xml:"Upload"`
+	XMLName            xml.Name                  `xml:"ListMultipartUploadsResult"`
+	Bucket             string                    `xml:"Bucket"`
+	KeyMarker          string                    `xml:"KeyMarker"`
+	UploadIDMarker     string                    `xml:"UploadIdMarker"`
+	NextKeyMarker      string                    `xml:"NextKeyMarker,omitempty"`
+	NextUploadIDMarker string                    `xml:"NextUploadIdMarker,omitempty"`
+	Prefix             string                    `xml:"Prefix,omitempty"`
+	Delimiter          string                    `xml:"Delimiter,omitempty"`
+	MaxUploads         int                       `xml:"MaxUploads"`
+	IsTruncated        bool                      `xml:"IsTruncated"`
+	Uploads            []ListMultipartUploadItem `xml:"Upload"`
+	CommonPrefixes     []listCommonPrefix        `xml:"CommonPrefixes"`
 }
 
 type ListMultipartUploadItem struct {
-	Key       string `xml:"Key"`
-	UploadID  string `xml:"UploadId"`
-	Initiated string `xml:"Initiated"`
+	Key          string `xml:"Key"`
+	UploadID     string `xml:"UploadId"`
+	StorageClass string `xml:"StorageClass,omitempty"`
+	Initiated    string `xml:"Initiated"`
+}
+
+type listCommonPrefix struct {
+	Prefix string `xml:"Prefix"`
 }
 
 // completedUploadResult is the CompleteMultipartUploadResult of a retry
@@ -1798,7 +1989,7 @@ func (s *Server) completedUploadResult(r *http.Request, tenantID, uploadID, buck
 		return none, false
 	}
 	return CompleteMultipartUploadResult{
-		Location: fmt.Sprintf("http://%s/%s/%s", r.Host, bucket, object),
+		Location: s.completeLocation(r, bucket, object),
 		Bucket:   bucket,
 		Key:      object,
 		ETag:     etag,

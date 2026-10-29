@@ -427,6 +427,12 @@ func readBody(r *http.Request) ([]byte, error) {
 			_, _ = io.Copy(io.Discard, br) // trailers
 			return out, nil
 		}
+		// A chunk size is the peer's: bounded before the allocation (CodeQL
+		// go/uncontrolled-allocation-size, alert 119). SDKs send 64 KiB to
+		// 8 MiB chunks.
+		if n < 0 || n > 64<<20 {
+			return nil, fmt.Errorf("aws-chunked size %d out of range", n)
+		}
 		chunk := make([]byte, n)
 		if _, err := io.ReadFull(br, chunk); err != nil {
 			return nil, fmt.Errorf("aws-chunked data: %w", err)
