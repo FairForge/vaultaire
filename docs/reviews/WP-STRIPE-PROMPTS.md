@@ -661,6 +661,6 @@ Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accept
   - #1051: the image.
   - The post-merge review is RP80.
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
-- **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade. The post-merge review is RP82.
+- **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82.
 - **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = RP82 (filled by RP82). Migration 118. The post-merge review is RP84.
 - **53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`); **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
