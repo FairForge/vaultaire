@@ -272,6 +272,10 @@ test("putTwo: each body has the admitted length where the runtime has FixedLengt
 // --- RP78-1: the mirror's buffer is the isolate's bytes ---------------------------
 
 test("putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored", async () => {
+  // The budget is held by the test itself, not by a second PUT's mirror: on
+  // a loaded runner that mirror could fall 16 MiB behind its primary and be
+  // cut — giving the buffer back — inside the 200 ms wait (RB9-6, the CI
+  // flake on #1054 and #1057). A hold the test controls is deterministic.
   const restore = setIsolateBudget(20 << 20);
   const a = [];
   let mirrorCalls = 0;
@@ -279,26 +283,32 @@ test("putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored"
   const pb = await listen(async (req, res) => {
     mirrorCalls++;
     await readAll(req);
-    await new Promise((r) => setTimeout(r, 1_500)); // holds its buffer past the other's wait
     res.writeHead(200, { ETag: '"m"' });
     res.end();
   });
+  const init = (st, n) => ({ method: "PUT", headers: { "content-length": String(n) }, body: st, duplex: "half" });
   try {
-    const one = chunked(64 << 20);
-    const two = chunked(64 << 20);
-    const init = (st, n) => ({ method: "PUT", headers: { "content-length": String(n) }, body: st, duplex: "half" });
-    const [r1, r2] = await Promise.all([
-      putTwo(fetch, [pa.url + "/1", pb.url + "/1"], init(one.stream, one.bytes.length), one.bytes.length),
-      putTwo(fetch, [pa.url + "/2", pb.url + "/2"], init(two.stream, two.bytes.length), two.bytes.length),
-    ]);
-    const unbudgeted = [r1, r2].filter((r) => r.mirrorUnbudgeted);
-    assert.equal(unbudgeted.length, 1, "one of the two goes unmirrored");
-    assert.equal(unbudgeted[0].resp.status, 200, "and is stored on the primary");
+    const hold = 4 << 20; // leaves 16 MiB: less than a mirror's buffer
+    assert.equal(await isolateBudget().acquireWithin(hold, 0), true);
+    const one = chunked(8 << 20);
+    const began = Date.now();
+    const r1 = await putTwo(fetch, [pa.url + "/1", pb.url + "/1"], init(one.stream, one.bytes.length), one.bytes.length);
+    assert.equal(r1.mirrorUnbudgeted, true, "no buffer to spare: unmirrored");
+    assert.ok(Date.now() - began >= 150, "it waited for the buffer before giving up");
+    assert.equal(r1.resp.status, 200, "and is stored on the primary");
     await r1.settle;
+    assert.equal(mirrorCalls, 0, "the unmirrored PUT sent one link");
+    assert.equal(isolateBudget().held, hold, "nothing of the mirror's was charged");
+
+    // The hold given back: the next PUT is mirrored, and gives its buffer back.
+    isolateBudget().release(hold);
+    const two = chunked(8 << 20);
+    const r2 = await putTwo(fetch, [pa.url + "/2", pb.url + "/2"], init(two.stream, two.bytes.length), two.bytes.length);
+    assert.equal(r2.mirrorUnbudgeted, false);
     await r2.settle;
-    assert.equal(mirrorCalls, 1, "the unmirrored PUT sent one link");
+    assert.equal(mirrorCalls, 1);
     assert.equal(a.length, 2);
-    assert.equal(isolateBudget().held, 0, "every byte given back when the mirrors ended");
+    assert.equal(isolateBudget().held, 0, "every byte given back when the mirror ended");
   } finally {
     restore();
     pa.s.close();
