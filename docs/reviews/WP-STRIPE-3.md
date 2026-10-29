@@ -53,17 +53,39 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 - **RB9-3:** the parent dashboard's "Children" card (chain edition item 5) is not built. The list endpoint answers the per-child usage.
 - **RB9-4 (RB8-3 widened):** admin views count children (and sandboxes) as tenants.
 - **RB9-5:** no `PlatformAdmin` key permission (D-STRIPE-19).
-- **RB9-6:** the Worker's JS test `putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored` failed once in CI on #1054 (a docs-only PR; both mirrors got the budget). It passed on rerun. It is a timing test (a 1.5 s hold against a 200 ms wait).
+- **RB9-6 (fixed, #1059):** the Worker's JS test `putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored` failed CI on #1054 and #1057. On a loaded runner the first PUT's mirror fell 16 MiB behind and was cut inside the second's 200 ms wait, giving the buffer back. The test now holds the budget itself.
 - **RB9-7:** a child whose erasure settles on a lagging backend records `user_id = ""` in its settle row. The walk is tenant-keyed, so nothing else reads it.
 
 ## The prod proof
 
-**Owed: the owner's TOTP.** `PUT /api/v1/admin/tenants/{id}/platform` is an admin route, and an admin JWT from `POST /auth/login` needs the owner's TOTP code (#956). With it:
-1. grant tenant zero the platform flag;
-2. create one child through `POST /api/v1/platform/tenants`;
-3. mint the child a scoped key (`POST …/keys`);
-4. PUT one object through `s3.stored.cloud` with that key;
-5. read the child's `usage.storage_used_bytes`, and the pool's sum against tenant zero's limit.
+All on prod, 2026-10-29 (UTC), after #1057 (the pool) went live (build `3ba1e2e0`, 18:03).
+
+**How (owner-authorised, no TOTP).** The admin route needs an admin JWT, which needs the owner's TOTP. The owner authorised the operator to do it on the box instead, as Prompt 50's session did for the test key. One script (`psql` with the app's credentials, never printed) ran each step in **the code's own transaction**:
+- `auth.SetPlatform`: tenant zero's row `FOR UPDATE`, `platform = true`, and an `admin.platform_granted` audit row whose metadata says "operator SQL, owner-authorised".
+- `auth.CreateChildTenant`: the parent `FOR SHARE`, the child `tenant-9f168de3e4ef8be3` (label "Prompt 51 proof", `external_id` `proof-1`, `platform+…@platform.invalid`), its quota row at limit 0 with tenant zero's tier `starter`, and `platform.tenant_created`.
+- `auth.GenerateChildKey`: a scoped key `VK0453DCEDAB45B29674DC` (CreateBucket, ListObjects, PutObject, GetObject, HeadObject, DeleteObject) whose secret was generated on the box into a 0600 file and bcrypt-hashed, and `platform.key_created`.
+
+**Through `s3.stored.cloud`, with the child's key:**
+- CreateBucket `plat-proof-2a1605` 200;
+- a 3,000,000-byte PutObject 200 (ETag `8fb62310…`), the head row on `idrive`;
+- GetObject: bytes identical;
+- a ListObjectsV2 of tenant zero's `lightroom-backups` is **404**: a child's key sees only its own tenant.
+
+**The pool:**
+
+| | Before | After |
+|---|---|---|
+| child's `storage_used_bytes` | — | **3,000,000** |
+| tenant zero's own counter | 106,527,633,904 | unchanged |
+| the pool's sum (tenant zero + children) | 106,527,633,904 | **106,530,633,904** (+3,000,000) |
+| the pool's limit (tenant zero's) | 1 TiB | 1 TiB |
+
+**The rows:**
+- the request log holds four rows **under the child's id** (CreateBucket, PutObject, GetObject, the 404 ListObjects), each `host = origin`;
+- `edge_admits`: 0 (the child has no `edge_ingest` flag, so the Worker passed it to the origin);
+- the audit trail under tenant zero: `admin.platform_granted`, `platform.tenant_created`, `platform.key_created`, `platform.key_revoked`.
+
+**Left in place:** tenant zero is a platform. The child, its bucket and its 3 MB object stay as the proof. The key was **revoked** at the end, and the secret file was removed with the script (no live credential outlives it).
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, the Connect primitive), after Part 0 = RP80 — DONE in code, dark** (`docs/reviews/WP-STRIPE-3.md`; migration 117; next 118):
+Updated: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, the Connect primitive), after Part 0 = RP80 — DONE** (`docs/reviews/WP-STRIPE-3.md`; migration 117; next 118):
 - **#1055 Part 0**, every RP80 finding fixed:
   - a sandbox's downloads are metered under its own id against a fixed 5 GiB a month and paced past it, never billed; its presigned links ≤ 1 h; never Public;
   - a suspended parent's sandbox is suspended; no test key for a suspended account;
@@ -13,7 +13,7 @@ Updated: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, th
   - a child: no user, no e-mail, no primary pair; suspended with its platform.
 - **#1057, the pool:** every write path (the edge admit included) reserves against the platform's limit and the sum of the platform's and its children's bytes; a sandbox is never in it.
 - **#1058, keys and the cascade:** a child's scoped keys and STS tokens, never wider than the calling credential (400 `scope_exceeds_parent`); a platform's erasure erases its children first (the runner's stage b5); a due child is erased alone.
-- **Prod: dark.** No tenant has `platform = true`. **The proof is owed and needs the owner's TOTP:** grant tenant zero, create one child, mint its key, PUT one object through `s3.stored.cloud`, read the child's usage in the pool.
+- **Prod proof (owner-authorised operator SQL in the code's own transactions, no TOTP):** tenant zero is a **platform**; child `tenant-9f168de3e4ef8be3` made; its scoped key PUT a 3 MB object through `s3.stored.cloud` (bytes identical; tenant zero's bucket 404 to it); the child's counter 3,000,000 and the pool's sum +3,000,000 against tenant zero's 1 TiB; four request-log rows under the child; the key revoked after.
 - **Owner:** open questions in WP-STRIPE-3: a platform key instead of a JWT (D-STRIPE-19), a tenant-level residency (D-STRIPE-20), a child's download allowance (RB9-2).
 - **Prompt 52 (WP-TEAM-1)** is written in both editions with Part 0 = RP82. The post-merge review is RP82.
 
