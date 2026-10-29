@@ -184,6 +184,12 @@ func (a *Auth) validateDescribed(r *http.Request, clientIP string) (string, *Key
 			zap.Bool("time_skewed", errors.Is(err, ErrRequestTimeSkewed)))
 		return "", nil, err
 	}
+	// A signed streaming body is checked chunk by chunk as the handler reads
+	// it (WP-R15-1): the verifier rides on the body. A described request has
+	// none (the edge never takes a signed stream — edgeStreamingOf).
+	if v := a.streamChunkVerifier(r, params, cred.SecretKey); v != nil && r.Body != nil {
+		r.Body = &signedStreamBody{ReadCloser: r.Body, v: v}
+	}
 	// The key's IP allow-list, against the address the entrance vouches for
 	// (R1-01): the origin's trusted peer, or the Worker's CF-Connecting-IP.
 	if cred.Scope != nil && !CheckIPAllowlist(cred.Scope.IPAllowlist, clientIP) {

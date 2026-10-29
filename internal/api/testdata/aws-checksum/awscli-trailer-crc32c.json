@@ -1,0 +1,43 @@
+{
+ "Method": "PUT",
+ "Path": "/bench/t-CRC32C.txt",
+ "RawQuery": "",
+ "Host": "127.0.0.1:18913",
+ "ContentLength": -1,
+ "Header": {
+  "Accept-Encoding": [
+   "identity"
+  ],
+  "Authorization": [
+   "AWS4-HMAC-SHA256 Credential=AKIAVAULTAIRETEST/20261029/us-east-1/s3/aws4_request, SignedHeaders=content-encoding;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length;x-amz-sdk-checksum-algorithm;x-amz-trailer, Signature=aa25420d9142337fbeae1a66311a824309a23953945ac31ac8f251a746792bec"
+  ],
+  "Content-Encoding": [
+   "aws-chunked"
+  ],
+  "Content-Type": [
+   "text/plain"
+  ],
+  "Expect": [
+   "100-continue"
+  ],
+  "User-Agent": [
+   "aws-cli/2.28.19 md/awscrt#0.27.5 ua/2.1 os/macos#25.1.0 md/arch#arm64 lang/python#3.13.7 md/pyimpl#CPython m/Z,E,G,V,N,b cfg/retry-mode#standard md/installer#source md/prompt#off md/command#s3.cp"
+  ],
+  "X-Amz-Content-Sha256": [
+   "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+  ],
+  "X-Amz-Date": [
+   "20261029T205105Z"
+  ],
+  "X-Amz-Decoded-Content-Length": [
+   "12"
+  ],
+  "X-Amz-Sdk-Checksum-Algorithm": [
+   "CRC32C"
+  ],
+  "X-Amz-Trailer": [
+   "x-amz-checksum-crc32c"
+  ]
+ },
+ "Body": "Yw0KaGVsbG8gc3RvcmVkDQowDQp4LWFtei1jaGVja3N1bS1jcmMzMmM6dm1YWHFRPT0NCg0K"
+}
