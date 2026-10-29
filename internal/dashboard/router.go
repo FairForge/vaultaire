@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/account"
@@ -114,6 +115,66 @@ func (d Deps) flagOn(key string) func(tenantID string) bool {
 		return nil
 	}
 	return func(tenantID string) bool { return d.Flags.Enabled(key, tenantID) }
+}
+
+// personalWrite marks a dashboard write about the signed-in user only (its
+// profile, password, MFA, sessions): every member may make it.
+const personalWrite auth.Action = "personal"
+
+// dashboardWrites names what every write of the /dashboard group does
+// (WP-TEAM-1): the action auth.Can checks against the member's role on the
+// active tenant, or personalWrite. A write registered without an entry
+// panics at boot (dashboardAction); TestDashboardRoutes_EveryWriteNamesItsAction
+// walks the router.
+var dashboardWrites = map[string]auth.Action{
+	"POST /buckets":                       auth.ActionBucketWrite,
+	"POST /buckets/{name}/restore":        auth.ActionBucketWrite,
+	"POST /buckets/{name}/settings":       auth.ActionBucketWrite,
+	"POST /apikeys":                       auth.ActionKeyWrite,
+	"POST /apikeys/{id}/revoke":           auth.ActionKeyWrite,
+	"POST /apikeys/{id}/rotate":           auth.ActionKeyWrite,
+	"POST /settings/profile":              personalWrite,
+	"POST /settings/password":             personalWrite,
+	"POST /settings/notifications":        personalWrite,
+	"POST /settings/sessions/revoke-all":  personalWrite,
+	"POST /settings/sessions/{id}/revoke": personalWrite,
+	"POST /settings/mfa/enable":           personalWrite,
+	"POST /settings/mfa/backup-codes":     personalWrite,
+	"POST /settings/mfa/disable":          personalWrite,
+	"POST /settings/resend-verify":        personalWrite,
+	"POST /onboarding/dismiss":            personalWrite,
+	"POST /settings/export":               auth.ActionAccountExport,
+	"GET /settings/export/download":       auth.ActionAccountExport,
+	"POST /settings/delete-account":       auth.ActionAccountDelete,
+	"POST /settings/cancel-deletion":      auth.ActionAccountDelete,
+	"POST /billing/house":                 auth.ActionBilling,
+	"POST /billing/portal":                auth.ActionBilling,
+	"POST /billing/renew":                 auth.ActionBilling,
+	"POST /billing/switch":                auth.ActionBilling,
+	"POST /billing/crypto-invoice/cancel": auth.ActionBilling,
+}
+
+// dashboardActed records the routes mounted through dashboardAction (the
+// walk's proof that a write went through it).
+var (
+	dashboardActedMu sync.Mutex
+	dashboardActed   = map[string]bool{}
+)
+
+// dashboardAction is the middleware of one /dashboard write: the role check
+// of its action (handlers.RequireAction), nothing for a personal write.
+func dashboardAction(route string) func(http.Handler) http.Handler {
+	action, ok := dashboardWrites[route]
+	if !ok {
+		panic("dashboard: write " + route + " names no action in dashboardWrites")
+	}
+	dashboardActedMu.Lock()
+	dashboardActed[route] = true
+	dashboardActedMu.Unlock()
+	if action == personalWrite {
+		return func(next http.Handler) http.Handler { return next }
+	}
+	return handlers.RequireAction(action)
 }
 
 // CSRFKeyFromSecret derives the CSRF key from a persistent server secret
@@ -239,10 +300,12 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 	})
 
 	// --- Customer dashboard (session required) ---
+	act := dashboardAction
 	r.Route("/dashboard", func(dr chi.Router) {
 		dr.Use(middleware.Recovery(deps.Logger))
 		dr.Use(middleware.SecurityHeaders)
 		dr.Use(dashauth.RequireSession(deps.Sessions))
+		dr.Use(handlers.ResolveMember(deps.DB, deps.Logger)) // WP-TEAM-1: the role on the active tenant
 		dr.Use(csrf)
 		dr.Use(middleware.Flash)
 		dr.NotFound(handlers.HandleNotFound(deps.Logger))
@@ -273,14 +336,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			return deps.Flags != nil && deps.Flags.Enabled(modes.FlagModesCopy, tenantID)
 		})
 		dr.Get("/buckets", handlers.HandleBuckets(bucketsTmpl, deps.DB, deps.DataPath, deps.RegionAvailable, deps.Logger))
-		dr.Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.RegionAvailable, deps.Logger))
+		dr.With(act("POST /buckets")).Post("/buckets", handlers.HandleCreateBucket(bucketsTmpl, deps.DB, deps.CreateBucket, deps.RegionAvailable, deps.Logger))
 		// A system bucket (tenant.ExportsBucket, WP-R10-3b) has no page: 404
 		// before any handler, as the S3 API answers NoSuchBucket.
 		dr.With(noSystemBucket).Get("/buckets/{name}", handlers.HandleBucketObjects(bucketObjsTmpl, deps.DB, deps.Logger))
-		dr.With(noSystemBucket).Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
+		dr.With(noSystemBucket, act("POST /buckets/{name}/restore")).Post("/buckets/{name}/restore", handlers.HandleRestoreObject(deps.Engine, deps.DB, deps.Logger))
 		dr.With(noSystemBucket).Get("/buckets/{name}/restore-status", handlers.HandleObjectRestoreStatus(deps.Engine, deps.DB, deps.Logger))
 		dr.With(noSystemBucket).Get("/buckets/{name}/settings", handlers.HandleBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
-		dr.With(noSystemBucket).Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
+		dr.With(noSystemBucket, act("POST /buckets/{name}/settings")).Post("/buckets/{name}/settings", handlers.HandleUpdateBucketSettings(bucketSettingsTmpl, deps.DB, deps.Logger))
 
 		// Bucket CDN analytics.
 		analyticsTmpl := template.Must(baseTmpl.Clone())
@@ -295,9 +358,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 			"templates/customer/apikeys.html",
 		))
 		dr.Get("/apikeys", handlers.HandleAPIKeys(apikeysTmpl, deps.Auth, deps.Logger))
-		dr.Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.DB, deps.Logger))
-		dr.Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
-		dr.Post("/apikeys/{id}/rotate", handlers.HandleRotateKey(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.With(act("POST /apikeys")).Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.With(act("POST /apikeys/{id}/revoke")).Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
+		dr.With(act("POST /apikeys/{id}/rotate")).Post("/apikeys/{id}/rotate", handlers.HandleRotateKey(apikeysTmpl, deps.Auth, deps.Logger))
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())
@@ -328,13 +391,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		))
 		dr.Get("/settings/access", handlers.HandleAccess(accessTmpl, deps.flagOn(translog.FlagTranslogCustomerView),
 			deps.flagOn(translog.FlagTranslogAdminReads), deps.AccessLog, deps.trustCheckpointURL(), deps.translogPublished(), deps.Logger))
-		dr.Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
-		dr.Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
-		dr.Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.With(act("POST /settings/profile")).Post("/settings/profile", handlers.HandleUpdateProfile(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
+		dr.With(act("POST /settings/password")).Post("/settings/password", handlers.HandleChangePassword(settingsTmpl, deps.Auth, deps.DB, deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/notifications")).Post("/settings/notifications", handlers.HandleUpdateNotifications(settingsTmpl, deps.Auth, deps.DB, deps.Logger))
 
 		// Active sessions / sign out other devices (Phase 5.8).
-		dr.Post("/settings/sessions/revoke-all", handlers.HandleRevokeAllOtherSessions(deps.Sessions, deps.Logger))
-		dr.Post("/settings/sessions/{id}/revoke", handlers.HandleRevokeSession(deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/sessions/revoke-all")).Post("/settings/sessions/revoke-all", handlers.HandleRevokeAllOtherSessions(deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/sessions/{id}/revoke")).Post("/settings/sessions/{id}/revoke", handlers.HandleRevokeSession(deps.Sessions, deps.Logger))
 
 		// 2FA settings.
 		mfaSetupTmpl := template.Must(baseTmpl.Clone())
@@ -351,23 +414,23 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		}
 		dr.Get("/settings/mfa", handlers.HandleMFASetup(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Logger))
 		dr.Get("/settings/mfa/qr.png", handlers.HandleMFAQR(mfaEnrol, deps.Logger))
-		dr.Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Sessions, deps.Logger))
-		dr.Post("/settings/mfa/backup-codes", handlers.HandleMFARegenerateBackupCodes(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Sessions, deps.Logger))
-		dr.Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/mfa/enable")).Post("/settings/mfa/enable", handlers.HandleMFAEnable(mfaSetupTmpl, deps.Auth, deps.MFA, mfaEnrol, deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/mfa/backup-codes")).Post("/settings/mfa/backup-codes", handlers.HandleMFARegenerateBackupCodes(mfaSetupTmpl, deps.Auth, deps.MFA, deps.Sessions, deps.Logger))
+		dr.With(act("POST /settings/mfa/disable")).Post("/settings/mfa/disable", handlers.HandleMFADisable(settingsTmpl, deps.Auth, deps.Sessions, deps.Logger))
 
 		// GDPR: data export (WP-R10-3b: requested here, rendered by the
 		// account_export job, downloaded through a presigned URL) + account
 		// deletion.
-		dr.Post("/settings/export", handlers.HandleExportData(deps.Exports, deps.DB, deps.Logger))
-		dr.Get("/settings/export/download", handlers.HandleExportDownload(deps.Exports, deps.Logger))
-		dr.Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Auth, deps.Account, deps.MFA, deps.Logger))
-		dr.Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Account, deps.Logger))
+		dr.With(act("POST /settings/export")).Post("/settings/export", handlers.HandleExportData(deps.Exports, deps.DB, deps.Logger))
+		dr.With(act("GET /settings/export/download")).Get("/settings/export/download", handlers.HandleExportDownload(deps.Exports, deps.Logger))
+		dr.With(act("POST /settings/delete-account")).Post("/settings/delete-account", handlers.HandleRequestDeletion(deps.DB, deps.Auth, deps.Account, deps.MFA, deps.Logger))
+		dr.With(act("POST /settings/cancel-deletion")).Post("/settings/cancel-deletion", handlers.HandleCancelDeletion(deps.DB, deps.Account, deps.Logger))
 
 		// Email verification resend.
-		dr.Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger, deps.Email, deps.BaseURL))
+		dr.With(act("POST /settings/resend-verify")).Post("/settings/resend-verify", handlers.HandleResendVerification(deps.Auth, deps.Logger, deps.Email, deps.BaseURL))
 
 		// Onboarding dismiss.
-		dr.Post("/onboarding/dismiss", handlers.HandleDismissOnboarding(deps.Logger))
+		dr.With(act("POST /onboarding/dismiss")).Post("/onboarding/dismiss", handlers.HandleDismissOnboarding(deps.Logger))
 
 		// Billing page.
 		billingTmpl := template.Must(baseTmpl.Clone())
@@ -382,21 +445,21 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		}
 		dr.Get("/billing", handlers.HandleBilling(billingTmpl, billingSvc, deps.DB, deps.Flags, deps.Logger))
 		houseCheckout := handlers.HandleHouseCheckout(billingSvc, deps.DB, deps.Flags, deps.BaseURL, deps.Logger)
-		dr.Post("/billing/house", houseCheckout)
-		dr.Post("/billing/portal", handlers.HandleManageBilling(deps.Payments.Provider(payments.ProviderStripe), deps.BaseURL, deps.Logger))
+		dr.With(act("POST /billing/house")).Post("/billing/house", houseCheckout)
+		dr.With(act("POST /billing/portal")).Post("/billing/portal", handlers.HandleManageBilling(deps.Payments.Provider(payments.ProviderStripe), deps.BaseURL, deps.Logger))
 		// WP-PAY-3: renew a prepaid or lapsed house by hand; the receipts
 		// (print-ready, from the ledger row, the session's tenant only).
 		renewHouse := handlers.HandleRenewHouse(billingSvc, deps.DB, deps.BaseURL, deps.Logger)
 		switchProvider := handlers.HandleSwitchProvider(billingSvc, deps.DB, deps.BaseURL, deps.Logger)
-		dr.Post("/billing/renew", renewHouse)
-		dr.Post("/billing/switch", switchProvider)
+		dr.With(act("POST /billing/renew")).Post("/billing/renew", renewHouse)
+		dr.With(act("POST /billing/switch")).Post("/billing/switch", switchProvider)
 		// RP31-5: the way out of a crypto_invoice_open 409 — cancel the
 		// unpaid bitcoin invoice, then the refused form continues.
 		var invoiceCancel handlers.InvoiceCancelling
 		if deps.Payments != nil {
 			invoiceCancel = deps.Payments
 		}
-		dr.Post("/billing/crypto-invoice/cancel", handlers.HandleCancelCryptoInvoice(invoiceCancel,
+		dr.With(act("POST /billing/crypto-invoice/cancel")).Post("/billing/crypto-invoice/cancel", handlers.HandleCancelCryptoInvoice(invoiceCancel,
 			map[string]http.Handler{"house": houseCheckout, "renew": renewHouse, "switch": switchProvider}, deps.Logger))
 		receiptTmpl := template.Must(template.New("").Funcs(handlers.TemplateFuncs()).ParseFS(Templates, "templates/customer/receipt.html"))
 		dr.Get("/billing/receipts/{id}", handlers.HandleReceipt(receiptTmpl, deps.DB, deps.hostSet().Legal(), deps.Logger))

@@ -37,34 +37,37 @@ func (s *Server) registerManagementRoutes() {
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireMember)        // WP-TEAM-1: the JWT's user is a member of its tenant
 		r.Use(s.logManagementRequest) // RP78-6: the request log
 		r.Use(rl.Middleware)
 		r.Use(im.Middleware)
 
+		// Every write names the action it performs (WP-TEAM-1): the acting
+		// member's role is checked by requireRole, auth.Can the one rule.
 		r.Get("/buckets", s.handleMgmtListBuckets)
-		r.Post("/buckets", s.handleMgmtCreateBucket)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets", s.handleMgmtCreateBucket)
 		r.Get("/buckets/{name}", s.handleMgmtGetBucket)
-		r.Patch("/buckets/{name}", s.handleMgmtPatchBucket)
-		r.Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Patch("/buckets/{name}", s.handleMgmtPatchBucket)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 
 		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
-		r.Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
-		r.Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
-		r.Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
-		r.Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
 
 		r.Get("/keys", s.handleMgmtListKeys)
-		r.Post("/keys", s.handleMgmtCreateKey)
-		r.Delete("/keys/{id}", s.handleMgmtDeleteKey)
-		r.Post("/sandbox/reset", s.handleMgmtSandboxReset) // WP-DX-1: test mode
+		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/keys", s.handleMgmtCreateKey)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Delete("/keys/{id}", s.handleMgmtDeleteKey)
+		r.With(s.requireRole(auth.ActionSandboxReset)).Post("/sandbox/reset", s.handleMgmtSandboxReset) // WP-DX-1: test mode
 
 		r.Get("/usage", s.handleMgmtGetUsage)
 		r.Get("/requests", s.handleMgmtRequests) // WP-LOG-1: the request log
 
-		r.Post("/account/export", s.handleMgmtExportData)
-		r.Get("/account/export/{id}", s.handleMgmtGetExport)
-		r.Delete("/account", s.handleMgmtDeleteAccount)
-		r.Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
+		r.With(s.requireRole(auth.ActionAccountExport)).Post("/account/export", s.handleMgmtExportData)
+		r.With(s.requireRole(auth.ActionAccountExport)).Get("/account/export/{id}", s.handleMgmtGetExport)
+		r.With(s.requireRole(auth.ActionAccountDelete)).Delete("/account", s.handleMgmtDeleteAccount)
+		r.With(s.requireRole(auth.ActionAccountDelete)).Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
 		// The tenant's own admin-read entries in the transparency log (K4c-1),
 		// dark behind translog_customer_view.
 		r.Get("/account/transparency", s.handleMgmtAccountTransparency)

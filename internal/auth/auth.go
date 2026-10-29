@@ -47,7 +47,12 @@ type Tenant struct {
 type JWTClaims struct {
 	UserID   string `json:"user_id"`
 	Email    string `json:"email"`
-	TenantID string `json:"tenant_id"`
+	TenantID string `json:"tenant_id"` // the ACTIVE tenant (WP-TEAM-1)
+	// Role is the member's role on TenantID when the token was minted
+	// (WP-TEAM-1) — for the client to read. The server never trusts it:
+	// requireJWT reads the role from tenant_members on every request, and a
+	// token minted before 118 carries none.
+	Role string `json:"role,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -468,8 +473,8 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	return user, tenant, apiKey, nil
 }
 
-// persistNewAccount writes users → tenants → api_keys → tenant_quotas in one
-// transaction. Each INSERT is ON CONFLICT DO NOTHING for idempotency.
+// persistNewAccount writes users → tenants → api_keys → tenant_quotas →
+// tenant_members (the owner) in one transaction. Each INSERT is ON CONFLICT DO NOTHING for idempotency.
 func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant *Tenant, apiKey *APIKey, company string) error {
 	tx, err := a.sqlDB.BeginTx(ctx, nil)
 	if err != nil {
@@ -533,6 +538,16 @@ func (a *AuthService) persistNewAccount(ctx context.Context, user *User, tenant 
 		ON CONFLICT (tenant_id) DO NOTHING
 	`, tenant.ID); err != nil {
 		return fmt.Errorf("provision tenant quota: %w", err)
+	}
+
+	// The registering user is the tenant's owner member (WP-TEAM-1, 118):
+	// the four-table rule is five.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_members (tenant_id, user_id, role)
+		VALUES ($1, $2, 'owner')
+		ON CONFLICT DO NOTHING
+	`, tenant.ID, user.ID); err != nil {
+		return fmt.Errorf("persist owner member: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -800,10 +815,33 @@ func (a *AuthService) GenerateJWT(user *User) (string, error) {
 // generateJWTAt mints a token with an explicit issue time (tests date a
 // token before a password change).
 func (a *AuthService) generateJWTAt(user *User, issuedAt time.Time) (string, error) {
+	a.cacheMu.RLock()
+	tenantID := user.TenantID
+	a.cacheMu.RUnlock()
+	return a.generateJWTFor(user, tenantID, "", issuedAt)
+}
+
+// GenerateJWTForTenant mints a token whose active tenant is tenantID, for a
+// member of it (WP-TEAM-1: a user in several tenants signs in to one and
+// switches). The caller has checked the membership; the role is recorded in
+// the claims for the client.
+func (a *AuthService) GenerateJWTForTenant(user *User, tenantID string, role Role) (string, error) {
+	return a.generateJWTFor(user, tenantID, role, time.Now())
+}
+
+func (a *AuthService) generateJWTFor(user *User, tenantID string, role Role, issuedAt time.Time) (string, error) {
+	if role == "" && tenantID != "" && a.sqlDB != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), jwtLookupTimeout)
+		if r, err := MemberRole(ctx, a.sqlDB, tenantID, user.ID); err == nil {
+			role = r
+		}
+		cancel()
+	}
 	claims := JWTClaims{
 		UserID:   user.ID,
 		Email:    user.Email,
-		TenantID: user.TenantID,
+		TenantID: tenantID,
+		Role:     string(role),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(issuedAt.Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(issuedAt),
