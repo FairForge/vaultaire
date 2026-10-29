@@ -168,6 +168,15 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("tenant", tenantID))
 
+	// RP80-1: a test-mode tenant's bucket is never Public. A live tenant's
+	// canned ACL on a create is not honoured (the bucket is born Standard);
+	// a sandbox's public one is refused, so a test never believes it.
+	if acl := r.Header.Get("x-amz-acl"); (acl == "public-read" || acl == "public-read-write") && isSandbox(ctx, s.db, tenantID) {
+		WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(),
+			WithMessage("A test-mode bucket is never public: test data is not served to the world."))
+		return
+	}
+
 	// x-amz-bucket-object-lock-enabled (aws-cli --object-lock-enabled-for-bucket;
 	// RP16-4: it was ignored, the bucket made without lock).
 	var opts bucketCreateOptions

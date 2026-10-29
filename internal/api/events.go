@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -460,6 +461,46 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 // eventsWaitMax bounds a long poll of the forward cursor.
 const eventsWaitMax = 25 * time.Second
 
+// eventsMaxWaitsPerTenant bounds one tenant's long polls waiting at once
+// (RP80-4: each waiting request asks the database every 500 ms, and the
+// routes' rate limit counts requests, not waits). The fifth is 429.
+const eventsMaxWaitsPerTenant = 4
+
+// eventsSettleHorizon: an event is answered by the forward cursor only once
+// it is this old (RP80-3). created_at is the INSERT's NOW() and the id a
+// random uuid, so two events can commit out of their stamps' order; a
+// cursor that moved past a later stamp would skip the earlier one for ever.
+// An event's single-statement INSERT commits well inside the horizon.
+var eventsSettleHorizon = 2 * time.Second
+
+// eventWaits counts each tenant's long polls waiting now.
+var eventWaits = struct {
+	sync.Mutex
+	n map[string]int
+}{n: map[string]int{}}
+
+// acquireEventWait takes one of the tenant's wait slots; false when all
+// eventsMaxWaitsPerTenant are taken. The caller releases a slot it got.
+func acquireEventWait(tenantID string) bool {
+	eventWaits.Lock()
+	defer eventWaits.Unlock()
+	if eventWaits.n[tenantID] >= eventsMaxWaitsPerTenant {
+		return false
+	}
+	eventWaits.n[tenantID]++
+	return true
+}
+
+func releaseEventWait(tenantID string) {
+	eventWaits.Lock()
+	defer eventWaits.Unlock()
+	if eventWaits.n[tenantID] <= 1 {
+		delete(eventWaits.n, tenantID)
+		return
+	}
+	eventWaits.n[tenantID]--
+}
+
 // listEventsAfter is GET /api/v1/events?after=<event id>&wait=<s> (WP-DX-1):
 // the tenant's events after that one, OLDEST first (created_at, then id), at
 // most limit; next_cursor is the last one's id (the given one when none).
@@ -476,6 +517,15 @@ func (s *Server) listEventsAfter(w http.ResponseWriter, r *http.Request, tenantI
 	var wait time.Duration
 	if n, err := strconv.Atoi(q.Get("wait")); err == nil && n > 0 {
 		wait = min(time.Duration(n)*time.Second, eventsWaitMax)
+	}
+	if wait > 0 {
+		if !acquireEventWait(tenantID) {
+			w.Header().Set("Retry-After", "5")
+			writeManagementError(w, ErrTypeRateLimit, "too_many_listeners",
+				fmt.Sprintf("at most %d long polls of this account may wait at once", eventsMaxWaitsPerTenant), "wait")
+			return
+		}
+		defer releaseEventWait(tenantID)
 	}
 	ctx := r.Context()
 	if after == "now" {
@@ -531,13 +581,14 @@ func (s *Server) listEventsAfter(w http.ResponseWriter, r *http.Request, tenantI
 }
 
 // eventsAfter reads the events after the one with id after ("" = from the
-// first), oldest first.
+// first), oldest first, older than the settle horizon (RP80-3).
 func (s *Server) eventsAfter(ctx context.Context, tenantID, after string, limit int) ([]map[string]interface{}, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.type, e.data, e.created_at, e.livemode FROM events e
 		WHERE e.tenant_id = $1
 		  AND ($2 = '' OR (e.created_at, e.id) > (SELECT a.created_at, a.id FROM events a WHERE a.id = $2 AND a.tenant_id = $1))
-		ORDER BY e.created_at, e.id LIMIT $3`, tenantID, after, limit)
+		  AND e.created_at <= now() - make_interval(secs => $4)
+		ORDER BY e.created_at, e.id LIMIT $3`, tenantID, after, limit, eventsSettleHorizon.Seconds())
 	if err != nil {
 		return nil, err
 	}

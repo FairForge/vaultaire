@@ -66,3 +66,37 @@ func TestDevelopers_ShowsTheTenantsRequestsWithTheSuggestion(t *testing.T) {
 	assert.Contains(t, byKey, "REQ-DENIED-1")
 	assert.NotContains(t, byKey, "REQ-OK-1")
 }
+
+// RB8-2: the page's Live / Test toggle — ?mode=test lists the sandbox's
+// requests (a test key's), live the tenant's own.
+func TestDevelopers_TestModeShowsTheSandboxsRequests(t *testing.T) {
+	db := testDashDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	id := houseTenant(t, db, 0, 0)
+	sb := "sandbox-dev-" + id[len(id)-8:]
+	_, err := db.Exec(`INSERT INTO tenants (id, name, email, sandbox_of) VALUES ($1, 'test data', $2, $3)`, sb, "sandbox+"+sb+"@sandbox.invalid", id)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM request_log WHERE tenant_id IN ($1, $2)`, id, sb)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, sb)
+	})
+	_, err = db.Exec(`INSERT INTO request_log (tenant_id, key_id, op, bucket, object_key, status, error_code, request_id, host) VALUES
+		($1, 'VKLIVE', 'GetObject', 'photos', 'cat.jpg', 200, '', 'REQ-LIVE-1', 'origin'),
+		($2, 'VLT_TEST_X', 'PutObject', 'scratch', 't.txt', 200, '', 'REQ-TEST-1', 'origin')`, id, sb)
+	require.NoError(t, err)
+	get := func(query string) string {
+		w := httptest.NewRecorder()
+		HandleDevelopers(developersPage(t), db, zap.NewNop()).ServeHTTP(w,
+			injectSessionWithTenant(httptest.NewRequest("GET", "/dashboard/developers"+query, nil), id))
+		require.Equal(t, 200, w.Code)
+		return w.Body.String()
+	}
+	live := get("")
+	assert.Contains(t, live, "REQ-LIVE-1")
+	assert.NotContains(t, live, "REQ-TEST-1")
+	assert.Contains(t, live, `href="/dashboard/developers?mode=test"`, "the toggle")
+	test := get("?mode=test")
+	assert.Contains(t, test, "REQ-TEST-1")
+	assert.NotContains(t, test, "REQ-LIVE-1")
+	assert.Contains(t, test, `name="mode" value="test"`, "the filters keep the mode")
+}

@@ -166,7 +166,13 @@ func (a *S3ToEngine) versionedChunkingEnabled(tenantID string) bool {
 func (a *S3ToEngine) decidePlacement(ctx context.Context, req placementRequest) writePlacement {
 	// WP-DX-1: a sandbox writes whole and as received to `local` (placeOn)
 	// — never chunked or sealed, no refusal for a missing master key.
-	if isSandbox(ctx, a.db, req.TenantID) {
+	switch parent, err := sandboxLookup(ctx, a.db, req.TenantID); {
+	case err != nil:
+		// RP80-5: unknown is not "live" — a chunked write would put a
+		// sandbox's chunks on the primary.
+		return writePlacement{Refusal: &placementRefusal{Status: http.StatusServiceUnavailable,
+			Code: ErrServiceUnavailable, Message: "The account could not be read; try again shortly.", RetryAfter: "30"}}
+	case parent != "":
 		return writePlacement{Kind: placeWhole}
 	}
 	chunkThreshold := a.chunkThreshold()

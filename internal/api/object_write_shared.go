@@ -243,8 +243,13 @@ func placeObject(ctx context.Context, db *sql.DB, eng engine.Engine, logger *zap
 func placeOn(ctx context.Context, db *sql.DB, eng engine.Engine, tenantID, bucket, container, blob string,
 	body io.Reader, opts ...engine.PutOption) (string, error) {
 	// WP-DX-1: a sandbox's bytes go to `local`, whatever else is asked —
-	// the first branch, before a region pin or the engine's placement.
-	if isSandbox(ctx, db, tenantID) {
+	// the first branch, before a region pin or the engine's placement. A
+	// lookup that fails is a 503 (RP80-5): never a paid backend by mistake.
+	parent, err := sandboxLookup(ctx, db, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("put %s/%s: is %s a sandbox: %w: %w", container, blob, tenantID, err, engine.ErrAllBackendsUnavailable)
+	}
+	if parent != "" {
 		ce, ok := eng.(*engine.CoreEngine)
 		if !ok {
 			return "", fmt.Errorf("sandbox put %s/%s: no engine to place on %s", container, blob, sandboxBackend)

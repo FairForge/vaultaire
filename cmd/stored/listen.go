@@ -2,7 +2,8 @@ package main
 
 // stored listen (WP-DX-1): a long poll on the account's event log
 // (GET /api/v1/events?after=<cursor>&wait=25), each new event POSTed once,
-// in order, to the local endpoint — the body a webhook delivery carries,
+// in order (the last 1,000 ids forwarded are remembered, so a re-read never
+// delivers one twice — RP80-3), to the local endpoint — the body a webhook delivery carries,
 // signed X-Webhook-Signature with the listen secret (printed at start, or
 // --secret / STORED_LISTEN_SECRET) — and the cursor saved after each one,
 // so a restart resumes where it stopped. The first run starts at now: the
@@ -34,6 +35,37 @@ type listener struct {
 	client                                  *http.Client
 	out                                     io.Writer
 	wait                                    time.Duration
+
+	// seen / order: the last listenSeenMax ids forwarded (RP80-3), so a
+	// re-read of the log never delivers an event twice.
+	seen  map[string]struct{}
+	order []string
+}
+
+// listenSeenMax is how many forwarded ids the listener remembers.
+const listenSeenMax = 1000
+
+// forwarded reports whether id was forwarded by this listener.
+func (l *listener) forwarded(id string) bool {
+	_, ok := l.seen[id]
+	return ok
+}
+
+// remember records a forwarded id, forgetting the oldest past
+// listenSeenMax.
+func (l *listener) remember(id string) {
+	if l.seen == nil {
+		l.seen = make(map[string]struct{}, listenSeenMax)
+	}
+	if _, ok := l.seen[id]; ok {
+		return
+	}
+	l.seen[id] = struct{}{}
+	l.order = append(l.order, id)
+	if len(l.order) > listenSeenMax {
+		delete(l.seen, l.order[0])
+		l.order = l.order[1:]
+	}
 }
 
 func runListen(ctx context.Context, args []string, out io.Writer) error {
@@ -151,9 +183,17 @@ func (l *listener) once(ctx context.Context) (int, error) {
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return n, fmt.Errorf("decode an event: %w", err)
 		}
+		if l.forwarded(ev.ID) {
+			// A re-read answered it again: never forwarded twice.
+			if err := l.saveCursor(ev.ID); err != nil {
+				return n, err
+			}
+			continue
+		}
 		if err := l.post(ctx, target, ev.ID, raw); err != nil {
 			return n, err // the cursor stays before it: retried next poll
 		}
+		l.remember(ev.ID)
 		_, _ = fmt.Fprintf(l.out, "%s  %s  %s → %s\n", time.Now().Format("15:04:05"), ev.Type, ev.ID, target)
 		if err := l.saveCursor(ev.ID); err != nil {
 			return n, err

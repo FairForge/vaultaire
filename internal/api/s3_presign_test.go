@@ -354,23 +354,26 @@ func TestPresignedURL_Integration(t *testing.T) {
 	t.Cleanup(func() { blobIDRand = prevRand })
 	const zeroID = "00000000000000000000000000"
 
+	// A live tenant (never a sandbox): placement asks first (RP80-5 fails
+	// closed on a lookup the mock would not answer).
+	sandboxCache.Store(testPresignTenantID, "")
 	tenantRow := primaryKeyRow(testPresignTenantID, testSecretKey)
-	suspendedRow := sqlmock.NewRows([]string{"suspended_at"})
+	suspendedRow := sqlmock.NewRows([]string{"suspended"}).AddRow(false)
 
 	// Auth expectations (PUT + GET each do tenant lookup + suspended check)
 	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
 		WillReturnRows(tenantRow)
-	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
+	mock.ExpectQuery(`SELECT t.suspended_at IS NOT NULL OR p.suspended_at IS NOT NULL`).
 		WithArgs(testPresignTenantID).
 		WillReturnRows(suspendedRow)
 
 	tenantRow2 := primaryKeyRow(testPresignTenantID, testSecretKey)
-	suspendedRow2 := sqlmock.NewRows([]string{"suspended_at"})
+	suspendedRow2 := sqlmock.NewRows([]string{"suspended"}).AddRow(false)
 	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs(testAccessKey).
 		WillReturnRows(tenantRow2)
-	mock.ExpectQuery(`SELECT suspended_at FROM tenants WHERE id`).
+	mock.ExpectQuery(`SELECT t.suspended_at IS NOT NULL OR p.suspended_at IS NOT NULL`).
 		WithArgs(testPresignTenantID).
 		WillReturnRows(suspendedRow2)
 

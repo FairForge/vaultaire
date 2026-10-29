@@ -1121,7 +1121,8 @@ func generateManagementPaths() map[string]*PathItem {
 				queryParam("status", "An exact status (`403`), a class (`4xx`, `5xx`) or `error` (every status from 400)", &Schema{Type: "string"}),
 				queryParam("request_id", "Only the request answered with this request id", &Schema{Type: "string"}),
 				queryParam("cursor", "The previous page's `next_cursor`", &Schema{Type: "string"}),
-				queryParam("limit", "Rows per page, 1-200 (default 50)", &Schema{Type: "integer"}))),
+				queryParam("limit", "Rows per page, 1-200 (default 50)", &Schema{Type: "integer"}),
+				queryParam("mode", "`live` (the default): the account's own requests; `test`: its test keys' (the sandbox's) — an empty list when no test key was ever made", &Schema{Type: "string", Enum: []interface{}{"live", "test"}}))),
 		},
 		"/api/v1/manage/usage": {
 			Get: mgmt(jsonOp("Management", "Get tenant usage", "ManageGetUsage",

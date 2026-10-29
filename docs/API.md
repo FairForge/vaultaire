@@ -475,12 +475,17 @@ A **test key** works like any key but writes to the account's **sandbox**, never
 - It has the same S3 API on every host.
 - Every object it writes is stored on a local disk (never a paid backend), whole and as received: never chunked, sealed, mirrored or tiered.
 - Its requests never go through the edge: the origin serves them.
-- It is never billed and never metered. The sandbox's own counter is its cap, the free tier's 5 GiB.
+- It is never billed. The sandbox's own counter is its cap, the free tier's 5 GiB.
+- Its downloads are metered under the sandbox, against a fixed 5 GiB a month; past it they are slowed to the throttle's floor, as any account's past its allowance. Nothing reaches the account's own counters.
+- Its presigned links live at most one hour (`X-Amz-Expires` ≤ 3600, else 400 `AuthorizationQueryParametersError`), and a test bucket is never public (a create with `x-amz-acl: public-read` is 400 `InvalidRequest`).
+- It stops working while the account is suspended (403 `AccountSuspended`), and no test key is made for a suspended account (403 `account_suspended`).
 - Every S3 response carries `x-stored-mode: test`.
 
 **Clearing it.** Test data is deleted automatically once its last write is 7 days old. `POST /api/v1/manage/sandbox/reset` empties the sandbox now (objects, versions, uploads and buckets); the test keys stay. An account's sandbox is erased with the account.
 
-**Webhooks.** An event caused by a test key goes to the account's own webhooks with `"livemode": false` in its body. `stored listen --forward-to localhost:<port>/<path>` replays the account's events to a local endpoint.
+**Webhooks.** An event caused by a test key goes to the account's own webhooks with `"livemode": false` in its body. `stored listen --forward-to localhost:<port>/<path>` replays the account's events to a local endpoint, each once. The event log's forward cursor (`GET /api/v1/events?after=<id>&wait=<s>`) answers an event once it is 2 seconds old, so a slower commit is never skipped; at most 4 waits of one account at once (the fifth is 429 `too_many_listeners`).
+
+**The request log.** `GET /api/v1/manage/requests?mode=test` (and the Developers page's **Test** toggle) lists the test keys' requests; the default is the live ones.
 
 **Elsewhere.** The dashboard's overview shows a **Test data** card once a sandbox exists. To run Stored entirely on your own machine, see `docs/guides/local.md`.
 

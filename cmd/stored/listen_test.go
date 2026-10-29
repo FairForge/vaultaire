@@ -24,6 +24,9 @@ type fakeEventLog struct {
 	mu     sync.Mutex
 	events []map[string]any
 	token  string
+	// rewind, when set, is answered for the next poll in place of its
+	// cursor (a re-read: the server answers events already forwarded).
+	rewind string
 }
 
 func (l *fakeEventLog) add(typ string, livemode bool) {
@@ -49,6 +52,9 @@ func (l *fakeEventLog) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{}, "next_cursor": after})
 		return
+	}
+	if l.rewind != "" {
+		after, l.rewind = l.rewind, ""
 	}
 	var out []any
 	next := after
@@ -136,4 +142,44 @@ func TestListen_ForwardsOnlyToLocalhost(t *testing.T) {
 		require.NoError(t, err, ok)
 		assert.True(t, strings.HasPrefix(u, "http://"), u)
 	}
+}
+
+// RP80-3: a re-read never forwards an id twice — the listener keeps the
+// last 1,000 ids it forwarded.
+func TestListen_NeverForwardsAnIDTwice(t *testing.T) {
+	log := &fakeEventLog{token: "jwt-test"}
+	log.add("object.created", true) // before the listener: never replayed
+	api := httptest.NewServer(log)
+	defer api.Close()
+	rc := &receiver{}
+	local := httptest.NewServer(rc)
+	defer local.Close()
+	l := &listener{api: api.URL, token: "jwt-test", forward: strings.TrimPrefix(local.URL, "http://") + "/hook",
+		cursorFile: filepath.Join(t.TempDir(), "cursor"), secret: "whsec_local", client: api.Client(), out: io.Discard, wait: time.Second}
+	ctx := context.Background()
+	_, err := l.once(ctx) // starts at now
+	require.NoError(t, err)
+	log.add("object.created", true)
+	log.add("object.deleted", true)
+	n, err := l.once(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	log.add("key.created", true)
+	log.mu.Lock()
+	log.rewind = "evt-001" // the server answers 002…004: two already forwarded
+	log.mu.Unlock()
+	n, err = l.once(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the new one")
+	assert.Equal(t, []string{"evt-002", "evt-003", "evt-004"}, rc.ids, "each id once")
+	assert.Equal(t, "evt-004", l.readCursor())
+
+	// The memory is bounded.
+	for i := 0; i < listenSeenMax+10; i++ {
+		l.remember(fmt.Sprintf("x-%d", i))
+	}
+	assert.LessOrEqual(t, len(l.seen), listenSeenMax)
+	assert.True(t, l.forwarded(fmt.Sprintf("x-%d", listenSeenMax+9)))
+	assert.False(t, l.forwarded("x-0"), "the oldest is forgotten")
 }

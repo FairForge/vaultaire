@@ -33,19 +33,40 @@ func TestBootstrapTenant_MadeOnceKeysPrintedOnce(t *testing.T) {
 	})
 	svc := auth.NewAuthService(nil, db)
 	var out bytes.Buffer
-	made, err := bootstrapTenant(context.Background(), svc, zap.NewNop(), email, &out)
+	made, err := bootstrapTenant(context.Background(), svc, zap.NewNop(), email, "local", &out)
 	require.NoError(t, err)
 	assert.True(t, made)
 	assert.Contains(t, out.String(), "AWS_ACCESS_KEY_ID=VK")
 	assert.Contains(t, out.String(), "AWS_SECRET_ACCESS_KEY=")
 	assert.Contains(t, out.String(), "shown once")
+	assert.Contains(t, out.String(), "password=", "RP80-7: a one-time password to sign in to the dashboard with")
 
 	out.Reset()
 	fresh := auth.NewAuthService(nil, db)
 	require.NoError(t, fresh.LoadFromDB(context.Background()))
-	made, err = bootstrapTenant(context.Background(), fresh, zap.NewNop(), email, &out)
+	made, err = bootstrapTenant(context.Background(), fresh, zap.NewNop(), email, "local", &out)
 	require.NoError(t, err)
 	assert.False(t, made, "idempotent: the next boot finds it")
 	assert.NotContains(t, out.String(), "AWS_SECRET_ACCESS_KEY", "the secret is never printed twice")
 	assert.True(t, strings.Contains(out.String(), "already"))
+}
+
+// RP80-7: the first-boot account is the local server's only: on any other
+// STORAGE_MODE nothing is made and no secret is printed.
+func TestBootstrapTenant_LocalOnly(t *testing.T) {
+	db, err := sql.Open("postgres", testutil.DSN())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	email := "bootstrap-prod-" + uuid.NewString()[:8] + "@stored.ge"
+	svc := auth.NewAuthService(nil, db)
+	for _, mode := range []string{"", "idrive", "lyve"} {
+		var out bytes.Buffer
+		made, err := bootstrapTenant(context.Background(), svc, zap.NewNop(), email, mode, &out)
+		require.ErrorIs(t, err, errBootstrapNotLocal, mode)
+		assert.False(t, made)
+		assert.NotContains(t, out.String(), "AWS_SECRET_ACCESS_KEY")
+	}
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM users WHERE email = $1`, email).Scan(&n))
+	assert.Zero(t, n, "nothing made")
 }

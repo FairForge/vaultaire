@@ -141,9 +141,23 @@ func (s *Server) verifyPresignedURL(r *http.Request) (string, *auth.KeyScope, er
 	if !hmac.Equal([]byte(expectedSig), []byte(signature)) {
 		return "", nil, fmt.Errorf("%s", ErrSignatureDoesNotMatch)
 	}
+	// RP80-1: a test-mode tenant's link lives at most an hour — its
+	// sandbox is no file host. Decided by the tenant the key resolved to,
+	// so an STS token of a test key is held to it too.
+	if expires > testPresignMaxExpires && isSandbox(r.Context(), s.db, tenantID) {
+		return "", nil, fmt.Errorf("%s", errTestPresignExpires)
+	}
 
 	return tenantID, scope, nil
 }
+
+// errTestPresignExpires is the refusal of a test key's link past an hour:
+// answered as AWS's AuthorizationQueryParametersError with its own sentence
+// (handleS3Request).
+const errTestPresignExpires = "AuthorizationQueryParametersError_TestExpires"
+
+// testPresignExpiresMessage is that refusal's sentence.
+var testPresignExpiresMessage = fmt.Sprintf("A test key's presigned link may live at most %d seconds (X-Amz-Expires).", testPresignMaxExpires)
 
 // presignError is a presigned-URL failure: Error() is the S3 code the
 // response carries (handleS3Request switches on it), Unwrap() the lookup
