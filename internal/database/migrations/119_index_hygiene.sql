@@ -12,7 +12,7 @@
 --    in the same change, so a re-run never re-adds them. The partial
 --    idx_api_keys_active stays (the planner picks it for the scoped lookup).
 --
--- 2. WP-R11-2: idempotency claim-first + body hash. request_hash is
+-- 2. WP-R11-2: idempotency claim-first + body hash. request_digest is
 --    sha256(method ‖ path ‖ body) of the request a key was first used with
 --    (NULL = a row written before: method and path only, as before). A
 --    `claimed` row is the claim the middleware inserts BEFORE the handler
@@ -35,7 +35,7 @@ DROP INDEX IF EXISTS idx_tenants_access_key;
 DROP INDEX IF EXISTS idx_tenants_email;
 DROP INDEX IF EXISTS idx_users_email;
 
-ALTER TABLE idempotency_cache ADD COLUMN IF NOT EXISTS request_hash TEXT;
+ALTER TABLE idempotency_cache ADD COLUMN IF NOT EXISTS request_digest TEXT;
 ALTER TABLE idempotency_cache ADD COLUMN IF NOT EXISTS claimed BOOLEAN NOT NULL DEFAULT FALSE;
 
 ALTER TABLE multipart_uploads ADD COLUMN IF NOT EXISTS tagging TEXT;

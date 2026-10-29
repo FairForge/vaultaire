@@ -332,7 +332,7 @@ func assertIndexHygiene(ctx context.Context, t *testing.T, db *sql.DB) {
 	for _, kept := range []string{"api_keys_key_id_key", "tenants_access_key_key", "tenants_email_key", "users_email_key", "idx_api_keys_active"} {
 		assert.True(t, exists(kept), "%s stays", kept)
 	}
-	for _, col := range [][2]string{{"idempotency_cache", "request_hash"}, {"idempotency_cache", "claimed"}, {"multipart_uploads", "tagging"}} {
+	for _, col := range [][2]string{{"idempotency_cache", "request_digest"}, {"idempotency_cache", "claimed"}, {"multipart_uploads", "tagging"}} {
 		var n int
 		require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`, col[0], col[1]).Scan(&n))
 		assert.Equal(t, 1, n, "%s.%s", col[0], col[1])
