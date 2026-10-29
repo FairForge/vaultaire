@@ -1,6 +1,12 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 07:00 UTC — **Stage 1a Prompt 50 — WP-DX-1 (test mode and the local server), after Part 0 = RP78 — DONE** (`docs/reviews/WP-STRIPE-2.md`; migration 116; next 117):
+Updated: 2026-10-29 14:00 UTC — **Review RP80 of Stage 1a Prompt 50 (WP-DX-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-2-REVIEW.md`):
+- **RP80-1 (P2):** a sandbox's downloads are never metered and never paced, so a free account's `VLT_TEST_` key could serve 5 GiB through presigned links with no egress limit, from SLC. Fix: meter without billing (a small own allowance, paced past it), test-key presigned URLs at most 1 h, no Public sandbox bucket. Latent until signups open.
+- **P3s:** RP80-2 (a suspended parent's sandbox keeps working), RP80-3 (`stored listen` can skip an event committed late), RP80-4 (no bound on a tenant's long polls). Four P4s.
+- **Prod:** every origin request-log row since Part 0 carries its request id (33 / 33); 3 mirror settles, 0 cut. The GHCR image package is private (owner: make it public at launch).
+- **Prompt 51 (WP-PLAT-1: platform tenants and API-created child accounts; migration 117)** is issued with Part 0 = RP80 in both editions (`docs/reviews/WP-STRIPE-PROMPTS.md`). The post-merge review is RP82.
+
+Before that: 2026-10-29 07:00 UTC — **Stage 1a Prompt 50 — WP-DX-1 (test mode and the local server), after Part 0 = RP78 — DONE** (`docs/reviews/WP-STRIPE-2.md`; migration 116; next 117):
 - **#1047 Part 0** (deployed 04:52), every RP78 finding fixed:
   - the mirror's buffer is the host's bytes (unbudgeted = unmirrored);
   - the client is answered at the primary's pace and the mirror settles after (`POST /api/v1/edge/mirror`);
