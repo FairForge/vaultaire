@@ -122,8 +122,19 @@ func TestOpenAPIDriftGuard(t *testing.T) {
 // the S3 catch-all (documented via /{bucket} spec paths, walked in
 // direction 3) are out of scope.
 func isGuardedRoute(key string) bool {
+	if _, page := htmlPagesUnderAuth[key]; page {
+		return false
+	}
 	route := key[strings.Index(key, " ")+1:]
 	return strings.HasPrefix(route, "/api/") || strings.HasPrefix(route, "/auth/")
+}
+
+// htmlPagesUnderAuth are dashboard HTML pages mounted under /auth/ (a
+// reserved first segment, so they add no reserved bucket name): no JSON,
+// no OpenAPI entry.
+var htmlPagesUnderAuth = map[string]string{
+	"GET /auth/invitations/{token}":  "WP-TEAM-1: the invitation link's page (an HTML form)",
+	"POST /auth/invitations/{token}": "WP-TEAM-1: the invitation page's form (choose a password)",
 }
 
 // isS3SpecPath reports whether a spec path is part of the S3 wire protocol

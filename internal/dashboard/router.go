@@ -254,8 +254,9 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// --- Email verification (public) ---
 		pub.Get("/verify", handleVerifyEmail(baseTmpl, deps))
 		// WP-TEAM-1: an invitation link (a new address registers through it).
-		pub.Get("/invitations/{token}", handleInvitation(baseTmpl, deps))
-		pub.Post("/invitations/{token}", registerRL.Limit(handleInvitation(baseTmpl, deps)).ServeHTTP)
+		// Under /auth/, a reserved first segment: no new reserved bucket name.
+		pub.Get("/auth/invitations/{token}", handleInvitation(baseTmpl, deps))
+		pub.Post("/auth/invitations/{token}", registerRL.Limit(handleInvitation(baseTmpl, deps)).ServeHTTP)
 
 		// --- Password reset (public) ---
 		resetRL := middleware.NewLoginRateLimiter(5, 5)
@@ -1339,7 +1340,7 @@ func pageContent(page string) string {
 			`<div class="auth-footer"><a href="/login">Sign in</a> · <a href="/dashboard/invitations/{{.Token}}">Accept after signing in</a></div>` +
 			`{{else}}<p>You are invited to <strong>{{.Account}}</strong> as a <strong>{{.Role}}</strong>. ` +
 			`Choose a password for <strong>{{.Email}}</strong> to accept.</p>` +
-			`<form method="post" action="/invitations/{{.Token}}">` +
+			`<form method="post" action="/auth/invitations/{{.Token}}">` +
 			`<div class="form-group"><label for="password">Password</label>` +
 			`<input type="password" id="password" name="password" required minlength="8" autocomplete="new-password"></div>` +
 			`<button type="submit" class="btn btn-primary btn-block">Accept and create my sign-in</button>` +

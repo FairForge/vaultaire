@@ -57,7 +57,7 @@ type invitationData struct {
 }
 
 // RenderInvitation renders a member invitation (WP-TEAM-1): the link is
-// <baseURL>/invitations/<token>, single use, 7 days.
+// <baseURL>/auth/invitations/<token>, single use, 7 days.
 func RenderInvitation(baseURL, token, email, account, inviter, role string) (string, string, error) {
 	return render("invitation.html", invitationData{BaseURL: baseURL, Token: token, Email: email,
 		Account: account, Inviter: inviter, Role: role})
