@@ -145,6 +145,63 @@ var floorLockAllowed = map[string]string{
 	// WP-PLAT-1: the total's lock is taken by lockPool (pool.go) — the
 	// pool owner's row, then the tenant's own — before the floor statement.
 	"usage.ReserveTx": "the tenant_quotas lock is lockPool's call, before the floor",
+	// RP82-1: the pool's floor helpers are called only after lockPool /
+	// lockPoolOwner (the owner's total, then the child's) — the order
+	// TestLedger_LockOrder_PoolOwnerFirst_Structure pins in their callers.
+	"usage.lockPoolFloor":       "called by ReserveTx / ApplyLedgerTx after lockPool / lockPoolOwner",
+	"usage.ensureChildFloorRow": "called by ReserveTx after lockPool and lockPoolFloor",
+}
+
+// TestLedger_LockOrder_PoolOwnerFirst_Structure pins the pool's order
+// (RP82-1) in the two functions that check a pooled floor: the owner's
+// total (lockPool / lockPoolOwner, which then takes the child's), then the
+// owner's floor (lockPoolFloor), then the tenant's own floor row (the
+// UPDATE that charges it) — owner total → child total → owner floor →
+// child floor.
+func TestLedger_LockOrder_PoolOwnerFirst_Structure(t *testing.T) {
+	fset := token.NewFileSet()
+	found := map[string]bool{}
+	for _, name := range []string{"floor.go", "ledger_tx.go"} {
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || (fd.Name.Name != "ReserveTx" && fd.Name.Name != "ApplyLedgerTx") {
+				continue
+			}
+			found[fd.Name.Name] = true
+			var total, ownerFloor, ownFloor token.Pos
+			ast.Inspect(fd, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CallExpr:
+					if id, ok := x.Fun.(*ast.Ident); ok {
+						switch id.Name {
+						case "lockPool", "lockPoolOwner":
+							if total == 0 {
+								total = x.Pos()
+							}
+						case "lockPoolFloor":
+							if ownerFloor == 0 {
+								ownerFloor = x.Pos()
+							}
+						}
+					}
+				case *ast.BasicLit:
+					if s, err := strconv.Unquote(x.Value); err == nil && ownFloor == 0 &&
+						regexp.MustCompile(`(?is)UPDATE\s+tenant_floor_quotas`).MatchString(s) {
+						ownFloor = x.Pos()
+					}
+				}
+				return true
+			})
+			require.NotZero(t, total, "%s locks the pool owner", fd.Name.Name)
+			require.NotZero(t, ownerFloor, "%s locks the owner's floor", fd.Name.Name)
+			require.NotZero(t, ownFloor, "%s charges the tenant's own floor row after the owner's", fd.Name.Name)
+			assert.Less(t, int(total), int(ownerFloor), "%s: the owner's total before the owner's floor", fd.Name.Name)
+			assert.Less(t, int(ownerFloor), int(ownFloor), "%s: the owner's floor before the tenant's own", fd.Name.Name)
+		}
+	}
+	assert.True(t, found["ReserveTx"] && found["ApplyLedgerTx"], "both functions were found")
 }
 
 func TestLedger_LockOrder_TotalBeforeFloors_Structure(t *testing.T) {

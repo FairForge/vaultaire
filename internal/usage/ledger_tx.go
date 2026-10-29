@@ -13,7 +13,8 @@
 // advisory lock (lockHeadKey) → the head row (FOR UPDATE) → the key's
 // version lock and rows → the upload row (multipart_uploads, FOR UPDATE)
 // → tenant_quotas (a pool's OWNER row first, then the tenant's own —
-// WP-PLAT-1, pool.go) → tenant_floor_quotas (standard, then vault). The ledger
+// WP-PLAT-1, pool.go) → tenant_floor_quotas (a pool's owner floor row
+// first, then the tenant's own — RP82-1; standard, then vault). The ledger
 // statements are the LAST of the transaction: the tenant's quota row is
 // held from its UPDATE to COMMIT only, and nothing that holds it waits for
 // a key, row or upload lock — the reservation (CheckAndReserveFloor), the
@@ -74,24 +75,32 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	// a transaction holding the total, or two floors locked in either order
 	// deadlock against the reconcile or ClearHouse (Stage 1a Prompt 7,
 	// Part 0).
+	// A guarded increase is checked against the POOL (WP-PLAT-1; its floors
+	// since RP82-1): the pool's owner row is locked FIRST — before this
+	// tenant's own row, the order every reservation takes (lockPool) — so a
+	// settle and a reservation of two children never wait for each other in
+	// turn. The floor guard needs the owner too, total moving or not: a
+	// child's own floor rows have limit 0 and never decide.
+	totalGuard := c.Guard != "" && c.Total > 0
+	floorGuard := c.Guard != "" && c.Floors[c.Guard] > 0
+	pool := poolOf{owner: tenantID}
+	if totalGuard || floorGuard {
+		p, err := lockPoolOwner(ctx, tx, tenantID)
+		switch {
+		case err == nil:
+			pool = p
+		case !totalGuard && errors.Is(err, sql.ErrNoRows):
+			// No quota row: nothing to change on the total (as unguarded).
+		default:
+			return err
+		}
+	}
 	if c.Total == 0 {
 		if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID); err != nil {
 			return fmt.Errorf("ledger: lock tenant %s: %w", tenantID, err)
 		}
 	}
 	if c.Total != 0 {
-		// A guarded increase is checked against the POOL (WP-PLAT-1): the
-		// pool's owner row is locked FIRST — before this tenant's own row,
-		// the order every reservation takes (lockPool) — so a settle and a
-		// reservation of two children never wait for each other in turn.
-		guarded := c.Guard != "" && c.Total > 0
-		pool := poolOf{owner: tenantID}
-		if guarded {
-			var err error
-			if pool, err = lockPoolOwner(ctx, tx, tenantID); err != nil {
-				return err
-			}
-		}
 		var used, limit int64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE tenant_quotas
@@ -104,14 +113,23 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 		case err != nil:
 			return fmt.Errorf("ledger: tenant %s: %w", tenantID, err)
 		}
-		if guarded && pool.pooled {
+		if totalGuard && pool.pooled {
 			if used, err = poolUsed(ctx, tx, pool.owner); err != nil {
 				return err
 			}
 			limit = pool.limit
 		}
-		if guarded && used > limit {
+		if totalGuard && used > limit {
 			return fmt.Errorf("%w: tenant %s total %d > %d", ErrOverQuota, tenantID, used, limit)
+		}
+	}
+	// The pool's floor: the owner's row, locked before this tenant's own.
+	var poolFloorLimit int64
+	poolFloor := false
+	if floorGuard && pool.pooled {
+		var err error
+		if poolFloorLimit, poolFloor, err = lockPoolFloor(ctx, tx, pool.owner, c.Guard); err != nil {
+			return err
 		}
 	}
 	floors := make([]string, 0, len(c.Floors))
@@ -122,19 +140,34 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	}
 	sort.Strings(floors) // standard before vault: one order for every path
 	for _, f := range floors {
+		guardHere := f == c.Guard && c.Floors[f] > 0
 		var fUsed, fLimit int64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE tenant_floor_quotas
 			   SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1), updated_at = NOW()
 			 WHERE tenant_id = $2 AND floor = $3
 			RETURNING storage_used_bytes, storage_limit_bytes`, c.Floors[f], tenantID, f).Scan(&fUsed, &fLimit)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			continue
-		case err != nil:
+		missing := errors.Is(err, sql.ErrNoRows)
+		if err != nil && !missing {
 			return fmt.Errorf("ledger: tenant %s floor %s: %w", tenantID, f, err)
 		}
-		if f == c.Guard && c.Floors[f] > 0 && fUsed > fLimit {
+		switch {
+		case !guardHere:
+		case pool.pooled:
+			if !poolFloor {
+				continue // the owner has no such floor row: nothing guards it
+			}
+			used, err := poolFloorUsed(ctx, tx, pool.owner, f)
+			if err != nil {
+				return err
+			}
+			if missing {
+				used += c.Floors[f] // a child with no counting row yet: its bytes still count
+			}
+			if used > poolFloorLimit {
+				return fmt.Errorf("%w: tenant %s pool %s floor %s %d > %d", ErrOverQuota, tenantID, pool.owner, f, used, poolFloorLimit)
+			}
+		case !missing && fUsed > fLimit:
 			return fmt.Errorf("%w: tenant %s floor %s %d > %d", ErrOverQuota, tenantID, f, fUsed, fLimit)
 		}
 	}

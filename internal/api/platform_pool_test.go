@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
 
@@ -126,4 +127,48 @@ func TestPlatform_ASandboxIsNeverInThePool(t *testing.T) {
 	res, err := usage.NewQuotaManager(f.db).ReserveOnFloor(context.Background(), sb, usage.FloorStandard, 1<<10)
 	require.NoError(t, err)
 	assert.True(t, res.OK, "the sandbox reserves against its own cap, not the pool")
+}
+
+// RP82-1 (Stage 1a Prompt 52, Part 0): a platform's children draw from its
+// FLOORS, not only its total. Owner floors 10 KiB Standard + 100 KiB Vault:
+// a child made after the house (auth.CreateChildTenant writes its counting
+// floor rows) is refused a 12 KiB Standard PUT and reserves 12 KiB on the
+// Vault floor; the owner's own Standard bytes count against the same 10 KiB.
+func TestPool_ChildFloorsDrawFromTheOwnersFloors(t *testing.T) {
+	f := setupRequestLogFixture(t)
+	f.makePlatform(10 << 10)
+	ctx := context.Background()
+	require.NoError(t, usage.NewQuotaManager(f.db).SetHouse(ctx, f.tenantID, usage.House{StdBytes: 10 << 10, VaultBytes: 100 << 10}))
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, f.tenantID) })
+	child, err := auth.CreateChildTenant(ctx, f.db, f.tenantID, "floors", "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, child.ID) })
+	var rows, limits int64
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(storage_limit_bytes), 0) FROM tenant_floor_quotas WHERE tenant_id = $1`, child.ID).Scan(&rows, &limits))
+	assert.Equal(t, int64(2), rows, "a counting row per floor the owner has")
+	assert.Zero(t, limits, "a child's floor rows have limit 0: the owner's floors decide")
+	id := uuid.NewString()
+	c := poolChild{id: child.ID, ak: "VKCF" + strings.ToUpper(id[:12]), sk: "SKCF" + id, bucket: "floors-" + id[:6]}
+	f.exec(`INSERT INTO api_keys (id, user_id, tenant_id, name, key_id, secret_hash, secret_key) VALUES ($1, $2, $3, 'child', $4, 'h', $5)`,
+		uuid.NewString(), f.userID, c.id, c.ak, c.sk)
+	f.exec(`INSERT INTO buckets (tenant_id, name, visibility) VALUES ($1, $2, 'private')`, c.id, c.bucket)
+	twelve := []byte(strings.Repeat("c", 12<<10))
+	six := []byte(strings.Repeat("6", 6<<10))
+
+	w := f.do(http.MethodPut, "/"+c.bucket+"/std.bin", twelve, c.ak, c.sk, nil)
+	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "QuotaExceeded")
+	// The Vault floor has room for the same 12 KiB. Reserved directly: a
+	// plain GLACIER PUT needs the master key since tape takes only sealed
+	// bytes (#1061), and the floor rule is the reservation's.
+	vault, err := usage.NewQuotaManager(f.db).ReserveOnFloor(ctx, c.id, usage.FloorVault, 12<<10)
+	require.NoError(t, err)
+	require.True(t, vault.OK, "12 KiB on the Vault floor fits the owner's 100 KiB")
+	assert.True(t, vault.Floor, "charged on the child's counting row")
+
+	w = f.do(http.MethodPut, "/"+f.bucket+"/six.bin", six, f.ak, f.sk, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = f.do(http.MethodPut, "/"+c.bucket+"/six.bin", six, c.ak, c.sk, nil)
+	assert.Equal(t, http.StatusForbidden, w.Code, "the owner's 6 KiB and the child's 6 KiB are past the 10 KiB Standard floor")
+	assert.Contains(t, w.Body.String(), "QuotaExceeded")
 }

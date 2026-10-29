@@ -239,3 +239,40 @@ func insertTenantRow(t *testing.T, db *sql.DB, tenantID string) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenantID) })
 }
+
+// RP82-2 (Stage 1a Prompt 52, Part 0): a child's own quota row has limit 0
+// (the pool decides). Its allowance is never read from that row — that
+// would be 0, "nothing to download, never over", an unpaced child. It is
+// the pool root's, and its month is the pool's.
+func TestEgress_ZeroAllowanceIsNotUnlimitedForAChild(t *testing.T) {
+	db, owner, child := poolDB(t)
+	ctx := context.Background()
+	setOverride(t, db, owner, 10<<20)
+	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM bandwidth_usage_daily WHERE tenant_id IN ($1, $2)`, owner, child) })
+
+	a, err := NewQuotaManager(db).EgressAllowance(ctx, child)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10<<20), a.Bytes, "the child's allowance is its pool root's, never its own row's 0")
+	assert.Equal(t, owner, a.Root)
+
+	now := time.Now()
+	day := EgressMonthStart(now).Format("2006-01-02")
+	for _, id := range []string{owner, child} {
+		_, err := db.Exec(`INSERT INTO bandwidth_usage_daily (tenant_id, date, egress_bytes, requests_count) VALUES ($1, $2, $3, 1)`, id, day, 6<<20)
+		require.NoError(t, err)
+	}
+	st, err := EgressStatusFromDB(ctx, db, child, now)
+	require.NoError(t, err)
+	assert.Equal(t, int64(12<<20), st.UsedBytes, "the month is the pool's")
+	assert.True(t, st.Over, "a child past its pool's allowance is over")
+
+	root, err := PoolRoot(ctx, db, child)
+	require.NoError(t, err)
+	assert.Equal(t, owner, root)
+	root, err = PoolRoot(ctx, db, owner)
+	require.NoError(t, err)
+	assert.Equal(t, owner, root)
+	root, err = PoolRoot(ctx, db, "no-such-tenant-"+owner)
+	require.NoError(t, err)
+	assert.Equal(t, "no-such-tenant-"+owner, root, "a tenant with no tenants row is its own pool")
+}

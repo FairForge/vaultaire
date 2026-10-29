@@ -81,14 +81,18 @@ func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) (int, error
 	return len(tenants), nil
 }
 
-// alertCandidates lists, with one set-based query, the tenants that have
-// egress recorded this UTC month. A tenant with none cannot have crossed a
-// step.
+// alertCandidates lists, with one set-based query, the POOL ROOTS with
+// egress recorded this UTC month: a platform's children download from its
+// allowance (D-STRIPE-31), so their bytes make the platform the candidate
+// and the notice is the platform's — a child has no user to tell. A pool
+// with none cannot have crossed a step.
 func (a *BandwidthAlerter) alertCandidates(ctx context.Context) ([]string, error) {
 	rows, err := a.db.QueryContext(ctx,
-		`SELECT tenant_id FROM bandwidth_usage_daily
-		  WHERE date >= $1::date
-		  GROUP BY tenant_id HAVING SUM(egress_bytes) > 0`,
+		`SELECT COALESCE(t.parent_tenant_id, b.tenant_id)
+		   FROM bandwidth_usage_daily b
+		   LEFT JOIN tenants t ON t.id = b.tenant_id
+		  WHERE b.date >= $1::date
+		  GROUP BY 1 HAVING SUM(b.egress_bytes) > 0`,
 		usage.EgressMonthStart(a.now()).Format("2006-01-02"))
 	if err != nil {
 		return nil, fmt.Errorf("list tenants with egress this month: %w", err)

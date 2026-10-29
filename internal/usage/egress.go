@@ -14,6 +14,9 @@
 //  3. no house: the Standard ratio × tenant_quotas.storage_limit_bytes
 //     (the free tier's 5 GiB gives 2.5 GiB)
 //
+// A platform's child is none of these either: its allowance is its POOL
+// ROOT's (PoolRoot, D-STRIPE-31) and its month is the pool's.
+//
 // A sandbox (a test-mode tenant, tenants.sandbox_of) is none of these: its
 // allowance is SandboxEgressAllowance, a constant — never a price, never an
 // override (RP80-1: metered and paced, never billed).
@@ -54,6 +57,9 @@ type EgressAllowance struct {
 	PlanBytes     int64  // what the plan grants (house or single quota)
 	OverrideBytes int64  // the admin override; 0 = none
 	Source        string // EgressSource*
+	// Root is the tenant whose allowance this is: the pool root (PoolRoot)
+	// — a child's platform, else the tenant itself.
+	Root string
 }
 
 // EgressRatios returns the allowance ratios the site prints (prices.json):
@@ -72,9 +78,27 @@ func PlanEgressAllowance(stdLimit, vaultLimit int64) int64 {
 	return int64(math.Round(std*float64(stdLimit))) + int64(math.Round(vault*float64(vaultLimit)))
 }
 
-// EgressAllowance resolves the tenant's allowance with one query. An unknown
-// tenant is an error wrapping sql.ErrNoRows.
+// EgressAllowance resolves the tenant's allowance: its POOL ROOT's
+// (PoolRoot — D-STRIPE-31, RP82-2), read with one query. A platform's child
+// has a quota row of limit 0 (the pool decides); read as its own, that row
+// would be an allowance of 0, "nothing to download, never over" — an
+// unpaced child. A child's downloads spend its platform's allowance. An
+// unknown tenant is an error wrapping sql.ErrNoRows.
 func (m *QuotaManager) EgressAllowance(ctx context.Context, tenantID string) (EgressAllowance, error) {
+	root, err := PoolRoot(ctx, m.db, tenantID)
+	if err != nil {
+		return EgressAllowance{}, fmt.Errorf("egress allowance for tenant %s: %w", tenantID, err)
+	}
+	a, err := m.egressAllowanceOf(ctx, root)
+	if err != nil {
+		return EgressAllowance{}, fmt.Errorf("egress allowance for tenant %s: %w", tenantID, err)
+	}
+	a.Root = root
+	return a, nil
+}
+
+// egressAllowanceOf is the allowance of a pool root from its own rows.
+func (m *QuotaManager) egressAllowanceOf(ctx context.Context, tenantID string) (EgressAllowance, error) {
 	var total, override, stdLimit, vaultLimit int64
 	var floors int
 	var sandbox bool
@@ -91,7 +115,7 @@ func (m *QuotaManager) EgressAllowance(ctx context.Context, tenantID string) (Eg
 		 GROUP BY q.tenant_id, q.storage_limit_bytes, q.bandwidth_limit_bytes`,
 		tenantID).Scan(&total, &override, &stdLimit, &vaultLimit, &floors, &sandbox)
 	if err != nil {
-		return EgressAllowance{}, fmt.Errorf("egress allowance for tenant %s: %w", tenantID, err)
+		return EgressAllowance{}, fmt.Errorf("pool root %s: %w", tenantID, err)
 	}
 	if sandbox {
 		return EgressAllowance{Bytes: SandboxEgressAllowance, PlanBytes: SandboxEgressAllowance, Source: EgressSourceSandbox}, nil
@@ -123,15 +147,23 @@ func EgressResetAt(t time.Time) time.Time {
 	return EgressMonthStart(t).AddDate(0, 1, 0)
 }
 
-// MonthEgressBytes sums the tenant's recorded egress — egress only, never
-// ingress (Review R13-16) — from monthStart on. The live counter in
-// internal/api loads from it once per tenant per month.
+// MonthEgressBytes sums the recorded egress of the tenant's POOL — egress
+// only, never ingress (Review R13-16) — from monthStart on: the pool root's
+// rows and every child's (D-STRIPE-31). Each tenant keeps its own rows
+// (bandwidth_usage_daily is written per tenant); the month the allowance is
+// spent against is the pool's. The live counter in internal/api loads from
+// it once per pool per month.
 func MonthEgressBytes(ctx context.Context, db *sql.DB, tenantID string, monthStart time.Time) (int64, error) {
+	root, err := PoolRoot(ctx, db, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("month egress for tenant %s: %w", tenantID, err)
+	}
 	var used int64
-	err := db.QueryRowContext(ctx,
+	err = db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		  WHERE tenant_id = $1 AND date >= $2::date`,
-		tenantID, monthStart.UTC().Format("2006-01-02")).Scan(&used)
+		  WHERE (tenant_id = $1 OR tenant_id IN (SELECT c.id FROM tenants c WHERE c.parent_tenant_id = $1))
+		    AND date >= $2::date`,
+		root, monthStart.UTC().Format("2006-01-02")).Scan(&used)
 	if err != nil {
 		return 0, fmt.Errorf("month egress for tenant %s: %w", tenantID, err)
 	}

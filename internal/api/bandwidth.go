@@ -200,7 +200,7 @@ func (bt *BandwidthTracker) recordResponse(tenantID, backend string, ingress int
 	now := time.Now()
 	egress := cw.bytesWritten
 	if cw.span != nil {
-		egress = cw.span.t.takeUnrecorded(egress)
+		egress = cw.span.takeUnrecorded(egress)
 		if carried := min(cw.span.carried, egress); carried > 0 {
 			lastMonth := usage.EgressMonthStart(now).AddDate(0, 0, -1)
 			bt.recordOn(lastMonth, tenantID, backend, 0, carried)

@@ -27,6 +27,13 @@ import (
 // per tenant for egressAllowanceTTL, so a purchase or an admin edit lifts the
 // cap within that window.
 //
+// The counter is the POOL's (D-STRIPE-31, Stage 1a Prompt 52 Part 0): an
+// entry is keyed by the pool root (usage.PoolRoot — a platform's child
+// counts into its platform's entry, decides and is paced on the pool's
+// position and its token bucket), while each response still hands its own
+// tenant's bytes to the BandwidthTracker, so the daily rows stay per
+// tenant. A sandbox is its own root (its fixed allowance, RP80-1).
+//
 // Past the allowance a tenant is slowed, not refused: GetObject bodies and
 // /cdn bodies share one token bucket per tenant (egressWriter). The one
 // refusal is the stream guard: more than MaxStreams concurrent throttled
@@ -88,19 +95,23 @@ type egressMeter struct {
 	// The two reads, replaceable in tests.
 	loadAllowance func(ctx context.Context, tenantID string) (usage.EgressAllowance, error)
 	loadUsed      func(ctx context.Context, tenantID string, monthStart time.Time) (int64, error)
+	// loadRoot resolves a tenant's pool root (usage.PoolRoot).
+	loadRoot func(ctx context.Context, tenantID string) (string, error)
 
 	allowanceTTL time.Duration
 	reevalEvery  time.Duration // a paced response re-reads its position this often
 	maxTenants   int
 
 	mu        sync.Mutex
-	tenants   map[string]*egressTenant
+	tenants   map[string]*egressTenant // keyed by pool root
+	roots     map[string]string        // tenant → pool root (a tenant's parent never changes)
 	lastSweep time.Time
 }
 
-// egressTenant is one tenant's counter, cached allowance and token bucket.
+// egressTenant is one pool's counter, cached allowance and token bucket: a
+// tenant in no pool is a pool of one.
 type egressTenant struct {
-	id string
+	id string // the pool root
 
 	mu     sync.Mutex // guards the first load
 	loaded atomic.Bool
@@ -108,10 +119,11 @@ type egressTenant struct {
 	month atomic.Int64 // monthKey of `used`; 0 until loaded
 	used  atomic.Int64 // egress bytes this month: loaded base + live bytes
 
-	// unrecorded: live bytes not yet handed to the BandwidthTracker (their
-	// responses have not ended). Shutdown drains it so a restart reloads
-	// the whole counter.
-	unrecorded atomic.Int64
+	// unrecorded: per member tenant (*atomic.Int64 by tenant id), live bytes
+	// not yet handed to the BandwidthTracker (their responses have not
+	// ended). Shutdown drains them, each under its own tenant, so a restart
+	// reloads the whole counter.
+	unrecorded sync.Map
 
 	allowance   atomic.Int64 // bytes; 0 = none known
 	allowanceAt atomic.Int64 // unix nanos of the next refresh
@@ -145,6 +157,13 @@ func newEgressMeter(db *sql.DB, cfg usage.EgressThrottle, enforced func(string) 
 		reevalEvery:  5 * time.Second,
 		maxTenants:   egressMaxTenants,
 		tenants:      make(map[string]*egressTenant),
+		roots:        make(map[string]string),
+	}
+	m.loadRoot = func(ctx context.Context, tenantID string) (string, error) {
+		if m.db == nil {
+			return tenantID, nil
+		}
+		return usage.PoolRoot(ctx, m.db, tenantID)
 	}
 	m.loadAllowance = func(ctx context.Context, tenantID string) (usage.EgressAllowance, error) {
 		if m.db == nil {
@@ -201,10 +220,40 @@ func egressMonthKey(t time.Time) int64 {
 	return int64(u.Year())*12 + int64(u.Month())
 }
 
-// tenant returns the tenant's entry, loaded: the month's recorded egress and
-// the allowance are read once, by whichever request arrives first; a second
-// request racing it waits for that one load instead of running its own.
+// root is tenantID's pool root, cached for the life of the process (a
+// tenant's parent is set at creation and never changes). A failed read
+// counts the tenant as its own pool for this request — fail open, like the
+// first load — and is retried next time.
+func (m *egressMeter) root(ctx context.Context, tenantID string) string {
+	m.mu.Lock()
+	r, ok := m.roots[tenantID]
+	m.mu.Unlock()
+	if ok {
+		return r
+	}
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	r, err := m.loadRoot(lctx, tenantID)
+	if err != nil {
+		m.logger.Warn("egress meter: pool root read failed — counting the tenant as its own pool",
+			zap.String("tenant_id", tenantID), zap.Error(err))
+		return tenantID
+	}
+	m.mu.Lock()
+	if len(m.roots) >= m.maxTenants {
+		clear(m.roots) // a cache: every entry reloads with one read
+	}
+	m.roots[tenantID] = r
+	m.mu.Unlock()
+	return r
+}
+
+// tenant returns the entry of tenantID's POOL, loaded: the month's recorded
+// egress and the allowance are read once, by whichever request arrives
+// first; a second request racing it waits for that one load instead of
+// running its own.
 func (m *egressMeter) tenant(ctx context.Context, tenantID string) *egressTenant {
+	tenantID = m.root(ctx, tenantID)
 	now := m.now()
 
 	m.mu.Lock()
@@ -283,21 +332,31 @@ func (t *egressTenant) rollover(mk int64) {
 	}
 }
 
-// add counts bytes as they are written.
-func (t *egressTenant) add(n int64, mk int64) {
+// member is the unrecorded-bytes counter of one tenant of the pool.
+func (t *egressTenant) member(tenantID string) *atomic.Int64 {
+	if v, ok := t.unrecorded.Load(tenantID); ok {
+		return v.(*atomic.Int64)
+	}
+	v, _ := t.unrecorded.LoadOrStore(tenantID, new(atomic.Int64))
+	return v.(*atomic.Int64)
+}
+
+// add counts bytes as they are written: into the pool's month and into the
+// writing tenant's unrecorded bytes.
+func (t *egressTenant) add(n int64, mk int64, unrecorded *atomic.Int64) {
 	if cur := t.month.Load(); cur != mk && cur != 0 {
 		t.rollover(mk)
 	}
 	t.used.Add(n)
-	t.unrecorded.Add(n)
+	unrecorded.Add(n)
 }
 
-// takeUnrecorded claims up to n of the tenant's unrecorded bytes for a
+// takeUnrecorded claims up to n of a tenant's unrecorded bytes for a
 // response that is recording itself. It returns less than n only when a
 // shutdown drain already recorded them.
-func (t *egressTenant) takeUnrecorded(n int64) int64 {
+func takeUnrecorded(unrecorded *atomic.Int64, n int64) int64 {
 	for {
-		have := t.unrecorded.Load()
+		have := unrecorded.Load()
 		take := n
 		if take > have {
 			take = have
@@ -305,7 +364,7 @@ func (t *egressTenant) takeUnrecorded(n int64) int64 {
 		if take <= 0 {
 			return 0
 		}
-		if t.unrecorded.CompareAndSwap(have, have-take) {
+		if unrecorded.CompareAndSwap(have, have-take) {
 			return take
 		}
 	}
@@ -317,10 +376,13 @@ func (m *egressMeter) drainUnrecorded(bt *BandwidthTracker) {
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for id, t := range m.tenants {
-		if n := t.unrecorded.Swap(0); n > 0 {
-			bt.recordOn(now, id, "", 0, n)
-		}
+	for _, t := range m.tenants {
+		t.unrecorded.Range(func(id, v any) bool {
+			if n := v.(*atomic.Int64).Swap(0); n > 0 {
+				bt.recordOn(now, id.(string), "", 0, n)
+			}
+			return true
+		})
 	}
 }
 
@@ -429,10 +491,11 @@ func (m *egressMeter) admit(w http.ResponseWriter, r *http.Request, tenantID, su
 }
 
 // EgressStatus is the tenant's position for the dashboard, the admin page,
-// /api/v1/user/usage and the alerter: the allowance read fresh (an admin
-// edit shows at once) and the live counter when the tenant has one, the
-// recorded month otherwise. It never adds an entry to the map.
+// /api/v1/user/usage and the alerter: its POOL's — the allowance read fresh
+// (an admin edit shows at once) and the live counter when the pool has one,
+// the recorded month otherwise. It never adds an entry to the map.
 func (m *egressMeter) EgressStatus(ctx context.Context, tenantID string) (usage.EgressStatus, error) {
+	tenantID = m.root(ctx, tenantID)
 	now := m.now()
 	a, err := m.loadAllowance(ctx, tenantID)
 	if err != nil {
@@ -453,9 +516,10 @@ func (m *egressMeter) EgressStatus(ctx context.Context, tenantID string) (usage.
 	return st, nil
 }
 
-// usedBytes is the counter's value for a tenant: live when loaded, the
-// recorded month otherwise.
+// usedBytes is the counter's value for a tenant's pool: live when loaded,
+// the recorded month otherwise.
 func (m *egressMeter) usedBytes(ctx context.Context, tenantID string, now time.Time) (int64, error) {
+	tenantID = m.root(ctx, tenantID)
 	m.mu.Lock()
 	t := m.tenants[tenantID]
 	m.mu.Unlock()
@@ -485,21 +549,27 @@ func (m *egressMeter) throttledTenants() int {
 	return n
 }
 
-// egressSpan counts one response's bytes into the tenant's counter as they
-// are written. It lives on the countingResponseWriter.
+// egressSpan counts one response's bytes into the tenant's POOL counter as
+// they are written, and into the tenant's own unrecorded bytes (its rows).
+// It lives on the countingResponseWriter.
 type egressSpan struct {
-	m *egressMeter
-	t *egressTenant
+	m          *egressMeter
+	t          *egressTenant
+	unrecorded *atomic.Int64 // the response's own tenant's
 
 	month   int64 // month of the bytes counted so far
 	total   int64
 	carried int64 // bytes written before the month turned over mid-response
 }
 
-// span opens the live count for one response.
+// span opens the live count for one response of tenantID.
 func (m *egressMeter) span(ctx context.Context, tenantID string) *egressSpan {
-	return &egressSpan{m: m, t: m.tenant(ctx, tenantID)}
+	t := m.tenant(ctx, tenantID)
+	return &egressSpan{m: m, t: t, unrecorded: t.member(tenantID)}
 }
+
+// takeUnrecorded claims up to n of the response's tenant's unrecorded bytes.
+func (s *egressSpan) takeUnrecorded(n int64) int64 { return takeUnrecorded(s.unrecorded, n) }
 
 func (s *egressSpan) count(n int64) {
 	mk := egressMonthKey(s.m.now())
@@ -510,5 +580,5 @@ func (s *egressSpan) count(n int64) {
 		s.month = mk
 	}
 	s.total += n
-	s.t.add(n, mk)
+	s.t.add(n, mk, s.unrecorded)
 }
