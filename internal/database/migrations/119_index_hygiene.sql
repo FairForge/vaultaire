@@ -20,6 +20,11 @@
 --    previous build — which reads every row as a cached answer — replays
 --    "in progress" for it too. The handler's answer replaces the claim.
 --
+-- 3. WP-R3-6: multipart_uploads.tagging keeps the x-amz-tagging header of
+--    CreateMultipartUpload (validated there) for CompleteMultipartUpload,
+--    which carries only the part list — as 068 keeps the other attributes.
+--    NULL = no tag set (and every upload created before).
+--
 -- Additive and idempotent: the drops are IF EXISTS, the columns IF NOT
 -- EXISTS with constant defaults (no table rewrite).
 
@@ -32,3 +37,5 @@ DROP INDEX IF EXISTS idx_users_email;
 
 ALTER TABLE idempotency_cache ADD COLUMN IF NOT EXISTS request_hash TEXT;
 ALTER TABLE idempotency_cache ADD COLUMN IF NOT EXISTS claimed BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE multipart_uploads ADD COLUMN IF NOT EXISTS tagging TEXT;

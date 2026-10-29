@@ -317,8 +317,8 @@ func TestMigrations_Reapply(t *testing.T) {
 // assertIndexHygiene — migration 119 (WP-R9-3, R9-17): the four plain
 // indexes that duplicated a UNIQUE index on the same column are gone after
 // any number of passes (their CREATE is emptied in 005/006, as 100's drops
-// were), the UNIQUE indexes stay, and idempotency_cache carries the claim
-// columns of WP-R11-2.
+// were), the UNIQUE indexes stay, idempotency_cache carries the claim
+// columns of WP-R11-2 and multipart_uploads the tagging of WP-R3-6.
 func assertIndexHygiene(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
 	exists := func(name string) bool {
@@ -332,9 +332,9 @@ func assertIndexHygiene(ctx context.Context, t *testing.T, db *sql.DB) {
 	for _, kept := range []string{"api_keys_key_id_key", "tenants_access_key_key", "tenants_email_key", "users_email_key", "idx_api_keys_active"} {
 		assert.True(t, exists(kept), "%s stays", kept)
 	}
-	for _, col := range []string{"request_hash", "claimed"} {
+	for _, col := range [][2]string{{"idempotency_cache", "request_hash"}, {"idempotency_cache", "claimed"}, {"multipart_uploads", "tagging"}} {
 		var n int
-		require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = 'idempotency_cache' AND column_name = $1`, col).Scan(&n))
-		assert.Equal(t, 1, n, "idempotency_cache.%s", col)
+		require.NoError(t, db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`, col[0], col[1]).Scan(&n))
+		assert.Equal(t, 1, n, "%s.%s", col[0], col[1])
 	}
 }
