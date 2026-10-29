@@ -199,6 +199,22 @@
       "sha256": "5a3057ade960a5453023f70738e993a7402e1bfcfbd2c0fdb9277b565a83e986",
       "toolchain": "none",
       "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-ingest",
+      "version": "0.6.0",
+      "source_commit": "dbcc420eca0df9b690d403e733ef846234db38a0",
+      "sha256": "3c8b2b7056e283ab58a54dbf28276c11ad51aa498ae378d71cee4c38166dfd4d",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
+    },
+    {
+      "client": "edge-codec",
+      "version": "0.6.0",
+      "source_commit": "dbcc420eca0df9b690d403e733ef846234db38a0",
+      "sha256": "5d1c7c11211c164530d19c73dd92412f52af6e55451912875981be263c600fbb",
+      "toolchain": "none",
+      "recipe": "scripts/build-client.sh"
     }
   ],
   "withdrawn": [
