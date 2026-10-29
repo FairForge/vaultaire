@@ -1,6 +1,25 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 22:30 UTC — **Two lanes at once.** The surface lane runs Prompt 52 (WP-TEAM-1, migration 118). The engine lane runs **Prompt 52E, the Stage 1 closeout** (`docs/reviews/STAGE1-CLOSEOUT-PROMPTS.md`, migration 119). It covers what Stage 1 still owes in code that does not touch Prompt 52's files:
+Updated: 2026-10-29 23:30 UTC — **Stage 1a Prompt 52 — WP-TEAM-1 (teams: members, roles, invitations, a user in several tenants), after Part 0 = D-STRIPE-31 + RP82-1/2/5 — CODE DONE, prod proof owed** (`docs/reviews/WP-STRIPE-4.md`; migration 118; next 120 — 119 is Prompt 52E's):
+- **#1067, Part 0:**
+  - a platform's child downloads from its POOL (`usage.PoolRoot`: the root's allowance, the pool's month, the meter keyed by the root, the rows per tenant, the alert to the root);
+  - floors pooled like the total (a child's counting floor rows; the owner's floor limit against the pool's sum; lock order owner total → child total → owner floor → child floor);
+  - `GenerateChildKey`'s unused read dropped.
+- **#1068, members and roles** (migration 118: `tenant_members` with the owner backfill, `tenant_invitations`):
+  - registration writes the owner member;
+  - `auth.Can(role, action)` is the one rule; `requireJWT` reads the role per request;
+  - `requireMember` + `requireRole` on every management/platform write; `dashboardAction` on every `/dashboard` write;
+  - erasure and export cover both tables.
+- **#1069, invitations:** a single-use 7-day link (only its SHA-256 stored) at `/auth/invitations/<token>`; a new address registers with no tenant of its own; the Members page; the `members` routes.
+- **#1071, several tenants:**
+  - `POST /auth/login` answers `tenants` and takes `tenant_id`; the dashboard switcher;
+  - keys by tenant (`notChildKeySQL` gone);
+  - the role check also on `/api/v1/user`, `/webhooks`, `/events`, `/sts`;
+  - the audit row names the member and the active tenant.
+- **Prod proof owed** (needs the owner's TOTP and mailbox): tenant zero invites a second address of the owner's as viewer; it accepts and reads the buckets read-only; the audit page names both. Steps in `WP-STRIPE-4.md` § The prod proof.
+- **The post-merge review is RP84.** **Prompt 53 (WP-ACCT-1: the account tree; migration 120 — 119 is Prompt 52E's)** is written in both editions with Part 0 = RP84 (the review fills it) + RP82-3/4/7; its own review is RP86.
+
+Before that: 2026-10-29 22:30 UTC — **Two lanes at once.** The surface lane runs Prompt 52 (WP-TEAM-1, migration 118). The engine lane runs **Prompt 52E, the Stage 1 closeout** (`docs/reviews/STAGE1-CLOSEOUT-PROMPTS.md`, migration 119). It covers what Stage 1 still owes in code that does not touch Prompt 52's files:
 - WP-R15-1, chunk-signature verification;
 - the origin's `x-amz-checksum-*` trailer check (discarded today);
 - WP-R1-10 (the boot pings the database);
