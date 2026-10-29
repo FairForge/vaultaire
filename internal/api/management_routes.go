@@ -71,6 +71,9 @@ func (s *Server) registerManagementRoutes() {
 		// The tenant's own admin-read entries in the transparency log (K4c-1),
 		// dark behind translog_customer_view.
 		r.Get("/account/transparency", s.handleMgmtAccountTransparency)
+
+		// WP-TEAM-1 PR B: members and invitations (manage_members.go).
+		s.registerMemberRoutes(r)
 	})
 }
 

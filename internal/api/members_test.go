@@ -119,7 +119,9 @@ func TestMembers_ANonMemberIsRefused(t *testing.T) {
 }
 
 // memberWritesOpenToAnyMember are the writes no role check guards, and why.
-var memberWritesOpenToAnyMember = map[string]string{}
+var memberWritesOpenToAnyMember = map[string]string{
+	"POST /api/v1/manage/invitations/{token}/accept": "the invitee is no member yet: the invitation's own address decides (PR B)",
+}
 
 // Every write route of /api/v1/manage and /api/v1/platform names a write
 // action: a viewer — who may only read — is refused by role on each.

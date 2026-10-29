@@ -1,0 +1,15 @@
+{{define "title"}}Invitation, Stored{{end}}
+{{define "content"}}
+<div class="page-header"><div><h1>Invitation</h1></div></div>
+<div class="card">
+    {{if .InvitationError}}
+    <div class="alert alert-error">{{.InvitationError}}</div>
+    {{else}}
+    <p>You are invited to the account <strong>{{.Account}}</strong> as a <strong>{{.Invitation.Role}}</strong>.</p>
+    <form method="post" action="/dashboard/invitations/{{.Token}}/accept">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="btn" type="submit">Accept</button>
+    </form>
+    {{end}}
+</div>
+{{end}}
