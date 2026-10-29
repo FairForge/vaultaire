@@ -261,12 +261,15 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 // ReserveTx is ReserveOnFloor inside the caller's transaction (an UploadPart
 // reserves under its upload row's lock, WP-R10-8 Part C): the same checks,
 // the same writes, one rule. The caller commits.
+//
+// The total is the POOL's (WP-PLAT-1): a platform's child is checked
+// against its parent's limit with the sum of the parent's and every
+// child's counter (lockPool), and the bytes are reserved on the child's
+// own row. A tenant in no pool is its own row, as before.
 func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes int64) (Reservation, error) {
-	var used, limit int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_quotas
-		  WHERE tenant_id = $1 FOR UPDATE`, tenantID).Scan(&used, &limit); err != nil {
-		return Reservation{}, fmt.Errorf("checking quota for tenant %s: %w", tenantID, err)
+	used, limit, err := lockPool(ctx, tx, tenantID)
+	if err != nil {
+		return Reservation{}, err
 	}
 	if used+bytes > limit {
 		return Reservation{}, nil
