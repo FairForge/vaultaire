@@ -1,6 +1,19 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, the Connect primitive), after Part 0 = RP80 — DONE** (`docs/reviews/WP-STRIPE-3.md`; migration 117; next 118):
+Updated: 2026-10-29 21:00 UTC — **Review RP82 of Stage 1a Prompt 51 (WP-PLAT-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-3-REVIEW.md`):
+- **RP82-1 (P2):** the pool checks the total only, so a platform's children skip its Standard / Vault floor split (11 TB Standard at the Vault price on a 1 + 10 TB house). Latent: tenant zero has no floors, and no outside platform exists. Fix: floors pooled like the total.
+- **RP82-2 (P2):** a child's downloads have no allowance (= D-STRIPE-31, already Prompt 52's Part 0).
+- **P3s for WP-ACCT-1:** RP82-3 (a per-write SUM over every child), RP82-4 (children inherit no per-tenant flag, `standard_sealed_default` included). Three P4s.
+- **Plan:** new § **WP-EGRESS** from the 2026-10-29 owner session:
+  - read from the free-egress copy;
+  - a hot-object cache on B2 through the Worker, or R2;
+  - B2 as a leg;
+  - the launch gates: `egress_throttle` ON, edge reads for everyone;
+  - owner decisions F-44 (the advertised allowance) and F-45 (vendor terms in writing: Lyve is Wasabi's since 2026-04-09);
+  - `docs/CLOUDFLARE.md` § Findings 2026-10-29 (a Worker's byte-0 range rule, the Wasabi test, the Mac upload).
+- **Prompt 52 (WP-TEAM-1; migration 118):** Part 0 = D-STRIPE-31 + RP82-1/2/5, both editions (`docs/reviews/WP-STRIPE-PROMPTS.md`). The post-merge review is RP84.
+
+Before that: 2026-10-29 — **Stage 1a Prompt 51 — WP-PLAT-1 (platform tenants, the Connect primitive), after Part 0 = RP80 — DONE** (`docs/reviews/WP-STRIPE-3.md`; migration 117; next 118):
 - **#1055 Part 0**, every RP80 finding fixed:
   - a sandbox's downloads are metered under its own id against a fixed 5 GiB a month and paced past it, never billed; its presigned links ≤ 1 h; never Public;
   - a suspended parent's sandbox is suspended; no test key for a suspended account;

@@ -75,6 +75,15 @@ was emptied without a separate R2 key.
 
 A Worker cannot deliver a webhook to its own hostname. `Date.now()` is frozen during CPU work. Six subrequests may wait on headers at once. The 128 MB isolate bounds whole-block decodes (~64 MiB RS); stripe-interleaved shards decode at any size. A GET-presigned URL cannot be HEADed (probe with `bytes=0-0`). Account tokens never see zones. Workers for Platforms ($25/mo) adds customer-run Workers on top of Workers Paid; it does not raise your own Workers' limits.
 
+## Findings 2026-10-29 (egress research + a Worker test against Wasabi, bench account)
+
+- **A Worker `fetch` with the default cache mode turns `Range: bytes=0-N` into a full-object 200.** A range at any other offset is a 206. `cache: "no-store"` gives the 206 for byte 0 too. The product Worker's `readFetchInit` already sets it; every new Worker that reads ranges must, or each first range pulls the whole object (egress and time).
+- **Bandwidth Alliance:** the page now names only Oracle, Tencent, Alibaba, Zenlayer and Cherry Servers. Backblaze B2's free egress to Cloudflare stands on B2's own pricing page ("unlimited free egress when downloading to or through partner CDNs", Cloudflare named). Wasabi's, per Cloudflare's own partner page, is capped "up to the amount of stored data per month", the same 1:1 rule as without Cloudflare.
+- **Developer Platform terms (updated 2026-09-28):** no bandwidth or large-file restriction on Workers; the large-file rule is the CDN cache's.
+- **Worker subrequests leave from Cloudflare addresses** (`2a06:98c0:3600::103`, colo SLC).
+- **Wasabi through a Worker, from SLC** (partner account; the temporary Worker `wasabi-cf-test` on the bench account, token-gated, to be deleted): 8×128 MiB reads 262–265 MB/s against 44–102 MB/s direct; single streams 35–56 against 5–37 MB/s; signed Content-MD5 (400 BadDigest) and signed Content-Length (403) enforced on presigned PUTs forwarded by the Worker. Whether Wasabi meters Cloudflare-routed bytes: its per-bucket stats of 2026-10-29 (buckets `cfwt-*-1029`, kept to mid-November). Plan § WP-EGRESS.
+- **A home upload through the edge** (the owner's Mac, AT&T, 2 GiB): 64–70 MB/s through `s3.stored.cloud` against 53 MB/s through the origin; the line's ceiling is about 560 Mbps.
+
 ## Findings 2026-10-05 (plan-driver session: three doc researchers + live tests on the prod origin)
 
 Tests ran against `s3.stored.ge` with the bench tenant (bucket `cf-tests-20261005`, kept for the lifecycle check) and an R2 bucket `vt-sippy-range` on the fairforge account (Sippy configured, lifecycle `expire-1d` set ~16:00 UTC; delete both after the expiry check).

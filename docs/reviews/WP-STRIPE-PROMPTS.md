@@ -555,7 +555,11 @@ Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one chil
    - the month's egress is summed over the pool (`MonthEgressBytes` of the root sums the pool's rows);
    - the live counter is the root's (`egressMeter.tenant` keyed by the root for decide and pace), while `BandwidthTracker` still records each tenant's own rows;
    - a sandbox is never in a pool (its fixed allowance, RP80-1).
-2. **RP82's findings, in RP82's order** (`docs/reviews/WP-STRIPE-3-REVIEW.md`). Fold any that touch TEAM-1's surfaces (the JWT's tenant, the key listing, the deletion runner) before PR A.
+2. **RP82's findings** (`docs/reviews/WP-STRIPE-3-REVIEW.md`, HOLDS at P2), in order:
+   - **RP82-2 (P2)** is item 1 above. Also: a child's limit-0 row must never read as an unlimited allowance (`TestEgress_ZeroAllowanceIsNotUnlimitedForAChild`).
+   - **RP82-1 (P2): floors are pooled like the total.** Today `ReserveTx` checks the pool's total, but the floor check reads the CHILD's `tenant_floor_quotas`, and a child has none. A platform with 1 TB Standard + 10 TB Vault lets its children put 11 TB on Standard at the Vault price. A child gets counting floor rows (limit 0) whenever its owner has floors (at creation, and by `SetHouse` for existing children); the floor check sums the pool's rows for that floor against the OWNER's floor limit; lock order: owner total → child total → owner floor → child floor. `TestPool_ChildFloorsDrawFromTheOwnersFloors`; the `TestLedger_LockOrder_*` structure test extended.
+   - **RP82-5 (P4):** drop `GenerateChildKey`'s unused `deletion_scheduled_at` read.
+   - **Not in this Part 0:** RP82-3 (a denormalised pool counter), RP82-4 (flag inheritance: `standard_sealed_default` must inherit down the tree) and RP82-7 (admin totals by tenant kind) are WP-ACCT-1's, Prompt 53. RP82-6 (a management key's mint ceiling is its own field, not its bucket scope) is WP-KEY-1's, Prompt 54.
 
 Continue from WP-STRIPE-3 and its review RP82. `git log origin/main`, `gh pr list`.
 
@@ -621,7 +625,20 @@ Read before editing:
 
 PR 0 — Branch `stage1a-p52-part0`. Read `docs/ACCOUNTS.md` first.
 - **0a (D-STRIPE-31, RB9-2).** Test first: `TestPool_AChildsDownloadsSpendThePoolsAllowance` (the platform's allowance 10 MiB; children A and B download 6 MiB each; B's second response is paced with `egress_throttle` on and counted in `vaultaire_egress_would_throttle_total` with it off; the rows stay under A and B; the platform gets the alert). Then `usage.PoolRoot(ctx, q, tenantID)` (one function; `COALESCE(parent_tenant_id, id)`), `EgressAllowance` and `MonthEgressBytes` answer the root's allowance and the pool's month, `egressMeter.tenant` keys its counter by the root while `BandwidthTracker` keeps each tenant's own rows; a sandbox keeps its fixed allowance. Verify: `go test -race ./internal/usage/ ./internal/api/ -run 'Pool|Egress|Sandbox'`.
-- **0b…** RP82's fixes (`docs/reviews/WP-STRIPE-3-REVIEW.md`), one step per finding, each test first, in RP82's order.
+- **0b (RP82-2's second half).** Test first: `TestEgress_ZeroAllowanceIsNotUnlimitedForAChild`: a child's own limit-0 quota row never yields an unpaced allowance. `EgressAllowance` is reached only through `PoolRoot` for a child. Verify: `go test -race ./internal/usage/ -run Egress`.
+- **0c (RP82-1).** Test first:
+  - `TestPool_ChildFloorsDrawFromTheOwnersFloors`: owner floors 10 KiB Standard + 100 KiB Vault; a child's 12 KiB Standard PUT is 403 QuotaExceeded while a 12 KiB Vault PUT succeeds; the owner's own Standard PUT counts against the same 10 KiB;
+  - `TestPool_SetHouseGivesChildrenCountingFloors`;
+  - extend `TestLedger_LockOrder_TotalBeforeFloors_Structure` to the owner-first order.
+
+  Then:
+  - `auth.CreateChildTenant` writes limit-0 `tenant_floor_quotas` rows for each floor its owner has;
+  - `usage.SetHouse` adds them to existing children;
+  - `ReserveTx` and `ApplyLedgerTx` lock the owner's floor row, then the child's, and check the SUM of the pool's rows for that floor against the owner's floor limit;
+  - the reconcile (`usage/billed.go`) recomputes each child's floor rows from its head rows as it does the owner's.
+
+  Verify: `go test -race ./internal/usage/ ./internal/api/ -run 'Pool|Floor|Ledger'`.
+- **0d (RP82-5).** Drop the unused read in `GenerateChildKey`.
 
 PR A — members and roles. Branch `stage1a-p52-members`.
 1. Migration 118 `118_members.sql`:
@@ -661,6 +678,6 @@ Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accept
   - #1051: the image.
   - The post-merge review is RP80.
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
-- **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82.
-- **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = RP82 (filled by RP82). Migration 118. The post-merge review is RP84.
+- **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82. **Reviewed by RP82 (2026-10-29, `docs/reviews/WP-STRIPE-3-REVIEW.md`): HOLDS at P2** — RP82-1 a child skips its platform's Standard/Vault floors, RP82-2 a child's downloads have no allowance (= D-STRIPE-31); two P3s for WP-ACCT-1, three P4s.
+- **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = D-STRIPE-31 + RP82-1/2/5 (filled by RP82). Migration 118. The post-merge review is RP84.
 - **53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`); **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
