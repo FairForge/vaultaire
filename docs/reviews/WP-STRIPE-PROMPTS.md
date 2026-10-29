@@ -354,8 +354,147 @@ Prod: PR 0 first; PR A deploys dark until a `VLT_TEST_` key exists (none exist b
 
 Done means: PR 0, A, B, C, D merged; tenant zero's test key round-trips an object with zero calls to a paid backend (its request log rows say so); the image runs on the Mac in under a minute; Prompt 51 written here.
 
+## Stage 1a Prompt 51: WP-PLAT-1 — API-created accounts, the Connect primitive (Part 0: RP80's findings)
+
+**From 50 (`docs/reviews/WP-STRIPE-2.md`; the post-merge review is RP80):**
+- **Test mode is live and dark until a test key exists:**
+  - a `VLT_TEST_` key resolves to the tenant's **sandbox** (`tenants.sandbox_of`, migration 116), a tenant of its own;
+  - every sandbox write lands on `local` (`placeOn`'s first branch) and is never billed or metered;
+  - `POST /api/v1/manage/sandbox/reset` and the `sandbox_purge` job (7 days) clear it; it is erased with its parent;
+  - a sandbox's events go to the parent's webhooks with `livemode: false`;
+  - `stored listen` replays the event log (`GET /api/v1/events?after=…&wait=25`) to localhost.
+- **The local image:** `make docker`, `deploy/docker/compose.yml`, and `ghcr.io/fairforge/vaultaire:<sha12>` pushed by Deploy with its binary's sha256 checked against the release artefact.
+- **The mirror:**
+  - settles after the commit (`POST /api/v1/edge/mirror`, Worker 0.6.0);
+  - its buffer is the host's bytes (unbudgeted = unmirrored);
+  - one request id per S3 request;
+  - London is the UK;
+  - the copy pass leaves one multiple of free egress to the customers;
+  - 0.5.1's `edge-codec` is withdrawn.
+- **What PLAT-1 inherits from 50:**
+  - A **users-less tenant** already exists (a sandbox has no `users` row; its keys are its parent user's). PLAT-1's child tenants are the second kind, and every schema walk must hold them too.
+  - **A tenant with a parent** is a pattern now (`sandbox_of`). A platform child is NOT a sandbox: it is billed (against the parent's pool) and lives on the real backends. Never reuse `sandbox_of` for it; `parent_tenant_id` is its own column.
+  - **The sandbox's own quota row is its local-disk cap** (D-STRIPE-13, open question 1 for the owner). The pool walk of PLAT-1 must not count a sandbox.
+- **Open:**
+  - D-STRIPE-13 (the sandbox's cap);
+  - RB8-2 (test requests on the parent's Developers page);
+  - RB8-1 (a node's shutdown drops a settle in flight);
+  - RB8-6 (`stored listen` forwards the list item, not the webhook body).
+
+**Part 0 (RP80, in its order — filled by RP80's review, `docs/reviews/WP-STRIPE-2-REVIEW.md`):** RP80's findings, in its order. Fold any that touch PLAT-1's surfaces (the auth lookup, `tenant_quotas`, the erasure) before PR A.
+
+Continue from WP-STRIPE-2 and its review RP80. `git log origin/main`, `gh pr list`.
+
+Read first:
+- plan § WP-STRIPE (the WP-PLAT-1 row — the contract);
+- `internal/auth/testkey.go` (how a tenant that is not a user's is made in one transaction: the pattern to follow, not the column);
+- `internal/auth/handlers.go` `LookupCredential` (the one lookup);
+- `internal/usage/quota*.go` (the quota check a pool must sit in);
+- `internal/account/erase.go` (`eraseSandboxRows`: the cascade pattern);
+- `internal/api/sandbox.go` (a per-tenant fact cached for the process because it never changes — `parent_tenant_id` never changes either);
+- `internal/api/management_routes.go` + `request_log.go` `logManagementRequest` (every new route is logged);
+- `internal/docs/openapi.go` and the drift guard.
+
+Lane: Developer surface (the Stripe layer). Migration 117: `tenants.parent_tenant_id`, `tenants.platform`, `tenants.external_id`, `tenants.label`; a partial unique `(parent_tenant_id, external_id)`.
+
+PRs:
+- (0) RP80's fixes;
+- (A) the platform tenant and its children;
+- (B) the pooled quota;
+- (C) the keys and STS tokens of a child, and the cascade;
+- (D) docs.
+
+What to build
+1. **A platform tenant** (`tenants.platform = true`, set only by an admin through `PUT /api/v1/admin/tenants/{id}/platform`, audited `admin.platform_granted`):
+   - its JWT (or a key with the new `PlatformAdmin` permission) may call `/api/v1/platform/*`. Any other caller gets a 404, never a 403: the routes do not exist for it.
+   - `POST /api/v1/platform/tenants {label, external_id?}` creates a child: no user row, no e-mail (a `platform+<id>@platform.invalid` placeholder, as the sandbox's), residency inherited from the parent and never changed, `parent_tenant_id` set.
+   - `GET /api/v1/platform/tenants[/{id}]` lists and reads children (usage included).
+   - `DELETE …/{id}` schedules a child's erasure (the ordinary one).
+2. **Pooled quota:** a child's `tenant_quotas` row draws from the parent's pool. The quota check walks one level (`parent_tenant_id`) in ONE query. Both a child's PUT and the parent's own PUT are 403 once the pool is spent; the edge admit's reservation is the same check.
+3. **Keys:**
+   - `POST /api/v1/platform/tenants/{id}/keys` mints a scoped key for a child; its scope is capped by the calling key's (`TestPlatform_ChildKeysNeverExceedTheParentsScope`).
+   - STS tokens likewise.
+   - A child has no primary pair: every key of a child is scoped and revocable by the parent.
+4. **The cascade:** the erasure of a parent erases its children first (each through the ordinary runner path, objects included), then the parent. A child's erasure is ordinary.
+5. **Metering:** every request_log / bandwidth row of a child carries the child's id. The parent's dashboard sums its children (a "Children" card); the `/platform` usage endpoint answers per child.
+
+Tests (red first):
+- `TestPlatform_CreatesATenantWithoutAUser`;
+- `TestPlatform_ChildQuotaDrawsFromTheParentsPool`;
+- `TestPlatform_ChildKeysNeverExceedTheParentsScope`;
+- `TestPlatform_ANonPlatformTenantGets404`;
+- `TestPlatform_EraseParentCascades`;
+- `TestPlatform_ASandboxIsNeverInThePool`;
+- `TestErasedTablesCoverSchema` / `TestExportSectionsCoverSchema` naming the columns.
+
+Prod proof: tenant zero made a platform tenant by the admin route (owner's TOTP), one child created by the API, one object through the child's scoped key, the child's usage on the parent's card.
+
+Architecture notes
+- A child is a TENANT, exactly as a sandbox is: every per-tenant guard already holds. The difference is billing: a child is billed through the parent's pool; a sandbox is never billed.
+- The routes mount for every process; the 404 is decided per caller, so no platform exists on prod until the owner grants one.
+- Closeout: `docs/reviews/WP-STRIPE-3.md`, STATUS, plan § WP-STRIPE's row, CLAUDE.md (the columns, the routes, the admin route), `docs/API.md` § Platform, the ledger row; Prompt 52 (WP-TEAM-1) written here. The post-merge review is RP82.
+
+ultrathink
+
+## Stage 1a Prompt 51 — Opus edition
+
+**From 50 (as above).**
+
+You are building plan § WP-STRIPE's WP-PLAT-1 row in the Vaultaire repository: platform tenants that create users-less child tenants by API, their pooled quota, their scoped keys and the erasure cascade. Part 0 (RP80's fixes) comes first. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`. Migration 117.
+
+Read before editing:
+- plan § WP-STRIPE (the WP-PLAT-1 row);
+- `docs/reviews/WP-STRIPE-2.md` + `WP-STRIPE-2-REVIEW.md`;
+- `internal/auth/testkey.go`, `internal/auth/handlers.go` (`LookupCredential`), `internal/auth/apikey.go` (`GenerateAPIKey`, `checkKeyCap`, `KeyCreateOptions.Validate`);
+- `internal/usage/quota*.go` (`reserveQuota` and its SQL);
+- `internal/api/quota_accounting.go` (`reserveWrite`);
+- `internal/api/edge_ingest.go` (the admit's reservation);
+- `internal/account/erase.go` (`eraseSandboxRows`), `internal/api/deletion_runner.go` (stage b4);
+- `internal/api/sandbox.go`;
+- `internal/api/management_routes.go`, `request_log.go` (`logManagementRequest`);
+- `internal/docs/openapi.go`.
+
+PR 0 — RP80's fixes (`docs/reviews/WP-STRIPE-2-REVIEW.md`). Branch `stage1a-p51-part0`. One step per finding, each test first, in RP80's order.
+
+PR A — the platform tenant and its children. Branch `stage1a-p51-platform`.
+1. Migration 117 `117_platform.sql`:
+   - `ALTER TABLE tenants ADD COLUMN IF NOT EXISTS parent_tenant_id VARCHAR(255) REFERENCES tenants(id)`, `platform BOOLEAN NOT NULL DEFAULT FALSE`, `external_id TEXT`, `label TEXT`;
+   - `CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_parent_external ON tenants (parent_tenant_id, external_id) WHERE parent_tenant_id IS NOT NULL AND external_id IS NOT NULL`;
+   - then `make test-db`, the reapply test, and the schema walks: `TestErasedTablesCoverSchema` needs no new table; the export section for `tenants` names the four columns.
+2. Test first: `TestPlatform_ANonPlatformTenantGets404` (a JWT of a tenant with `platform = false` gets 404 on `POST /api/v1/platform/tenants`; an admin's `PUT /api/v1/admin/tenants/{id}/platform {"platform": true}` makes the next call 201, audited `admin.platform_granted`). Then:
+   - `internal/api/platform_tenants.go`: routes under `/api/v1/platform` behind `requireJWT` + `logManagementRequest`, and a middleware that answers `writeManagementError(... ErrTypeNotFound ...)` unless the JWT's tenant has `platform`;
+   - the admin route in `admin_routes` (classified in `apiAdminWrites`).
+3. Test first: `TestPlatform_CreatesATenantWithoutAUser` (201 `{object: "tenant", id, label, external_id, residency}`; no `users` row; `tenants.parent_tenant_id` = the caller; a second create with the same `external_id` is 409 `external_id_taken`; a child of a child is 400 `child_of_child`). Then `internal/auth/platform.go` `CreateChildTenant(ctx, parentTenantID, label, externalID)`, in ONE transaction:
+   - the parent row `FOR SHARE`;
+   - then `tenants` (`platform+<id>@platform.invalid`, the parent's region in metadata);
+   - then `tenant_quotas` (limit 0: the pool decides).
+4. Test first: `TestPlatform_ListAndReadChildren` (usage per child from `tenant_quotas`). Then the GET routes; `DELETE /api/v1/platform/tenants/{id}` schedules the child's erasure through `internal/account` (a child has no user: `account.ScheduleTenant`, new, the same 30-day grace).
+
+PR B — the pool. Branch `stage1a-p51-pool`.
+5. Test first: `TestPlatform_ChildQuotaDrawsFromTheParentsPool` (parent limit 10 KiB; a 6 KiB PUT by child A, then a 6 KiB PUT by child B is 403 QuotaExceeded, and the parent's own 6 KiB PUT too), `TestPlatform_ASandboxIsNeverInThePool`. Then:
+   - `reserveQuota`'s SQL resolves the pool owner `COALESCE(parent_tenant_id, id)` in the same statement and checks `SUM(used) of the pool` against the owner's limit;
+   - the edge admit uses the same function (no second rule);
+   - `usage.Billed*` reports a child under its own id and the pool under the owner.
+
+PR C — keys and the cascade. Branch `stage1a-p51-keys`.
+6. Test first: `TestPlatform_ChildKeysNeverExceedTheParentsScope` (the caller's key scoped to `GetObject` on bucket `a`; asking `PutObject`, or bucket `b`, for a child is 400 `scope_exceeds_parent`). Then `POST/GET/DELETE /api/v1/platform/tenants/{id}/keys[/{key}]` and `POST …/sts` (the STS scope intersection reused).
+7. Test first: `TestPlatform_EraseParentCascades` (a parent with two children, each holding an object and a key: the runner erases both children — objects, rows, keys — before the parent's rows; `EraseRows` refuses the parent while a child row exists). Then the cascade in `internal/account` (children first, like `eraseSandboxRows`) and stage b5 in the deletion runner.
+
+PR D — docs: `docs/reviews/WP-STRIPE-3.md`, STATUS, plan row DONE, CLAUDE.md (the columns, the routes, the admin route), `docs/API.md` § Platform, the ledger row; Prompt 52 (WP-TEAM-1) in both editions with Part 0 = RP82. The post-merge review is RP82.
+
+Prod: PR 0 first. PRs A–C deploy dark: no tenant has `platform = true` until the owner grants one. The proof needs the owner's TOTP for the admin route.
+
+Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one child was made by the API, and one object went through the child's scoped key with its bytes counted in the parent's pool; Prompt 52 written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
-- **Prompt 50 — WP-DX-1** (test mode + the Docker image) — WRITTEN above by Prompt 49's closeout, both editions; Part 0 = RP78-1…10 (filled by RP78). The post-merge review is RP80.
+- **Prompt 50 — WP-DX-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-2.md`). PRs:
+  - #1047: Part 0, RP78-1…10.
+  - #1048 / #1052: the Worker 0.6.0 and its rows.
+  - #1049: the sandbox, migration 116.
+  - #1050: `livemode` and `stored listen`.
+  - #1051: the image.
+  - The post-merge review is RP80.
+- **Prompt 51 — WP-PLAT-1** (API-created accounts, the Connect primitive) — WRITTEN above by Prompt 50's closeout, both editions. Part 0 = RP80 (filled by RP80). Migration 117. The post-merge review is RP82.
 - **Prompt 51 — WP-PLAT-1** (API-created accounts); **52 — WP-TEAM-1**; **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
