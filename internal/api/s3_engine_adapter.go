@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
@@ -197,35 +198,74 @@ func (a *S3ToEngine) TranslateRequest(req *S3Request) engine.Operation {
 // awsChunkedReader decodes the aws-chunked transfer encoding used by the
 // AWS SDK v2. Each chunk is preceded by a hex size line (optionally followed
 // by a semicolon-delimited chunk extension such as a chunk signature), then
-// the payload bytes, then CRLF. A zero-length chunk terminates the stream.
-// Trailing headers (e.g. x-amz-checksum-*) are discarded.
+// the payload bytes, then CRLF. A zero-length chunk terminates the stream,
+// followed by the trailing headers (x-amz-checksum-*, and on a signed
+// -TRAILER stream x-amz-trailer-signature).
 //
 // This is distinct from standard HTTP chunked transfer encoding, which Go's
 // net/http server decodes automatically. aws-chunked is an application-level
 // encoding that must be stripped before the payload reaches the storage
 // backend.
+//
+// The body is what was signed (WP-R15-1): with sig set (a signed stream —
+// requestPayload takes it from the request's verifier) each chunk's
+// chunk-signature is checked as the chunk ends, chained from the seed, and
+// the signed trailer at the end; with trailer set the declared checksum is
+// computed over the decoded bytes and compared at the terminal chunk. A
+// failure is the read's error (errAWSChunkedSignature → 403,
+// errChecksumMismatch → 400), so the upload fails before its commit; bytes
+// already handed out are the caller's to discard, as with a payload hash.
 type awsChunkedReader struct {
 	r         *bufio.Reader
-	chunkLeft int  // bytes remaining in the current chunk
-	done      bool // true once the terminal 0-size chunk is seen
+	chunkLeft int   // bytes remaining in the current chunk
+	done      bool  // true once the terminal chunk (and its trailer) is read
+	err       error // the first failure; every later read repeats it
+
+	sig      *auth.ChunkVerifier // nil: the chunks carry no signature to check
+	chunkSig string              // the current chunk's chunk-signature
+	chunkSum hash.Hash           // sha256 of the current chunk's payload (sig only)
+
+	trailer *payloadChecksum // the checksum x-amz-trailer declared, or nil
 }
+
+// awsChunkedMaxTrailerLines bounds the trailing header section.
+const awsChunkedMaxTrailerLines = 32
 
 func newAWSChunkedReader(r io.Reader) *awsChunkedReader {
 	return &awsChunkedReader{r: bufio.NewReader(r)}
 }
 
 func (a *awsChunkedReader) Read(p []byte) (int, error) {
+	if a.err != nil {
+		return 0, a.err
+	}
 	if a.done {
 		return 0, io.EOF
 	}
+	n, err := a.read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		a.err = err
+	}
+	return n, err
+}
 
+// line reads one CRLF- (or LF-) terminated line, at most the buffer's size.
+func (a *awsChunkedReader) line() (string, error) {
+	b, err := a.r.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", fmt.Errorf("%w: a line longer than %d bytes", errAWSChunkedFraming, a.r.Size())
+	}
+	return string(b), err
+}
+
+func (a *awsChunkedReader) read(p []byte) (int, error) {
 	// If the current chunk is exhausted, read the next chunk header. A
 	// stream that is not well framed is the client's (errAWSChunkedFraming,
 	// WP-R2-3): it used to end "cleanly" wherever it stopped, and a size
 	// line that was not hex was a 500.
 	for a.chunkLeft == 0 {
 		// Read the chunk size line: "<hex-size>[;chunk-extension]\r\n"
-		line, err := a.r.ReadString('\n')
+		line, err := a.line()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return 0, fmt.Errorf("%w: the stream ended before its terminal chunk: %w", errAWSChunkedFraming, io.ErrUnexpectedEOF)
@@ -234,9 +274,10 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		}
 		line = strings.TrimRight(line, "\r\n")
 
-		// Strip chunk extensions (e.g. ";chunk-signature=...")
+		// The chunk extensions (";chunk-signature=...").
+		var ext string
 		if idx := strings.IndexByte(line, ';'); idx >= 0 {
-			line = line[:idx]
+			line, ext = line[:idx], line[idx+1:]
 		}
 		line = strings.TrimSpace(line)
 
@@ -244,9 +285,27 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		if err != nil || size < 0 {
 			return 0, fmt.Errorf("%w: invalid chunk size %q", errAWSChunkedFraming, line)
 		}
+		if a.sig != nil {
+			a.chunkSig = ""
+			for _, e := range strings.Split(ext, ";") {
+				if v, ok := strings.CutPrefix(strings.TrimSpace(e), "chunk-signature="); ok {
+					a.chunkSig = v
+				}
+			}
+			if a.chunkSum == nil {
+				a.chunkSum = sha256.New()
+			}
+			a.chunkSum.Reset()
+		}
 
 		if size == 0 {
-			// Terminal chunk — trailing headers are ignored; signal EOF.
+			// The terminal chunk signs an empty payload; then the trailer.
+			if err := a.verifyChunk(); err != nil {
+				return 0, err
+			}
+			if err := a.readTrailer(); err != nil {
+				return 0, err
+			}
 			a.done = true
 			return 0, io.EOF
 		}
@@ -260,6 +319,14 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 	}
 	n, err := a.r.Read(p)
 	a.chunkLeft -= n
+	if n > 0 {
+		if a.sig != nil {
+			a.chunkSum.Write(p[:n])
+		}
+		if a.trailer != nil {
+			a.trailer.h.Write(p[:n])
+		}
+	}
 	if errors.Is(err, io.EOF) && a.chunkLeft > 0 {
 		return n, fmt.Errorf("%w: the stream ended inside a chunk: %w", errAWSChunkedFraming, io.ErrUnexpectedEOF)
 	}
@@ -267,7 +334,8 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		return n, err
 	}
 
-	// A fully consumed chunk is followed by CRLF.
+	// A fully consumed chunk is followed by CRLF, and its signature is
+	// checked before the read that ends it returns.
 	if a.chunkLeft == 0 {
 		var crlf [2]byte
 		if _, err := io.ReadFull(a.r, crlf[:]); err != nil {
@@ -279,9 +347,76 @@ func (a *awsChunkedReader) Read(p []byte) (int, error) {
 		if crlf != [2]byte{'\r', '\n'} {
 			return n, fmt.Errorf("%w: a chunk is not followed by CRLF", errAWSChunkedFraming)
 		}
+		if err := a.verifyChunk(); err != nil {
+			return n, err
+		}
 	}
 
 	return n, nil
+}
+
+// verifyChunk checks the chunk just read against its chunk-signature.
+func (a *awsChunkedReader) verifyChunk() error {
+	if a.sig == nil {
+		return nil
+	}
+	if err := a.sig.Chunk(a.chunkSig, a.chunkSum.Sum(nil)); err != nil {
+		return fmt.Errorf("%w: %w", errAWSChunkedSignature, err)
+	}
+	return nil
+}
+
+// readTrailer reads the trailing headers after the terminal chunk when the
+// stream has a trailer to check: the signed trailer's signature first (a
+// forged trailer is the signature's refusal), then the declared checksum. A
+// stream with nothing to check leaves its trailer unread, as before.
+func (a *awsChunkedReader) readTrailer() error {
+	signed := a.sig != nil && a.sig.SignedTrailer()
+	if !signed && a.trailer == nil {
+		return nil
+	}
+	var canonical strings.Builder
+	var signature, declared string
+	for i := 0; ; i++ {
+		if i == awsChunkedMaxTrailerLines {
+			return fmt.Errorf("%w: more than %d trailing lines", errAWSChunkedFraming, awsChunkedMaxTrailerLines)
+		}
+		raw, err := a.line()
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		line := strings.TrimRight(raw, "\r\n")
+		if line == "" {
+			if errors.Is(err, io.EOF) || !signed || signature != "" {
+				break
+			}
+			// minio-go writes "name:value\n" then "\r\n" before the
+			// signature line: only the signature ends a signed trailer.
+			continue
+		}
+		name, value, _ := strings.Cut(line, ":")
+		name, value = strings.ToLower(strings.TrimSpace(name)), strings.TrimSpace(value)
+		if name == "x-amz-trailer-signature" {
+			signature = value
+		} else {
+			canonical.WriteString(name + ":" + value + "\n")
+			if a.trailer != nil && name == a.trailer.name {
+				declared = value
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	if signed {
+		if err := a.sig.Trailer([]byte(canonical.String()), signature); err != nil {
+			return fmt.Errorf("%w: %w", errAWSChunkedSignature, err)
+		}
+	}
+	if a.trailer != nil {
+		return a.trailer.check(declared)
+	}
+	return nil
 }
 
 // isAWSChunked returns true when the request body uses aws-chunked encoding.
@@ -1145,9 +1280,10 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 	// MD5 hasher so the ETag is computed in a single streaming pass.
 	// bodyCounter measures the decoded logical bytes actually consumed —
 	// billing must never trust the client-declared size alone.
-	var body io.Reader = r.Body
-	if chunked {
-		body = newAWSChunkedReader(r.Body)
+	body, payloadErr := requestPayload(r, a.db != nil)
+	if payloadErr != nil {
+		answerClientBody(w, r, a.logger, "PutObject", nil, payloadErr, zap.String("bucket", bucket), zap.String("key", artifact))
+		return
 	}
 	// Every read error of the body is the client's, tagged where it is
 	// read (WP-R2-3): the sealer, the chunker and the driver all read
@@ -1371,6 +1507,16 @@ func (a *S3ToEngine) HandlePut(w http.ResponseWriter, r *http.Request, bucket, o
 				zap.String("artifact", artifact))
 			WriteS3Error(w, bodyReadErrorCode(err), r.URL.Path, generateRequestID())
 		}
+		return
+	}
+
+	// A driver that stored the bytes although a read of the body failed (one
+	// that does not stop at a read error): the body is not what was signed
+	// or declared — never committed, the blob queued as an orphan.
+	if bodyErr := src.failed(); bodyErr != nil {
+		retireOrphanWrite(r.Context(), a.db, a.logger, t.ID, bucket, blob, backendName)
+		answerClientBody(w, r, a.logger, "PutObject", src, bodyErr,
+			zap.String("container", container), zap.String("artifact", artifact))
 		return
 	}
 

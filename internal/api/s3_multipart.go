@@ -348,9 +348,10 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request, bucket
 	// as STREAMING-UNSIGNED-PAYLOAD-TRAILER; storing the raw framed body
 	// corrupts the assembled object (wire framing embedded in the data) and
 	// records framed sizes/ETags for the parts.
-	var body io.Reader = r.Body
-	if isAWSChunked(r) {
-		body = newAWSChunkedReader(r.Body)
+	body, payloadErr := requestPayload(r, s.db != nil)
+	if payloadErr != nil {
+		answerClientBody(w, r, s.logger, "UploadPart", nil, payloadErr, zap.String("upload_id", uploadID), zap.Int("part", partNumber))
+		return
 	}
 	src := newClientBody(body) // the client's own read failures (WP-R2-3)
 

@@ -33,6 +33,11 @@ import (
 // ends before its terminal chunk.
 var errAWSChunkedFraming = errors.New("aws-chunked framing")
 
+// errAWSChunkedSignature: a signed aws-chunked body whose chunk (or trailer)
+// signature is missing or does not verify (WP-R15-1): the body is not what
+// was signed — 403 SignatureDoesNotMatch, nothing committed.
+var errAWSChunkedSignature = errors.New("aws-chunked signature")
+
 // Reasons of vaultaire_client_body_errors_total.
 const (
 	clientBodyShort   = "short"    // the body ended or broke before its declared length
@@ -129,6 +134,22 @@ func answerClientBody(w http.ResponseWriter, r *http.Request, logger *zap.Logger
 		logger.Info("request body does not match its signed x-amz-content-sha256",
 			append(fields, zap.String("op", op), zap.Error(err))...)
 		WriteS3Error(w, ErrXAmzContentSHA256Mismatch, r.URL.Path, generateRequestID())
+		return
+	}
+	// So does a signed stream whose chunks are not what was signed
+	// (WP-R15-1) — counted as a failure against a real key — and a body that
+	// does not match its x-amz-checksum-*.
+	if errors.Is(err, errAWSChunkedSignature) || errors.Is(body.failed(), errAWSChunkedSignature) {
+		logger.Info("aws-chunked body does not match its chunk signatures",
+			append(fields, zap.String("op", op), zap.Error(err))...)
+		recordAuthFailure(r, "chunk_signature_mismatch", true)
+		WriteS3Error(w, ErrSignatureDoesNotMatch, r.URL.Path, generateRequestID())
+		return
+	}
+	if errors.Is(err, errChecksumMismatch) || errors.Is(body.failed(), errChecksumMismatch) {
+		logger.Info("request body does not match its x-amz-checksum",
+			append(fields, zap.String("op", op), zap.Error(err))...)
+		WriteS3Error(w, ErrXAmzContentChecksumMismatch, r.URL.Path, generateRequestID())
 		return
 	}
 	reason := clientBodyReason(r.Context(), body, err)

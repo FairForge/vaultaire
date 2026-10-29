@@ -111,16 +111,7 @@ func parseSigV4AuthHeader(h string) (*sigV4Params, error) {
 // scope's date/region/service are used verbatim so any region string a
 // client signs with is accepted.
 func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID string) error {
-	// The signed timestamp comes from X-Amz-Date, or — as the SigV4 spec
-	// permits — the standard Date header, converted to ISO8601 basic.
-	amzDate := r.Header.Get("X-Amz-Date")
-	if amzDate == "" {
-		if httpDate := r.Header.Get("Date"); httpDate != "" {
-			if t, err := http.ParseTime(httpDate); err == nil {
-				amzDate = t.UTC().Format(timeFormat)
-			}
-		}
-	}
+	amzDate := requestAmzDate(r)
 	if amzDate == "" {
 		return fmt.Errorf("%w: missing X-Amz-Date (or Date) header", ErrSignatureMismatch)
 	}
@@ -131,7 +122,7 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID 
 	if parseErr != nil {
 		return fmt.Errorf("%w: malformed X-Amz-Date %q (want YYYYMMDDTHHMMSSZ)", ErrSignatureMismatch, amzDate)
 	}
-	if diff := time.Now().UTC().Sub(ts); diff < -maxTimeSkew || diff > maxTimeSkew {
+	if diff := verifierNow().UTC().Sub(ts); diff < -maxTimeSkew || diff > maxTimeSkew {
 		return fmt.Errorf("%w: request timestamp too old or too far in future", ErrRequestTimeSkewed)
 	}
 	if !strings.HasPrefix(amzDate, p.Date) {
@@ -211,6 +202,26 @@ func (a *Auth) verifySigV4(r *http.Request, p *sigV4Params, secretKey, tenantID 
 	}
 	return fmt.Errorf("%w", ErrSignatureMismatch)
 }
+
+// requestAmzDate is the request's signed timestamp: X-Amz-Date, or — as the
+// SigV4 spec permits — the standard Date header, converted to ISO8601 basic
+// ("" when neither is usable). The chunk signatures of a streaming body sign
+// the same value.
+func requestAmzDate(r *http.Request) string {
+	if amzDate := r.Header.Get("X-Amz-Date"); amzDate != "" {
+		return amzDate
+	}
+	if httpDate := r.Header.Get("Date"); httpDate != "" {
+		if t, err := http.ParseTime(httpDate); err == nil {
+			return t.UTC().Format(timeFormat)
+		}
+	}
+	return ""
+}
+
+// verifierNow is the clock of the skew check (a variable so a test can verify
+// a published fixture signed in the past).
+var verifierNow = time.Now
 
 // signedAcceptEncodings are the Accept-Encoding values S3 clients sign, tried
 // in turn when a proxy rewrote the header on its way to the origin: identity

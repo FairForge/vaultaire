@@ -29,11 +29,11 @@ var ErrInvalidContentSHA256 = errors.New("invalid x-amz-content-sha256 header va
 // digest differs from the declared value — so a tampered or corrupted
 // payload errors out before any handler treats it as complete.
 //
-// Marker values pass through unverified: UNSIGNED-PAYLOAD carries no body
-// digest by design (TLS is the integrity layer), and STREAMING-* payloads
-// declare per-chunk signatures inside the aws-chunked framing (verifying
-// those needs the signing key mid-stream — not yet implemented). Anything
-// else that is not a SHA-256 hex digest is rejected outright.
+// Marker values pass through here: UNSIGNED-PAYLOAD carries no body digest
+// by design (TLS is the integrity layer), and STREAMING-* payloads are
+// checked inside the aws-chunked framing — the signed ones chunk by chunk
+// (sigv4_chunks.go, WP-R15-1). Anything else that is not a SHA-256 hex
+// digest is rejected outright.
 func wrapPayloadVerification(r *http.Request) error {
 	declared := r.Header.Get("X-Amz-Content-Sha256")
 	if declared == "" || declared == unsignedPayload || strings.HasPrefix(declared, "STREAMING-") {
