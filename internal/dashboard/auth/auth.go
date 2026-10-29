@@ -27,12 +27,17 @@ const (
 // request. They are read-only after creation and shown on the "active
 // sessions" list on the settings page.
 type SessionData struct {
-	UserID    string
-	TenantID  string
-	Email     string
+	UserID   string
+	TenantID string // the ACTIVE tenant (WP-TEAM-1: a user may be a member of several)
+	Email    string
+	// Role is the OPERATOR role ("admin" opens /admin), never a tenant role.
 	Role      string
 	IPAddress string
 	UserAgent string
+	// MemberRole is the user's role on TenantID (owner / admin / developer
+	// / viewer, WP-TEAM-1): resolved from tenant_members on every request
+	// by handlers.ResolveMember, never persisted with the session.
+	MemberRole string
 }
 
 // GetSession extracts session data from a request context.
@@ -40,6 +45,12 @@ type SessionData struct {
 func GetSession(ctx context.Context) *SessionData {
 	sd, _ := ctx.Value(SessionKey).(*SessionData)
 	return sd
+}
+
+// WithSession returns ctx carrying sd (a middleware that refines the
+// session — handlers.ResolveMember — hands it on).
+func WithSession(ctx context.Context, sd *SessionData) context.Context {
+	return context.WithValue(ctx, SessionKey, sd)
 }
 
 // SessionInfo is the display-oriented view of a persisted session used by

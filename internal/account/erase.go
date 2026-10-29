@@ -207,6 +207,16 @@ var Deleted = []Rule{
 
 	// --- the user: credentials, identity, compliance scaffolding (D-12) ---
 	{"api_keys", `DELETE FROM api_keys WHERE user_id::text = $1`, ByUser},
+	// WP-TEAM-1 (118): the tenant's members and invitations go with the
+	// tenant; the user's memberships of tenants it does not own go with the
+	// user (a member's own users row is never erased with someone else's
+	// tenant — only its membership row is); an invitation or a membership
+	// the user sent keeps its row with the sender forgotten.
+	{"tenant_members", `DELETE FROM tenant_members WHERE tenant_id = $1`, ByTenant},
+	{"tenant_members", `DELETE FROM tenant_members WHERE user_id::text = $1`, ByUser},
+	{"tenant_members", `UPDATE tenant_members SET invited_by = NULL WHERE invited_by::text = $1`, ByUser},
+	{"tenant_invitations", `DELETE FROM tenant_invitations WHERE tenant_id = $1`, ByTenant},
+	{"tenant_invitations", `UPDATE tenant_invitations SET invited_by = NULL WHERE invited_by::text = $1`, ByUser},
 	{"dashboard_sessions", `DELETE FROM dashboard_sessions WHERE user_id::text = $1`, ByUser},
 	{"user_mfa", `DELETE FROM user_mfa WHERE user_id = $1`, ByUser},
 	{"mfa_audit_log", `DELETE FROM mfa_audit_log WHERE user_id = $1`, ByUser},

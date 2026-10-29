@@ -2050,9 +2050,29 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 			return
 		}
 
+		// The acting member's role on the JWT's tenant (WP-TEAM-1): read
+		// from tenant_members on every request — a removed member loses the
+		// tenant at once, a changed role applies at once — and the claim's
+		// role (or a JWT minted before 118, with none) is never trusted on
+		// its own. No member: no role (""), which requireMember refuses on
+		// the tenant surfaces; the operator routes do not ask.
+		role := auth.RoleOwner
+		if claims.TenantID != "" && s.db != nil {
+			role, err = auth.MemberRole(r.Context(), s.db, claims.TenantID, claims.UserID)
+			switch {
+			case errors.Is(err, auth.ErrNotMember):
+				role = ""
+			case err != nil:
+				s.logger.Error("resolve member role", zap.String("tenant_id", claims.TenantID), zap.Error(err))
+				writeManagementError(w, ErrTypeAPI, "member_lookup_failed", "could not read the member's role", "")
+				return
+			}
+		}
+
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, emailKey, claims.Email)
 		ctx = context.WithValue(ctx, tenantIDKey, claims.TenantID)
+		ctx = context.WithValue(ctx, roleKey, role)
 		ctx = context.WithValue(ctx, jwtIDKey, claims.ID) // the request log's key_id (RP78-6)
 		ctx = audit.WithActor(ctx, claims.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))

@@ -33,21 +33,22 @@ func (s *Server) registerPlatformRoutes() {
 	rl, im := s.jsonAPIMiddleware()
 	s.router.Route("/api/v1/platform", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		r.Use(s.requireMember)        // WP-TEAM-1: the JWT's user is a member of the platform
 		r.Use(s.logManagementRequest) // the request log, under the parent
 		r.Use(s.requirePlatform)      // 404 for any tenant that is not a platform
 		r.Use(rl.Middleware)
 		r.Use(im.Middleware)
 
-		r.Post("/tenants", s.handlePlatformCreateTenant)
+		r.With(s.requireRole(auth.ActionChildWrite)).Post("/tenants", s.handlePlatformCreateTenant)
 		r.Get("/tenants", s.handlePlatformListTenants)
 		r.Get("/tenants/{id}", s.handlePlatformGetTenant)
-		r.Delete("/tenants/{id}", s.handlePlatformDeleteTenant)
+		r.With(s.requireRole(auth.ActionChildWrite)).Delete("/tenants/{id}", s.handlePlatformDeleteTenant)
 
 		// PR C: the child's keys and STS tokens (platform_keys.go).
-		r.Post("/tenants/{id}/keys", s.handlePlatformCreateKey)
+		r.With(s.requireRole(auth.ActionChildKey)).Post("/tenants/{id}/keys", s.handlePlatformCreateKey)
 		r.Get("/tenants/{id}/keys", s.handlePlatformListKeys)
-		r.Delete("/tenants/{id}/keys/{key}", s.handlePlatformDeleteKey)
-		r.Post("/tenants/{id}/sts", s.handlePlatformCreateSTS)
+		r.With(s.requireRole(auth.ActionChildKey)).Delete("/tenants/{id}/keys/{key}", s.handlePlatformDeleteKey)
+		r.With(s.requireRole(auth.ActionChildKey)).Post("/tenants/{id}/sts", s.handlePlatformCreateSTS)
 	})
 }
 
