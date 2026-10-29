@@ -381,7 +381,14 @@ Done means: PR 0, A, B, C, D merged; tenant zero's test key round-trips an objec
   - RB8-1 (a node's shutdown drops a settle in flight);
   - RB8-6 (`stored listen` forwards the list item, not the webhook body).
 
-**Part 0 (RP80, in its order — filled by RP80's review, `docs/reviews/WP-STRIPE-2-REVIEW.md`):** RP80's findings, in its order. Fold any that touch PLAT-1's surfaces (the auth lookup, `tenant_quotas`, the erasure) before PR A.
+**Part 0 (RP80, in its order — `docs/reviews/WP-STRIPE-2-REVIEW.md`, HOLDS at P2):**
+- **RP80-1 (P2):** a sandbox's downloads are never metered and never paced (`metered := … && !sandbox`), so a free account's test key could serve its 5 GiB through presigned links with no egress limit. **Meter without billing:** the sandbox gets an egress span on its own row with a fixed small allowance (1× its 5 GiB a month, a const), paced past it, and recorded in `bandwidth_usage_daily` under the sandbox id; the parent's counters and payments are untouched. A `VLT_TEST_` presigned URL lives at most 1 hour; a sandbox bucket is never Public (409 `sandbox_never_public`). Tests: `TestSandbox_DownloadsArePacedNeverBilled`, `TestTestKey_PresignCappedAtOneHour`, `TestSandbox_NeverPublic`.
+- **RP80-2 (P3):** a suspended parent's sandbox keeps working. `isTenantSuspended` reads the tenant OR its `sandbox_of` parent in one query, and the test-key mint checks the parent. `TestSandbox_ParentSuspendedRefusesTestKeys`. PLAT-1's children need the same rule, through `parent_tenant_id`.
+- **RP80-3 (P3):** `stored listen` can skip an event (a keyset on `(created_at, random uuid)` with concurrent autocommit inserts). Answer only events older than a 2 s settle horizon; `stored listen` remembers its last 1,000 ids. `TestEvents_AfterNeverSkipsALateCommit`.
+- **RP80-4 (P3):** at most 4 concurrent long polls per tenant (429 `too_many_listeners` + `Retry-After`). `TestEvents_LongPollsBoundedPerTenant`.
+- **RB8-2 (open question 2, yes):** `GET /api/v1/manage/requests?mode=test` and a Live / Test toggle on the Developers page. PLAT-1's child rows land on the same page.
+- **RP80-5…7 (P4):** the sandbox lookup fails closed (503, never the live placement); the mirror settle refuses a caller whose host is not the admit's; the first-boot account prints a one-time password and runs only under `STORAGE_MODE=local`.
+- **Open question 1 (D-STRIPE-13):** keep the sandbox's 5 GiB counter as its disk cap (RP80-1's allowance derives from it). RB8-3 (admin totals count sandboxes) is PLAT-1's: every admin total must tell live, sandbox and child tenants apart.
 
 Continue from WP-STRIPE-2 and its review RP80. `git log origin/main`, `gh pr list`.
 
@@ -454,7 +461,38 @@ Read before editing:
 - `internal/api/management_routes.go`, `request_log.go` (`logManagementRequest`);
 - `internal/docs/openapi.go`.
 
-PR 0 — RP80's fixes (`docs/reviews/WP-STRIPE-2-REVIEW.md`). Branch `stage1a-p51-part0`. One step per finding, each test first, in RP80's order.
+PR 0 — RP80's fixes (`docs/reviews/WP-STRIPE-2-REVIEW.md`). Branch `stage1a-p51-part0`.
+- **0a (RP80-1).** Test first:
+  - `TestSandbox_DownloadsArePacedNeverBilled`: a sandbox past its allowance is paced at `EGRESS_THROTTLE_MIN_BYTES_PER_SEC` with the `egress_throttle` flag on (counted in `vaultaire_egress_would_throttle_total` with it off); its bytes are in `bandwidth_usage_daily` under the sandbox id; the parent's rows, `payments` and `entitlements` are unchanged.
+  - `TestTestKey_PresignCappedAtOneHour`: a `VLT_TEST_` presigned GET with `X-Amz-Expires` over 3600 is 400 `AuthorizationQueryParametersError`.
+  - `TestSandbox_NeverPublic`: `modes.SetBucket` to Public for a sandbox bucket, and a create with `x-amz-acl: public-read`, answer 409 `sandbox_never_public` / S3 400 `InvalidRequest`.
+
+  Then:
+  - in `s3.go` drop `&& !sandbox` from `metered` and from the bandwidth record;
+  - `usage.QuotaManager.EgressAllowance` answers a sandbox `sandboxEgressAllowance` (5 GiB, a const beside `sandboxBackend`), never from `prices.json`;
+  - the presign check and the mode door as above.
+
+  Verify: `go test -race ./internal/api/ -run 'Sandbox|TestKey' ./internal/usage/ ./internal/modes/`.
+- **0b (RP80-2).** Test first: `TestSandbox_ParentSuspendedRefusesTestKeys` (the parent suspended: a test-key PUT is 403 `AccountSuspended`; `POST /api/v1/manage/keys {test: true}` is 403). Then:
+  - `isTenantSuspended` becomes `SELECT t.suspended_at IS NOT NULL OR p.suspended_at IS NOT NULL FROM tenants t LEFT JOIN tenants p ON p.id = t.sandbox_of WHERE t.id = $1`;
+  - `GenerateTestKey` checks the parent.
+  PR B's children reuse the same join through `parent_tenant_id`.
+- **0c (RP80-3, RP80-4).** Test first:
+  - `TestEvents_AfterNeverSkipsALateCommit` (an event committed after a later-stamped one is still delivered);
+  - `TestEvents_LongPollsBoundedPerTenant` (the 5th concurrent wait is 429 + `Retry-After`);
+  - `TestListen_NeverForwardsAnIDTwice`.
+
+  Then:
+  - `eventsAfter` adds `AND e.created_at <= now() - interval '2 seconds'`;
+  - a per-tenant semaphore of 4 in `listEventsAfter`;
+  - `cmd/stored listen` keeps an LRU of its last 1,000 forwarded ids.
+
+  Verify: `go test -race ./internal/api/ -run Events ./cmd/stored/`.
+- **0d (RB8-2).** Test first: `TestRequestLog_ModeTestReadsTheSandbox` (the parent's JWT with `?mode=test` reads the sandbox's rows; without it, its own). Then the query parameter (OpenAPI) and the Developers page's Live / Test toggle.
+- **0e (RP80-5…7).**
+  - `placeOn` answers 503 when the sandbox lookup errors (`TestSandbox_LookupErrorFailsClosed`).
+  - `edgeMirrorSettle` refuses a caller whose host is not `row.Host` (404).
+  - `bootstrapTenant` prints a one-time password beside the keys and refuses unless `STORAGE_MODE=local` (`TestBootstrapTenant_LocalOnly`).
 
 PR A — the platform tenant and its children. Branch `stage1a-p51-platform`.
 1. Migration 117 `117_platform.sql`:
@@ -495,6 +533,6 @@ Done means: PRs 0, A, B, C, D merged; tenant zero is a platform tenant, one chil
   - #1049: the sandbox, migration 116.
   - #1050: `livemode` and `stored listen`.
   - #1051: the image.
-  - The post-merge review is RP80.
-- **Prompt 51 — WP-PLAT-1** (API-created accounts, the Connect primitive) — WRITTEN above by Prompt 50's closeout, both editions. Part 0 = RP80 (filled by RP80). Migration 117. The post-merge review is RP82.
-- **Prompt 51 — WP-PLAT-1** (API-created accounts); **52 — WP-TEAM-1**; **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
+  - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
+- **Prompt 51 — WP-PLAT-1** (API-created accounts, the Connect primitive) — WRITTEN above by Prompt 50's closeout, both editions. Part 0 = RP80-1…7 + RB8-2 (filled by RP80). Migration 117. The post-merge review is RP82.
+- **52 — WP-TEAM-1**; **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
