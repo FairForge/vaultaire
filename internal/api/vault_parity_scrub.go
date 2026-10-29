@@ -226,8 +226,10 @@ func (r scrubRowData) trusted() bool {
 }
 
 // scrubRows reads complete rows after `after` (from the start when zero),
-// up to and including `until` when it is set (the wrapped half of a pass).
-func (p *VaultParity) scrubRows(ctx context.Context, after scrubCursor, until *scrubCursor, extra string, limit int) ([]scrubRowData, error) {
+// up to and including `until` when it is set (the wrapped half of a pass);
+// hashed keeps only rows a rebuild can be checked against (a stored-bytes
+// hash of their etag).
+func (p *VaultParity) scrubRows(ctx context.Context, after scrubCursor, until *scrubCursor, hashed bool, limit int) ([]scrubRowData, error) {
 	var u scrubCursor
 	if until != nil {
 		u = *until
@@ -238,10 +240,11 @@ func (p *VaultParity) scrubRows(ctx context.Context, after scrubCursor, until *s
 		FROM vault_parity
 		WHERE state = 'complete' AND ($1 = '' OR tenant_id = $1)
 		  AND ($2::BOOLEAN OR (tenant_id, bucket, object_key) > ($3::TEXT, $4::TEXT, $5::TEXT))
-		  AND (NOT $6::BOOLEAN OR (tenant_id, bucket, object_key) <= ($7::TEXT, $8::TEXT, $9::TEXT))`+extra+`
+		  AND (NOT $6::BOOLEAN OR (tenant_id, bucket, object_key) <= ($7::TEXT, $8::TEXT, $9::TEXT))
+		  AND (NOT $11::BOOLEAN OR (object_sha256 IS NOT NULL AND digest_etag = etag))
 		ORDER BY tenant_id, bucket, object_key
 		LIMIT $10`, p.scopeTenant, after.zero(), after.Tenant, after.Bucket, after.Key,
-		until != nil, u.Tenant, u.Bucket, u.Key, limit)
+		until != nil, u.Tenant, u.Bucket, u.Key, limit, hashed)
 	if err != nil {
 		return nil, fmt.Errorf("vault parity scrub: rows: %w", err)
 	}
@@ -296,7 +299,7 @@ walk:
 	// Checked before every query: a pass whose budget is spent never wraps
 	// (the next one does, from where this one stopped).
 	for spent < budget && ctx.Err() == nil {
-		rows, err := p.scrubRows(ctx, cur, until, "", scrubPage)
+		rows, err := p.scrubRows(ctx, cur, until, false, scrubPage)
 		if err != nil {
 			res.Errors = append(res.Errors, err.Error())
 			break
@@ -513,7 +516,6 @@ func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, 
 	if ctx.Err() != nil {
 		return after
 	}
-	const eligible = ` AND object_sha256 IS NOT NULL AND digest_etag = etag`
 	var pick *scrubRowData
 	deadline, hasDeadline := ctx.Deadline()
 	for _, from := range []scrubCursor{after, {}} {
@@ -521,7 +523,7 @@ func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, 
 		if from.zero() && !after.zero() {
 			until = &after // the wrapped half
 		}
-		rows, err := p.scrubRows(ctx, from, until, eligible, scrubPage)
+		rows, err := p.scrubRows(ctx, from, until, true, scrubPage)
 		if err != nil {
 			res.Errors = append(res.Errors, err.Error())
 			return after
