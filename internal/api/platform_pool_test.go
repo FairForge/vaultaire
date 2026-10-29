@@ -132,8 +132,8 @@ func TestPlatform_ASandboxIsNeverInThePool(t *testing.T) {
 // RP82-1 (Stage 1a Prompt 52, Part 0): a platform's children draw from its
 // FLOORS, not only its total. Owner floors 10 KiB Standard + 100 KiB Vault:
 // a child made after the house (auth.CreateChildTenant writes its counting
-// floor rows) is refused a 12 KiB Standard PUT and stores a 12 KiB Vault
-// PUT; the owner's own Standard bytes count against the same 10 KiB.
+// floor rows) is refused a 12 KiB Standard PUT and reserves 12 KiB on the
+// Vault floor; the owner's own Standard bytes count against the same 10 KiB.
 func TestPool_ChildFloorsDrawFromTheOwnersFloors(t *testing.T) {
 	f := setupRequestLogFixture(t)
 	f.makePlatform(10 << 10)
@@ -158,8 +158,13 @@ func TestPool_ChildFloorsDrawFromTheOwnersFloors(t *testing.T) {
 	w := f.do(http.MethodPut, "/"+c.bucket+"/std.bin", twelve, c.ak, c.sk, nil)
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	assert.Contains(t, w.Body.String(), "QuotaExceeded")
-	w = f.do(http.MethodPut, "/"+c.bucket+"/vault.bin", twelve, c.ak, c.sk, map[string]string{"x-amz-storage-class": "GLACIER"})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	// The Vault floor has room for the same 12 KiB. Reserved directly: a
+	// plain GLACIER PUT needs the master key since tape takes only sealed
+	// bytes (#1061), and the floor rule is the reservation's.
+	vault, err := usage.NewQuotaManager(f.db).ReserveOnFloor(ctx, c.id, usage.FloorVault, 12<<10)
+	require.NoError(t, err)
+	require.True(t, vault.OK, "12 KiB on the Vault floor fits the owner's 100 KiB")
+	assert.True(t, vault.Floor, "charged on the child's counting row")
 
 	w = f.do(http.MethodPut, "/"+f.bucket+"/six.bin", six, f.ak, f.sk, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
