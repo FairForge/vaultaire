@@ -259,7 +259,14 @@ Prompt 50 written here.
 - Residuals open: RB7-1 (management requests not in the request log), RB7-2 (the owner's call on the privacy-policy notice), RB7-3 (RS first-stripe rebuild), RB7-4 (the `blob_copies (leg, storage_key)` index).
 - The request log's writer is the one place the sandbox's requests will show up (`host` and the `x-stored-mode` header the test mode adds): a sandbox request is logged under the SANDBOX tenant, never the parent's.
 
-**Part 0 (RP78, in its order):** the findings of `docs/reviews/WP-STRIPE-1-REVIEW.md` — PLACEHOLDER: RP78 writes this paragraph, each finding one sentence with its fix and test, P2s first.
+**Part 0 (RP78, in its order — `docs/reviews/WP-STRIPE-1-REVIEW.md`, HOLDS at P2):**
+- **RP78-1 (P2):** the Worker's 18 MiB mirror buffer and the Go host's 16 MiB mirror queue are outside the byte budgets (`ISOLATE_BYTES`, RP72-6; `Host.Budget`, RP74-6). A mirrored PUT takes its buffer from the budget with a short wait and is sent UNMIRRORED when it cannot (the copy owed, counted `unbudgeted`), never refused. Tests: concurrent mirrored PUTs under a 20 MiB isolate budget; `TestPutTwo_NoBudgetNoMirror`.
+- **RP78-2 (P2), open question 1 = option (b):** the commit goes at the primary's answer, and the mirror settles in the background (Worker `ctx.waitUntil`, cut at 30 s; Go host `mirrorDeadline`), its buffer still charged. New `POST /api/v1/edge/mirror` (token gate, outside the S3 gate) flips the copy `pending → ready` only while its row and admit are this one's, else queues the leg's address in `retired_blobs` (`orphan_write`). Tests: a 2 MB/s mirror leaves the client at the primary's pace and the copy `ready` after; a DELETE before the settle leaves nothing on the leg. Worker 0.6.0, proved in the workerd lab first (a 411-refusing sink, a mirror slower than 30 s).
+- **RP78-3 (P3):** 28 of 44 origin rows on prod have no request id. ONE id per S3 request, set up front as `x-amz-request-id` on every response and in every row. `TestS3_EveryResponseCarriesTheLoggedRequestID` over the dispatcher matrix.
+- **RP78-4 (P3):** `eu-west-3` is London. An explicit jurisdiction per region (used by the mirror rule and `IsEURegion`; a UK label). `TestMirrorLegFor_LondonIsNotTheEU`.
+- **RP78-5 (P3):** the copy pass stops at one multiple of stored left for the customers (D-EDGE-60 amended). `TestBlobCopiesJob_LeavesTheCustomersTheirEgress`.
+- **RP78-6 (P3, RB7-1):** management requests go into the request log too (`op` = route pattern, `host` = `api`). This goes with PR A's new routes. `TestRequestLog_ManagementRequestsToo`.
+- **RP78-7…10 (P4):** the `<-mc` that drops a late ETag (moot after RP78-2); the backfill's typed strict list → `engine.StrictTargets()`; the dead `mirrorBody.cancel`; a `withdrawn` manifest field so 0.5.1's bytes cannot be redeployed.
 
 Continue from WP-STRIPE-1 and its review RP78. `git log origin/main`, `gh pr list`.
 
@@ -290,7 +297,42 @@ You are building plan § WP-STRIPE's WP-DX-1 row in the Vaultaire repository —
 
 Read before editing: plan § WP-STRIPE (the WP-DX-1 row); `docs/reviews/WP-STRIPE-1.md` + `WP-STRIPE-1-REVIEW.md`; `internal/auth/credentials.go` (`LookupCredential`) and the key-minting code; `internal/api/placement.go`; `internal/api/edge_ingest.go` (the admit's pass-through list); `internal/api/events.go`, `webhook_outbox.go`; `internal/usage/quota*.go`, `internal/api/egress_meter.go`, `bandwidth.go`; `internal/account/erase.go`; `cmd/vaultaire/main.go`; `scripts/build-release.sh`; `.github/workflows/deploy.yml`.
 
-PR 0 — RP78's fixes. Branch `stage1a-p50-part0`. PLACEHOLDER: RP78 writes the numbered steps here (0a, 0b, …), each "test first: <name> — <what it pins>; then <the change>; verify: <command>".
+PR 0 — RP78's fixes (`docs/reviews/WP-STRIPE-1-REVIEW.md`). Branch `stage1a-p50-part0`; the Worker change may be its own PR (`stage1a-p50-worker060`), deployed only after its manifest row.
+- **0a (RP78-1).** Test first:
+  - node: `putTwo: a mirrored PUT the isolate budget cannot cover is sent unmirrored` (`setIsolateBudget(20 << 20)`, two concurrent 64 MiB mirrored PUTs: the second has one link and `mirror_unbudgeted: true`);
+  - Go: `TestPutTwo_NoBudgetNoMirror` (a `Host.Budget` with nothing left: one PUT, no mirror, no error).
+  Then:
+  - `putTwo` (both) acquires `MIRROR_MAX_LAG + 2 MiB` from `isolateBudget()` / `Host.Budget` with the windowed reader's short wait, before the tee, and releases it when the mirror ends (answer, cut or error);
+  - no budget = the plain PUT;
+  - the commit's `mirror_unbudgeted` → `vaultaire_blob_copies_total{outcome="unbudgeted"}`.
+  Verify: `cd edge/s3-ingest && npm test`, `go test -race ./internal/dataplane/ -run PutTwo`.
+- **0b (RP78-2).** Test first:
+  - node: `putTwo: the client is answered at the primary's pace; the mirror settles after` (a 2 MB/s mirror; `putTwo` resolves at the primary's answer, the settle promise later);
+  - Go: `TestEdgeMirror_SettleAfterCommit` (commit, then `POST /api/v1/edge/mirror` with the ETag → `ready`; a DELETE in between → the leg's address in `retired_blobs` on the leg, no `ready` row; a second settle is idempotent; an unknown admit is 404);
+  - add `/api/v1/edge/mirror` to `TestEdgeRoutes_NeverCapturedByTheS3Gate`.
+  Then:
+  - the Worker returns the client's response at the primary's answer and settles the mirror under `ctx.waitUntil` (cut at 30 s after the response);
+  - the Go host settles in a goroutine bounded by `mirrorDeadline`;
+  - both POST `{admit_id, etag | cut}` to the new route (token gate, Cloudflare peer);
+  - the control plane flips the row under the key's lock only while the row is `pending`, names the admit's `storage_key` and the admit is `committed`;
+  - the budget from 0a is held until the settle ends;
+  - remove the after-primary timer (RP78-7 goes with it).
+  Verify:
+  - `go test -race ./internal/api/ -run 'EdgeMirror|EdgeRoutes'`;
+  - the workerd lab (`wrangler dev --local`, the 411-refusing sink, a 2 MB/s mirror and a 40 s mirror): both bodies keep `content-length`, the client time is the primary's, the 40 s mirror is cut and its copy is `pending`;
+  - Worker 0.6.0's manifest row before its deploy.
+- **0c (RP78-3).** Test first: `TestS3_EveryResponseCarriesTheLoggedRequestID` (the dispatcher matrix, every op, a success and an error: the response's `x-amz-request-id` equals the `request_log` row's `request_id`, never empty). Then:
+  - the dispatcher sets the request's id (the request-id middleware's) as `x-amz-request-id` before any handler;
+  - every `generateRequestID()` in the S3 handlers and error bodies uses it;
+  - `recordS3Access` reads it.
+  Verify: `go test -race ./internal/api/ -run 'RequestLog|EveryResponse'`.
+- **0d (RP78-4).** Test first: `TestMirrorLegFor_LondonIsNotTheEU`, `TestIsEURegion_London`. Then a `Jurisdiction` per row of `IDriveRegions` (`eu-west-3` → `uk`), `legRegion` → jurisdiction through it (lyve's region `us`), `IsEURegion` from it, and the bucket page's residency label and single-copy sentence for a UK bucket. Verify: `go test ./internal/drivers/ ./internal/api/ -run 'Jurisdiction|EURegion|MirrorLegFor' ./internal/dashboard/`.
+- **0e (RP78-5).** Test first: `TestBlobCopiesJob_LeavesTheCustomersTheirEgress` (multiple 3, stored 10 KiB: the pass stops at 20 KiB of copies). Then the ledger's limit becomes `max(0, (multiple − 1) × stored − used)`, and the D-EDGE-60 sentence in CLAUDE.md is amended. Verify: `go test -race ./internal/api/ -run BlobCopiesJob`.
+- **0f (RP78-6).** With PR A (its routes are the reason). Test first: `TestRequestLog_ManagementRequestsToo` (a JWT `GET /api/v1/manage/usage` and a refused `POST /api/v1/manage/keys` are rows: `op` = the route pattern, `host` = `api`, `key_id` = the JWT's key id or `session`). Then a management middleware feeding the tracker's request sink. The plan row's "S3 only" note goes.
+- **0g (RP78-8…10).**
+  - The backfill's strict list comes from `engine.StrictTargets()` as an array parameter.
+  - Drop the dead `mirrorBody.cancel` (a comment on the `ac.abort` path).
+  - 0.5.1's manifest rows are marked withdrawn, and the Worker deploy and `translog-verify -client` refuse a withdrawn build. How the withdrawal is recorded (a manifest field, or a log entry of its own) is this PR's call, but it must never re-append the row or rewrite its log entry. Test `TestClientBuildManifest_WithdrawnIsRefused`.
 
 PR A — the sandbox. Branch `stage1a-p50-sandbox`.
 1. Migration 116 `116_sandbox.sql`: `ALTER TABLE tenants ADD COLUMN IF NOT EXISTS sandbox_of TEXT REFERENCES tenants(id)` + a partial unique index `(sandbox_of) WHERE sandbox_of IS NOT NULL`; `make test-db`; the reapply test; `erase.go` erases the sandbox with its parent (a sandbox row first).
@@ -315,5 +357,5 @@ Done means: PR 0, A, B, C, D merged; tenant zero's test key round-trips an objec
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
-- **Prompt 50 — WP-DX-1** (test mode + the Docker image) — WRITTEN above by Prompt 49's closeout, both editions; Part 0 = RP78 (placeholders for RP78 to fill). The post-merge review is RP80.
+- **Prompt 50 — WP-DX-1** (test mode + the Docker image) — WRITTEN above by Prompt 49's closeout, both editions; Part 0 = RP78-1…10 (filled by RP78). The post-merge review is RP80.
 - **Prompt 51 — WP-PLAT-1** (API-created accounts); **52 — WP-TEAM-1**; **53 — WP-KEY-1 + WP-POST-1**; **54 — WP-XFER-1** (after the first node); **55 — WP-VAULT-2** — each written by the closeout before it.
