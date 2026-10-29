@@ -155,6 +155,7 @@ var apiAdminWrites = map[string]string{
 	"PUT /api/v1/admin/backends/{backend}/plan":                    "mutation: the vendor plan row; no customer",
 	"PUT /api/v1/admin/data-plane-hosts/{host}":                    "mutation: a data-plane host row (WP-EDGE-3); answers the row written and, on a node's first PUT, its token once",
 	"DELETE /api/v1/admin/data-plane-hosts/{host}":                 "mutation: removes a data-plane host row; answers the host name",
+	"PUT /api/v1/admin/tenants/{tenant_id}/platform":               "mutation: grants or revokes the platform flag (WP-PLAT-1); answers the tenant id and the flag sent",
 	"PUT /api/v1/admin/flags/{key}":                                "mutation: writes a flag row (a translog_* row is a log_policy entry first); answers the flag and the one row written, never the others",
 	"DELETE /api/v1/admin/flags/{key}":                             "mutation: removes a flag row (a translog_* row is a log_policy entry first); answers the flag, never the other tenants' rows",
 	"POST /api/compliance/breach":                                  "mutation: the operator's breach register; no customer",

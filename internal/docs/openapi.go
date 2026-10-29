@@ -227,6 +227,7 @@ func GenerateOpenAPISpec(h hosts.Hosts) *OpenAPISpec {
 			{Name: "Webhooks", Description: "Tenant webhook endpoints and their deliveries. Bearer JWT, rate limited per tenant, Idempotency-Key honoured on mutations"},
 			{Name: "Events", Description: "The tenant's event log (what webhooks are fed from). Bearer JWT, rate limited per tenant"},
 			{Name: "STS", Description: "Temporary S3 credentials bounded by the caller's authority. Bearer JWT"},
+			{Name: "Platform", Description: "Child tenants of a platform tenant under /api/v1/platform (WP-PLAT-1): Bearer JWT of a platform tenant (404 for any other), rate limited per tenant, Idempotency-Key honoured on mutations"},
 			{Name: "Admin", Description: "Operator endpoints under /api/v1/admin: Bearer JWT whose user has role admin (403 otherwise)"},
 			{Name: "Health", Description: "Health checks"},
 		},
@@ -451,6 +452,7 @@ func generatePaths() map[string]*PathItem {
 		generateManagementPaths(),
 		generateWebhookPaths(),
 		generateSTSPaths(),
+		generatePlatformPaths(),
 		generateAdminPaths(),
 	} {
 		for p, item := range group {
@@ -1204,7 +1206,7 @@ func generateWebhookPaths() map[string]*PathItem {
 	eventTypes := strEnum("Event types the endpoint receives: exact names, `prefix.*`, or `*` for everything",
 		"*", "object.*", "bucket.*", "key.*", "sts.*", "webhook.*", "bandwidth.*",
 		"object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted",
-		"key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert")
+		"key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert", "tenant.*", "tenant.created")
 
 	return map[string]*PathItem{
 		"/api/v1/webhooks": {
@@ -1748,6 +1750,25 @@ func generateAdminPaths() map[string]*PathItem {
 					}, "flags")),
 				})),
 		},
+		"/api/v1/admin/tenants/{tenant_id}/platform": {
+			Parameters: []Parameter{pathParam("tenant_id", "The tenant to make (or unmake) a platform")},
+			Put: admin(withBody(jsonOp("Admin", "Grant or revoke the platform flag", "AdminSetPlatform",
+				"WP-PLAT-1: a platform tenant may create child tenants under /api/v1/platform. Audited `admin.platform_granted` / `admin.platform_revoked`. "+
+					"A child or a sandbox is never a platform (400 `child_of_child`); a revoke while children remain is 409 `platform_has_children`.",
+				map[string]Response{
+					"200": jsonResp("The flag as set", objectPtr("", map[string]*Schema{
+						"object":     strEnum("", "tenant"),
+						"id":         str(""),
+						"platform":   boolean(""),
+						"request_id": str(""),
+					}, "object", "id", "platform")),
+					"400": errResp("`invalid_json` or `child_of_child`"),
+					"404": errResp("`tenant_not_found`"),
+					"409": errResp("`platform_has_children`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The flag", objectPtr("", map[string]*Schema{"platform": boolean("")}, "platform")))),
+		},
 		"/api/v1/admin/flags/{key}": {
 			Parameters: []Parameter{flagKey},
 			Put: admin(withBody(jsonOp("Admin", "Set a feature flag", "AdminSetFlag",
@@ -1796,6 +1817,9 @@ func generateAdminPaths() map[string]*PathItem {
 func generateSchemas() map[string]Schema {
 	schemas := generateS3Schemas()
 	for name, s := range generateJSONSchemas() {
+		schemas[name] = s
+	}
+	for name, s := range platformSchemas() {
 		schemas[name] = s
 	}
 	return schemas
@@ -2252,7 +2276,7 @@ func generateJSONSchemas() map[string]Schema {
 		"Event": object("A tenant event; webhooks receive `{id, type, tenant_id, data, created_at}`", map[string]*Schema{
 			"object":     strEnum("", "event"),
 			"id":         str("Event id (UUID)"),
-			"type":       strEnum("", "object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted", "key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert"),
+			"type":       strEnum("", "object.created", "object.deleted", "object.downloaded", "bucket.created", "bucket.deleted", "key.created", "key.revoked", "sts.token_created", "webhook.test", "bandwidth.alert", "tenant.created"),
 			"data":       freeObject("Type-specific payload"),
 			"created_at": dateTime(""),
 		}, "object", "id", "type", "data", "created_at"),

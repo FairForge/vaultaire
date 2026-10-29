@@ -1140,6 +1140,7 @@ func (s *Server) setupRoutes() {
 
 	s.logger.Info("Registering management API routes")
 	s.registerManagementRoutes()
+	s.registerPlatformRoutes() // WP-PLAT-1: 404 for every tenant that is not a platform
 
 	// POST /api/v1/edge/admit + /commit — the Worker's calls (WP-EDGE-1
 	// Part A, edge_ingest.go); mounted only with EDGE_SERVICE_TOKEN.
@@ -1351,6 +1352,9 @@ func (s *Server) registerComplianceRoutes() {
 		s.registerAdminDataPlaneHostRoutes(r)
 		// The transparency log's ceremony entries (K4): admin + a fresh TOTP.
 		s.registerTranslogAdminRoutes(r)
+		// The platform grant (WP-PLAT-1): only an admin makes a tenant a
+		// platform.
+		s.registerAdminPlatformRoutes(r)
 	})
 }
 

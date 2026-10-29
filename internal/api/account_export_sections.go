@@ -385,7 +385,8 @@ const (
 	sqlExportTenant    = `
 		SELECT id, name, email,
 		       (SELECT key_id FROM api_keys WHERE tenant_id = tenants.id AND is_primary AND revoked_at IS NULL) AS primary_access_key_id,
-		       plan, created_at, suspended_at, slug
+		       plan, created_at, suspended_at, slug,
+		       platform, parent_tenant_id, external_id, label, deletion_scheduled_at
 		  FROM tenants WHERE id = $1`
 	sqlExportQuotaTotals = `
 		SELECT storage_limit_bytes, storage_used_bytes, bandwidth_limit_bytes, bandwidth_used_bytes, tier, pin_hot_bytes, updated_at

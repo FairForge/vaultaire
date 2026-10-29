@@ -49,7 +49,12 @@
         "plan",
         "created_at",
         "suspended_at",
-        "slug"
+        "slug",
+        "platform",
+        "parent_tenant_id",
+        "external_id",
+        "label",
+        "deletion_scheduled_at"
       ]
     },
     {
