@@ -141,7 +141,11 @@ var (
 
 // floorLockAllowed names the functions that lock a floor row with no total
 // lock before it in their own body, and why that is safe.
-var floorLockAllowed = map[string]string{}
+var floorLockAllowed = map[string]string{
+	// WP-PLAT-1: the total's lock is taken by lockPool (pool.go) — the
+	// pool owner's row, then the tenant's own — before the floor statement.
+	"usage.ReserveTx": "the tenant_quotas lock is lockPool's call, before the floor",
+}
 
 func TestLedger_LockOrder_TotalBeforeFloors_Structure(t *testing.T) {
 	root := filepath.Join("..", "..")

@@ -12,7 +12,8 @@
 // deadlocks and walk every statement of the repository): the key's
 // advisory lock (lockHeadKey) → the head row (FOR UPDATE) → the key's
 // version lock and rows → the upload row (multipart_uploads, FOR UPDATE)
-// → tenant_quotas → tenant_floor_quotas (standard, then vault). The ledger
+// → tenant_quotas (a pool's OWNER row first, then the tenant's own —
+// WP-PLAT-1, pool.go) → tenant_floor_quotas (standard, then vault). The ledger
 // statements are the LAST of the transaction: the tenant's quota row is
 // held from its UPDATE to COMMIT only, and nothing that holds it waits for
 // a key, row or upload lock — the reservation (CheckAndReserveFloor), the
@@ -79,6 +80,18 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 		}
 	}
 	if c.Total != 0 {
+		// A guarded increase is checked against the POOL (WP-PLAT-1): the
+		// pool's owner row is locked FIRST — before this tenant's own row,
+		// the order every reservation takes (lockPool) — so a settle and a
+		// reservation of two children never wait for each other in turn.
+		guarded := c.Guard != "" && c.Total > 0
+		pool := poolOf{owner: tenantID}
+		if guarded {
+			var err error
+			if pool, err = lockPoolOwner(ctx, tx, tenantID); err != nil {
+				return err
+			}
+		}
 		var used, limit int64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE tenant_quotas
@@ -91,7 +104,13 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 		case err != nil:
 			return fmt.Errorf("ledger: tenant %s: %w", tenantID, err)
 		}
-		if c.Guard != "" && c.Total > 0 && used > limit {
+		if guarded && pool.pooled {
+			if used, err = poolUsed(ctx, tx, pool.owner); err != nil {
+				return err
+			}
+			limit = pool.limit
+		}
+		if guarded && used > limit {
 			return fmt.Errorf("%w: tenant %s total %d > %d", ErrOverQuota, tenantID, used, limit)
 		}
 	}
