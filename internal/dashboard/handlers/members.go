@@ -214,10 +214,10 @@ func HandleAcceptInvitation(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 				logger.Error("dashboard: accept invitation", zap.Error(err))
 			}
 			middleware.SetFlash(w, "error", InvitationMessage(err))
-			http.Redirect(w, r, "/dashboard/invitations/"+token, http.StatusSeeOther)
+			http.Redirect(w, r, "/dashboard/members", http.StatusSeeOther) // a fixed path: never one built from the request
 			return
 		}
-		middleware.SetFlash(w, "success", "You are now a "+string(inv.Role)+" of this account. Switch to it from the account menu.")
+		middleware.SetFlash(w, "success", "You are now a "+string(inv.Role)+" of this account. Switch to it on the Members page.")
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 	}
 }
