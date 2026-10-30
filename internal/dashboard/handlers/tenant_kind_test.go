@@ -57,8 +57,8 @@ func TestAdminTenants_KindFilter(t *testing.T) {
 	assert.Equal(t, []string{live, child, sandbox}, shown(list("&kind=all")))
 	assert.Equal(t, []string{live}, shown(list("&kind=nonsense")), "an unknown kind is the default")
 
-	for kind, want := range map[string]string{"": "t.sandbox_of IS NULL AND t.parent_tenant_id IS NULL",
-		"child": "t.parent_tenant_id IS NOT NULL", "sandbox": "t.sandbox_of IS NOT NULL", "all": "TRUE"} {
-		assert.Equal(t, want, tenantKindSQL(parseTenantKind(kind), "t"), kind)
+	for v, want := range map[string]tenantKind{"": tenantKindLive, "live": tenantKindLive, "child": tenantKindChild,
+		"sandbox": tenantKindSandbox, "all": tenantKindAll, "other": tenantKindLive} {
+		assert.Equal(t, want, parseTenantKind(v), v)
 	}
 }

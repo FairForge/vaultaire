@@ -94,10 +94,10 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, kind tenant
 		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
 		LEFT JOIN entitlements e ON e.tenant_id = t.id
 		WHERE ($1 = '' OR t.name ILIKE '%' || $1 || '%' OR t.email ILIKE '%' || $1 || '%')
-		  AND `+tenantKindSQL(kind, "t")+`
+		  AND `+tenantKindWhere2+`
 		ORDER BY t.created_at DESC
 		LIMIT 100
-	`, search)
+	`, search, string(kind))
 	if err != nil {
 		logger.Debug("admin: list tenants", zap.Error(err))
 		return nil

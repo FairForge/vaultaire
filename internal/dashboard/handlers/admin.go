@@ -53,13 +53,13 @@ type recentUser struct {
 
 func queryAdminStats(ctx context.Context, db *sql.DB, kind tenantKind, logger *zap.Logger) (int, string, int, string) {
 	var tenantCount int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants t WHERE `+tenantKindSQL(kind, "t")).Scan(&tenantCount); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants t WHERE `+tenantKindWhere1, string(kind)).Scan(&tenantCount); err != nil {
 		logger.Debug("admin: count tenants", zap.Error(err))
 	}
 
 	var totalBytes int64
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(q.storage_used_bytes), 0) FROM tenant_quotas q
-		JOIN tenants t ON t.id = q.tenant_id WHERE `+tenantKindSQL(kind, "t")).Scan(&totalBytes); err != nil {
+		JOIN tenants t ON t.id = q.tenant_id WHERE `+tenantKindWhere1, string(kind)).Scan(&totalBytes); err != nil {
 		logger.Debug("admin: sum storage", zap.Error(err))
 	}
 

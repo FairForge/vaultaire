@@ -150,7 +150,8 @@ func populateTraffic(ctx context.Context, db *sql.DB, logger *zap.Logger, data m
 	}
 	perDay(`SELECT created_at::date, COUNT(*) FROM waitlist_signups WHERE created_at >= $1::date GROUP BY 1`,
 		func(t *trafficDay, n int64) { t.Signups = n })
-	perDay(`SELECT t.created_at::date, COUNT(*) FROM tenants t WHERE t.created_at >= $1::date AND `+tenantKindSQL(tenantKindLive, "t")+` GROUP BY 1`,
+	perDay(`SELECT t.created_at::date, COUNT(*) FROM tenants t WHERE t.created_at >= $1::date
+		AND t.sandbox_of IS NULL AND t.parent_tenant_id IS NULL GROUP BY 1`, // customers (RP82-7)
 		func(t *trafficDay, n int64) { t.Accounts = n })
 
 	// newest first, whatever order the three queries filled the map in
@@ -223,7 +224,7 @@ func populateTraffic(ctx context.Context, db *sql.DB, logger *zap.Logger, data m
 	var f trafficFunnel
 	if err := db.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM waitlist_signups),
-		       (SELECT COUNT(*) FROM tenants t WHERE `+tenantKindSQL(tenantKindLive, "t")+`),
+		       (SELECT COUNT(*) FROM tenants t WHERE t.sandbox_of IS NULL AND t.parent_tenant_id IS NULL),
 		       (SELECT COUNT(DISTINCT tenant_id) FROM buckets),
 		       (SELECT COUNT(DISTINCT tenant_id) FROM object_head_cache),
 		       (SELECT COUNT(*) FROM entitlements WHERE lapsed_at IS NULL)`).

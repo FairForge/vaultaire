@@ -31,16 +31,16 @@ func parseTenantKind(v string) tenantKind {
 // tenantKindOf is the request's ?kind=.
 func tenantKindOf(r *http.Request) tenantKind { return parseTenantKind(r.URL.Query().Get("kind")) }
 
-// tenantKindSQL is the predicate of k on the tenants alias a (a constant
-// string: never caller input).
-func tenantKindSQL(k tenantKind, a string) string {
-	switch k {
-	case tenantKindSandbox:
-		return a + ".sandbox_of IS NOT NULL"
-	case tenantKindChild:
-		return a + ".parent_tenant_id IS NOT NULL"
-	case tenantKindAll:
-		return "TRUE"
-	}
-	return a + ".sandbox_of IS NULL AND " + a + ".parent_tenant_id IS NULL"
-}
+// The kind predicate on tenants alias t, the kind a bound parameter (no
+// SQL is built from a value): $1 in tenantKindWhere1, $2 in
+// tenantKindWhere2.
+const (
+	tenantKindWhere1 = `($1 = 'all'
+		OR ($1 = 'live' AND t.sandbox_of IS NULL AND t.parent_tenant_id IS NULL)
+		OR ($1 = 'child' AND t.parent_tenant_id IS NOT NULL)
+		OR ($1 = 'sandbox' AND t.sandbox_of IS NOT NULL))`
+	tenantKindWhere2 = `($2 = 'all'
+		OR ($2 = 'live' AND t.sandbox_of IS NULL AND t.parent_tenant_id IS NULL)
+		OR ($2 = 'child' AND t.parent_tenant_id IS NOT NULL)
+		OR ($2 = 'sandbox' AND t.sandbox_of IS NOT NULL))`
+)
