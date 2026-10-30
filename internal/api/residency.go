@@ -119,6 +119,9 @@ func (s *Server) setTenantResidency(ctx context.Context, tenantID, residency str
 		return err
 	}
 	def := drivers.IDriveDefaultRegion(os.Getenv)
+	if err := moveSystemBucketsInside(ctx, tx, tenantID, residency, def); err != nil {
+		return err
+	}
 	for _, region := range regions {
 		if region == "" {
 			region = def
@@ -140,10 +143,15 @@ func (s *Server) setTenantResidency(ctx context.Context, tenantID, residency str
 // residencyTree is "t is $1 or a tenant under it".
 const residencyTree = `(t.id = $1 OR ` + auth.DescendantT1 + `)`
 
-// treeBucketRegions is every distinct bucket region of tenantID's tree
-// ("" for a bucket that names none).
+// systemBucket is "b is a system bucket" (`_exports`): a name no S3 bucket
+// name can take, hidden from the customer (RP86-1).
+const systemBucket = `LEFT(b.name, 1) = '_'`
+
+// treeBucketRegions is every distinct region of a customer's bucket in
+// tenantID's tree ("" for a bucket that names none). The system buckets are
+// moveSystemBucketsInside's.
 func treeBucketRegions(ctx context.Context, tx *sql.Tx, tenantID string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT COALESCE(b.region, '') FROM buckets b JOIN tenants t ON t.id = b.tenant_id WHERE `+residencyTree, tenantID)
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT COALESCE(b.region, '') FROM buckets b JOIN tenants t ON t.id = b.tenant_id WHERE `+residencyTree+` AND NOT `+systemBucket, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("the buckets of %s: %w", tenantID, err)
 	}
@@ -160,6 +168,64 @@ func treeBucketRegions(ctx context.Context, tx *sql.Tx, tenantID string) ([]stri
 		return nil, fmt.Errorf("the buckets of %s: %w", tenantID, err)
 	}
 	return out, nil
+}
+
+// moveSystemBucketsInside applies a residency set to the system buckets of
+// tenantID's tree (RP86-1): one outside the residency that holds no object
+// moves to the first enabled region inside it (with none inside, its row
+// goes: ensureSystemBucket makes it again, or refuses, at the next export);
+// one holding a live object is errBucketsOutside until the object expires.
+func moveSystemBucketsInside(ctx context.Context, tx *sql.Tx, tenantID, residency, def string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT b.tenant_id, b.name, COALESCE(b.region, ''),
+		       EXISTS (SELECT 1 FROM object_head_cache h WHERE h.tenant_id = b.tenant_id AND h.bucket = b.name)
+		  FROM buckets b JOIN tenants t ON t.id = b.tenant_id
+		 WHERE `+residencyTree+` AND `+systemBucket+`
+		 FOR UPDATE OF b`, tenantID)
+	if err != nil {
+		return fmt.Errorf("the system buckets of %s: %w", tenantID, err)
+	}
+	type sysBucket struct {
+		tenant, name, region string
+		live                 bool
+	}
+	var outside []sysBucket
+	for rows.Next() {
+		var b sysBucket
+		if err := rows.Scan(&b.tenant, &b.name, &b.region, &b.live); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("the system buckets of %s: %w", tenantID, err)
+		}
+		region := b.region
+		if region == "" {
+			region = def
+		}
+		if !regionInside(region, residency) {
+			outside = append(outside, b)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("the system buckets of %s: %w", tenantID, err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("the system buckets of %s: %w", tenantID, err)
+	}
+	inside := firstRegionInside(residency)
+	for _, b := range outside {
+		if b.live {
+			return errBucketsOutside
+		}
+		if inside == "" {
+			_, err = tx.ExecContext(ctx, `DELETE FROM buckets WHERE tenant_id = $1 AND name = $2`, b.tenant, b.name)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE buckets SET region = $3, data_residency = $4 WHERE tenant_id = $1 AND name = $2`,
+				b.tenant, b.name, inside, drivers.DataResidency(inside))
+		}
+		if err != nil {
+			return fmt.Errorf("move the system bucket %s of %s inside %s: %w", b.name, b.tenant, residency, err)
+		}
+	}
+	return nil
 }
 
 // handleAdminSetResidency is PUT /api/v1/admin/tenants/{tenant_id}/residency

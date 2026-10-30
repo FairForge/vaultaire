@@ -159,6 +159,15 @@ browser at `https://ntfy.sh/<topic>`.
 
 ## Testing
 
+**Rule unit tests (CI, RP86-5):** `bash deploy/monitoring/promtool-test.sh`
+runs `promtool test rules` over every `tests/*_test.yml`, each copied beside
+its rule file into a scratch directory (promtool resolves `rule_files` from
+the test's directory). The promtool is the box's version (2.53.5), fetched
+from the Prometheus release and checksum-verified (linux-amd64 for CI,
+darwin-arm64 on a Mac), or `PROMTOOL=<path>`. CI runs it after Lint; a rule
+whose text changes without its test now fails the PR (the jobs test had
+failed unseen since #981). The pitr test alone takes a few minutes.
+
 Synthetic alert through the full Alertmanager → bridge → ntfy chain:
 
 ```bash

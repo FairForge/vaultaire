@@ -4,32 +4,73 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/drivers"
 )
 
-// BackfillBuckets creates rows in the buckets table for any
-// (tenant_id, bucket) pair found in object_head_cache that doesn't
-// already exist in buckets. All backfilled buckets are private.
+// BackfillBuckets recreates the bucket row of every bucket that has head
+// rows and no row (a DeleteBucket racing a PUT's commit). The row takes the
+// region of the backend that holds the bytes (RP86-3): idrive-<region> is
+// that region, anything else the default region — it used to take no region,
+// i.e. the default, under any residency, and the next write landed outside.
+// A bucket whose region is outside its tenant's residency is skipped with an
+// Error line (an operator's to place), never recreated outside.
 func BackfillBuckets(ctx context.Context, db *sql.DB, logger *zap.Logger) error {
-	result, err := db.ExecContext(ctx, `
-		INSERT INTO buckets (tenant_id, name, visibility)
-		SELECT DISTINCT tenant_id, bucket, 'private'
-		FROM object_head_cache
-		WHERE NOT EXISTS (
-			SELECT 1 FROM buckets b
-			WHERE b.tenant_id = object_head_cache.tenant_id
-			AND b.name = object_head_cache.bucket
-		)
-		ON CONFLICT (tenant_id, name) DO NOTHING
-	`)
+	rows, err := db.QueryContext(ctx, `
+		SELECT h.tenant_id, h.bucket, MIN(COALESCE(h.backend_name, '')), COALESCE(t.residency, '')
+		  FROM object_head_cache h
+		  LEFT JOIN tenants t ON t.id = h.tenant_id
+		 WHERE NOT EXISTS (SELECT 1 FROM buckets b WHERE b.tenant_id = h.tenant_id AND b.name = h.bucket)
+		 GROUP BY h.tenant_id, h.bucket, t.residency`)
 	if err != nil {
 		return fmt.Errorf("backfill buckets: %w", err)
 	}
+	type missing struct{ tenant, bucket, backend, residency string }
+	var todo []missing
+	for rows.Next() {
+		var m missing
+		if err := rows.Scan(&m.tenant, &m.bucket, &m.backend, &m.residency); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("backfill buckets: %w", err)
+		}
+		todo = append(todo, m)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("backfill buckets: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("backfill buckets: %w", err)
+	}
 
-	rows, _ := result.RowsAffected()
-	if rows > 0 {
-		logger.Info("backfilled buckets from object_head_cache", zap.Int64("count", rows))
+	def := drivers.IDriveDefaultRegion(os.Getenv)
+	var made int64
+	for _, m := range todo {
+		region := def
+		if r, ok := strings.CutPrefix(m.backend, "idrive-"); ok && drivers.IsValidRegion(r) {
+			region = r
+		}
+		if m.residency != "" && drivers.RegionJurisdiction(region) != m.residency {
+			logger.Error("backfill buckets: a bucket with objects and no row is outside its tenant's residency — not recreated",
+				zap.String("tenant_id", m.tenant), zap.String("bucket", m.bucket), zap.String("backend", m.backend),
+				zap.String("region", region), zap.String("residency", m.residency))
+			continue
+		}
+		res, err := db.ExecContext(ctx, `
+			INSERT INTO buckets (tenant_id, name, visibility, region, data_residency)
+			VALUES ($1, $2, 'private', $3, $4)
+			ON CONFLICT (tenant_id, name) DO NOTHING`, m.tenant, m.bucket, region, drivers.DataResidency(region))
+		if err != nil {
+			return fmt.Errorf("backfill bucket %s of %s: %w", m.bucket, m.tenant, err)
+		}
+		n, _ := res.RowsAffected()
+		made += n
+	}
+	if made > 0 {
+		logger.Info("backfilled buckets from object_head_cache", zap.Int64("count", made))
 	}
 	return nil
 }

@@ -475,9 +475,74 @@ func (s *Service) detachOne(ctx context.Context, child string, freeLimit int64) 
 	return tx.Commit()
 }
 
+// ErrBecameMember: a tenant-less sign-in due for erasure is a member of a
+// tenant again (RP86-4, an invitation accepted during the grace). It is an
+// ErrNotPending: the schedule was cleared, nothing erased.
+var ErrBecameMember = fmt.Errorf("%w: the sign-in became a member during its grace", ErrNotPending)
+
 // ErrStillAMember refuses ScheduleSignIn for a user who owns a tenant or is
 // a member of one.
 var ErrStillAMember = errors.New("the sign-in owns an account or is a member of one")
+
+// isMemberSQL is "the user $1 owns a tenant or is a member of one" (the
+// owner by e-mail too: a registration's owner row may predate 118).
+const isMemberSQL = `SELECT EXISTS (SELECT 1 FROM tenant_members m WHERE m.user_id::text = $1)
+	    OR EXISTS (SELECT 1 FROM users u JOIN tenants t ON lower(t.email) = lower(u.email) WHERE u.id::text = $1)`
+
+// ReleaseIfMember re-checks a tenant-less sign-in's due erasure under the
+// user's row lock (RP86-4): a member of a tenant again — an invitation
+// accepted during the grace — has its schedule cleared, with an
+// account.deletion_cancelled row (reason became_member), and true is
+// returned; the runner erases nothing. A user who is no member is left as
+// it is (false). Membership is inserted under the users row's FOR KEY SHARE
+// (the tenant_members foreign key), which this FOR UPDATE waits for.
+func (s *Service) ReleaseIfMember(ctx context.Context, userID string) (bool, error) {
+	if s.db == nil {
+		return false, ErrNoDatabase
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("re-check a sign-in's membership: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var one int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id::text = $1 FOR UPDATE`, userID).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("re-check a sign-in's membership: %w", err)
+	}
+	released, err := lockedReleaseIfMember(ctx, tx, userID)
+	if err != nil || !released {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// lockedReleaseIfMember is ReleaseIfMember inside a transaction that holds
+// the user's row lock (EraseRows' guard too).
+func lockedReleaseIfMember(ctx context.Context, tx *sql.Tx, userID string) (bool, error) {
+	var member bool
+	if err := tx.QueryRowContext(ctx, isMemberSQL, userID).Scan(&member); err != nil {
+		return false, fmt.Errorf("re-check a sign-in's membership: %w", err)
+	}
+	if !member {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE users SET deletion_scheduled_at = NULL, deletion_reason = NULL, status = 'active'
+		 WHERE id::text = $1`, userID); err != nil {
+		return false, fmt.Errorf("clear a rejoined sign-in's schedule: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_logs (user_id, event_type, action, resource, result, severity, metadata)
+		VALUES ($1::uuid, 'account', 'account.deletion_cancelled', $2, 'success', 'info',
+		        '{"reason": "became_member", "by": "the deletion runner: the sign-in is a member of an account again"}'::jsonb)`,
+		userID, "user:"+userID); err != nil {
+		return false, fmt.Errorf("clear a rejoined sign-in's schedule: audit: %w", err)
+	}
+	return true, nil
+}
 
 // ScheduleSignIn schedules the erasure of a sign-in that owns no tenant and
 // is a member of none (RB10-1, WP-ACCT-1): Schedule, after checking under
@@ -487,10 +552,7 @@ func (s *Service) ScheduleSignIn(ctx context.Context, userID, reason string) (ti
 		return time.Time{}, ErrNoDatabase
 	}
 	var member bool
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT EXISTS (SELECT 1 FROM tenant_members m WHERE m.user_id::text = $1)
-		    OR EXISTS (SELECT 1 FROM users u JOIN tenants t ON lower(t.email) = lower(u.email) WHERE u.id::text = $1)`,
-		userID).Scan(&member); err != nil {
+	if err := s.db.QueryRowContext(ctx, isMemberSQL, userID).Scan(&member); err != nil {
 		return time.Time{}, fmt.Errorf("schedule a sign-in's deletion: %w", err)
 	}
 	if member {

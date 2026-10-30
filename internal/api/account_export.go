@@ -447,11 +447,29 @@ func (s *AccountExportService) renderOne(ctx context.Context, c *claimed, log *z
 	return nil
 }
 
+// errNoRegionInside: the tenant's residency has no enabled region to hold
+// its system bucket (RP86-1). The export fails with this note, never
+// written outside.
+var errNoRegionInside = errors.New("no_region_inside: no enabled region inside the tenant's residency holds its export")
+
 // ensureSystemBucket creates the tenant's `_exports` registry row (the
 // generatedObjectWriter refuses a bucket with no row — WP-R12-10): private,
-// never versioned, never lock-enabled, in the default region.
+// never versioned, never lock-enabled, in the default region — or, under a
+// residency, in the first enabled region inside it (RP86-1: the export is
+// the account's whole metadata, at rest for 7 days; none inside =
+// errNoRegionInside, nothing written). An existing row is kept: the
+// residency's admin set moves an empty one inside (setTenantResidency).
 func (s *AccountExportService) ensureSystemBucket(ctx context.Context, tenantID string) error {
+	var res sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT residency FROM tenants WHERE id = $1`, tenantID).Scan(&res); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read the residency of %s: %w", tenantID, err)
+	}
 	region := drivers.IDriveDefaultRegion(os.Getenv)
+	if res.String != "" {
+		if region = firstRegionInside(res.String); region == "" {
+			return errNoRegionInside
+		}
+	}
 	residency := drivers.DataResidency(region) // RP78-4: London is the UK
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency, versioning_status, object_lock_enabled, metadata)

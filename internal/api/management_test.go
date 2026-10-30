@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -607,8 +608,11 @@ func TestMgmtSetBucketResidency(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
+	mock.ExpectQuery(`SELECT COALESCE\(region, ''\) FROM buckets`).
+		WithArgs("test-tenant", "my-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"region"}).AddRow("eu-west-1"))
 	mock.ExpectExec(`UPDATE buckets SET data_residency`).
-		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
+		WithArgs("eu", "test-tenant", "my-bucket").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	body := bytes.NewBufferString(`{"residency":"eu"}`)
@@ -650,9 +654,9 @@ func TestMgmtSetBucketResidency_NotFound(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
-	mock.ExpectExec(`UPDATE buckets SET data_residency`).
-		WithArgs(sqlmock.AnyArg(), "test-tenant", "ghost-bucket").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`SELECT COALESCE\(region, ''\) FROM buckets`).
+		WithArgs("test-tenant", "ghost-bucket").
+		WillReturnError(sql.ErrNoRows)
 
 	body := bytes.NewBufferString(`{"residency":"us"}`)
 	req := httptest.NewRequest("PUT", "/api/v1/manage/buckets/ghost-bucket/residency", body)
@@ -672,8 +676,11 @@ func TestMgmtSetBucketResidency_Null(t *testing.T) {
 	s, mock, cleanup := newMgmtTestServer(t)
 	defer cleanup()
 
+	mock.ExpectQuery(`SELECT COALESCE\(region, ''\) FROM buckets`).
+		WithArgs("test-tenant", "my-bucket").
+		WillReturnRows(sqlmock.NewRows([]string{"region"}).AddRow("us-central-1"))
 	mock.ExpectExec(`UPDATE buckets SET data_residency`).
-		WithArgs(sqlmock.AnyArg(), "test-tenant", "my-bucket").
+		WithArgs("us", "test-tenant", "my-bucket").
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	body := bytes.NewBufferString(`{"residency":null}`)
@@ -687,5 +694,5 @@ func TestMgmtSetBucketResidency_Null(t *testing.T) {
 	var resp map[string]interface{}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "bucket", resp["object"])
-	assert.Nil(t, resp["data_residency"])
+	assert.Equal(t, "us", resp["data_residency"], "null re-asserts the region's label (RP86-2)")
 }
