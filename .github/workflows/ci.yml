@@ -116,6 +116,12 @@ jobs:
         with:
           version: v2.14.0
 
+      # The promtool unit tests of every rule file (RP86-5): the jobs test had
+      # failed unseen since #981. A pinned promtool (the box's 2.53.5),
+      # checksum-verified; each test runs beside its rule file.
+      - name: Prometheus rule tests
+        run: bash deploy/monitoring/promtool-test.sh
+
       # sdk/wasm under GOOS=js GOARCH=wasm: the step above skips its build
       # tag (RP51-2). The same pinned version, built for the runner.
       - name: Lint (sdk/wasm, js/wasm)
