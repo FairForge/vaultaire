@@ -200,12 +200,26 @@ var Deleted = []Rule{
 	// bytes they name are in the tenant's prefix and went with the sweep.
 	{"retired_blobs", `DELETE FROM retired_blobs WHERE tenant_id = $1`, ByTenant},
 	{"sts_tokens", `DELETE FROM sts_tokens WHERE tenant_id = $1`, ByTenant},
+	// A key is the TENANT's (D-STRIPE-40): the tenant's erasure takes every
+	// key of the tenant, whichever member made it (RP84-1 a — the maker's
+	// rule alone left a developer's key live for the erased tenant). A
+	// platform's child and a sandbox lose theirs by this rule too.
+	{"api_keys", `DELETE FROM api_keys WHERE tenant_id = $1`, ByTenant},
 	{"admin_notifications", `DELETE FROM admin_notifications WHERE tenant_id = $1`, ByTenant},
 	{"admin_notes", `DELETE FROM admin_notes WHERE tenant_id = $1`, ByTenant},
 	{"change_history", `DELETE FROM change_history WHERE tenant_id = $1`, ByTenant},
 	{"dashboard_sessions", `DELETE FROM dashboard_sessions WHERE tenant_id = $1`, ByTenant},
 
 	// --- the user: credentials, identity, compliance scaffolding (D-12) ---
+	// The keys this user made on a tenant that is not its own (a team it is
+	// a member of, a platform's child) stay the tenant's: before the users
+	// row goes — its ON DELETE CASCADE would take them — each is handed to
+	// that tenant's owner (else the owner of the tenant's pool root, else
+	// its registering user), with one key.maker_erased row on the tenant
+	// naming the key, never the person (RP84-1 b). user_id stays NOT NULL:
+	// the previous build scans it into a string at boot. A key with no
+	// other owner to take it goes with the user, below.
+	{"api_keys", keyMakerHandover, ByUser},
 	{"api_keys", `DELETE FROM api_keys WHERE user_id::text = $1`, ByUser},
 	// WP-TEAM-1 (118): the tenant's members and invitations go with the
 	// tenant; the user's memberships of tenants it does not own go with the
@@ -238,6 +252,9 @@ var Deleted = []Rule{
 	{"portability_requests", `DELETE FROM portability_requests WHERE user_id::text = $1`, ByUser},
 	{"change_history", `DELETE FROM change_history WHERE user_id::text = $1`, ByUser},
 	{"account_exports", `DELETE FROM account_exports WHERE user_id::text = $1`, ByUser},
+	// The tenant's exports, whoever requested them (the walk's tenant rule,
+	// RP84-1): the objects were in its _exports bucket, gone with the walk.
+	{"account_exports", `DELETE FROM account_exports WHERE tenant_id = $1`, ByTenant},
 	// admin_notes.admin_user_id → users has NO ACTION: notes this user
 	// AUTHORED (as an admin) would block the DELETE and are their PII.
 	{"admin_notes", `DELETE FROM admin_notes WHERE admin_user_id::text = $1`, ByUser},
@@ -259,6 +276,31 @@ var Deleted = []Rule{
 	{"users", `DELETE FROM users WHERE id::text = $1`, ByUser},
 	{"tenants", `DELETE FROM tenants WHERE id = $1`, ByTenant},
 }
+
+// keyMakerHandover is RP84-1 b's statement: the user's ($1) keys on other
+// tenants move to the tenant's owner, and each move is an audit row on that
+// tenant. The keys of the erased tenant itself are gone already (the
+// ByTenant rule above runs first).
+const keyMakerHandover = `
+	WITH heirs AS (
+		SELECT k.id, k.tenant_id, COALESCE(
+			(SELECT m.user_id FROM tenant_members m
+			  WHERE m.tenant_id = k.tenant_id AND m.role = 'owner' AND m.user_id::text <> $1),
+			(SELECT m.user_id FROM tenants t JOIN tenant_members m ON m.tenant_id = t.pool_root_id AND m.role = 'owner'
+			  WHERE t.id = k.tenant_id AND m.user_id::text <> $1),
+			(SELECT u.id FROM tenants t JOIN users u ON lower(u.email) = lower(t.email)
+			  WHERE t.id = k.tenant_id AND u.id::text <> $1 ORDER BY u.created_at LIMIT 1)) AS heir
+		  FROM api_keys k
+		 WHERE k.user_id::text = $1 AND k.tenant_id IS NOT NULL AND k.tenant_id <> ''),
+	moved AS (
+		UPDATE api_keys k SET user_id = h.heir
+		  FROM heirs h
+		 WHERE k.id = h.id AND h.heir IS NOT NULL
+		RETURNING k.id, k.tenant_id)
+	INSERT INTO audit_logs (tenant_id, event_type, action, resource, result, severity, metadata)
+	SELECT tenant_id, 'key', 'key.maker_erased', 'key:' || id::text, 'success', 'info',
+	       '{"reason": "the member who made the key erased its account; the key is the tenant''s owner''s now"}'::jsonb
+	  FROM moved`
 
 // operatorTrailScrub is the statement that keeps the operator audit trail when
 // the operator's own account is erased (WP-R10-3d). Of the rows that name the
@@ -406,18 +448,11 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 			continue // a lock (FOR UPDATE): erases nothing
 		}
 		n, _ := out.RowsAffected()
-		res.Rows[r.Table] += n
-		res.Total += n
-	}
-	// A child's keys are bound to the platform user who minted them
-	// (api_keys' rule is the user's): they go with the child.
-	if userID == "" && tenantID != "" {
-		out, err := tx.ExecContext(ctx, `DELETE FROM api_keys WHERE tenant_id = $1`, tenantID)
-		if err != nil {
-			return res, fmt.Errorf("erase the child's api_keys: %w", err)
+		if r.SQL == keyMakerHandover {
+			res.Rows["api_keys:handed_over"] += n // kept, not erased
+			continue
 		}
-		n, _ := out.RowsAffected()
-		res.Rows["api_keys"] += n
+		res.Rows[r.Table] += n
 		res.Total += n
 	}
 	for _, r := range Kept {
