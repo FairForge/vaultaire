@@ -86,9 +86,9 @@ func TestObjectRestorerFor_DemotedDownstairsObjectHasNoRestore(t *testing.T) {
 	eng.AddDriver("geyser", &fakeArchive{})
 
 	// Act
-	attic, err := objectRestorerFor(context.Background(), eng, db, tenantID, "b", "attic.zip")
+	attic, _, err := objectRestorerFor(context.Background(), eng, db, tenantID, "b", "attic.zip")
 	require.NoError(t, err)
-	demoted, err := objectRestorerFor(context.Background(), eng, db, tenantID, "b", "demoted.jpg")
+	demoted, _, err := objectRestorerFor(context.Background(), eng, db, tenantID, "b", "demoted.jpg")
 	require.NoError(t, err)
 
 	// Assert
