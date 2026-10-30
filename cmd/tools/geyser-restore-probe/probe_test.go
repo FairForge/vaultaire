@@ -7,6 +7,7 @@ import (
 	"crypto/md5" // #nosec G501 -- the S3 ETag
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,13 @@ type fakeArchive struct {
 	restores        int
 	restoreStatus   int
 	etag            string // default "etag-1" (not an MD5)
+	// ssecKey, when set, makes the object an SSE-C one: every HEAD and GET
+	// must carry this key (else 400, as S3 answers), RestoreObject none.
+	ssecKey          []byte
+	ssecMissing      int // HEAD/GET without the key (refused)
+	ssecOnRestore    int // RestoreObject that carried a key
+	ssecHeadsWithKey int
+	ssecGetsWithKey  int
 }
 
 func newFakeArchive(size int) *fakeArchive {
@@ -56,6 +64,27 @@ func newFakeArchive(size int) *fakeArchive {
 func (f *fakeArchive) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.ssecKey != nil {
+		if r.Method == http.MethodPost {
+			if r.Header.Get("x-amz-server-side-encryption-customer-key") != "" {
+				f.ssecOnRestore++
+			}
+		} else {
+			sum := md5.Sum(f.ssecKey) // #nosec G401 -- S3's key digest
+			if r.Header.Get("x-amz-server-side-encryption-customer-algorithm") != "AES256" ||
+				r.Header.Get("x-amz-server-side-encryption-customer-key") != base64.StdEncoding.EncodeToString(f.ssecKey) ||
+				r.Header.Get("x-amz-server-side-encryption-customer-key-MD5") != base64.StdEncoding.EncodeToString(sum[:]) {
+				f.ssecMissing++
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if r.Method == http.MethodHead {
+				f.ssecHeadsWithKey++
+			} else {
+				f.ssecGetsWithKey++
+			}
+		}
+	}
 	if r.Method == http.MethodPost && r.URL.Query().Has("restore") {
 		f.restores++
 		if f.phase == "tape" {
@@ -250,6 +279,54 @@ func TestProbe_FirstTimeOnTapeRunsTheCustomerPath(t *testing.T) {
 	assert.Equal(t, "done", res.State)
 	assert.Len(t, f.reports(t), 1)
 	assert.Equal(t, 1, f.fake.restores)
+}
+
+// An SSE-C object (WP-VAULT-2: until the master key, the only kind a Vault
+// write may be): every HEAD and GET carries the customer key, RestoreObject
+// none — S3 takes no key to restore — and the whole path still runs.
+func TestProbe_SSECObjectCarriesTheKeyOnEveryReadAndNoneOnTheRestore(t *testing.T) {
+	f := newProbeFixture(t, 300_000)
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	f.fake.ssecKey = key
+	f.p.SetSSECKey(key)
+	ctx := context.Background()
+	_, err := f.p.Check(ctx, obj) // baseline
+	require.NoError(t, err)
+	f.fake.set("tape")
+
+	res, err := f.p.Check(ctx, obj)
+
+	require.NoError(t, err)
+	assert.Equal(t, "reported", res.State)
+	assert.Zero(t, f.fake.ssecMissing, "no read went without the key")
+	assert.Zero(t, f.fake.ssecOnRestore, "the restore carries no key")
+	assert.Greater(t, f.fake.ssecHeadsWithKey, 0)
+	assert.Greater(t, f.fake.ssecGetsWithKey, 0)
+	r := f.reports(t)[0]
+	require.NotNil(t, r.Identical)
+	assert.True(t, *r.Identical)
+}
+
+func TestReadSSECKeyFile(t *testing.T) {
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	good := filepath.Join(dir, "k")
+	require.NoError(t, os.WriteFile(good, key, 0o600))
+	got, err := readSSECKeyFile(good)
+	require.NoError(t, err)
+	assert.Equal(t, key, got)
+
+	short := filepath.Join(dir, "short")
+	require.NoError(t, os.WriteFile(short, key[:16], 0o600))
+	_, err = readSSECKeyFile(short)
+	assert.Error(t, err, "an SSE-C key is 32 bytes")
+
+	open := filepath.Join(dir, "open")
+	require.NoError(t, os.WriteFile(open, key, 0o644))
+	_, err = readSSECKeyFile(open)
+	assert.Error(t, err, "a key readable by others is refused")
 }
 
 func TestProbe_Records503WithRetryAfter(t *testing.T) {

@@ -46,6 +46,7 @@ func main() {
 	timeout := flag.Duration("restore-timeout", 6*time.Hour, "give up on one restore after this (the next visit resumes)")
 	days := flag.Int("days", 1, "RestoreObject Days")
 	noBaseline := flag.Bool("no-baseline", false, "do not download the object while it is readable (no byte comparison after the restore)")
+	ssecKeyFile := flag.String("sse-c-key-file", "", "the objects are SSE-C: a file (mode 600) holding the raw 32-byte customer key, sent on every HEAD and GET")
 	flag.Parse()
 
 	objs, err := parseObjects(*objects)
@@ -64,6 +65,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "geyser-restore-probe:", err, "(set VAULTAIRE_BENCH_ACCESS_KEY / VAULTAIRE_BENCH_SECRET_KEY)")
 		os.Exit(2)
+	}
+	if *ssecKeyFile != "" {
+		key, err := readSSECKeyFile(*ssecKeyFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "geyser-restore-probe:", err)
+			os.Exit(2)
+		}
+		p.SetSSECKey(key)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

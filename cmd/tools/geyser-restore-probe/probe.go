@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- an S3 ETag of a single-part upload IS the MD5 of the bytes; compared, not trusted
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -68,9 +69,13 @@ type Config struct {
 type Probe struct {
 	cfg    Config
 	client *s3.Client
-	now    func() time.Time
-	sleep  func(context.Context, time.Duration) error
-	logf   func(string, ...any)
+	// ssec: an SSE-C object's customer key as S3 takes it (algorithm, the
+	// key and its MD5, base64) — sent on every HEAD and GET, never on the
+	// restore. Nil fields = no key.
+	ssecAlg, ssecKey, ssecMD5 *string
+	now                       func() time.Time
+	sleep                     func(context.Context, time.Duration) error
+	logf                      func(string, ...any)
 }
 
 // State is the per-object state file.
@@ -249,7 +254,7 @@ func refused(status int, code string) bool {
 
 // probeByte reads one byte: nil = readable.
 func (p *Probe) probeByte(ctx context.Context, o Object) error {
-	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &o.Bucket, Key: &o.Key, Range: aws.String("bytes=0-0")})
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &o.Bucket, Key: &o.Key, Range: aws.String("bytes=0-0"), SSECustomerAlgorithm: p.ssecAlg, SSECustomerKey: p.ssecKey, SSECustomerKeyMD5: p.ssecMD5})
 	if err != nil {
 		return err
 	}
@@ -261,7 +266,7 @@ func (p *Probe) probeByte(ctx context.Context, o Object) error {
 func (p *Probe) getWhole(ctx context.Context, o Object) (Step, error) {
 	st := Step{At: p.now()}
 	start := time.Now()
-	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &o.Bucket, Key: &o.Key})
+	out, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &o.Bucket, Key: &o.Key, SSECustomerAlgorithm: p.ssecAlg, SSECustomerKey: p.ssecKey, SSECustomerKeyMD5: p.ssecMD5})
 	if err != nil {
 		st.Seconds = time.Since(start).Seconds()
 		st.Status, st.Code, st.RetryAfter = wireErr(err)
@@ -282,6 +287,36 @@ func (p *Probe) getWhole(ctx context.Context, o Object) (Step, error) {
 	return st, nil
 }
 
+// SetSSECKey makes the probe read SSE-C objects: the 32-byte customer key
+// goes on every HEAD and GET (S3 refuses a read of an SSE-C object without
+// it), never on the RestoreObject, which takes none.
+func (p *Probe) SetSSECKey(key []byte) {
+	sum := md5.Sum(key) // #nosec G401 -- S3's SSE-C key digest, not a security hash
+	p.ssecAlg = aws.String("AES256")
+	p.ssecKey = aws.String(base64.StdEncoding.EncodeToString(key))
+	p.ssecMD5 = aws.String(base64.StdEncoding.EncodeToString(sum[:]))
+}
+
+// readSSECKeyFile reads a raw 32-byte SSE-C key from a file only its owner
+// can read.
+func readSSECKeyFile(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("sse-c key file: %w", err)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("sse-c key file %s is readable by others (%v): chmod 600", path, fi.Mode().Perm())
+	}
+	key, err := os.ReadFile(path) // #nosec G304 -- operator flag
+	if err != nil {
+		return nil, fmt.Errorf("sse-c key file: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("sse-c key file %s holds %d bytes, an SSE-C key is 32", path, len(key))
+	}
+	return key, nil
+}
+
 // Check is one visit to one object.
 func (p *Probe) Check(ctx context.Context, o Object) (CheckResult, error) {
 	st, err := p.loadState(o)
@@ -292,7 +327,7 @@ func (p *Probe) Check(ctx context.Context, o Object) (CheckResult, error) {
 		return CheckResult{State: "done"}, nil
 	}
 	now := p.now()
-	head, err := p.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &o.Bucket, Key: &o.Key})
+	head, err := p.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &o.Bucket, Key: &o.Key, SSECustomerAlgorithm: p.ssecAlg, SSECustomerKey: p.ssecKey, SSECustomerKeyMD5: p.ssecMD5})
 	if err != nil {
 		status, code, _ := wireErr(err)
 		p.logf("%s HEAD failed: %d %s (%v)", o, status, code, err)
@@ -401,7 +436,7 @@ func (p *Probe) customerPath(ctx context.Context, o Object, rep *Report) error {
 	deadline := rs.At.Add(p.cfg.RestoreTimeout)
 	for {
 		rep.Polls++
-		head, herr := p.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &o.Bucket, Key: &o.Key})
+		head, herr := p.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: &o.Bucket, Key: &o.Key, SSECustomerAlgorithm: p.ssecAlg, SSECustomerKey: p.ssecKey, SSECustomerKeyMD5: p.ssecMD5})
 		if herr == nil {
 			h := aws.ToString(head.Restore)
 			if h != "" {
