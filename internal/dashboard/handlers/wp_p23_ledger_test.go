@@ -89,14 +89,14 @@ func TestAdminOverview_ActiveSubsFromEntitlements(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	mock.MatchExpectationsInOrder(false)
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM tenants`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(3))
-	mock.ExpectQuery(`SUM\(storage_used_bytes\)`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
+	mock.ExpectQuery(`SUM\(q.storage_used_bytes\)`).WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM entitlements WHERE lapsed_at IS NULL`).
 		WillReturnRows(sqlmock.NewRows([]string{"n"}).AddRow(7))
 	mock.ExpectQuery(`FROM entitlements WHERE lapsed_at IS NULL`).
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "std_tb", "vault_tb", "pin_hot_tb", "period", "paid_through",
 			"renewal", "provider", "provider_ref", "created_at", "updated_at"}))
 
-	_, _, active, _ := queryAdminStats(context.Background(), db, zap.NewNop())
+	_, _, active, _ := queryAdminStats(context.Background(), db, tenantKindLive, zap.NewNop())
 
 	assert.Equal(t, 7, active)
 	require.NoError(t, mock.ExpectationsWereMet())

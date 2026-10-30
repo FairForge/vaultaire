@@ -81,16 +81,20 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	// settle and a reservation of two children never wait for each other in
 	// turn. The floor guard needs the owner too, total moving or not: a
 	// child's own floor rows have limit 0 and never decide.
+	// A total that moves moves the pool's counter too (RP82-3): the root's
+	// row is locked first whether or not the change is guarded.
 	totalGuard := c.Guard != "" && c.Total > 0
 	floorGuard := c.Guard != "" && c.Floors[c.Guard] > 0
 	pool := poolOf{owner: tenantID}
-	if totalGuard || floorGuard {
+	if c.Total != 0 || floorGuard {
 		p, err := lockPoolOwner(ctx, tx, tenantID)
 		switch {
 		case err == nil:
 			pool = p
 		case !totalGuard && errors.Is(err, sql.ErrNoRows):
-			// No quota row: nothing to change on the total (as unguarded).
+			if c.Total != 0 {
+				return nil // no quota row: nothing to change on the total
+			}
 		default:
 			return err
 		}
@@ -101,23 +105,15 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 		}
 	}
 	if c.Total != 0 {
-		var used, limit int64
-		err := tx.QueryRowContext(ctx, `
-			UPDATE tenant_quotas
-			   SET storage_used_bytes = GREATEST(0, storage_used_bytes + $1), updated_at = NOW()
-			 WHERE tenant_id = $2
-			RETURNING storage_used_bytes, storage_limit_bytes`, c.Total, tenantID).Scan(&used, &limit)
+		used, limit, poolUsed, found, err := moveUsed(ctx, tx, tenantID, pool.owner, c.Total)
 		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			return nil
 		case err != nil:
-			return fmt.Errorf("ledger: tenant %s: %w", tenantID, err)
+			return err
+		case !found:
+			return nil
 		}
 		if totalGuard && pool.pooled {
-			if used, err = poolUsed(ctx, tx, pool.owner); err != nil {
-				return err
-			}
-			limit = pool.limit
+			used, limit = poolUsed, pool.limit
 		}
 		if totalGuard && used > limit {
 			return fmt.Errorf("%w: tenant %s total %d > %d", ErrOverQuota, tenantID, used, limit)

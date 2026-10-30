@@ -87,28 +87,9 @@ func (a *BandwidthAlerter) checkBandwidthAlerts(ctx context.Context) (int, error
 // and the notice is the platform's — a child has no user to tell. A pool
 // with none cannot have crossed a step.
 func (a *BandwidthAlerter) alertCandidates(ctx context.Context) ([]string, error) {
-	rows, err := a.db.QueryContext(ctx,
-		`SELECT COALESCE(t.parent_tenant_id, b.tenant_id)
-		   FROM bandwidth_usage_daily b
-		   LEFT JOIN tenants t ON t.id = b.tenant_id
-		  WHERE b.date >= $1::date
-		  GROUP BY 1 HAVING SUM(b.egress_bytes) > 0`,
-		usage.EgressMonthStart(a.now()).Format("2006-01-02"))
+	tenants, err := usage.PoolRootsWithEgressSince(ctx, a.db, usage.EgressMonthStart(a.now()))
 	if err != nil {
 		return nil, fmt.Errorf("list tenants with egress this month: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	var tenants []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan tenant with egress this month: %w", err)
-		}
-		tenants = append(tenants, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tenants with egress this month: %w", err)
 	}
 	return tenants, nil
 }

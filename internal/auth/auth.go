@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -361,6 +362,24 @@ func (a *AuthService) CreateUser(ctx context.Context, email, password string) (*
 	return user, err
 }
 
+// CleanTenantName is a registration's company as tenants.name keeps it: a
+// tab or any other whitespace control is a space, every other control
+// character (CR, LF, NUL, DEL, C1) is dropped, the ends trimmed (RP84-3: a
+// CR/LF in the name injected headers into the invitation's subject).
+func CleanTenantName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '\t':
+			b.WriteRune(' ')
+		case unicode.IsControl(r):
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
 // CreateUserWithTenant creates both user and their storage tenant.
 //
 // The four rows — users → tenants → api_keys → tenant_quotas, in that order
@@ -374,6 +393,10 @@ func (a *AuthService) CreateUserWithTenant(ctx context.Context, email, password,
 	if !a.SignupsEnabled() {
 		return nil, nil, nil, ErrSignupsDisabled
 	}
+
+	// The company becomes tenants.name, which mail subjects carry (an
+	// invitation's): no control character reaches either row (RP84-3).
+	company = CleanTenantName(company)
 
 	// Validate email
 	email = strings.ToLower(strings.TrimSpace(email))

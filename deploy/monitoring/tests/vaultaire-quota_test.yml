@@ -1,0 +1,27 @@
+# promtool unit test of vaultaire-quota.yml.
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-quota.yml deploy/monitoring/tests/vaultaire-quota_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-quota_test.yml'
+rule_files:
+  - vaultaire-quota.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A drift held 30 minutes fires; a drift that cleared after 10 does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_pool_used_drift_bytes{root="tenant-zero"}'
+        values: '900x40'
+      - series: 'vaultaire_pool_used_drift_bytes{root="tenant-other"}'
+        values: '5x10'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: PoolUsedDrift
+        exp_alerts:
+          - exp_labels:
+              root: tenant-zero
+              severity: warning
+            exp_annotations:
+              summary: "The pool counter of tenant-zero is off by 900 bytes"
+              description: "tenant_quotas.pool_used_bytes of the pool root differs from the sum of its pool's storage_used_bytes, and pooled quota checks read the counter. The code never repairs it: when the pool's writes are quiet, reseed it with POST /api/v1/admin/quota/reconcile?tenant_id=<root>&pool=reseed (deploy/monitoring/vaultaire-quota.yml)."

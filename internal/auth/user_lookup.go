@@ -55,7 +55,9 @@ func (a *AuthService) fetchUserRow(ctx context.Context, where string, arg any) (
 
 // cacheUser writes row into the maps and returns the cached pointer. An
 // existing entry is updated in place, so a pointer another caller holds sees
-// the same values; an e-mail that changed is re-keyed.
+// the same values; an e-mail that changed is re-keyed. The tenant is the
+// row's as read (RP84-2: a cached tenant outliving its row's "" — an
+// invitee removed again — was what the key generator fell back to).
 func (a *AuthService) cacheUser(row *User) *User {
 	a.cacheMu.Lock()
 	defer a.cacheMu.Unlock()
@@ -68,11 +70,7 @@ func (a *AuthService) cacheUser(row *User) *User {
 	if u.Email != row.Email {
 		delete(a.users, u.Email)
 	}
-	tenantID := u.TenantID
 	*u = *row
-	if u.TenantID == "" {
-		u.TenantID = tenantID
-	}
 	a.users[u.Email] = u
 	return u
 }

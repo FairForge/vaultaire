@@ -182,6 +182,8 @@ func flagRefused(w http.ResponseWriter, err error) bool {
 		http.Error(w, "Conflict: "+pre.Error()+".", http.StatusConflict)
 	case errors.Is(err, flags.ErrNotExemptible):
 		http.Error(w, "Conflict: this flag is on globally and cannot be turned off for one tenant (flag_not_exemptible).", http.StatusConflict)
+	case errors.Is(err, flags.ErrOnlyTightens):
+		http.Error(w, "Conflict: this flag is on up the account tree; a child may tighten it, never turn it off (flag_only_tightens).", http.StatusConflict)
 	case errors.Is(err, flags.ErrGlobalOnly):
 		http.Error(w, "Bad Request: this flag has a global row only (flag_global_only).", http.StatusBadRequest)
 	case errors.Is(err, adminread.ErrNoSuchTenant):

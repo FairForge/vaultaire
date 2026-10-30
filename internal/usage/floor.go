@@ -121,7 +121,7 @@ func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error
 	// order), and each gets its counting floor rows below.
 	if _, err := tx.ExecContext(ctx, `
 		SELECT 1 FROM tenant_quotas
-		 WHERE tenant_id IN (SELECT c.id FROM tenants c WHERE c.parent_tenant_id = $1)
+		 WHERE tenant_id IN (SELECT c.id FROM tenants c WHERE c.pool_root_id = $1 AND c.id <> $1)
 		 ORDER BY tenant_id FOR UPDATE`, tenantID); err != nil {
 		return fmt.Errorf("set house for tenant %s: lock children: %w", tenantID, err)
 	}
@@ -146,7 +146,7 @@ func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error
 		SELECT f.tenant_id, f.floor, 0, `+billedBytesOfF+`
 		  FROM (SELECT c.id AS tenant_id, fl.floor
 		          FROM tenants c CROSS JOIN (VALUES ('`+FloorStandard+`'), ('`+FloorVault+`')) AS fl(floor)
-		         WHERE c.parent_tenant_id = $1) f
+		         WHERE c.pool_root_id = $1 AND c.id <> $1) f
 		ON CONFLICT (tenant_id, floor) DO NOTHING`, tenantID); err != nil {
 		return fmt.Errorf("set house for tenant %s: children's floors: %w", tenantID, err)
 	}
@@ -291,7 +291,7 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 	if err != nil {
 		return Reservation{}, err
 	}
-	if p.used+bytes > p.limit {
+	if !p.fits(bytes) {
 		return Reservation{}, nil
 	}
 
@@ -372,10 +372,8 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 		}
 	}
 
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tenant_quotas
-		    SET storage_used_bytes = storage_used_bytes + $1, updated_at = NOW()
-		  WHERE tenant_id = $2`, bytes, tenantID); err != nil {
+	// The total, and the pool's counter in the same statement (RP82-3).
+	if _, _, _, _, err := moveUsed(ctx, tx, tenantID, p.owner, bytes); err != nil {
 		return Reservation{}, fmt.Errorf("updating quota: %w", err)
 	}
 	return res, nil
@@ -391,18 +389,10 @@ func (m *QuotaManager) ReleaseFloor(ctx context.Context, tenantID, floor string,
 		return fmt.Errorf("releasing quota for tenant %s: begin: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tenant_quotas
-		    SET storage_used_bytes = GREATEST(0, storage_used_bytes - $1), updated_at = NOW()
-		  WHERE tenant_id = $2`, bytes, tenantID); err != nil {
+	// The ledger's one writer (the pool's root first, its counter moved
+	// with the total — RP82-3); unguarded, so a negative value adds.
+	if err := ApplyLedgerTx(ctx, tx, tenantID, LedgerChange{Total: -bytes, Floors: map[string]int64{floor: -bytes}}); err != nil {
 		return fmt.Errorf("releasing quota for tenant %s: %w", tenantID, err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE tenant_floor_quotas
-		    SET storage_used_bytes = GREATEST(0, storage_used_bytes - $1), updated_at = NOW()
-		  WHERE tenant_id = $2 AND floor = $3`, bytes, tenantID, floor); err != nil {
-		return fmt.Errorf("releasing floor %s for tenant %s: %w", floor, tenantID, err)
 	}
 	return tx.Commit()
 }

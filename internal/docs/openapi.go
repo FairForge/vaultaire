@@ -424,6 +424,7 @@ func idempotent(op *Operation) *Operation {
 				r.Headers = map[string]Header{}
 			}
 			r.Headers["Idempotency-Replayed"] = Header{Ref: headerRef + "Idempotency-Replayed"}
+			r.Headers["Idempotent-Replayed"] = Header{Ref: headerRef + "Idempotent-Replayed"}
 			op.Responses[code] = r
 		}
 	}
@@ -1084,7 +1085,7 @@ func generateManagementPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 			Post: mut(withBody(jsonOp("Management", "Invite a member", "ManageInviteMember",
-				"An owner's or an admin's. E-mails the address a link that works once and expires after 7 days; only the token's SHA-256 is stored. The role is `admin`, `developer` or `viewer`, never `owner`. Audited `member.invited`.",
+				"An owner's or an admin's. E-mails the address a link that works once and expires after 7 days; only the token's SHA-256 is stored. The role is `admin`, `developer` or `viewer`, never `owner`. Inviting an address again replaces its pending invitation (the resend). At most 20 pending invitations and 50 invitation e-mails a day per account: past either, 429 `invitation_rate_limited`. Audited `member.invited`.",
 				map[string]Response{
 					"201": jsonResp("Invitation sent", objectPtr("", map[string]*Schema{"object": strEnum("", "invitation"), "id": str(""), "email": str(""), "role": str(""), "expires_at": str("")}, "object", "id")),
 					"400": errResp("`invalid_json`, `invalid_role` or `invalid_email`"),
@@ -1108,9 +1109,11 @@ func generateManagementPaths() map[string]*PathItem {
 				}),
 				jsonBody("The new role", objectPtr("", map[string]*Schema{"role": strEnum("", "admin", "developer", "viewer")}, "role")))),
 			Delete: mut(jsonOp("Management", "Remove a member", "ManageRemoveMember",
-				"An owner's or an admin's. Removes the membership only: never the person's sign-in, never a bucket. The owner cannot be removed. Audited `member.removed`.",
+				"An owner's or an admin's. Removes the membership only: never the person's sign-in, never a bucket. The owner cannot be removed. The answer names the S3 keys the member made (`keys_made`): they are the account's and stay live unless an optional JSON body `{\"revoke_keys\": true}` revokes them, with their temporary credentials, in the same step. Audited `member.removed` (and `member.keys_revoked`).",
 				map[string]Response{
-					"200": jsonResp("Removed", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "user_id": str(""), "deleted": boolean("Always true")}, "object", "user_id", "deleted")),
+					"200": jsonResp("Removed", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "user_id": str(""), "deleted": boolean("Always true"),
+						"keys_made":    arrayOf(objectPtr("A live key the member made", map[string]*Schema{"id": str(""), "name": str(""), "last_used": nullable(str(""))})),
+						"keys_revoked": boolean("Whether keys_made were revoked (revoke_keys)")}, "object", "user_id", "deleted", "keys_made", "keys_revoked")),
 					"403": errResp("`role_forbidden`"),
 					"404": errResp("`member_not_found`"),
 					"409": errResp("`owner_is_permanent`"),
@@ -2676,6 +2679,7 @@ func generateHeaders() map[string]Header {
 		"X-RateLimit-Reset":     {Description: "Unix time when the bucket is full again (when admitted) or when the next request will be accepted (when refused), rounded up", Schema: &Schema{Type: "integer"}},
 		"Retry-After":           {Description: "Seconds to wait before retrying", Schema: &Schema{Type: "integer"}},
 		"Idempotency-Replayed":  {Description: "`true` when this response was replayed from the idempotency cache rather than executed", Schema: &Schema{Type: "string"}},
+		"Idempotent-Replayed":   {Description: "`true` when this response was replayed (Stripe's name for Idempotency-Replayed; both are sent). A replay never carries a secret: a blanked one is marked `secret_redacted: true`", Schema: &Schema{Type: "string"}},
 	}
 }
 

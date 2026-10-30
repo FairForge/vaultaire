@@ -68,9 +68,11 @@ func HandleTenantList(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 		withCSRF(r.Context(), data)
 		query := r.URL.Query().Get("q")
 		data["SearchQuery"] = query
+		kind := tenantKindOf(r)
+		data["TenantKind"] = string(kind)
 
 		if db != nil {
-			data["Tenants"] = queryTenantList(r.Context(), db, query, logger)
+			data["Tenants"] = queryTenantList(r.Context(), db, query, kind, logger)
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -81,7 +83,7 @@ func HandleTenantList(tmpl *template.Template, db *sql.DB, logger *zap.Logger) h
 	}
 }
 
-func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap.Logger) []tenantRow {
+func queryTenantList(ctx context.Context, db *sql.DB, search string, kind tenantKind, logger *zap.Logger) []tenantRow {
 	rows, err := db.QueryContext(ctx, `
 		SELECT t.id, t.name, t.email, COALESCE(t.plan, 'starter'),
 		       e.paid_through, e.lapsed_at IS NOT NULL, t.suspended_at,
@@ -92,9 +94,10 @@ func queryTenantList(ctx context.Context, db *sql.DB, search string, logger *zap
 		LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
 		LEFT JOIN entitlements e ON e.tenant_id = t.id
 		WHERE ($1 = '' OR t.name ILIKE '%' || $1 || '%' OR t.email ILIKE '%' || $1 || '%')
+		  AND `+tenantKindWhere2+`
 		ORDER BY t.created_at DESC
 		LIMIT 100
-	`, search)
+	`, search, string(kind))
 	if err != nil {
 		logger.Debug("admin: list tenants", zap.Error(err))
 		return nil

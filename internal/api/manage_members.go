@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -29,9 +30,8 @@ func (s *Server) registerMemberRoutes(r chi.Router) {
 	r.With(s.requireRole(auth.ActionMemberManage)).Patch("/members/{user}", s.handleMgmtSetMemberRole)
 	r.With(s.requireRole(auth.ActionMemberManage)).Delete("/members/{user}", s.handleMgmtRemoveMember)
 	r.With(s.requireRole(auth.ActionMemberManage)).Delete("/invitations/{id}", s.handleMgmtRevokeInvitation)
-	// The invitee is a member of NO role here yet: the route is open to
-	// any signed-in user, and the invitation's own address decides.
-	r.Post("/invitations/{token}/accept", s.handleMgmtAcceptInvitation)
+	// POST /invitations/{token}/accept is mounted outside requireMember
+	// (registerManagementRoutes): the invitee is a member of no tenant yet.
 }
 
 func (s *Server) handleMgmtListMembers(w http.ResponseWriter, r *http.Request) {
@@ -71,8 +71,6 @@ func (s *Server) inviteMember(ctx context.Context, tenantID, inviterID, inviterE
 	if err != nil {
 		return inv, err
 	}
-	audit.Record(ctx, s.db, audit.Entry{TenantID: tenantID, Action: "member.invited", Resource: "invitation:" + inv.ID,
-		Metadata: map[string]any{"email": inv.Email, "role": string(inv.Role)}})
 	var account string
 	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(name, ''), email) FROM tenants WHERE id = $1`, tenantID).Scan(&account)
 	sender := s.emailSender
@@ -110,6 +108,10 @@ func (s *Server) handleMgmtInviteMember(w http.ResponseWriter, r *http.Request) 
 	switch {
 	case errors.Is(err, auth.ErrAlreadyMember):
 		writeManagementError(w, ErrTypeConflict, "already_a_member", "that address is already a member", "email")
+		return
+	case errors.Is(err, auth.ErrInvitationRateLimited):
+		writeManagementError(w, ErrTypeRateLimit, "invitation_rate_limited",
+			"too many invitations: an account holds at most 20 pending and sends at most 50 a day — revoke one, or try tomorrow", "")
 		return
 	case err != nil && err.Error() == "invalid email address":
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_email", "email must be an e-mail address", "email")
@@ -161,19 +163,37 @@ func (s *Server) handleMgmtSetMemberRole(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "role": role})
 }
 
+// handleMgmtRemoveMember removes a member. The answer names the keys the
+// member made (keys_made: they are the tenant's and stay live); a body
+// {"revoke_keys": true} revokes them in the same transaction (RP84-4).
 func (s *Server) handleMgmtRemoveMember(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
 	target := chi.URLParam(r, "user")
-	if err := auth.RemoveMember(r.Context(), s.db, tenantID, target); err != nil {
+	var req struct {
+		RevokeKeys bool `json:"revoke_keys"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+			return
+		}
+	}
+	res, err := auth.RemoveMember(r.Context(), s.db, tenantID, target, req.RevokeKeys)
+	if err != nil {
 		if !memberChangeError(w, err) {
 			s.logger.Error("remove member", zap.Error(err))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to remove the member", "")
 		}
 		return
 	}
+	if res.KeysRevoked && s.auth != nil {
+		s.auth.ForgetRevokedKeys(tenantID, res.KeysMade)
+	}
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: target, TenantID: tenantID, Action: "member.removed",
-		Resource: "user:" + target, Severity: "warning"})
-	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "deleted": true})
+		Resource: "user:" + target, Severity: "warning",
+		Metadata: map[string]any{"keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "deleted": true,
+		"keys_made": res.KeysMade, "keys_revoked": res.KeysRevoked})
 }
 
 func (s *Server) handleMgmtRevokeInvitation(w http.ResponseWriter, r *http.Request) {

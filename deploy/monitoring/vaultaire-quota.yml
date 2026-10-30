@@ -1,0 +1,26 @@
+# The quota pool's counter — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from the app's /metrics (RP82-3, internal/api/pool_drift.go):
+#   vaultaire_pool_used_drift_bytes{root}   a pool root's tenant_quotas.pool_used_bytes minus the
+#                                            sum of its pool's storage_used_bytes; one series per
+#                                            pooled root (a platform, or a root with children) whose
+#                                            counter differs, none when every counter is true
+#
+# A pooled quota check reads the counter, so a drift moves what the pool may
+# store. The code never repairs it. Likely cause: the previous build wrote
+# the root's or a child's ledger during a deploy overlap (it moves no
+# counter). Fix, after checking the writes are quiet for that pool:
+#   curl -X POST -H "Authorization: Bearer $ADMIN_JWT" \
+#     'https://stored.ge/api/v1/admin/quota/reconcile?tenant_id=<root>&pool=reseed'
+# (audited admin.pool_used_reseeded with the drift it removed).
+groups:
+  - name: vaultaire-quota
+    rules:
+      - alert: PoolUsedDrift
+        expr: vaultaire_pool_used_drift_bytes != 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The pool counter of {{ $labels.root }} is off by {{ $value }} bytes"
+          description: "tenant_quotas.pool_used_bytes of the pool root differs from the sum of its pool's storage_used_bytes, and pooled quota checks read the counter. The code never repairs it: when the pool's writes are quiet, reseed it with POST /api/v1/admin/quota/reconcile?tenant_id=<root>&pool=reseed (deploy/monitoring/vaultaire-quota.yml)."

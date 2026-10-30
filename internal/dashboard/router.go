@@ -400,7 +400,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.Get("/members", handlers.HandleMembers(membersTmpl, deps.DB, deps.Logger))
 		dr.With(act("POST /members")).Post("/members", handlers.HandleInviteMember(deps.DB, deps.Email, deps.BaseURL, deps.Logger))
 		dr.With(act("POST /members/{user}/role")).Post("/members/{user}/role", handlers.HandleSetMemberRole(deps.DB, deps.Logger))
-		dr.With(act("POST /members/{user}/remove")).Post("/members/{user}/remove", handlers.HandleRemoveMember(deps.DB, deps.Logger))
+		dr.With(act("POST /members/{user}/remove")).Post("/members/{user}/remove", handlers.HandleRemoveMember(deps.DB, deps.Auth, deps.Logger))
 		dr.With(act("POST /members/invitations/{id}/revoke")).Post("/members/invitations/{id}/revoke", handlers.HandleRevokeInvitation(deps.DB, deps.Logger))
 		invitationTmpl := template.Must(baseTmpl.Clone())
 		template.Must(invitationTmpl.ParseFS(Templates, "templates/customer/invitation.html"))

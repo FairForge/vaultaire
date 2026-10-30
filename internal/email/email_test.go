@@ -128,7 +128,8 @@ func TestResendSender_APIError(t *testing.T) {
 }
 
 func TestSMTPSender_BuildMessage(t *testing.T) {
-	msg := buildMIMEMessage("noreply@stored.ge", "user@example.com", "Test Subject", "<h1>Hi</h1>", "Hi")
+	msg, err := buildMIMEMessage("noreply@stored.ge", "user@example.com", "Test Subject", "<h1>Hi</h1>", "Hi")
+	require.NoError(t, err)
 	s := string(msg)
 
 	assert.Contains(t, s, "From: noreply@stored.ge")
@@ -244,4 +245,29 @@ func newTestRateLimiter() *rateLimiter {
 		limit:    10,
 		interval: time.Minute,
 	}
+}
+
+// RP84-3 (a): a header value carrying CR or LF is refused by every sender,
+// never written into the message (a tenant's name in an invitation's
+// subject added headers to a DKIM-signed mail); a non-ASCII subject is
+// RFC 2047-encoded.
+func TestEmail_HeaderValuesRefuseCRLF(t *testing.T) {
+	for _, c := range []struct{ from, to, subject string }{
+		{"noreply@stored.ge\r\nBcc: x@evil.example", "user@example.com", "Hi"},
+		{"noreply@stored.ge", "user@example.com\nBcc: x@evil.example", "Hi"},
+		{"noreply@stored.ge", "user@example.com", "You are invited to Acme\r\nReply-To: x@evil.example"},
+		{"noreply@stored.ge", "user@example.com", "a\rb"},
+	} {
+		_, err := buildMIMEMessage(c.from, c.to, c.subject, "<p>x</p>", "x")
+		assert.ErrorIs(t, err, ErrHeaderValue, "%q / %q / %q", c.from, c.to, c.subject)
+		_, err = resendBody(c.from, c.to, c.subject, "<p>x</p>", "x")
+		assert.ErrorIs(t, err, ErrHeaderValue, "resend: %q / %q / %q", c.from, c.to, c.subject)
+	}
+
+	msg, err := buildMIMEMessage("noreply@stored.ge", "user@example.com", "Invité à Café", "<p>x</p>", "x")
+	require.NoError(t, err)
+	assert.Contains(t, string(msg), "Subject: =?utf-8?q?Invit=C3=A9_=C3=A0_Caf=C3=A9?=\r\n")
+	msg, err = buildMIMEMessage("noreply@stored.ge", "user@example.com", "Plain subject", "<p>x</p>", "x")
+	require.NoError(t, err)
+	assert.Contains(t, string(msg), "Subject: Plain subject\r\n", "an ASCII subject is written as is")
 }

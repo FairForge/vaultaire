@@ -4,6 +4,12 @@
     <h1>Tenants</h1>
     <form method="GET" action="/admin/tenants" class="search-form">
         <input type="text" name="q" value="{{.SearchQuery}}" placeholder="Search by name or email..." class="search-input">
+        <select name="kind" aria-label="Kind of tenant">
+            <option value="live" {{if eq .TenantKind "live"}}selected{{end}}>customers</option>
+            <option value="child" {{if eq .TenantKind "child"}}selected{{end}}>platform children</option>
+            <option value="sandbox" {{if eq .TenantKind "sandbox"}}selected{{end}}>sandboxes</option>
+            <option value="all" {{if eq .TenantKind "all"}}selected{{end}}>all</option>
+        </select>
         <button type="submit" class="btn btn-sm">Search</button>
     </form>
 </div>

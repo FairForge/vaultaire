@@ -341,9 +341,14 @@ Conventions (Stripe-style):
 - single object: `{"object":"bucket", …, "request_id":"…"}`
 - list: `{"object":"list","data":[…],"has_more":bool,"next_cursor":"…"}` with `?limit=&starting_after=`
 - error: `{"error":{"type":"invalid_request_error|authentication_error|permission_error|not_found_error|conflict_error|rate_limit_error|gone_error|unavailable_error|api_error","code":"…","message":"…","param":"…","request_id":"…"}}`
-- `Idempotency-Key` on PUT/POST/DELETE: the 2xx response is cached 24 h and
-  replayed with `Idempotency-Replayed: true`; reusing a key on a different
-  method/path is 409 `idempotency_key_reuse`
+- `Idempotency-Key` on PUT/POST/DELETE: the 2xx response is cached 24 h, per
+  member of the account (one member's key never replays another's answer),
+  and replayed with `Idempotent-Replayed: true` (and the older
+  `Idempotency-Replayed: true`); reusing a key on a different
+  method/path is 409 `idempotency_key_reuse`. **A replay never carries a
+  secret:** a retried key create or rotate, STS mint or webhook secret is
+  answered with the secret blanked and `"secret_redacted": true` — revoke that
+  key and create another
 - webhooks are signed `X-Webhook-Signature: t=<unix>,v1=<hex>`
   with the `whsec_` secret shown once at creation (and by
   `POST /webhooks/{id}/rotate-secret`, which replaces it at once — retries of
@@ -532,13 +537,15 @@ A write the role does not allow is 403 `role_forbidden`. A JWT whose user is no 
 | Route | Role | What |
 |---|---|---|
 | `GET /api/v1/manage/members` | any | The members (`user_id`, `email`, `role`, `invited_by`, `accepted_at`) and the pending `invitations` |
-| `POST /api/v1/manage/members` `{email, role}` | admin | Invite an address (`admin`, `developer` or `viewer`): it receives a link that works **once** and expires after **7 days**. 409 `already_a_member`; 400 `invalid_role` |
+| `POST /api/v1/manage/members` `{email, role}` | admin | Invite an address (`admin`, `developer` or `viewer`): it receives a link that works **once** and expires after **7 days**. Inviting an address again **replaces** its pending invitation (the first link stops working): that is the resend. An account holds at most **20 pending invitations** and sends at most **50 invitation e-mails a day** (429 `invitation_rate_limited`). 409 `already_a_member`; 400 `invalid_role` |
 | `PATCH /api/v1/manage/members/{user_id}` `{role}` | admin | Change a member's role. 409 `owner_is_permanent` for the owner |
-| `DELETE /api/v1/manage/members/{user_id}` | admin | Remove a member: its membership only — never its sign-in, never a bucket. 409 `owner_is_permanent` |
+| `DELETE /api/v1/manage/members/{user_id}` `{revoke_keys?}` | admin | Remove a member: its membership only — never its sign-in, never a bucket. The answer names the S3 keys the member made (`keys_made: [{id, name, last_used}]`): they are the account's and **stay live** unless the body says `"revoke_keys": true`, which revokes them and their temporary credentials in the same step (`keys_revoked: true`). 409 `owner_is_permanent` |
 | `DELETE /api/v1/manage/invitations/{id}` | admin | Revoke a pending invitation |
-| `POST /api/v1/manage/invitations/{token}/accept` | any signed-in user | Accept an invitation sent to the token's address (403 `invitation_other_address` for another one). 410 `invitation_expired` / `invitation_used` |
+| `POST /api/v1/manage/invitations/{token}/accept` | any signed-in user | Accept an invitation sent to the token's address (403 `invitation_other_address` for another one); the answer's `role` is the one the person has. 410 `invitation_expired` / `invitation_used` |
 
 **The link.** An invitation is e-mailed as `https://<host>/auth/invitations/<token>`. Only the token's SHA-256 is stored. An address without an account chooses a password on that page and becomes a member — a sign-in with no account of its own; an address that has an account signs in and accepts from the dashboard. Accepting is open while public sign-ups are closed: it adds a person to an account that exists.
+
+**A sign-in on no account.** A person who is a member of no account (an invitee removed again) signs in to a JWT on no account: it has no role, and every route above but the accept is 403 `not_a_member`.
 
 **Several accounts.** A person may be a member of several accounts. `POST /auth/login` answers `tenants: [{id, role, name}]` and takes an optional `tenant_id` (default: the account the person owns, else the first joined; 403 `not_a_member` for one they are not in). The JWT is for that one account — its `tenant_id` and `role` claims — and every management route acts on it alone; signing in again with another `tenant_id` switches. The dashboard's switcher (Members page) does the same for the session.
 

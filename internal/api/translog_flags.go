@@ -96,6 +96,9 @@ func flagWriteError(w http.ResponseWriter, err error) bool {
 		writeJSON(w, http.StatusConflict, map[string]any{"error": pre.Code, "count": pre.Count, "message": pre.Error()})
 	case errors.Is(err, flags.ErrNotExemptible):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "flag_not_exemptible"})
+	case errors.Is(err, flags.ErrOnlyTightens):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "flag_only_tightens",
+			"message": "this flag is on up the account tree: a child may tighten it, never turn it off"})
 	case errors.Is(err, flags.ErrGlobalOnly):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "flag_global_only"})
 	case errors.Is(err, adminread.ErrNoSuchTenant):

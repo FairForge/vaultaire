@@ -79,6 +79,10 @@ type LogSender struct {
 }
 
 func (s *LogSender) Send(_ context.Context, to, subject, htmlBody, textBody string) error {
+	// The same guard as the real senders: a dev box refuses what prod would.
+	if err := checkHeaderValues(to, subject); err != nil {
+		return err
+	}
 	if err := s.rl.check(to); err != nil {
 		return err
 	}

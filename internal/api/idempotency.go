@@ -19,8 +19,11 @@ import (
 const (
 	idempotencyKeyHeader    = "Idempotency-Key"
 	idempotencyReplayHeader = "Idempotency-Replayed"
-	idempotencyKeyMaxLen    = 256
-	idempotencyTTL          = 24 * time.Hour
+	// idempotentReplayedHeader is Stripe's name for the same marker (RP85-2);
+	// both are sent on every replay.
+	idempotentReplayedHeader = "Idempotent-Replayed"
+	idempotencyKeyMaxLen     = 256
+	idempotencyTTL           = 24 * time.Hour
 )
 
 type idempotencyMiddleware struct {
@@ -96,6 +99,14 @@ func (im *idempotencyMiddleware) Middleware(next http.Handler) http.Handler {
 		if tenantID == "" {
 			next.ServeHTTP(w, r)
 			return
+		}
+		// The key is the ACTING member's (RP85-1): this middleware runs
+		// before each route's role check, so a key shared by two members of
+		// one tenant replayed one's answer to the other — a viewer got a
+		// developer's presigned PUT. Stored as <user id>:<key>, no schema
+		// change; a request with no user (none today) keeps the bare key.
+		if actor, _ := r.Context().Value(userIDKey).(string); actor != "" {
+			key = actor + ":" + key
 		}
 
 		// The request's identity: method, path and body.
@@ -265,7 +276,9 @@ func (im *idempotencyMiddleware) release(tenantID, key, hash string) {
 }
 
 // redactIdempotentBody blanks every secret field of a JSON answer, at any
-// depth; an answer that had one also says "idempotent_replay": true. A body
+// depth; an answer that had one also says "idempotent_replay": true and
+// "secret_redacted": true (RP85-2: a client retrying a timed-out create got
+// a key whose secret it never saw, and could not tell why). A body
 // that is not a JSON object or array is stored as it is (no route behind
 // this middleware answers a secret outside JSON).
 func redactIdempotentBody(body []byte) []byte {
@@ -278,10 +291,11 @@ func redactIdempotentBody(body []byte) []byte {
 	}
 	if obj, ok := v.(map[string]any); ok {
 		obj["idempotent_replay"] = true
+		obj["secret_redacted"] = true
 	}
 	out, err := json.Marshal(v)
 	if err != nil {
-		return []byte(`{"idempotent_replay":true}`)
+		return []byte(`{"idempotent_replay":true,"secret_redacted":true}`)
 	}
 	return out
 }
@@ -328,6 +342,7 @@ func (im *idempotencyMiddleware) replayResponse(w http.ResponseWriter, cached *c
 		}
 	}
 	w.Header().Set(idempotencyReplayHeader, "true")
+	w.Header().Set(idempotentReplayedHeader, "true")
 	w.WriteHeader(cached.Status)
 	_, _ = w.Write(cached.Body)
 }

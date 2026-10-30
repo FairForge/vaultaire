@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"time"
@@ -43,6 +44,20 @@ func HandleMembers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http
 		}
 		data["Members"] = members
 		data["Invitations"] = invs
+		// The keys each member made (RP84-4): the removal's confirmation
+		// lists them, with the revoke box ticked.
+		made := map[string][]auth.MadeKey{}
+		if auth.Can(auth.Role(sd.MemberRole), auth.ActionMemberManage) {
+			for _, m := range members {
+				if m.Role == auth.RoleOwner {
+					continue
+				}
+				if keys, err := auth.KeysMadeBy(r.Context(), db, sd.TenantID, m.UserID); err == nil && len(keys) > 0 {
+					made[m.UserID] = keys
+				}
+			}
+		}
+		data["KeysMade"] = made
 		data["Now"] = time.Now()
 		// The switcher (PR C): the other tenants this user may act on.
 		data["Accounts"] = []auth.Membership{}
@@ -71,14 +86,14 @@ func HandleInviteMember(db *sql.DB, sender email.Sender, baseURL string, logger 
 		switch {
 		case errors.Is(err, auth.ErrAlreadyMember):
 			middleware.SetFlash(w, "error", "That address is already a member.")
+		case errors.Is(err, auth.ErrInvitationRateLimited):
+			middleware.SetFlash(w, "error", "Too many invitations: an account holds at most 20 pending invitations and sends at most 50 a day. Revoke one, or try tomorrow.")
 		case err != nil && err.Error() == "invalid email address":
 			middleware.SetFlash(w, "error", "Enter an e-mail address.")
 		case err != nil:
 			logger.Error("dashboard: invite member", zap.Error(err))
 			middleware.SetFlash(w, "error", "The invitation could not be made. Try again.")
 		default:
-			audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Action: "member.invited", Resource: "invitation:" + inv.ID,
-				Metadata: map[string]any{"email": inv.Email, "role": string(inv.Role), "via": "dashboard"}})
 			var account string
 			_ = db.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), email) FROM tenants WHERE id = $1`, sd.TenantID).Scan(&account)
 			html, text, rerr := email.RenderInvitation(baseURL, token, inv.Email, account, sd.Email, string(inv.Role))
@@ -130,19 +145,35 @@ func HandleSetMemberRole(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 }
 
 // HandleRemoveMember removes a member's row (never a user, never a tenant).
-func HandleRemoveMember(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// The form's revoke_keys box (ticked by default on the page, which lists
+// the keys the member made) revokes those keys in the same transaction
+// (RP84-4); unticked, they stay the tenant's and live.
+func HandleRemoveMember(db *sql.DB, keys *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		target := chi.URLParam(r, "user")
-		if err := auth.RemoveMember(r.Context(), db, sd.TenantID, target); err != nil {
+		revoke := r.FormValue("revoke_keys") == "1"
+		res, err := auth.RemoveMember(r.Context(), db, sd.TenantID, target, revoke)
+		if err != nil {
 			if !errors.Is(err, auth.ErrOwnerMember) && !errors.Is(err, auth.ErrNotMember) {
 				logger.Error("dashboard: remove member", zap.Error(err))
 			}
 			middleware.SetFlash(w, "error", memberFlash(err))
 		} else {
+			if res.KeysRevoked && keys != nil {
+				keys.ForgetRevokedKeys(sd.TenantID, res.KeysMade)
+			}
 			audit.Record(r.Context(), db, audit.Entry{UserID: target, TenantID: sd.TenantID, Action: "member.removed",
-				Resource: "user:" + target, Severity: "warning", Metadata: map[string]any{"via": "dashboard"}})
-			middleware.SetFlash(w, "success", "Member removed.")
+				Resource: "user:" + target, Severity: "warning",
+				Metadata: map[string]any{"via": "dashboard", "keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})
+			switch {
+			case res.KeysRevoked:
+				middleware.SetFlash(w, "success", fmt.Sprintf("Member removed, and the %d keys they made revoked.", len(res.KeysMade)))
+			case len(res.KeysMade) > 0:
+				middleware.SetFlash(w, "success", fmt.Sprintf("Member removed. The %d keys they made are still live: revoke them on the API keys page if they should stop.", len(res.KeysMade)))
+			default:
+				middleware.SetFlash(w, "success", "Member removed.")
+			}
 		}
 		http.Redirect(w, r, "/dashboard/members", http.StatusSeeOther)
 	}

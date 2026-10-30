@@ -66,30 +66,51 @@ type APIKey struct {
 	LastIP      string            `json:"last_ip,omitempty" db:"last_ip"`
 }
 
+// ErrNoTenant refuses a key for no tenant (RP84-2): the generators never
+// fall back to a cached tenant of the user — a sign-in on no tenant is no
+// owner of anything.
+var ErrNoTenant = errors.New("a key is made for a tenant: none given")
+
 // GenerateAPIKey creates a new API key of the user's own tenant.
 // opts may be nil for full-access keys.
 func (a *AuthService) GenerateAPIKey(ctx context.Context, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
-	return a.GenerateAPIKeyForTenant(ctx, "", userID, name, opts)
+	tenantID, err := a.ownTenantOf(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("generate api key: %w", err)
+	}
+	return a.GenerateAPIKeyForTenant(ctx, tenantID, userID, name, opts)
+}
+
+// ownTenantOf is the tenant the user registered (its row, as read): "" for
+// a sign-in with no tenant of its own, which the generators refuse.
+func (a *AuthService) ownTenantOf(ctx context.Context, userID string) (string, error) {
+	cached, err := a.userByID(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	if cached == nil {
+		return "", fmt.Errorf("user not found")
+	}
+	a.cacheMu.RLock()
+	defer a.cacheMu.RUnlock()
+	return cached.TenantID, nil
 }
 
 // GenerateAPIKeyForTenant creates a new API key of tenantID made by userID
 // — a member of it acting on its ACTIVE tenant (WP-TEAM-1; the caller has
-// checked the member's role). "" = the user's own tenant. The row's
-// user_id is the member who made it; the key is the tenant's.
+// checked the member's role). "" is refused (ErrNoTenant, RP84-2: it used
+// to fall back to the user's cached tenant). The row's user_id is the
+// member who made it; the key is the tenant's.
 func (a *AuthService) GenerateAPIKeyForTenant(ctx context.Context, tenantID, userID, name string, opts *KeyCreateOptions) (*APIKey, error) {
+	if tenantID == "" {
+		return nil, ErrNoTenant
+	}
 	cached, err := a.userByID(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("generate api key: %w", err)
 	}
 	if cached == nil {
 		return nil, fmt.Errorf("user not found")
-	}
-	a.cacheMu.RLock()
-	snapshot := *cached
-	a.cacheMu.RUnlock()
-	user := &snapshot
-	if tenantID == "" {
-		tenantID = user.TenantID
 	}
 	// The scope is checked here, once, for every entry point (WP-R5-12):
 	// unknown permissions, allowlist entries that are not an address or a

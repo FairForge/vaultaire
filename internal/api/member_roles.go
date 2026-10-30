@@ -15,13 +15,12 @@ import (
 // (TestManagementRoutes_EveryWriteNamesItsAction walks the router).
 
 // memberRole is the acting member's role ("" = no member of the tenant). A
-// request that reached a handler without requireJWT (a test mounting the
-// handler by hand) is the owner: the role default of an un-migrated flow.
+// request that reached a handler without requireJWT has no role (RP84-2:
+// the owner default was the API's half of a tenant-less sign-in acting as
+// an owner); a test mounting a handler by hand sets the role it means.
 func memberRole(ctx context.Context) auth.Role {
-	if r, ok := ctx.Value(roleKey).(auth.Role); ok {
-		return r
-	}
-	return auth.RoleOwner
+	r, _ := ctx.Value(roleKey).(auth.Role)
+	return r
 }
 
 // activeTenant is the tenant the request acts on: the JWT's (WP-TEAM-1 —

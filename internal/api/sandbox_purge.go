@@ -161,9 +161,12 @@ func purgeSandbox(ctx context.Context, db *sql.DB, eng engine.Engine, sandboxID 
 		n, _ := out.RowsAffected()
 		res.BucketsDeleted = int(n)
 	}
-	// The sandbox's counter is what remains (its own cap, never a bill).
-	if _, err := db.ExecContext(ctx, `UPDATE tenant_quotas SET storage_used_bytes =
-		(SELECT COALESCE(SUM(size_bytes), 0) FROM object_head_cache WHERE tenant_id = $1), updated_at = NOW()
+	// The sandbox's counter is what remains (its own cap, never a bill). A
+	// sandbox is its own pool's root: its pool counter moves with it (RP82-3).
+	if _, err := db.ExecContext(ctx, `UPDATE tenant_quotas SET
+		storage_used_bytes = (SELECT COALESCE(SUM(size_bytes), 0) FROM object_head_cache WHERE tenant_id = $1),
+		pool_used_bytes = pool_used_bytes - storage_used_bytes + (SELECT COALESCE(SUM(size_bytes), 0) FROM object_head_cache WHERE tenant_id = $1),
+		updated_at = NOW()
 		WHERE tenant_id = $1`, sandboxID); err != nil {
 		return res, fmt.Errorf("purge %s: counter: %w", sandboxID, err)
 	}

@@ -100,3 +100,29 @@ func TestCan_TheActionTable(t *testing.T) {
 	assert.False(t, Can("", ActionRead), "no role, no action")
 	assert.False(t, Can("superuser", ActionRead))
 }
+
+// RP84-3: the registration's company becomes tenants.name, which the
+// invitation's subject carries; control characters (CR/LF above all) are
+// stripped before either row is written.
+func TestRegister_TenantNameHasNoControlCharacters(t *testing.T) {
+	db := setupTestDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	email := "ctl-name-" + uuid.NewString()[:8] + "@stored.ge"
+	svc := NewAuthService(nil, db)
+
+	user, tenant, _, err := svc.CreateUserWithTenant(context.Background(), email, "correct horse battery",
+		"Acme\r\nReply-To: x@evil.example\tInc\x00\x7f")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM tenant_members WHERE tenant_id = $1`, tenant.ID)
+		_, _ = db.Exec(`DELETE FROM api_keys WHERE tenant_id = $1`, tenant.ID)
+		_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, tenant.ID)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, tenant.ID)
+		_, _ = db.Exec(`DELETE FROM users WHERE id = $1`, user.ID)
+	})
+	var name, company string
+	require.NoError(t, db.QueryRow(`SELECT t.name, u.company FROM tenants t JOIN users u ON u.email = t.email WHERE t.id = $1`,
+		tenant.ID).Scan(&name, &company))
+	assert.Equal(t, "AcmeReply-To: x@evil.example Inc", name, "control characters stripped, a tab made a space")
+	assert.Equal(t, name, company)
+}

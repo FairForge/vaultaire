@@ -29,8 +29,10 @@ func HandleAdminOverview(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 		data["MonthlyRevenue"] = "$0.00"
 
 		if db != nil {
+			kind := tenantKindOf(r)
+			data["TenantKind"] = string(kind)
 			data["TenantCount"], data["TotalStorageFmt"],
-				data["ActiveSubCount"], data["MonthlyRevenue"] = queryAdminStats(r.Context(), db, logger)
+				data["ActiveSubCount"], data["MonthlyRevenue"] = queryAdminStats(r.Context(), db, kind, logger)
 			data["RecentUsers"] = queryRecentUsers(r.Context(), db, logger)
 		}
 
@@ -49,14 +51,15 @@ type recentUser struct {
 	RegisteredFmt string
 }
 
-func queryAdminStats(ctx context.Context, db *sql.DB, logger *zap.Logger) (int, string, int, string) {
+func queryAdminStats(ctx context.Context, db *sql.DB, kind tenantKind, logger *zap.Logger) (int, string, int, string) {
 	var tenantCount int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&tenantCount); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants t WHERE `+tenantKindWhere1, string(kind)).Scan(&tenantCount); err != nil {
 		logger.Debug("admin: count tenants", zap.Error(err))
 	}
 
 	var totalBytes int64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(storage_used_bytes), 0) FROM tenant_quotas`).Scan(&totalBytes); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(q.storage_used_bytes), 0) FROM tenant_quotas q
+		JOIN tenants t ON t.id = q.tenant_id WHERE `+tenantKindWhere1, string(kind)).Scan(&totalBytes); err != nil {
 		logger.Debug("admin: sum storage", zap.Error(err))
 	}
 

@@ -103,6 +103,8 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(dataPlaneAdmits, dataPlaneBytes, edgeAdmitReaperTotal)
 		if s.db != nil {
 			reg.MustRegister(newDataPlaneHostsCollector(s.db, s.log()))
+			// The pool counter's drift (RP82-3).
+			reg.MustRegister(newPoolDriftCollector(s.db, s.log()))
 		}
 		// The edge codec (WP-EDGE-2 Part A): chunks by outcome, bytes by
 		// kind, index calls.

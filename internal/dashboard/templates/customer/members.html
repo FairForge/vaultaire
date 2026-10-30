@@ -53,6 +53,10 @@
                     </form>
                     <form method="post" action="/dashboard/members/{{.UserID}}/remove" style="display:inline">
                         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        {{with index $.KeysMade .UserID}}
+                        <span class="text-muted">Keys they made:{{range .}} {{.Name}}{{end}}.</span>
+                        <label><input type="checkbox" name="revoke_keys" value="1" checked> revoke them</label>
+                        {{end}}
                         <button class="btn btn-sm btn-danger" type="submit">Remove</button>
                     </form>
                 {{end}}</td>{{end}}

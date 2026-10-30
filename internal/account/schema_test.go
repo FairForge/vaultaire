@@ -55,6 +55,31 @@ func TestErasedTablesCoverSchema(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	assert.Empty(t, missing, "tables keyed by tenant/user that no erase rule names — add them to Deleted or Kept in erase.go")
+
+	// A table with a tenant_id column has a TENANT rule (RP84-1): a rule by
+	// its user alone erased api_keys by the member who made a key, never
+	// with the tenant the key is.
+	byTenant := map[string]bool{}
+	for _, r := range append(append([]Rule{}, Deleted...), Kept...) {
+		if r.Key == ByTenant || r.Key == ByAccount {
+			byTenant[r.Table] = true
+		}
+	}
+	trows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT table_name FROM information_schema.columns
+		 WHERE table_schema = 'public' AND column_name = 'tenant_id' ORDER BY table_name`)
+	require.NoError(t, err)
+	defer func() { _ = trows.Close() }()
+	var noTenantRule []string
+	for trows.Next() {
+		var table string
+		require.NoError(t, trows.Scan(&table))
+		if !byTenant[table] {
+			noTenantRule = append(noTenantRule, table)
+		}
+	}
+	require.NoError(t, trows.Err())
+	assert.Empty(t, noTenantRule, "tables with a tenant_id column and no ByTenant rule in erase.go")
 	assert.Greater(t, len(seen), 50, "the walk saw the schema")
 
 	// Tables with no tenant/user column are not in the walk and need no
