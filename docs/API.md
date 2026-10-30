@@ -61,7 +61,7 @@ Account owners can also mint them without an SDK: `GET /api/v1/user/presigned`
 
 ```
 POST /auth/register  {"email","password","company"} -> {"token","tenant_id","access_key","secret_key"}
-POST /auth/login     {"email","password"}           -> {"token","tenant_id"}   (24 h JWT)
+POST /auth/login     {"email","password","code"?,"tenant_id"?} -> {"token","tenant_id","role","tenants"}   (24 h JWT)
 POST /auth/password-reset {"email"};  POST /auth/password-reset/complete {"token","new_password"}
 Authorization: Bearer <token>
 ```
@@ -515,6 +515,34 @@ Every call is a Bearer JWT of the platform, in its request log, rate limited and
 **Suspension and erasure.** A suspended platform's children answer 403 `AccountSuspended`. When a platform's account is erased, its children are erased first (objects, keys and rows), then the platform. A platform cannot be turned off while it has children.
 
 **Operator:** `PUT /api/v1/admin/tenants/{id}/platform` `{"platform": true|false}` (admin JWT; audited `admin.platform_granted` / `admin.platform_revoked`).
+
+## Members
+
+An account can have several **members**: people who sign in with their own e-mail and password (and their own MFA) and act on the account's buckets and keys, each with a **role**. A team is one shared account with members. Nothing about the account's data changes: S3 keys stay the account's, and the bytes and the bill are the same whoever made them.
+
+| Role | May |
+|---|---|
+| `viewer` | read: buckets, objects' listings, keys (never a secret), usage, the request log, the members |
+| `developer` | also make and revoke keys and temporary credentials, manage webhooks, make, change and delete buckets, reset the test-mode sandbox, and — on a platform — mint and revoke a child's keys and temporary credentials |
+| `admin` | also invite, change the role of and remove members (never the owner), and make or erase a platform's children |
+| `owner` | everything: also delete the account, export it, and change billing. One per account: the person who registered it. The owner cannot be removed or given another role |
+
+A write the role does not allow is 403 `role_forbidden`. A JWT whose user is no longer a member of its account is 403 `not_a_member` on every route of `/api/v1/manage`, `/api/v1/platform`, `/api/v1/user`, `/api/v1/webhooks`, `/api/v1/events` and `/api/v1/sts`: the role is read on every request, never from the token alone.
+
+| Route | Role | What |
+|---|---|---|
+| `GET /api/v1/manage/members` | any | The members (`user_id`, `email`, `role`, `invited_by`, `accepted_at`) and the pending `invitations` |
+| `POST /api/v1/manage/members` `{email, role}` | admin | Invite an address (`admin`, `developer` or `viewer`): it receives a link that works **once** and expires after **7 days**. 409 `already_a_member`; 400 `invalid_role` |
+| `PATCH /api/v1/manage/members/{user_id}` `{role}` | admin | Change a member's role. 409 `owner_is_permanent` for the owner |
+| `DELETE /api/v1/manage/members/{user_id}` | admin | Remove a member: its membership only — never its sign-in, never a bucket. 409 `owner_is_permanent` |
+| `DELETE /api/v1/manage/invitations/{id}` | admin | Revoke a pending invitation |
+| `POST /api/v1/manage/invitations/{token}/accept` | any signed-in user | Accept an invitation sent to the token's address (403 `invitation_other_address` for another one). 410 `invitation_expired` / `invitation_used` |
+
+**The link.** An invitation is e-mailed as `https://<host>/auth/invitations/<token>`. Only the token's SHA-256 is stored. An address without an account chooses a password on that page and becomes a member — a sign-in with no account of its own; an address that has an account signs in and accepts from the dashboard. Accepting is open while public sign-ups are closed: it adds a person to an account that exists.
+
+**Several accounts.** A person may be a member of several accounts. `POST /auth/login` answers `tenants: [{id, role, name}]` and takes an optional `tenant_id` (default: the account the person owns, else the first joined; 403 `not_a_member` for one they are not in). The JWT is for that one account — its `tenant_id` and `role` claims — and every management route acts on it alone; signing in again with another `tenant_id` switches. The dashboard's switcher (Members page) does the same for the session.
+
+Every change is in the audit trail (`member.invited`, `member.joined`, `member.role_changed`, `member.removed`, `member.invitation_revoked`), and every audit row of a tenant surface (the management, platform, user, webhook and STS APIs) and the dashboard names the member who acted and the account acted on.
 
 ## Rate limits
 

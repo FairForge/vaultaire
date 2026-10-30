@@ -667,6 +667,102 @@ Prod: PR 0 first. PRs A–C deploy with the backfill: every existing user is its
 
 Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accepted an invitation and reads its buckets read-only, and the audit page names both; Prompt 53 (WP-ACCT-1) written here.
 
+## Stage 1a Prompt 53: WP-ACCT-1 — the account tree: `pool_root_id`, `child_kind`, caps inside the pool, residency (Part 0: RP84's findings)
+
+**From 52 (`docs/reviews/WP-STRIPE-4.md`; the post-merge review is RP84):**
+- **Members and roles are live and change nothing until an invitation is sent** (migration 118). The pieces:
+  - `tenant_members` (owner / admin / developer / viewer; the backfill made every user its tenant's owner) and `tenant_invitations` (`kind member|family`, only the token's SHA-256, single use, 7 days);
+  - `auth.Can(role, action)` is the one rule. `requireJWT` reads the role from the row on every request (the JWT's claim is the client's). `requireMember` + `requireRole(action)` sit on every write of `/api/v1/manage`, `/platform`, `/user`, `/webhooks`, `/sts`, and `dashboardAction` on every `/dashboard` write;
+  - **the active tenant:** `POST /auth/login` answers `tenants` and takes `tenant_id`; the dashboard's switcher is on the Members page. **Keys are the tenant's** (list, revoke, rotate, expiry, the STS parent and the cap by tenant; `notChildKeySQL` is gone);
+  - `requireMember` stamps the active tenant on the audit rows (`audit.WithTenant`).
+- **Part 0 of 52:**
+  - the pool's egress (D-STRIPE-31) goes through `usage.PoolRoot`: the root's allowance, the pool's month, the meter keyed by the root, the rows per tenant;
+  - floors are pooled like the total: a child has counting floor rows, the check is the owner's floor limit against the pool's sum, and the lock order is owner total → child total → owner floor → child floor.
+- **What WP-ACCT-1 inherits from 52:**
+  - **ONE resolver to swap:** `usage.PoolRoot` (egress) and `lockPoolOwner` / `poolUsed` / `lockPoolFloor` / `poolFloorUsed` (quota, floors) all read `COALESCE(parent_tenant_id, id)`. `pool_root_id` replaces that expression in these functions and nowhere else.
+  - **RB10-1:** a member with no tenant of its own cannot leave or erase its sign-in. Decide self-leave (`DELETE /api/v1/manage/members/{self}` for any member but the owner) and the erasure of a tenant-less sign-in (its memberships, then the user, no tenant step).
+  - **The `sponsored` edge reuses invitations** (`tenant_invitations.kind = 'family'`, WP-FAMILY-1). Accepting one must ATTACH a person's own tenant as a sponsored child; it is never a member row. Leave `kind` alone here.
+
+**Part 0 (in this order):** RP84's findings — **the review session writes them here**, as RP82 did for Prompt 52. Then RP82's three for this WP:
+- **RP82-3 (P3):** a denormalised `pool_used_bytes` on the root row, moved in the member's statement. The reconcile checks it equals the sum; a mismatch is a metric (`vaultaire_pool_used_drift_bytes`), never a silent fix.
+- **RP82-4 (P3):** flag inheritance, decided once in the flags service. Privacy and safety flags (`standard_sealed_default`, any future sealing default) inherit down the tree and may only be tightened. Performance flags inherit as defaults. `TestFlags_ChildInheritsSealingDefault`.
+- **RP82-7 (P4):** every admin total and list gets a kind filter (live / sandbox / child).
+
+Read first:
+- plan § WP-STRIPE (the WP-ACCT-1 row: the contract) and `docs/ACCOUNTS.md` (the edges table, the rules for every edge);
+- `internal/usage/pool.go` + `egress.go` (`PoolRoot`) + `floor.go` + `ledger_tx.go` (the lock order);
+- `internal/auth/platform.go` (`CreateChildTenant`), `internal/api/deletion_runner.go` (stage b5, the cascade), `isTenantSuspended`;
+- the region gate and bucket create (`internal/api/region_gate.go`, `bucket_create.go`), the mirror legs (`blob_copies*.go`), the parity leg (`vault_parity.go`, `VAULT_PARITY_LEGS`);
+- `internal/flags` (per-tenant rows).
+
+Lane: Engine + Developer surface. Migration 120 (119 is the engine lane's Prompt 52E, #1064): `tenants.child_kind` (`managed` / `app` / `sponsored`; today's children backfilled `managed`), `tenants.pool_root_id` (backfilled `COALESCE(parent_tenant_id, id)`, NOT NULL after the backfill), `tenants.residency` (`eu` / `uk` / `us`, NULL = any), `tenant_quotas.pool_used_bytes` (RP82-3), `tenant_quotas.egress_cap_bytes` (a child's egress cap).
+
+PRs:
+- (0) RP84's fixes + RP82-3/4/7;
+- (A) the tree: the columns, `pool_root_id` behind the one resolver, depth 2 only under an `app`, caps inside the pool (a child's `storage_limit_bytes` > 0 and `egress_cap_bytes` are min(cap, pool));
+- (B) residency: set at creation, never changed, inherited and narrowable; enforced at bucket create, on the mirror leg and the parity leg (closes RP76-1); an existing tenant sets it only when every bucket complies;
+- (C) the edges' rules: suspension flows down `managed`/`app` only; stage b5 cascades down `managed`/`app` and DETACHES `sponsored` (no sponsored edge exists yet; the branch and its test come first); RB10-1;
+- (D) docs.
+
+Tests (red first):
+- `TestTree_PoolAtDepthTwo`;
+- `TestTree_ChildCapInsideThePool`;
+- `TestTree_PoolRootIsTheOneResolver` (a structure test: no `COALESCE(parent_tenant_id` outside `usage`);
+- `TestResidency_BucketOutsideRefused`;
+- `TestResidency_MirrorAndParityLegsStayInside`;
+- `TestResidency_ChildNarrowsNeverWidens`;
+- `TestTree_SponsoredNeverSuspendedOrErasedWithTheSponsor`;
+- `TestMembers_ALeaveRemovesTheMembershipOnly`;
+- `TestFlags_ChildInheritsSealingDefault`;
+- `TestPool_UsedCounterEqualsTheSum`.
+
+Prod proof: tenant zero's proof child re-read through `pool_root_id`; an EU child of tenant zero refuses a us-central-1 bucket.
+
+Closeout: `docs/reviews/WP-STRIPE-5.md`, STATUS, the plan row, CLAUDE.md, `docs/API.md` § Platform (caps, residency), the ledger row; Prompt 54 (WP-KEY-1, D-STRIPE-29's management key first) written here. The post-merge review is RP86.
+
+## Stage 1a Prompt 53 — Opus edition
+
+**From 52:** see the chain edition's "From 52" block above.
+
+You are building plan § WP-STRIPE's WP-ACCT-1 row in the Vaultaire repository: the account tree of `docs/ACCOUNTS.md`, built once for every account kind after it. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`. Migration 120.
+
+Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-4.md` and its review `WP-STRIPE-4-REVIEW.md` (RP84).
+
+PR 0 — Branch `stage1a-p53-part0`.
+- **0a (RP84):** the review's findings, in its order, each test first. If RP84 is not on main when you start, STOP and say so: never guess a review.
+- **0b (RP82-3).** Test first: `TestPool_UsedCounterEqualsTheSum` (two children write and delete; the root's `pool_used_bytes` equals the sum of the pool's `storage_used_bytes` after every step). Then:
+  - migration 120 adds `tenant_quotas.pool_used_bytes BIGINT NOT NULL DEFAULT 0`;
+  - `ReserveTx` and `ApplyLedgerTx` move it on the root's row in the statement that moves the member's (the root's row is already locked first);
+  - the pool check reads it instead of `poolUsed`'s SUM;
+  - the reconcile compares it with the sum and exports the difference as `vaultaire_pool_used_drift_bytes{root}`: never a silent rewrite.
+
+  Verify: `go test -race ./internal/usage/ -run 'Pool|Ledger'`.
+- **0c (RP82-4).** Test first: `TestFlags_ChildInheritsSealingDefault` (`standard_sealed_default` ON on a platform → its child reads ON; a child row OFF under a parent ON is refused 409 `flag_only_tightens`). Then `flags.Service.Enabled` walks the tree for flags registered `Inherit` (the sealing default and any flag named privacy/safety in its registration); performance flags inherit as a default the child may override. Verify: `go test -race ./internal/flags/ ./internal/api/ -run 'Flag|Inherit'`.
+- **0d (RP82-7).** Admin totals and lists take `kind=live|sandbox|child` (default live). `TestAdminTenants_KindFilter`.
+
+PR A — the tree. Branch `stage1a-p53-tree`.
+1. Migration 120 (one file with 0b's column): `tenants.child_kind TEXT CHECK (child_kind IN ('managed','app','sponsored'))` (backfill `managed` where `parent_tenant_id IS NOT NULL`); `tenants.pool_root_id VARCHAR(255) REFERENCES tenants(id)` (backfill `COALESCE(parent_tenant_id, id)`; an index); `tenant_quotas.egress_cap_bytes BIGINT NOT NULL DEFAULT 0`. Then `make test-db`, the reapply test, the schema walks.
+2. Test first: `TestTree_PoolRootIsTheOneResolver` (walks the repository: `COALESCE(parent_tenant_id` appears only in `usage.PoolRoot`'s migration-era comment). Then `PoolRoot`, `lockPoolOwner`, `poolUsed`, `lockPoolFloor`, `poolFloorUsed` read `pool_root_id`; `CreateChildTenant` writes it (the parent's root).
+3. Test first: `TestTree_PoolAtDepthTwo` (an `app` child's `managed` child reserves against the root; a `managed` child's child is refused 400 `child_of_child`). Then `CreateChildTenant(…, kind)`: depth 2 only under an `app`.
+4. Test first: `TestTree_ChildCapInsideThePool` (a child capped at 10 KiB in a 1 MiB pool is refused at 10 KiB + 1; its egress cap paces it when the pool has room). Then `ReserveTx` checks min(child cap, pool) and the egress meter's decision checks the child's cap beside the pool's position.
+
+PR B — residency. Branch `stage1a-p53-residency`.
+5. Test first: `TestResidency_BucketOutsideRefused`, `TestResidency_ChildNarrowsNeverWidens`, `TestResidency_MirrorAndParityLegsStayInside`. Then:
+   - `tenants.residency` (the migration: `eu` / `uk` / `us`, NULL = any);
+   - set at creation (`POST /api/v1/platform/tenants {residency}`, registration none), never changed except by an admin while every bucket complies (409 `buckets_outside_residency`);
+   - a bucket create outside it is 400 `InvalidLocationConstraint` (S3) / `region_outside_residency` (management), and the default region is the first inside it;
+   - the mirror leg and the parity leg choose only legs inside it (each driver names its jurisdiction; a leg without one is outside every residency).
+
+PR C — the edges' rules. Branch `stage1a-p53-edges`.
+6. Test first: `TestTree_SponsoredNeverSuspendedOrErasedWithTheSponsor` (a `sponsored` child row made by SQL: the sponsor's suspension leaves it active; the sponsor's erasure DETACHES it — `parent_tenant_id`, `pool_root_id` reset to itself, `child_kind` NULL, its data untouched). Then `isTenantSuspended` and stage b5 branch on `child_kind`.
+7. Test first: `TestMembers_ALeaveRemovesTheMembershipOnly` (a viewer `DELETE /api/v1/manage/members/{self}` → 200, its sign-in and the tenant intact; the owner cannot leave, 409). Then the route allows self-removal for any member but the owner. A sign-in with no tenant and no membership left may be erased: `account.Schedule` on a user with no owned tenant erases the user rows only (`TestAccount_TenantlessSignInErasesTheUserOnly`).
+
+PR D — docs: `docs/reviews/WP-STRIPE-5.md`, STATUS, the plan row DONE, CLAUDE.md (the tree, `pool_root_id`, residency), `docs/API.md` § Platform, the ledger row; Prompt 54 (WP-KEY-1: the management key of D-STRIPE-29 first, then the budgets of F-39) in both editions with Part 0 = RP86. The post-merge review is RP86.
+
+Prod: migration 120 first (additive; `pool_root_id` backfilled before any reader). Then the proof: tenant zero's proof child read through `pool_root_id`, and an EU child of tenant zero refused a us-central-1 bucket.
+
+Done means: PRs 0, A, B, C, D merged; the proof on prod; Prompt 54 written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -679,5 +775,6 @@ Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accept
   - The post-merge review is RP80.
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
 - **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82. **Reviewed by RP82 (2026-10-29, `docs/reviews/WP-STRIPE-3-REVIEW.md`): HOLDS at P2** — RP82-1 a child skips its platform's Standard/Vault floors, RP82-2 a child's downloads have no allowance (= D-STRIPE-31); two P3s for WP-ACCT-1, three P4s.
-- **Prompt 52 — WP-TEAM-1** (members, roles, invitations, several tenants per user) — WRITTEN above by Prompt 51's closeout, both editions. Part 0 = D-STRIPE-31 + RP82-1/2/5 (filled by RP82). Migration 118. The post-merge review is RP84.
-- **53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`); **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
+- **Prompt 52 — WP-TEAM-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-4.md`; migration 118). PRs: #1067 Part 0 (D-STRIPE-31 + RP82-1/2/5), #1068 members and roles, #1069 invitations, #1071 several tenants (the active tenant, keys by tenant, the audit tenant). Prod proof owed (the owner's TOTP and mailbox). The post-merge review is RP84.
+- **Prompt 53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`) — WRITTEN above by Prompt 52's closeout, both editions. Part 0 = RP84 (the review fills it) + RP82-3/4/7. Migration 120 (119 is Prompt 52E's). The post-merge review is RP86.
+- **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
