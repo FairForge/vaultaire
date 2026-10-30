@@ -148,7 +148,7 @@ func mockTenantDetailQueries(mock sqlmock.Sqlmock, tenantID string) {
 	// The egress allowance and the month's egress (usage.EgressStatusFromDB),
 	// each of the tenant's pool root (usage.PoolRoot, D-STRIPE-31).
 	poolRoot := func() {
-		mock.ExpectQuery(`SELECT COALESCE\(parent_tenant_id, id\) FROM tenants`).
+		mock.ExpectQuery(`SELECT pool_root_id FROM tenants`).
 			WithArgs(tenantID).
 			WillReturnRows(sqlmock.NewRows([]string{"root"}).AddRow(tenantID))
 	}

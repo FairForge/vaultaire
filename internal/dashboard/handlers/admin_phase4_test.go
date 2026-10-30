@@ -98,7 +98,7 @@ func TestRevenue_HouseMRRByFloor(t *testing.T) {
 	assert.GreaterOrEqual(t, stdN, 1)
 	assert.GreaterOrEqual(t, vaultN, 2)
 
-	rows := queryTenantList(context.Background(), db, annual, zap.NewNop())
+	rows := queryTenantList(context.Background(), db, annual, tenantKindLive, zap.NewNop())
 	require.Len(t, rows, 1)
 	assert.Equal(t, "6 TB downstairs · 1 TB attic", rows[0].House)
 }
