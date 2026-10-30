@@ -1,6 +1,24 @@
 # Status — the live pointer
 
-Updated: 2026-10-30 03:15 UTC — **Reviews RP84 (Prompt 52, WP-TEAM-1): HOLDS at P2, and RP85 (Prompt 52E, the Stage 1 closeout): HOLDS, nothing above P4.** Files: `docs/reviews/WP-STRIPE-4-REVIEW.md`, `docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`. Every finding is latent on prod (3 owner members, 0 invitations, 0 member-made keys):
+Updated: 2026-10-30 — **Stage 1a Prompt 53 (WP-ACCT-1, the account tree) — DONE, merged and deployed** (prod `9e2a5095`; `docs/reviews/WP-STRIPE-5.md`; migration **120**; next **121**; review **RP86**):
+- **#1085 Part 0:**
+  - RP84-1: a key is erased with its tenant, and a member's own erasure hands the team's keys to its owner.
+  - RP84-2: no role on no tenant.
+  - RP84-3: mail headers refuse CR/LF, and invitations are capped at 20 pending and 50 a day.
+  - RP84-4: a removal names, and can revoke, the member's keys.
+  - RP84-5: one pending invitation per address.
+  - RP85-1/2: idempotency per member, and replay markers.
+  - RP82-3: the pool counter `pool_used_bytes`, with a drift metric and the operator's reseed.
+  - RP82-4: flag inheritance down the tree.
+  - RP82-7: `?kind=` on the admin pages.
+- **#1086 PR A, the tree:** `child_kind`, depth 2 under an `app`, `pool_root_id` the one resolver, caps inside the pool.
+- **#1087 PR B, residency:** `tenants.residency` enforced at bucket create and on the mirror and parity legs.
+- **#1088 PR C, the edges:** suspension and erasure down `managed`/`app` only, a `sponsored` child detaches; RB10-1 self-leave and a tenant-less sign-in's erasure.
+- **Open question for the owner:** `standard_sealed_default` is global only. Should a platform turn sealing on for its own pool?
+- **Prod proof:** the read half is the operator's after the deploy. The EU child's refusal needs the owner's TOTP, and so does WP-TEAM-1's proof, now unblocked.
+- **[OPS]** install `deploy/monitoring/vaultaire-quota.yml` (`PoolUsedDrift`).
+
+Before that: 2026-10-30 03:15 UTC — **Reviews RP84 (Prompt 52, WP-TEAM-1): HOLDS at P2, and RP85 (Prompt 52E, the Stage 1 closeout): HOLDS, nothing above P4.** Files: `docs/reviews/WP-STRIPE-4-REVIEW.md`, `docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`. Every finding is latent on prod (3 owner members, 0 invitations, 0 member-made keys):
 - **RP84-1 (P2):** `api_keys` is erased by its maker, while since PR C the maker is a member. A team's erasure leaves its members' keys live and resolvable; a member's own erasure takes the team's keys. Proven by test.
 - **RP84-2 (P3):** a JWT on no tenant is an owner on the API. It minted an S3 key on tenant `''`, which S3 refuses. The accept route depends on this default.
 - **RP84-3 (P3, a launch gate):** the invitation subject injects headers from the tenant's name, and invitations are uncapped against the shared sending quota.

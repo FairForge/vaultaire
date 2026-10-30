@@ -793,6 +793,108 @@ Prod: migration 120 first (additive; `pool_root_id` backfilled before any reader
 
 Done means: PRs 0, A, B, C, D merged; the proof on prod; Prompt 54 written here.
 
+## Stage 1a Prompt 54: WP-KEY-1 — management keys first, then per-key and per-bucket budgets (Part 0: RP86's findings)
+
+**From 53 (`docs/reviews/WP-STRIPE-5.md`; the post-merge review is RP86):**
+- **The tree is live and dark.** Migration 120:
+  - `tenants.child_kind`, `pool_root_id` (the one resolver is `internal/usage`; `TestTree_PoolRootIsTheOneResolver`) and `residency`;
+  - `tenant_quotas.pool_used_bytes` (moved by `usage.moveUsed`; drift = `vaultaire_pool_used_drift_bytes`) and `egress_cap_bytes`.
+- **A platform reaches its whole tree** through `auth.DescendantT1…3`: a `managed` or `app` child, and an app's `managed` children at depth 2, never a `sponsored` child. Depth 2 is made by the platform (`parent_id` = the app) because **an app child has no credential of its own to call the API with**. That is this WP.
+- **Caps inside the pool exist for a CHILD** (`storage_limit_bytes` > 0, `egress_cap_bytes`, `PATCH /api/v1/platform/tenants/{id}`). WP-KEY-1's budgets are the same leash one level finer, per key and per bucket. They reuse `poolOf.fits` and `egress_member.go`'s per-member bucket rather than inventing a third shape.
+- **Residency is a tenant attribute** (eu/uk/us), copied to a child at creation.
+
+**Part 0:** RP86's findings (the post-merge review of Prompt 53), in the review's order. Also the one open question of WP-STRIPE-5: is `standard_sealed_default` to become per tenant, which would reverse WP-EDGE-4's "tenant row 400"? Apply it only if the owner has decided it by then.
+
+Read first:
+- plan § WP-STRIPE, the WP-KEY-1 row (the contract);
+- D-STRIPE-29 in `docs/reviews/WP-STRIPE-3.md` (the management key: opaque `sk_live_…` / `sk_test_…`, sha256-stored, tied to the tenant, scopes `manage:read` / `manage:write` / `platform` / `apps`, an S3 ceiling for what it mints — RP82-6: its own field, never its bucket scope);
+- `docs/ACCOUNTS.md` (an app's backend and an agent grant are management keys);
+- `internal/api/server.go` `requireJWT`, `member_roles.go`, `auth.CapScope`;
+- `internal/auth/platform_keys.go`, `internal/usage/pool.go` (`fits`), `internal/api/egress_member.go`;
+- `internal/api/edge_ingest.go` (the admit), `internal/api/s3_credential_gate` (Architecture Decision 8: a Bearer is not an AWS scheme, so no gate change).
+
+Lane: Developer surface. Migration 121.
+
+PRs:
+- (0) RP86's fixes;
+- (A) **the management key:**
+  - `management_keys` (tenant, `key_hash`, prefix, scopes, `s3_ceiling` JSONB, `created_by`, `last_used_at`, `revoked_at`, livemode);
+  - `requireCaller` = `requireJWT` or a management key. A key has no member and no role: its scopes are its authority, checked by the same `requireRole` through `auth.Can`'s scope column;
+  - mint / list / revoke on `/api/v1/manage/management-keys` (an admin's), the secret shown once;
+  - the platform routes accept it, and so does a management key **of an app child**, scoped to its subtree (the app's backend makes its users);
+- (B) **budgets (F-39):**
+  - `api_keys.storage_limit_bytes`, `egress_limit_bytes`, `buckets.storage_limit_bytes`, `egress_limit_bytes` (nullable = inherit);
+  - the reservation checks min(key, bucket, tenant, pool), the egress meter the same, and a refusal names the cap (`x-stored-cap: key|bucket|tenant|pool`);
+  - STS narrows only, and the edge admit enforces at presign;
+- (C) the dashboard (the keys page sets caps, the management keys page);
+- (D) docs.
+
+Tests (red first):
+- `TestManagementKey_ShownOnceStoredAsHash`;
+- `TestManagementKey_ScopesAreItsAuthority` (a `manage:read` key is 403 on a write);
+- `TestManagementKey_ReachesThePlatformRoutes`;
+- `TestManagementKey_AnAppsKeyReachesOnlyItsSubtree`;
+- `TestManagementKey_RevokedIsRefusedAtOnce`;
+- `TestManagementKey_CeilingIsItsOwnField` (RP82-6);
+- `TestKeyCap_PutRefusedPastTheKeysStorageCap`;
+- `TestKeyCap_EgressCapPacesThenRefusesAtTheKey`;
+- `TestKeyCap_STSNarrowsNeverWidens`;
+- `TestKeyCap_EdgeAdmitEnforcesIt`;
+- `TestKeyCap_403NamesTheCap`.
+
+Prod proof:
+- tenant zero mints a management key (the owner's TOTP once), and its server-side use makes a child and that child's key with no person in the loop;
+- a scoped key capped at 100 MiB refuses the 101st MiB through stored.ge and through the Worker alike.
+
+Closeout: `docs/reviews/WP-STRIPE-6.md`, STATUS, the plan row, CLAUDE.md, `docs/API.md` § Management keys + § Keys, the ledger row; Prompt 55 (WP-AGENT-1 + WP-APP-1) written here. The post-merge review is RP88.
+
+## Stage 1a Prompt 54 — Opus edition
+
+**From 53:** see the chain edition's "From 53" block above.
+
+You are building plan § WP-STRIPE's WP-KEY-1 row in the Vaultaire repository: first the management key of D-STRIPE-29, then the per-key and per-bucket budgets of F-39. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database, migration 121.
+
+Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-5.md`, and its review (RP86) once it is on main. If RP86 is not on main when you start, STOP and say so: never guess a review.
+
+PR 0 — Branch `stage1a-p54-part0`. RP86's findings in the review's order, each test first.
+
+PR A — the management key. Branch `stage1a-p54-mgmt-key`.
+1. **Migration 121.** One file for the WP, landed with PR A (WP-STRIPE-5's D-STRIPE-43 rule):
+   - `management_keys` (`id`, `tenant_id`, `prefix` (`sk_live_` | `sk_test_`), `key_hash` (sha256 hex, unique), `name`, `scopes text[]`, `s3_ceiling jsonb` (permissions, bucket scope, IP list, longest expiry), `created_by` uuid NULL, `created_at`, `last_used_at`, `revoked_at`);
+   - the four nullable cap columns of PR B on `api_keys` and `buckets`.
+
+   Then the erasure: a ByTenant rule, the schema walk (`TestErasedTablesCoverSchema`, the tenant-rule check) and the export section (never the hash). Verify with `make test-db` and the reapply test.
+2. Test first: `TestManagementKey_ShownOnceStoredAsHash`, `TestManagementKey_RevokedIsRefusedAtOnce`. Then `internal/auth/management_keys.go`: mint (32 random bytes, base62, prefix by the tenant's livemode), lookup by sha256 under `revoked_at IS NULL` on every request (no cache, as the role), revoke, and `last_used_at` coalesced to once a minute.
+3. Test first: `TestManagementKey_ScopesAreItsAuthority`, `TestManagementKey_ReachesThePlatformRoutes`. Then `requireCaller`:
+   - a Bearer that starts with `sk_live_` / `sk_test_` is a management key;
+   - anything else is a JWT, as today;
+   - it puts the tenant, a principal id (`mk:<id>`, for the request log, the audit row's actor and the idempotency key's prefix) and a ROLE derived from its scopes on the context: `manage:write` → developer, `manage:read` → viewer, `platform` → admin on `/api/v1/platform` only, `apps` → see step 4;
+   - `requireMember` passes a management key (it is the tenant's own).
+
+   Mount it on `/api/v1/manage` and `/api/v1/platform`. Leave `/api/v1/user`, the account deletion, the export and billing JWT only: an owner's acts need a person.
+4. Test first: `TestManagementKey_AnAppsKeyReachesOnlyItsSubtree`. A management key of an `app` child (minted by its platform: `POST /api/v1/platform/tenants/{app}/management-keys`) acts on `/api/v1/platform` as the app. Its tree is the app's managed children only (DescendantT with the app as the platform). Depth 2 stays the deepest.
+5. Test first: `TestManagementKey_CeilingIsItsOwnField` (RP82-6). `auth.CapScope` reads the management key's `s3_ceiling`, never a bucket scope of its own.
+
+PR B — budgets. Branch `stage1a-p54-budgets`.
+6. Test first: `TestKeyCap_PutRefusedPastTheKeysStorageCap`, `TestKeyCap_403NamesTheCap`. A key's storage cap counts the bytes the key's writes hold. Use `object_head_cache.written_by_key` if it exists; otherwise this step is a STOP — write it into open questions: a per-key storage count needs a column the migration must add, and the review decides.
+   - The reservation checks min(key, bucket, tenant, pool) through `poolOf.fits` extended with the two caps;
+   - a refusal is 403 `QuotaExceeded` with `x-stored-cap`.
+7. Test first: `TestKeyCap_EgressCapPacesThenRefusesAtTheKey`. Use the per-member bucket of `egress_member.go`, keyed by key id, for an egress cap. F-39 says "pace first", so a key past its cap is paced. Refuse only past 2 × the cap.
+8. Test first: `TestKeyCap_STSNarrowsNeverWidens`, `TestKeyCap_EdgeAdmitEnforcesIt`. An STS token inherits its key's caps and may only lower them. The edge admit runs the same reservation.
+
+PR C — the dashboard: the keys page sets a key's caps, and a management keys page (mint, show once, revoke). Both are behind `dashboardAction`; the router walks stay green.
+
+PR D — docs: `docs/reviews/WP-STRIPE-6.md`, STATUS, the plan row DONE, CLAUDE.md, `docs/API.md` § Management keys + § Keys, the ledger row; Prompt 55 (WP-AGENT-1 + WP-APP-1) in both editions with Part 0 = RP88.
+
+Prod:
+- migration 121 first (additive);
+- then the proof: tenant zero mints a management key (the owner's TOTP once) and, from a shell with no person's token, makes a child and its key; a capped scoped key refuses its 101st MiB through stored.ge and through the Worker.
+
+Done means:
+- PRs 0, A, B, C and D are merged;
+- the proof has run on prod;
+- Prompt 55 is written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -813,5 +915,14 @@ Done means: PRs 0, A, B, C, D merged; the proof on prod; Prompt 54 written here.
   - Two P4s.
   - The Stage 1 closeout (52E) was reviewed as **RP85** (`docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`): HOLDS, two P4s.
   - Prompt 53's Part 0 is filled in both editions. Run the prod proof after it deploys.
-- **Prompt 53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`) — WRITTEN above by Prompt 52's closeout, both editions. Part 0 = RP84-1…5 + RP85-1/2 (filled by the review, 2026-10-30) + RP82-3/4/7. Migration 120 (119 is Prompt 52E's). The post-merge review is RP86.
-- **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
+- **Prompt 53 — WP-ACCT-1 — DONE 2026-10-30** (`docs/reviews/WP-STRIPE-5.md`; migration 120, landed whole with Part 0). PRs:
+  - #1085: Part 0, RP84-1…6 + RP85-1/2 + RP82-3/4/7.
+  - #1086: PR A, the tree.
+  - #1087: PR B, residency.
+  - #1088: PR C, the edges' rules + RB10-1.
+  - PR D: this closeout.
+  - Open question: `standard_sealed_default` is global only (RP82-4's example).
+  - Prod proof: the read half is the operator's; the EU child needs the owner's TOTP.
+  - The post-merge review is RP86.
+- **Prompt 54 — WP-KEY-1** (management keys first, then budgets) — WRITTEN above by Prompt 53's closeout, both editions. Part 0 = RP86. Migration 121. The post-merge review is RP88.
+- **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
