@@ -118,6 +118,7 @@ const (
 	BucketCreateRegionUnavailable                          // region known, no driver on this deployment
 	BucketCreateRegionDown                                 // region enabled here, but down by its probe or breaker (Prompt 10 Part A)
 	BucketCreateReservedName                               // the name is a web path's first segment (Stage 1a Prompt 41 item 5); refused at create only
+	BucketCreateOutsideResidency                           // the region is outside the account's residency (WP-ACCT-1)
 )
 
 // BucketCreateResult is what a BucketCreator decided; Region is the stored region.
@@ -196,6 +197,8 @@ func HandleCreateBucket(tmpl *template.Template, db *sql.DB, create BucketCreato
 			data["CreateError"] = "Region " + drivers.RegionDisplayName(region) + " is temporarily unavailable: its storage is not answering. Try again in a minute, or pick another region."
 		case BucketCreateReservedName:
 			data["CreateError"] = "The name " + name + " is reserved: it is a path of this site. Choose another name."
+		case BucketCreateOutsideResidency:
+			data["CreateError"] = "This account's data stays in one jurisdiction: choose a region inside it."
 		}
 		if _, refused := data["CreateError"]; refused {
 			renderBucketList(w, r, tmpl, db, sd, data, regionUp, logger)

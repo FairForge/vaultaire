@@ -362,12 +362,24 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 
 // Leg is the leg this deployment writes new parity to: the first registered
 // of p.Legs.
-func (p *VaultParity) Leg() (string, engine.Driver, bool) {
+func (p *VaultParity) Leg() (string, engine.Driver, bool) { return p.LegFor("") }
+
+// LegFor is the leg a tenant of residency writes new parity to (WP-ACCT-1,
+// residency.go): the first registered of p.Legs whose jurisdiction is the
+// residency ("" = any leg). A leg whose jurisdiction we do not know (sync,
+// permafrost: legRegion names none) is outside every residency; none
+// inside = no parity copy for that tenant, never one outside.
+func (p *VaultParity) LegFor(residency string) (string, engine.Driver, bool) {
 	legs := p.Legs
 	if len(legs) == 0 {
 		legs = vaultParityLegs
 	}
 	for _, name := range legs {
+		if residency != "" {
+			if r := legRegion(name); r == "" || jurisdiction(r) != residency {
+				continue
+			}
+		}
 		if d, ok := p.eng.GetDriver(name); ok {
 			if engine.IsCleartextTransport(d) && !p.AllowCleartextLegs {
 				continue
@@ -900,7 +912,16 @@ func (t *tolerantWriter) Write(p []byte) (int, error) {
 // the row's state ('complete', 'partial', 'failed', 'skipped', 'gone') and
 // the bytes written.
 func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state string, written int64, err error) {
-	legName, leg, ok := p.Leg()
+	var residency sql.NullString
+	if err := p.db.QueryRowContext(ctx, `SELECT residency FROM tenants WHERE id = $1`, c.tenantID).Scan(&residency); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "skipped", 0, fmt.Errorf("vault parity: read the residency: %w", err)
+	}
+	legName, leg, ok := p.LegFor(residency.String)
+	if !ok && residency.String != "" {
+		// The tenant's bytes stay inside its residency: no leg there, no
+		// parity copy (a note each run), never a copy outside.
+		return "skipped", 0, fmt.Errorf("no parity leg inside the tenant's residency %s", residency.String)
+	}
 	if !ok {
 		return "failed", 0, errors.New("no parity leg registered")
 	}

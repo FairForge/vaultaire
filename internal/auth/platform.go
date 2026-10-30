@@ -58,7 +58,16 @@ var (
 	ErrBadChildKind = errors.New("kind must be managed or app")
 	// ErrBadCap: a cap is a byte count, 0 or more.
 	ErrBadCap = errors.New("a cap is 0 (the pool decides) or a positive number of bytes")
+	// ErrBadResidency: a residency is eu, uk or us.
+	ErrBadResidency = errors.New("residency must be eu, uk or us")
+	// ErrResidencyWidens: a child names a residency other than its parent's
+	// (a child narrows its parent's residency, never widens it).
+	ErrResidencyWidens = errors.New("a child's residency must be its parent's")
 )
+
+// ValidResidency reports whether r is a residency a tenant may hold
+// (tenants.residency, migration 120); "" is none (anywhere).
+func ValidResidency(r string) bool { return r == "eu" || r == "uk" || r == "us" }
 
 // ChildKind is the edge a child hangs off its parent by (tenants.child_kind).
 type ChildKind string
@@ -84,6 +93,10 @@ type ChildOptions struct {
 	Kind     ChildKind // "" = managed
 	ParentID string    // "" = the platform itself
 	Caps     ChildCaps
+	// Residency is where its bytes may be stored at rest (eu | uk | us;
+	// "" = its parent's, or anywhere). A child inherits its parent's
+	// residency and may not name another (WP-ACCT-1).
+	Residency string
 }
 
 // The predicate "tenant t is in the tree under the platform $n" (a child,
@@ -107,6 +120,7 @@ type ChildTenant struct {
 	ExternalID string
 	Kind       ChildKind
 	Caps       ChildCaps
+	Residency  string
 }
 
 // SetChildCaps sets a child's caps inside its pool (0 = the pool decides),
@@ -172,6 +186,8 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 		return nil, ErrBadChildKind
 	case !o.Caps.valid():
 		return nil, ErrBadCap
+	case o.Residency != "" && !ValidResidency(o.Residency):
+		return nil, ErrBadResidency
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -218,19 +234,34 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 		}
 		parent = o.ParentID
 	}
+	// The residency: the parent's, which the child may name but not change
+	// (every residency is one jurisdiction, so narrowing it is keeping it);
+	// a parent with none lets the child choose one.
+	var parentResidency sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT residency FROM tenants WHERE id = $1`, parent).Scan(&parentResidency); err != nil {
+		return nil, fmt.Errorf("create child of %s: read the residency: %w", parent, err)
+	}
+	switch {
+	case parentResidency.String == "":
+	case o.Residency == "":
+		o.Residency = parentResidency.String
+	case o.Residency != parentResidency.String:
+		return nil, ErrResidencyWidens
+	}
 
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return nil, err
 	}
 	c := &ChildTenant{ID: "tenant-" + hex.EncodeToString(b[:]), ParentID: parent, Label: label, ExternalID: externalID,
-		Kind: o.Kind, Caps: o.Caps}
+		Kind: o.Kind, Caps: o.Caps, Residency: o.Residency}
 	ext := sql.NullString{String: externalID, Valid: externalID != ""}
 	// pool_root_id is the platform's root (itself: a platform is a root).
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tenants (id, name, email, parent_tenant_id, external_id, label, child_kind, pool_root_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT p.pool_root_id FROM tenants p WHERE p.id = $8))`,
-		c.ID, label, childEmail(c.ID), parent, ext, label, string(o.Kind), platformID); err != nil {
+		INSERT INTO tenants (id, name, email, parent_tenant_id, external_id, label, child_kind, pool_root_id, residency)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT p.pool_root_id FROM tenants p WHERE p.id = $8), $9)`,
+		c.ID, label, childEmail(c.ID), parent, ext, label, string(o.Kind), platformID,
+		sql.NullString{String: o.Residency, Valid: o.Residency != ""}); err != nil {
 		var pqErr *pq.Error
 		if errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == "idx_tenants_parent_external" {
 			return nil, ErrExternalIDTaken
@@ -256,7 +287,8 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 	if err := audit.RecordTx(ctx, tx, audit.Entry{TenantID: parentTenantID, EventType: "platform",
 		Action: "platform.tenant_created", Resource: "tenant:" + c.ID,
 		Metadata: map[string]any{"child": c.ID, "label": label, "external_id": externalID, "kind": string(o.Kind),
-			"parent": parent, "storage_cap_bytes": o.Caps.StorageBytes, "egress_cap_bytes": o.Caps.EgressBytes}}); err != nil {
+			"parent": parent, "storage_cap_bytes": o.Caps.StorageBytes, "egress_cap_bytes": o.Caps.EgressBytes,
+			"residency": o.Residency}}); err != nil {
 		return nil, fmt.Errorf("create child of %s: %w", parentTenantID, err)
 	}
 	if err := tx.Commit(); err != nil {

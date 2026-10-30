@@ -233,6 +233,10 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 		WriteS3ErrorWithContext(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID(),
 			WithSuggestion(fmt.Sprintf("Region %s is not enabled on this deployment.", region)))
 		return
+	case bucketCreateOutsideResidency:
+		WriteS3ErrorWithContext(w, ErrInvalidLocationConstraint, r.URL.Path, generateRequestID(),
+			WithSuggestion("The account's residency keeps its buckets in regions of one jurisdiction: choose a region inside it."))
+		return
 	case bucketCreateRegionDown:
 		w.Header().Set("Retry-After", regionRetryAfter)
 		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(),

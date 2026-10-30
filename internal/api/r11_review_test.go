@@ -393,6 +393,7 @@ func TestR11_ManagementCreateBucket_RegionRules(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM buckets WHERE tenant_id`).WithArgs("test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	expectNoResidency(mock, "test-tenant")
 	rec, resp := mgmtCreate(t, s, `{"name":"bkt-one","region":"mars-1"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "invalid_region", resp["error"].(map[string]any)["code"])
@@ -404,6 +405,7 @@ func TestR11_ManagementCreateBucket_RegionRules(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM buckets WHERE tenant_id`).WithArgs("test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	expectNoResidency(mock, "test-tenant")
 	rec, resp = mgmtCreate(t, s, `{"name":"bkt-two","region":"eu-west-1"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "region_unavailable", resp["error"].(map[string]any)["code"])

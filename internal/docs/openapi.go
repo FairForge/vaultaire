@@ -1842,6 +1842,25 @@ func generateAdminPaths() map[string]*PathItem {
 				}),
 				jsonBody("The flag", objectPtr("", map[string]*Schema{"platform": boolean("")}, "platform")))),
 		},
+		"/api/v1/admin/tenants/{tenant_id}/residency": {
+			Parameters: []Parameter{pathParam("tenant_id", "The tenant whose residency to set")},
+			Put: admin(withBody(jsonOp("Admin", "Set a tenant's residency", "AdminSetResidency",
+				"WP-ACCT-1: where the tenant's bytes may be stored at rest (`eu`, `uk`, `us`; null = anywhere). Set for the tenant and every tenant under it, "+
+					"only while every bucket of that tree is in a region of the residency (409 `buckets_outside_residency`) and no tenant under it holds another (409 `children_outside_residency`). Audited `admin.residency_set`.",
+				map[string]Response{
+					"200": jsonResp("The residency as set", objectPtr("", map[string]*Schema{
+						"object":     strEnum("", "tenant"),
+						"id":         str(""),
+						"residency":  nullable(strEnum("", "eu", "uk", "us")),
+						"request_id": str(""),
+					}, "object", "id", "residency")),
+					"400": errResp("`invalid_json` or `invalid_residency`"),
+					"404": errResp("`tenant_not_found`"),
+					"409": errResp("`buckets_outside_residency` or `children_outside_residency`"),
+					"500": errResp("`internal_error`"),
+				}),
+				jsonBody("The residency", objectPtr("", map[string]*Schema{"residency": nullable(strEnum("", "eu", "uk", "us"))}, "residency")))),
+		},
 		"/api/v1/admin/flags/{key}": {
 			Parameters: []Parameter{flagKey},
 			Put: admin(withBody(jsonOp("Admin", "Set a feature flag", "AdminSetFlag",
