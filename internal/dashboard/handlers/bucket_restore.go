@@ -26,25 +26,32 @@ const dashboardRestoreDays = 2
 // nil when the object has nothing for its owner to restore: it is on hot
 // storage, or it is a downstairs object the Smart tier parked on the cold
 // backend — STANDARD to the customer, brought back by reading it (mirrors
-// api.objectRestorer, WP-R13-1).
-func objectRestorerFor(ctx context.Context, eng *engine.CoreEngine, db *sql.DB, tenantID, bucket, key string) (engine.Restorer, error) {
-	var backendName, floor string
+// api.objectRestorer, WP-R13-1). The second return is the artifact the
+// object's bytes are at — its row's storage_key (every whole write since
+// WP-R2-1 Part C puts them at <key>@<id>), the key when it records none — and
+// what a restore or a status probe must name (api.blobArtifact).
+func objectRestorerFor(ctx context.Context, eng *engine.CoreEngine, db *sql.DB, tenantID, bucket, key string) (engine.Restorer, string, error) {
+	var backendName, floor, storageKey string
 	err := db.QueryRowContext(ctx, `
-		SELECT COALESCE(backend_name, ''), floor FROM object_head_cache
+		SELECT COALESCE(backend_name, ''), floor, COALESCE(storage_key, '') FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`,
-		tenantID, bucket, key).Scan(&backendName, &floor)
+		tenantID, bucket, key).Scan(&backendName, &floor, &storageKey)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	artifact := key
+	if storageKey != "" {
+		artifact = storageKey
 	}
 	if eng == nil || !engine.IsArchiveClass(engine.CustomerStorageClass(floor, backendName)) {
-		return nil, nil
+		return nil, artifact, nil
 	}
 	drv, ok := eng.GetDriver(backendName)
 	if !ok {
-		return nil, nil
+		return nil, artifact, nil
 	}
 	restorer, _ := drv.(engine.Restorer)
-	return restorer, nil
+	return restorer, artifact, nil
 }
 
 // archiveContainer builds the engine container name for a tenant's bucket
@@ -76,7 +83,7 @@ func HandleRestoreObject(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger)
 			return
 		}
 
-		restorer, err := objectRestorerFor(r.Context(), eng, db, sd.TenantID, bucket, key)
+		restorer, artifact, err := objectRestorerFor(r.Context(), eng, db, sd.TenantID, bucket, key)
 		if err != nil || restorer == nil {
 			middleware.SetFlash(w, "error", "This object is not on the archive tier — it is directly downloadable.")
 			http.Redirect(w, r, backURL, http.StatusSeeOther)
@@ -84,7 +91,7 @@ func HandleRestoreObject(eng *engine.CoreEngine, db *sql.DB, logger *zap.Logger)
 		}
 
 		ctx := context.WithValue(r.Context(), common.TenantIDKey, sd.TenantID)
-		if restoreErr := restorer.RestoreObject(ctx, archiveContainer(sd.TenantID, bucket), key, dashboardRestoreDays); restoreErr != nil {
+		if restoreErr := restorer.RestoreObject(ctx, archiveContainer(sd.TenantID, bucket), artifact, dashboardRestoreDays); restoreErr != nil {
 			if errors.Is(restoreErr, engine.ErrRestoreAlreadyInProgress) {
 				middleware.SetFlash(w, "success", "A restore for this object is already running — check back in a few minutes.")
 			} else if errors.Is(restoreErr, engine.ErrArchived) {
@@ -124,14 +131,14 @@ func HandleObjectRestoreStatus(eng *engine.CoreEngine, db *sql.DB, logger *zap.L
 			return
 		}
 
-		restorer, err := objectRestorerFor(r.Context(), eng, db, sd.TenantID, bucket, key)
+		restorer, artifact, err := objectRestorerFor(r.Context(), eng, db, sd.TenantID, bucket, key)
 		if err != nil || restorer == nil {
 			_, _ = w.Write([]byte(`<span class="text-muted">in the attic</span>`))
 			return
 		}
 
 		ctx := context.WithValue(r.Context(), common.TenantIDKey, sd.TenantID)
-		st, stErr := restorer.RestoreStatus(ctx, archiveContainer(sd.TenantID, bucket), key)
+		st, stErr := restorer.RestoreStatus(ctx, archiveContainer(sd.TenantID, bucket), artifact)
 		if stErr != nil {
 			logger.Debug("dashboard restore status failed", zap.Error(stErr))
 			_, _ = w.Write([]byte(`<span class="text-muted">in the attic</span>`))
