@@ -263,3 +263,47 @@ func TestResidency_TheSystemBucketNeverBlocksTheSet(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, code, out)
 	assert.Equal(t, "buckets_outside_residency", errCode(out))
 }
+
+// RP86-2: the legacy PUT /api/v1/manage/buckets/{name}/residency wrote a free
+// us|eu label whatever the region (no uk). The label is the region's
+// (drivers.DataResidency); another is 409 residency_is_the_region, and a
+// null resets the label to the region's.
+func TestBucketResidencyLabelIsTheRegions(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement()
+	t.Setenv("IDRIVE_REGION", "us-central-1")
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM buckets WHERE tenant_id = $1`, f.user.TenantID) })
+	_, err := f.db.Exec(`INSERT INTO buckets (tenant_id, name, region, data_residency) VALUES
+		($1, 'lbl-eu', 'eu-west-1', 'us'), ($1, 'lbl-uk', 'eu-west-3', 'eu'), ($1, 'lbl-def', '', NULL)`, f.user.TenantID)
+	require.NoError(t, err)
+	put := func(bucket string, v any) (int, map[string]any) {
+		return f.call(http.MethodPut, "/api/v1/manage/buckets/"+bucket+"/residency", f.jwt, map[string]any{"residency": v})
+	}
+	label := func(bucket string) string {
+		var l sql.NullString
+		require.NoError(t, f.db.QueryRow(`SELECT data_residency FROM buckets WHERE tenant_id = $1 AND name = $2`, f.user.TenantID, bucket).Scan(&l))
+		return l.String
+	}
+
+	code, out := put("lbl-eu", "us")
+	assert.Equal(t, http.StatusConflict, code, out)
+	assert.Equal(t, "residency_is_the_region", errCode(out))
+	code, out = put("lbl-eu", "eu")
+	require.Equal(t, http.StatusOK, code, out)
+	assert.Equal(t, "eu", out["data_residency"])
+	assert.Equal(t, "eu", label("lbl-eu"), "the stale lie is replaced by the region's label")
+
+	code, out = put("lbl-uk", "uk")
+	require.Equal(t, http.StatusOK, code, out, "uk is a label: London is the UK")
+	code, out = put("lbl-uk", "eu")
+	assert.Equal(t, http.StatusConflict, code, out)
+
+	code, out = put("lbl-def", nil)
+	require.Equal(t, http.StatusOK, code, out)
+	assert.Equal(t, "us", out["data_residency"], "null = the region's label (no region = the default region)")
+	assert.Equal(t, "us", label("lbl-def"))
+
+	code, out = put("lbl-def", "mars")
+	assert.Equal(t, http.StatusBadRequest, code, out)
+	code, out = put("lbl-none", "us")
+	assert.Equal(t, http.StatusNotFound, code, out)
+}

@@ -322,7 +322,7 @@ covers every group; responses carry `X-RateLimit-Limit`, `-Remaining`,
 ```
 Management  /api/v1/manage
   GET/POST /buckets · GET/PATCH/DELETE /buckets/{name} · GET /buckets/{name}/objects
-  PUT /buckets/{name}/tier {"tier":"auto|performance|standard|archive|resilient"} · PUT /buckets/{name}/residency
+  PUT /buckets/{name}/tier {"tier":"auto|performance|standard|archive|resilient"} · PUT /buckets/{name}/residency (deprecated: re-asserts the region's label us|eu|uk; another is 409 residency_is_the_region — RP86-2)
   GET/POST /keys · DELETE /keys/{id} · GET /usage
   POST /account/export (202 + id; the export is rendered by a job into the account's private `_exports` system bucket, kept 7 days) · GET /account/export/{id} (status; when completed a 1 h presigned download URL; 410 once expired) · DELETE /account (30-day grace) · POST /account/cancel-deletion
 Account     /api/v1/user
@@ -541,7 +541,7 @@ Bytes in transit through an edge location are not storage: residency covers wher
 
 **Operator:**
 - `PUT /api/v1/admin/tenants/{id}/platform` `{"platform": true|false}` (admin JWT; audited `admin.platform_granted` / `admin.platform_revoked`).
-- `PUT /api/v1/admin/tenants/{id}/residency` `{"residency": "eu"|"uk"|"us"|null}`: for the tenant and its tree, only while every bucket of the tree complies (409 `buckets_outside_residency`, `children_outside_residency`; audited `admin.residency_set`).
+- `PUT /api/v1/admin/tenants/{id}/residency` `{"residency": "eu"|"uk"|"us"|null}`: for the tenant and its tree, only while every bucket of the tree complies (409 `buckets_outside_residency`, `children_outside_residency`; audited `admin.residency_set`). The hidden `_exports` system bucket never blocks it while it holds no export: it moves to the first region inside in the same transaction (a live export is 409 until it expires, 7 days). Under a residency the GDPR export is written inside it; with no enabled region inside, the export fails (`no_region_inside`) rather than be written outside (RP86-1).
 
 ## Members
 

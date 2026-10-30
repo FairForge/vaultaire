@@ -15,6 +15,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/modes"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/go-chi/chi/v5"
@@ -1111,11 +1112,13 @@ func (s *Server) handleMgmtSetBucketTier(w http.ResponseWriter, r *http.Request)
 
 // --- Bucket Data Residency ---
 
-var validResidencyValues = map[string]bool{
-	"us": true,
-	"eu": true,
-}
-
+// handleMgmtSetBucketResidency is the legacy PUT
+// /api/v1/manage/buckets/{name}/residency (deprecated, docs/API.md). The
+// bucket's data_residency label is its REGION's (drivers.DataResidency: us,
+// eu, uk — RP86-2): it wrote a free us|eu label whatever the region, a lie
+// beside tenants.residency. A label that is not the region's is 409
+// residency_is_the_region; the route only re-asserts the region's label (a
+// null too), so a stale row is mended.
 func (s *Server) handleMgmtSetBucketResidency(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
 	if tenantID == "" {
@@ -1140,43 +1143,45 @@ func (s *Server) handleMgmtSetBucketResidency(w http.ResponseWriter, r *http.Req
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
-
-	var residency sql.NullString
-	if req.Residency != nil {
-		if !validResidencyValues[*req.Residency] {
-			writeManagementError(w, ErrTypeInvalidRequest, "invalid_residency",
-				"residency must be one of: us, eu, or null", "residency")
-			return
-		}
-		residency = sql.NullString{String: *req.Residency, Valid: true}
+	if req.Residency != nil && !auth.ValidResidency(*req.Residency) {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_residency",
+			"residency must be one of: us, eu, uk, or null", "residency")
+		return
 	}
 
-	result, err := s.db.ExecContext(r.Context(),
-		`UPDATE buckets SET data_residency = $1, updated_at = NOW()
-		 WHERE tenant_id = $2 AND name = $3`,
-		residency, tenantID, name)
+	var region string
+	err := s.db.QueryRowContext(r.Context(), `SELECT COALESCE(region, '') FROM buckets WHERE tenant_id = $1 AND name = $2`,
+		tenantID, name).Scan(&region)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
+		return
+	}
 	if err != nil {
+		s.logger.Error("set bucket residency: read the region", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update data residency", "")
+		return
+	}
+	if region == "" {
+		region = drivers.IDriveDefaultRegion(os.Getenv)
+	}
+	label := drivers.DataResidency(region)
+	if req.Residency != nil && *req.Residency != label {
+		writeManagementError(w, ErrTypeConflict, "residency_is_the_region",
+			"a bucket's residency is its region's ("+region+" is "+label+"); create a bucket in another region instead", "residency")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(),
+		`UPDATE buckets SET data_residency = $1, updated_at = NOW() WHERE tenant_id = $2 AND name = $3`,
+		label, tenantID, name); err != nil {
 		s.logger.Error("set bucket residency", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "db_error", "failed to update data residency", "")
 		return
 	}
-
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		writeManagementError(w, ErrTypeNotFound, "bucket_not_found", "bucket not found", "name")
-		return
-	}
-
-	respResidency := interface{}(nil)
-	if residency.Valid {
-		respResidency = residency.String
-	}
-
-	resp := map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"object":         "bucket",
 		"name":           name,
-		"data_residency": respResidency,
+		"region":         region,
+		"data_residency": label,
 		"request_id":     getRequestID(w),
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }

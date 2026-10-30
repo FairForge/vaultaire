@@ -1031,17 +1031,20 @@ func generateManagementPaths() map[string]*PathItem {
 		},
 		"/api/v1/manage/buckets/{name}/residency": {
 			Parameters: []Parameter{name},
-			Put: mut(withBody(jsonOp("Management", "Set the bucket's data residency", "ManageSetBucketResidency",
-				"Stores `data_residency` (`us`, `eu`) or clears it with `null`.",
+			Put: mut(withBody(jsonOp("Management", "Re-assert the bucket's data residency label (deprecated)", "ManageSetBucketResidency",
+				"Deprecated (RP86-2). A bucket's `data_residency` is its region's (`us`, `eu`, `uk`): the route only re-asserts it. "+
+					"Another label is 409 `residency_is_the_region`; `null` writes the region's. Where a tenant may store is `tenants.residency`.",
 				map[string]Response{
-					"200": jsonResp("Residency set", objectPtr("", map[string]*Schema{
+					"200": jsonResp("The region's label", objectPtr("", map[string]*Schema{
 						"object":         strEnum("", "bucket"),
 						"name":           str("Bucket name"),
-						"data_residency": nullable(strEnum("", "us", "eu")),
+						"region":         str("The bucket's region"),
+						"data_residency": strEnum("", "us", "eu", "uk"),
 						"request_id":     str(""),
-					}, "object", "name", "data_residency", "request_id")),
-					"400": errResp("`invalid_json` or `invalid_residency` (must be `us`, `eu` or null)"),
+					}, "object", "name", "region", "data_residency", "request_id")),
+					"400": errResp("`invalid_json` or `invalid_residency` (must be `us`, `eu`, `uk` or null)"),
 					"404": errResp("`bucket_not_found`"),
+					"409": errResp("`residency_is_the_region`: the label asked is not the bucket region's"),
 					"500": errResp("`db_error` or `no_database`"),
 				}),
 				jsonBody("Residency", objectPtr("", map[string]*Schema{
