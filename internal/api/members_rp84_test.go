@@ -255,3 +255,44 @@ func TestMembers_RemovalNamesTheKeysTheMemberMade(t *testing.T) {
 		f.user.TenantID).Scan(&rows))
 	assert.Equal(t, 1, rows, "one audit row for the revocation")
 }
+
+// RP85-1 / RP85-2: the idempotency cache is keyed by the ACTING member too —
+// the group's middleware runs before each route's role check, so a viewer
+// presenting a developer's key got the developer's cached answer — and a
+// replay says it is one (Idempotent-Replayed, Stripe's header) and, where a
+// secret was blanked, secret_redacted.
+func TestIdempotency_KeyedByTheActingMember(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement()
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM idempotency_cache WHERE tenant_id = $1`, f.user.TenantID) })
+	_, err := f.db.Exec(`UPDATE tenant_quotas SET tier = 'standard' WHERE tenant_id = $1`, f.user.TenantID)
+	require.NoError(t, err)
+	_, developer := f.addMember(auth.RoleDeveloper)
+	_, viewer := f.addMember(auth.RoleViewer)
+	key := "idem-" + uuid.NewString()
+	post := func(jwt string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/manage/keys", strings.NewReader(`{"name":"ci"}`))
+		req.Header.Set("Authorization", "Bearer "+jwt)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", key)
+		w := httptest.NewRecorder()
+		f.s.router.ServeHTTP(w, req)
+		return w
+	}
+
+	first := post(developer)
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	assert.Empty(t, first.Header().Get("Idempotent-Replayed"))
+
+	w := post(viewer)
+	assert.Equal(t, http.StatusForbidden, w.Code, "never the developer's cached answer: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "role_forbidden")
+	assert.Empty(t, w.Header().Get("Idempotent-Replayed"))
+
+	again := post(developer)
+	require.Equal(t, http.StatusCreated, again.Code, again.Body.String())
+	assert.Equal(t, "true", again.Header().Get("Idempotent-Replayed"))
+	assert.Contains(t, again.Body.String(), `"secret_redacted":true`)
+	var rows int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND name = 'ci'`, f.user.TenantID).Scan(&rows))
+	assert.Equal(t, 1, rows, "the replay made no second key")
+}
