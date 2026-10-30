@@ -58,3 +58,13 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 ## Open questions
 
 - None blocking. RB10-1 (self-leave, a tenant-less sign-in's erasure) is for WP-ACCT-1 to decide.
+
+## Post-merge review
+
+**RP84, 2026-10-30 (`docs/reviews/WP-STRIPE-4-REVIEW.md`): HOLDS at P2**, every finding latent on prod. Prompt 53's Part 0 is filled with them, in this order:
+- RP84-1 (P2): `api_keys` is erased by its maker only. A team's erasure leaves its members' keys live; a member's own erasure takes the team's keys.
+- RP84-2 (P3): a JWT on no tenant is an owner on the API.
+- RP84-3 (P3): the invitation subject's header injection, and no invitation cap.
+- RP84-4 (P3): a removed member's keys are not named at removal.
+- RP84-5/6 (P4).
+- **The prod proof waits for that Part 0.**

@@ -1,6 +1,15 @@
 # Status — the live pointer
 
-Updated: 2026-10-30 01:50 UTC — **Stage 1a Prompt 52E — the Stage 1 closeout, engine lane — DONE and proven on prod** (`docs/reviews/STAGE1-CLOSEOUT.md`; migration 119; next 120; review **RP85**):
+Updated: 2026-10-30 03:15 UTC — **Reviews RP84 (Prompt 52, WP-TEAM-1): HOLDS at P2, and RP85 (Prompt 52E, the Stage 1 closeout): HOLDS, nothing above P4.** Files: `docs/reviews/WP-STRIPE-4-REVIEW.md`, `docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`. Every finding is latent on prod (3 owner members, 0 invitations, 0 member-made keys):
+- **RP84-1 (P2):** `api_keys` is erased by its maker, while since PR C the maker is a member. A team's erasure leaves its members' keys live and resolvable; a member's own erasure takes the team's keys. Proven by test.
+- **RP84-2 (P3):** a JWT on no tenant is an owner on the API. It minted an S3 key on tenant `''`, which S3 refuses. The accept route depends on this default.
+- **RP84-3 (P3, a launch gate):** the invitation subject injects headers from the tenant's name, and invitations are uncapped against the shared sending quota.
+- **RP84-4 (P3):** a removed member's keys are not named at removal.
+- P4s: RP84-5/6, RP85-1 (idempotency replays before the role check), RP85-2.
+- **Prompt 53 (WP-ACCT-1, migration 120)** now has Part 0 filled in both editions. **Run the owed WP-TEAM-1 prod proof after Part 0 deploys.**
+- [OPS, the vault lane] `vaultaire-jobs.yml` on the box is behind the repo: WP-VAULT-2's scrub and tape-audit rules are not installed.
+
+Before that: 2026-10-30 01:50 UTC — **Stage 1a Prompt 52E — the Stage 1 closeout, engine lane — DONE and proven on prod** (`docs/reviews/STAGE1-CLOSEOUT.md`; migration 119; next 120; review **RP85**):
 - **#1073 + #1077, the body is what was signed:** chunk signatures and the signed trailer verified as the aws-chunked decoder reads; the `x-amz-checksum-*` trailer / header checked at the origin; the body read to its end before a commit (#1077 — the S3 drivers' single PutObject stops at the declared length, found by the prod proof). Prod: a tampered signed body 403, a wrong CRC trailer 400, nothing committed, on stored.ge and s3.stored.cloud.
 - **#1070, boot and migrations:** a dead DB refuses the boot; the `NewServer` prologue under a 6 s deadline; `PGOPTIONS` lock/statement timeouts on every runner; migration 119 (four duplicate indexes dropped, idempotency + multipart tagging columns).
 - **#1075, API correctness:** idempotency claim-first + request digest + no secret at rest; ListParts / ListMultipartUploads pagination, `EntityTooSmall`, `Location` scheme, multipart tagging, CopyObject `Content-Length`; `last_accessed` coalesced.

@@ -209,3 +209,9 @@ before the ceremony); `retired_blobs` `ok`; `permission denied` in
 - **This prompt's leftovers:** the dashboard's Quotaless remnants (above);
   `engine/{analytics,capacity,load_balancer}.go` (D-9's other three, if the
   owner wants them gone).
+
+## Post-merge review
+
+**RP85, 2026-10-30 (`docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`): HOLDS, nothing above P4.** The R3-25 reading is confirmed (`putLength` + `WithContentLength` were already there). Two P4s, both for Prompt 53's Part 0:
+- RP85-1: the group's idempotency middleware replays ahead of Prompt 52's per-route `requireRole` (store the key under the acting user);
+- RP85-2: a replay carries no `Idempotent-Replayed` header, and no marker that its secret was blanked.

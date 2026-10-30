@@ -683,7 +683,16 @@ Done means: PRs 0, A, B, C, D merged; tenant zero has a second member who accept
   - **RB10-1:** a member with no tenant of its own cannot leave or erase its sign-in. Decide self-leave (`DELETE /api/v1/manage/members/{self}` for any member but the owner) and the erasure of a tenant-less sign-in (its memberships, then the user, no tenant step).
   - **The `sponsored` edge reuses invitations** (`tenant_invitations.kind = 'family'`, WP-FAMILY-1). Accepting one must ATTACH a person's own tenant as a sponsored child; it is never a member row. Leave `kind` alone here.
 
-**Part 0 (in this order):** RP84's findings — **the review session writes them here**, as RP82 did for Prompt 52. Then RP82's three for this WP:
+**Part 0 (in this order):** RP84's findings (`docs/reviews/WP-STRIPE-4-REVIEW.md`: HOLDS at P2, all latent on prod — 3 owner members, 0 invitations) and RP85's two P4s (`docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`: the 52E closeout HOLDS, nothing above P4):
+- **RP84-1 (P2):** `api_keys` is erased only by its MAKER (`erase.go`'s one ByUser rule + `api_keys.user_id … ON DELETE CASCADE`), but since PR C a key's maker is a member, not the tenant's owner. A team's erasure leaves the keys its members made, live and resolvable for the erased tenant. A member's own erasure takes the team's keys. Fix: a ByTenant `DELETE FROM api_keys WHERE tenant_id = $1`; before the user rows go, the keys a user made on tenants it does not own are handed to that tenant's owner member (`user_id` stays NOT NULL — the previous build scans it into a string), with an audit row `key.maker_erased` on that tenant; the schema walk checks that every table with a `tenant_id` column has a ByTenant rule. **Before RB10-1's step 7** (a tenant-less sign-in's erasure would take the team keys the person made). Tests `TestErase_TheTeamsErasureTakesEveryKeyOfTheTenant`, `TestErase_AMembersErasureKeepsTheTeamsKeys`.
+- **RP84-2 (P3):** `requireJWT` makes a JWT on NO tenant an owner (the dashboard got "viewer" in PR C; the API did not). Proven: `POST /api/v1/user/apikeys` answered 201 and a secret on tenant `''` (S3 refuses the row, so no data opens). Fix: role `""` on `""` for a non-operator JWT; `memberRole()`'s default `""`; **the accept route leaves `requireMember`** (a tenant-less invitee accepts only through this default today); `GenerateAPIKeyForTenant` / `GenerateTestKeyForTenant` refuse `""`; `RegisterInvitedUser` caches no tenant and `cacheUser` takes the row's tenant as read; the login's no-membership branch mints on no tenant (RP84-6). Test `TestMembers_ATenantlessSignInIsNoOwner`.
+- **RP84-3 (P3, a launch gate):** the invitation subject carries `tenants.name` raw into the SMTP DATA (`smtp.go:89`), so CR/LF in a registration's company injects headers into a DKIM-signed `stored.cloud` mail to any address; and nothing bounds invitations (100 management requests a minute) against the Cloudflare sending quota every reset and receipt shares. Fix: the sender refuses CR/LF in every header and RFC 2047-encodes the subject (overlaps WP-R14-3; do it once here); registration strips control characters from the name; ≤ 20 pending invitations per tenant and ≤ 50 invitation mails per tenant per day (429 `invitation_rate_limited`, counted from rows), on the API and the dashboard. Tests `TestEmail_HeaderValuesRefuseCRLF`, `TestRegister_TenantNameHasNoControlCharacters`, `TestMembers_InvitationsAreCapped`.
+- **RP84-4 (P3):** a removed (or demoted) member keeps every S3 key it made, and nothing says so. Fix: the removal answers `keys_made` and takes `revoke_keys: true` (revoked with their STS tokens in the same transaction, one audit row); the dashboard's confirmation lists them, revoke ticked. Test `TestMembers_RemovalNamesTheKeysTheMemberMade`.
+- **RP84-5 (P4):** one pending invitation per (tenant, address) — a new one replaces it (a partial unique index in migration 120); the accept answers the member's actual role; compare `lower(u.email)`.
+- **RP85-1 (P4):** the group's idempotency middleware runs before each route's `requireRole`: a viewer presenting a developer's key gets its cached answer. Fix: store the key as `<acting user id>:<key>`. Test `TestIdempotency_KeyedByTheActingMember`.
+- **RP85-2 (P4):** a replay sends `Idempotent-Replayed: true`, and `secret_redacted: true` where a secret was blanked.
+
+Then RP82's three for this WP:
 - **RP82-3 (P3):** a denormalised `pool_used_bytes` on the root row, moved in the member's statement. The reconcile checks it equals the sum; a mismatch is a metric (`vaultaire_pool_used_drift_bytes`), never a silent fix.
 - **RP82-4 (P3):** flag inheritance, decided once in the flags service. Privacy and safety flags (`standard_sealed_default`, any future sealing default) inherit down the tree and may only be tightened. Performance flags inherit as defaults. `TestFlags_ChildInheritsSealingDefault`.
 - **RP82-7 (P4):** every admin total and list gets a kind filter (live / sandbox / child).
@@ -695,7 +704,7 @@ Read first:
 - the region gate and bucket create (`internal/api/region_gate.go`, `bucket_create.go`), the mirror legs (`blob_copies*.go`), the parity leg (`vault_parity.go`, `VAULT_PARITY_LEGS`);
 - `internal/flags` (per-tenant rows).
 
-Lane: Engine + Developer surface. Migration 120 (119 is the engine lane's Prompt 52E, #1064): `tenants.child_kind` (`managed` / `app` / `sponsored`; today's children backfilled `managed`), `tenants.pool_root_id` (backfilled `COALESCE(parent_tenant_id, id)`, NOT NULL after the backfill), `tenants.residency` (`eu` / `uk` / `us`, NULL = any), `tenant_quotas.pool_used_bytes` (RP82-3), `tenant_quotas.egress_cap_bytes` (a child's egress cap).
+Lane: Engine + Developer surface. Migration 120 (119 is the engine lane's Prompt 52E, #1064): `tenants.child_kind` (`managed` / `app` / `sponsored`; today's children backfilled `managed`), `tenants.pool_root_id` (backfilled `COALESCE(parent_tenant_id, id)`, NOT NULL after the backfill), `tenants.residency` (`eu` / `uk` / `us`, NULL = any), `tenant_quotas.pool_used_bytes` (RP82-3), `tenant_quotas.egress_cap_bytes` (a child's egress cap), and RP84-5's partial unique index `tenant_invitations (tenant_id, lower(email)) WHERE accepted_at IS NULL`.
 
 PRs:
 - (0) RP84's fixes + RP82-3/4/7;
@@ -729,7 +738,28 @@ You are building plan § WP-STRIPE's WP-ACCT-1 row in the Vaultaire repository: 
 Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-4.md` and its review `WP-STRIPE-4-REVIEW.md` (RP84).
 
 PR 0 — Branch `stage1a-p53-part0`.
-- **0a (RP84):** the review's findings, in its order, each test first. If RP84 is not on main when you start, STOP and say so: never guess a review.
+- **0a (RP84 + RP85, `docs/reviews/WP-STRIPE-4-REVIEW.md`, `STAGE1-CLOSEOUT-REVIEW.md`):** the findings in the review's order, each test first. If those files are not on main when you start, STOP and say so: never guess a review. They are latent on prod (no invitation has been sent), so ship 0a before the owner's WP-TEAM-1 prod proof.
+  1. **RP84-1 (P2), the key's erasure.** Tests first:
+     - `TestErase_TheTeamsErasureTakesEveryKeyOfTheTenant`: a developer's key on tenant A is gone after A's `EraseRows`, and `LookupCredential` answers `ErrUnknownAccessKey`;
+     - `TestErase_AMembersErasureKeepsTheTeamsKeys`: the member's own erasure leaves the key resolving, now with A's owner as its user, plus an audit row `key.maker_erased` on A.
+
+     Then in `internal/account/erase.go`:
+     - add a ByTenant `api_keys` rule;
+     - add a ByUser `UPDATE api_keys SET user_id = <owner member of the key's tenant> WHERE user_id = $1 AND tenant_id NOT IN (<tenants the user owns>)`, ordered before the `users` row (the FK cascades);
+     - keep `user_id` NOT NULL: the previous build's boot load scans it into a string, and a NULL aborts it;
+     - extend the schema walk: a table with a `tenant_id` column must have a ByTenant rule.
+
+     Verify: `go test -race ./internal/account/ ./internal/api/ -run 'Erase|Members'`.
+  2. **RP84-2 (P3), no role on no tenant.** Test first: `TestMembers_ATenantlessSignInIsNoOwner`. A JWT minted on `""` gets 403 `not_a_member` on `POST /api/v1/user/apikeys`, `POST /api/v1/manage/keys` and `DELETE /api/v1/user`; `POST /api/v1/manage/invitations/{token}/accept` still answers 200. Then:
+     - `requireJWT` gives `""` for a non-operator JWT on `""`, and `memberRole()`'s default is `""`. Hand-mounted tests set the role explicitly;
+     - the accept route is mounted under `requireJWT` only;
+     - the two key generators refuse `""`;
+     - `RegisterInvitedUser` caches no `TenantID`, and `cacheUser` takes the row's tenant as read;
+     - `/auth/login`'s no-membership branch mints on no tenant.
+  3. **RP84-3 (P3), mail.** Tests first: `TestEmail_HeaderValuesRefuseCRLF` (`buildMIMEMessage` and the Resend body), `TestRegister_TenantNameHasNoControlCharacters`, `TestMembers_InvitationsAreCapped` (20 pending per tenant, 50 mails per tenant per day, 429 `invitation_rate_limited`, counted from `tenant_invitations` rows so both slots agree). Then the guard in the sender, `mime.QEncoding` for the subject, the registration's name, and the caps on the API and the dashboard.
+  4. **RP84-4 (P3), removal.** Test first: `TestMembers_RemovalNamesTheKeysTheMemberMade` (`keys_made` in the answer; `revoke_keys: true` revokes them and their STS tokens in the removal's transaction). Then the dashboard's confirmation lists them, revoke ticked by default.
+  5. **RP84-5 (P4):** migration 120 gets a partial unique index on `tenant_invitations (tenant_id, lower(email)) WHERE accepted_at IS NULL`; `CreateInvitation` replaces the pending row; the accept answers the member's real role.
+  6. **RP85-1 / RP85-2 (P4):** `TestIdempotency_KeyedByTheActingMember` (the stored key is `<acting user id>:<key>`); a replay sends `Idempotent-Replayed: true`, and `secret_redacted: true` where a secret was blanked.
 - **0b (RP82-3).** Test first: `TestPool_UsedCounterEqualsTheSum` (two children write and delete; the root's `pool_used_bytes` equals the sum of the pool's `storage_used_bytes` after every step). Then:
   - migration 120 adds `tenant_quotas.pool_used_bytes BIGINT NOT NULL DEFAULT 0`;
   - `ReserveTx` and `ApplyLedgerTx` move it on the root's row in the statement that moves the member's (the root's row is already locked first);
@@ -775,6 +805,13 @@ Done means: PRs 0, A, B, C, D merged; the proof on prod; Prompt 54 written here.
   - The post-merge review is RP80.
   - **Reviewed by RP80 (2026-10-29, `docs/reviews/WP-STRIPE-2-REVIEW.md`): HOLDS at P2** — RP80-1 sandbox downloads unmetered and unpaced (free hosting once signups open); three P3s, four P4s.
 - **Prompt 51 — WP-PLAT-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-3.md`; migration 117). PRs: #1055 Part 0 (RP80), #1056 the platform and its children, #1057 the pool, #1058 keys and the cascade, #1059 the Worker test flake. Prod proof: tenant zero a platform, one child, one object through its key counted in the pool. The post-merge review is RP82. **Reviewed by RP82 (2026-10-29, `docs/reviews/WP-STRIPE-3-REVIEW.md`): HOLDS at P2** — RP82-1 a child skips its platform's Standard/Vault floors, RP82-2 a child's downloads have no allowance (= D-STRIPE-31); two P3s for WP-ACCT-1, three P4s.
-- **Prompt 52 — WP-TEAM-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-4.md`; migration 118). PRs: #1067 Part 0 (D-STRIPE-31 + RP82-1/2/5), #1068 members and roles, #1069 invitations, #1071 several tenants (the active tenant, keys by tenant, the audit tenant). Prod proof owed (the owner's TOTP and mailbox). The post-merge review is RP84.
-- **Prompt 53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`) — WRITTEN above by Prompt 52's closeout, both editions. Part 0 = RP84 (the review fills it) + RP82-3/4/7. Migration 120 (119 is Prompt 52E's). The post-merge review is RP86.
+- **Prompt 52 — WP-TEAM-1 — DONE 2026-10-29** (`docs/reviews/WP-STRIPE-4.md`; migration 118). PRs: #1067 Part 0 (D-STRIPE-31 + RP82-1/2/5), #1068 members and roles, #1069 invitations, #1071 several tenants (the active tenant, keys by tenant, the audit tenant). Prod proof owed (the owner's TOTP and mailbox). The post-merge review is RP84. **Reviewed by RP84 (2026-10-30, `docs/reviews/WP-STRIPE-4-REVIEW.md`): HOLDS at P2.** All findings are latent on prod (no invitation sent yet):
+  - RP84-1: a key is erased by its maker. A team's erasure leaves its members' keys live; a member's own erasure takes the team's keys.
+  - RP84-2: a JWT on no tenant is an owner on the API.
+  - RP84-3: invitation mail header injection, and no invitation cap.
+  - RP84-4: a removed member's keys are not named.
+  - Two P4s.
+  - The Stage 1 closeout (52E) was reviewed as **RP85** (`docs/reviews/STAGE1-CLOSEOUT-REVIEW.md`): HOLDS, two P4s.
+  - Prompt 53's Part 0 is filled in both editions. Run the prod proof after it deploys.
+- **Prompt 53 — WP-ACCT-1** (the account tree: `pool_root_id`, `child_kind`, caps inside the pool, `tenants.residency`) — WRITTEN above by Prompt 52's closeout, both editions. Part 0 = RP84-1…5 + RP85-1/2 (filled by the review, 2026-10-30) + RP82-3/4/7. Migration 120 (119 is Prompt 52E's). The post-merge review is RP86.
 - **54 — WP-KEY-1** (management keys first, then budgets); **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
