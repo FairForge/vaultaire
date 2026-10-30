@@ -113,6 +113,10 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 			return nil
 		}
 		if totalGuard && pool.pooled {
+			// A capped child (its own limit > 0) is held to min(cap, pool).
+			if pool.owner != tenantID && limit > 0 && used > limit {
+				return fmt.Errorf("%w: tenant %s past its cap %d > %d", ErrOverQuota, tenantID, used, limit)
+			}
 			used, limit = poolUsed, pool.limit
 		}
 		if totalGuard && used > limit {

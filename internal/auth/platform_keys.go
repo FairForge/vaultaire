@@ -123,7 +123,7 @@ func (a *AuthService) GenerateChildKey(ctx context.Context, actorUserID, parentI
 	// child scheduled for erasure may still be given keys: the 30-day grace
 	// blocks nothing (D-16), so nothing here reads the schedule (RP82-5).
 	var one int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id = $1 AND parent_tenant_id = $2 FOR SHARE`,
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM tenants t WHERE t.id = $1 AND `+DescendantT2+` FOR SHARE`,
 		childID, parentID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrTenantNotFound
@@ -220,7 +220,7 @@ func (a *AuthService) RevokeChildKey(ctx context.Context, parentID, childID, key
 	var revoked bool
 	err := a.sqlDB.QueryRowContext(ctx, `
 		SELECT ak.key_id, ak.revoked_at IS NOT NULL FROM api_keys ak JOIN tenants t ON t.id = ak.tenant_id
-		 WHERE ak.id = $1 AND ak.tenant_id = $2 AND t.parent_tenant_id = $3`, keyRowID, childID, parentID).Scan(&keyID, &revoked)
+		 WHERE ak.id = $1 AND ak.tenant_id = $2 AND `+DescendantT3, keyRowID, childID, parentID).Scan(&keyID, &revoked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrKeyNotFound
 	}

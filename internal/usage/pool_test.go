@@ -246,3 +246,23 @@ func TestPool_UsedCounterEqualsTheSum(t *testing.T) {
 	assert.Equal(t, int64(900), n, "the operator's reseed answers the drift it removed")
 	step("reseeded")
 }
+
+// WP-ACCT-1: a guarded settle of a capped child is held to its cap too
+// (min(cap, pool)), not only the reservation.
+func TestPool_AGuardedSettleHoldsAChildToItsCap(t *testing.T) {
+	db, _, child := poolDB(t)
+	ctx := context.Background()
+	_, err := db.Exec(`UPDATE tenant_quotas SET storage_limit_bytes = 100 WHERE tenant_id = $1`, child)
+	require.NoError(t, err)
+	apply := func(n int64) error {
+		tx, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		if err := ApplyLedgerTx(ctx, tx, child, LedgerChange{Total: n, Floors: map[string]int64{FloorStandard: n}, Guard: FloorStandard}); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	require.NoError(t, apply(100), "up to its cap")
+	require.ErrorIs(t, apply(1), ErrOverQuota, "past its cap, the pool (1000) far from full")
+}
