@@ -1,7 +1,7 @@
 {{define "title"}}Privacy Policy, Stored{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: October 24, 2026</p>
+    <p class="text-muted">Last updated: October 30, 2026</p>
     <h1>Privacy Policy</h1>
     <p>This Privacy Policy describes how FairForge LLC, the controller ("<strong>{{host "brand"}}</strong>", a product of FairForge; "we", "us"), collects, uses, and protects your personal data when you use our S3-compatible object storage service at <strong>{{host "domain"}}</strong> (also served at {{host "aliases"}}).</p>
 
@@ -71,10 +71,12 @@
     <p>We use the following third-party sub-processors to deliver our service:</p>
     <ul>
         <li><strong>iDrive Inc.</strong> (United States; EU regions on request), primary object storage for Standard-tier objects, in the region you choose per bucket.</li>
-        <li><strong>Seagate Technology (Lyve Cloud)</strong> (United States), object storage for the resilient tier and as a failover leg.</li>
+        <li><strong>Seagate Technology (Lyve Cloud)</strong> (United States), object storage for the resilient tier and as a failover leg, and the parity second copy of Vault-tier objects.</li>
         <li><strong>Geyser Data Inc.</strong> (United States, Los Angeles), tape archive for Vault-tier objects (<code>GLACIER</code> / <code>DEEP_ARCHIVE</code>), whatever the bucket's region.</li>
         <li><strong>Cloudflare Inc.</strong> (global edge), CDN, DDoS protection, TLS termination and the cookieless Web Analytics beacon on the public pages; the bytes of an upload to the S3 endpoint <code>{{host "s3host"}}</code> pass through its edge in transit to the storage backend (never stored there); Cloudflare R2 holds the objects of public-read buckets served on <code>{{host "cdnhost"}}</code>, and the point-in-time archive of our database, encrypted on our server before it leaves it.</li>
         <li><strong>Microsoft Corporation (OneDrive)</strong> (United States), internal parity copies of objects, when enabled.</li>
+        <li><strong>Sync.com Inc.</strong> (Canada), the encrypted off-site copy of our database backups, and a standby location for the parity copies of Vault-tier objects.</li>
+        <li><strong>Blomp</strong> (United States), a second encrypted off-site copy of our database backups.</li>
         <li><strong>Stripe Inc.</strong> (United States), payment processing and subscription management.</li>
         <li><strong>Resend Inc.</strong> (United States), transactional e-mail, when enabled.</li>
         <li><strong>Google LLC / GitHub Inc.</strong> (United States), sign-in with Google or GitHub, only if you choose it (we receive your verified e-mail address).</li>

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/api/landing"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -275,10 +276,15 @@ func (p *SmartPromoter) requestRestore(ctx context.Context, tenantID, bucket, ke
 // autoRestoreRetryAfter is the Retry-After of a read that waits on a recall.
 const autoRestoreRetryAfter = "120"
 
-const (
-	autoRestoreMessage       = "This object has not been read for a while and is being brought back from cold storage. No action is needed: retry the request. It is usually readable again within a few hours."
-	autoRestoreFailedMessage = "This object is in cold storage and bringing it back could not be started. Retry shortly."
-)
+const autoRestoreFailedMessage = "This object is in cold storage and bringing it back could not be started. Retry shortly."
+
+// autoRestoreMessage is the answer to a read that started a recall. How long
+// the recall takes is prices.json's one sentence (vault.restore_time), the
+// same every public page says.
+func autoRestoreMessage() string {
+	return "This object has not been read for a while and is being brought back from cold storage. No action is needed: retry the request. " +
+		landing.Get().Vault.RestoreTime
+}
 
 // writeArchivedRead answers an S3 read (GetObject, the source of a
 // CopyObject) whose backend said the bytes are on tape. notSmartHint is the
@@ -294,7 +300,7 @@ func writeArchivedRead(w http.ResponseWriter, r *http.Request, p *SmartPromoter,
 	case archivedRestoring:
 		markClientRefusal(r.Context())
 		w.Header().Set("Retry-After", autoRestoreRetryAfter)
-		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(), WithMessage(autoRestoreMessage))
+		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(), WithMessage(autoRestoreMessage()))
 	case archivedRestoreFailed:
 		w.Header().Set("Retry-After", autoRestoreRetryAfter)
 		WriteS3ErrorWithContext(w, ErrServiceUnavailable, r.URL.Path, generateRequestID(), WithMessage(autoRestoreFailedMessage))

@@ -35,8 +35,8 @@ flat per-TB rate, and resize up or down whenever you like (prorated). The quota 
 hard cap — a write past it returns a clear quota error until you resize — so the
 bill never moves on its own: no meters, no overage charges.
 
-No API/request fees, ever. No retrieval fees. No minimum storage duration on
-Standard; Vault has a 30-day per-object minimum (a third of Wasabi's 90).
+No API/request fees, ever. No retrieval fees. No minimum storage duration, on
+Standard or Vault.
 
 **What about egress?**
 Egress is never billed — no surprise egress bills. Each month you can download
@@ -50,9 +50,10 @@ quota raises the allowance within a minute.
 
 **What stays hot on Standard?**
 The Smart schedule: about 15% of your quota lives on hot storage; data idle for 14+
-days moves to tape. Reading it brings it back hot — within minutes while the archive
-still holds it on its staging disk (roughly two weeks), a few hours once it has been
-written to tape — and it then stays hot until it goes idle again (14 days), or sooner
+days moves to tape. Reading it brings it back hot: at once while the archive still
+holds it on its staging disk (usually a day or more after the move); once it is on
+tape, the read answers `503 ServiceUnavailable` with `Retry-After` while we bring it back.
+__VAULT_RESTORE__ It then stays hot until it goes idle again (14 days), or sooner
 if your hot allowance is full. The schedule is switched on per account by us — until it
 is on for yours, everything you store on Standard simply stays hot. Need specific data to never demote?
 The **pin-hot add-on** is $3/TB/mo for the pinned amount.
@@ -133,8 +134,10 @@ your threat model, use SSE-C or client-side encryption and you keep dedup on eve
 else.
 
 **Cold data retrieval — is it instant?**
-Hot data is <50ms. Data aged to tape spools to cache on first read — seconds to a
-couple of minutes for first byte, longer for multi-TB restores. Need specific data
+Hot data is <50ms. Standard data the Smart schedule moved to tape comes back on its
+first read: that read answers `503 ServiceUnavailable` with `Retry-After` while we bring it
+back, and later reads are hot. __VAULT_RESTORE__ Vault objects are restored with
+`?restore` (or the dashboard's button) and read once it lands. Need specific data
 hot forever? The pin-hot add-on ($3/TB/mo) keeps it from ever demoting; a full
 always-hot Performance tier launches after October 31.
 

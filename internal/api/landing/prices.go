@@ -27,6 +27,11 @@ type Prices struct {
 		Annual         float64 `json:"annual"`
 		Monthly        float64 `json:"monthly"`
 		MonthlyMinimum float64 `json:"monthly_minimum"`
+		// How long a restore from tape takes, as every page says it: the
+		// long sentence and the short phrase (the pricing card). One
+		// wording, like the egress sentences below.
+		RestoreTime      string `json:"restore_time"`
+		RestoreTimeShort string `json:"restore_time_short"`
 	} `json:"vault"`
 	PinHot      float64 `json:"pin_hot"`
 	Performance float64 `json:"performance"`
@@ -154,6 +159,17 @@ func (h HouseIntent) RoomURL() string {
 		return ""
 	}
 	return "/#room=" + h.Room
+}
+
+// VaultTokens are the placeholders the embedded Markdown guides and the
+// landing pages carry for a Vault restore's time, with their values from
+// prices.json. build.py substitutes the same names into the landing page.
+func VaultTokens() map[string]string {
+	v := Get().Vault
+	return map[string]string{
+		"__VAULT_RESTORE__":       v.RestoreTime,
+		"__VAULT_RESTORE_SHORT__": v.RestoreTimeShort,
+	}
 }
 
 // EgressTokens are the placeholders the embedded Markdown guides carry for

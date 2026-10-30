@@ -115,7 +115,7 @@ Behaviour worth knowing before writing code against it:
 - **Storage classes are the tiers.** No header or `STANDARD` = the Standard
   floor (hot). `GLACIER` / `DEEP_ARCHIVE` = the Vault floor (tape): a GET of an
   archived object answers 403 `InvalidObjectState` until `?restore` completes
-  (minutes to hours). Listings and HEAD report the class the object actually
+  (usually a few minutes; allow up to 12 hours). Listings and HEAD report the class the object actually
   has. Any other class in `x-amz-storage-class` — `REDUCED_REDUNDANCY`,
   `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING` — is accepted and stored
   as the bucket's own tier (`STANDARD` on a plain bucket): we do not sell a

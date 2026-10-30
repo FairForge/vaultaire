@@ -1,7 +1,12 @@
 {
   "_comment": "Every Stored price the landing page shows. Edit here, then `make landing`. USD per TB per month unless noted.",
   "standard": { "annual": 4.49, "monthly": 4.99 },
-  "vault": { "annual": 2.00, "monthly": 2.55, "monthly_minimum": 4.99 },
+  "vault": {
+    "annual": 2.00, "monthly": 2.55, "monthly_minimum": 4.99,
+    "_restore_comment": "How long a restore from tape takes: the ONE wording every page uses (landing, pricing, FAQ), substituted as __VAULT_RESTORE__ / __VAULT_RESTORE_SHORT__. Measured 200 to 459 s on LA1/LA2, one LA2 restore past 92 min; the outer bound is the tape vendor's own envelope. No quotes, ampersands or angle brackets.",
+    "restore_time": "A restore from tape usually takes a few minutes; allow up to 12 hours.",
+    "restore_time_short": "restores usually take minutes, allow up to 12 hours"
+  },
   "pin_hot": 3.00,
   "performance": 6.99,
   "founders": 1.00,

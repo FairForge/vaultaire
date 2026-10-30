@@ -107,14 +107,17 @@ PRICE_TOKENS = {
     '__PRICES_SOURCES__': P['competitors']['_sources'],
     '__EGRESS_PAST_LONG__': P['egress']['past_allowance'],
     '__EGRESS_ONE__': P['egress']['one_allowance'],
+    # How long a Vault restore takes: one wording for every page.
+    '__VAULT_RESTORE__': P['vault']['restore_time'],
+    '__VAULT_RESTORE_SHORT__': P['vault']['restore_time_short'],
 }
 
 
 def prices(text):
     for k, v in PRICE_TOKENS.items():
         text = text.replace(k, v)
-    if '__PRICE_' in text:
-        sys.exit('build.py: unknown price token: ' + re.search(r'__PRICE_[A-Z0-9_]+__', text).group(0))
+    if '__PRICE_' in text or '__VAULT_' in text:
+        sys.exit('build.py: unknown price token: ' + re.search(r'__(PRICE|VAULT)_[A-Z0-9_]+__', text).group(0))
     return text
 
 
