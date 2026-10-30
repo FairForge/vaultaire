@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -162,19 +163,37 @@ func (s *Server) handleMgmtSetMemberRole(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "role": role})
 }
 
+// handleMgmtRemoveMember removes a member. The answer names the keys the
+// member made (keys_made: they are the tenant's and stay live); a body
+// {"revoke_keys": true} revokes them in the same transaction (RP84-4).
 func (s *Server) handleMgmtRemoveMember(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
 	target := chi.URLParam(r, "user")
-	if err := auth.RemoveMember(r.Context(), s.db, tenantID, target); err != nil {
+	var req struct {
+		RevokeKeys bool `json:"revoke_keys"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+			return
+		}
+	}
+	res, err := auth.RemoveMember(r.Context(), s.db, tenantID, target, req.RevokeKeys)
+	if err != nil {
 		if !memberChangeError(w, err) {
 			s.logger.Error("remove member", zap.Error(err))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to remove the member", "")
 		}
 		return
 	}
+	if res.KeysRevoked && s.auth != nil {
+		s.auth.ForgetRevokedKeys(tenantID, res.KeysMade)
+	}
 	audit.Record(r.Context(), s.db, audit.Entry{UserID: target, TenantID: tenantID, Action: "member.removed",
-		Resource: "user:" + target, Severity: "warning"})
-	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "deleted": true})
+		Resource: "user:" + target, Severity: "warning",
+		Metadata: map[string]any{"keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "deleted": true,
+		"keys_made": res.KeysMade, "keys_revoked": res.KeysRevoked})
 }
 
 func (s *Server) handleMgmtRevokeInvitation(w http.ResponseWriter, r *http.Request) {

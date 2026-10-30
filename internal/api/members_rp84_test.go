@@ -190,3 +190,68 @@ func TestMembers_ANewInvitationReplacesThePendingOne(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, out)
 	assert.Equal(t, "viewer", out["role"], "the member's actual role")
 }
+
+// RP84-4: a removed member keeps no secret silently — the removal names the
+// keys it made (they are the tenant's, D-STRIPE-40, and stay live unless
+// asked), and revoke_keys: true revokes them and their STS tokens in the
+// removal's own transaction, with one audit row.
+func TestMembers_RemovalNamesTheKeysTheMemberMade(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement()
+	ctx := context.Background()
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM sts_tokens WHERE tenant_id = $1`, f.user.TenantID) })
+	_, err := f.db.Exec(`UPDATE tenant_quotas SET tier = 'standard' WHERE tenant_id = $1`, f.user.TenantID)
+	require.NoError(t, err) // past the free tier's key cap
+	dev, devJWT := f.addMember(auth.RoleDeveloper)
+	var made []string
+	for _, name := range []string{"ci", "backup"} {
+		code, out := f.call(http.MethodPost, "/api/v1/manage/keys", devJWT, map[string]any{"name": name})
+		require.Equal(t, http.StatusCreated, code, out)
+		made = append(made, out["id"].(string))
+	}
+	var parentKeyID string
+	require.NoError(t, f.db.QueryRow(`SELECT key_id FROM api_keys WHERE id = $1`, made[0]).Scan(&parentKeyID))
+	_, err = f.db.Exec(`INSERT INTO sts_tokens (access_key, secret_key, tenant_id, parent_key_id, expires_at)
+		VALUES ($1, 'sk', $2, $3, NOW() + INTERVAL '1 hour')`, "ASIARM"+uuid.NewString()[:12], f.user.TenantID, parentKeyID)
+	require.NoError(t, err)
+
+	keyIDs := func(out map[string]any) []string {
+		var ids []string
+		list, _ := out["keys_made"].([]any)
+		for _, k := range list {
+			m := k.(map[string]any)
+			assert.Contains(t, m, "name")
+			assert.Contains(t, m, "last_used")
+			ids = append(ids, m["id"].(string))
+		}
+		return ids
+	}
+
+	// Removed without revoke: named, still live.
+	code, out := f.call(http.MethodDelete, "/api/v1/manage/members/"+dev.ID, f.jwt, nil)
+	require.Equal(t, http.StatusOK, code, out)
+	assert.ElementsMatch(t, made, keyIDs(out), "the answer names every key the member made")
+	assert.Equal(t, false, out["keys_revoked"])
+	_, err = f.s.auth.GetOwnedAPIKey(ctx, f.user.TenantID, made[0])
+	assert.NoError(t, err, "the tenant's keys stay live unless asked")
+
+	// Back, then removed with revoke_keys: revoked, their tokens gone.
+	_, err = f.db.Exec(`INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'developer')`, f.user.TenantID, dev.ID)
+	require.NoError(t, err)
+	code, out = f.call(http.MethodDelete, "/api/v1/manage/members/"+dev.ID, f.jwt, map[string]any{"revoke_keys": true})
+	require.Equal(t, http.StatusOK, code, out)
+	assert.ElementsMatch(t, made, keyIDs(out))
+	assert.Equal(t, true, out["keys_revoked"])
+	var live, tokens, rows int
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL`,
+		f.user.TenantID, dev.ID).Scan(&live))
+	assert.Zero(t, live, "every key the member made is revoked")
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM sts_tokens WHERE parent_key_id = $1`, parentKeyID).Scan(&tokens))
+	assert.Zero(t, tokens, "their STS tokens with them")
+	for _, id := range made {
+		_, err := f.s.auth.GetOwnedAPIKey(ctx, f.user.TenantID, id)
+		assert.ErrorIs(t, err, auth.ErrKeyRevoked, "this process's key cache knows it")
+	}
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1 AND action = 'member.keys_revoked'`,
+		f.user.TenantID).Scan(&rows))
+	assert.Equal(t, 1, rows, "one audit row for the revocation")
+}

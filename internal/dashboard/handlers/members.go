@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"time"
@@ -43,6 +44,20 @@ func HandleMembers(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http
 		}
 		data["Members"] = members
 		data["Invitations"] = invs
+		// The keys each member made (RP84-4): the removal's confirmation
+		// lists them, with the revoke box ticked.
+		made := map[string][]auth.MadeKey{}
+		if auth.Can(auth.Role(sd.MemberRole), auth.ActionMemberManage) {
+			for _, m := range members {
+				if m.Role == auth.RoleOwner {
+					continue
+				}
+				if keys, err := auth.KeysMadeBy(r.Context(), db, sd.TenantID, m.UserID); err == nil && len(keys) > 0 {
+					made[m.UserID] = keys
+				}
+			}
+		}
+		data["KeysMade"] = made
 		data["Now"] = time.Now()
 		// The switcher (PR C): the other tenants this user may act on.
 		data["Accounts"] = []auth.Membership{}
@@ -130,19 +145,35 @@ func HandleSetMemberRole(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 }
 
 // HandleRemoveMember removes a member's row (never a user, never a tenant).
-func HandleRemoveMember(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// The form's revoke_keys box (ticked by default on the page, which lists
+// the keys the member made) revokes those keys in the same transaction
+// (RP84-4); unticked, they stay the tenant's and live.
+func HandleRemoveMember(db *sql.DB, keys *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		target := chi.URLParam(r, "user")
-		if err := auth.RemoveMember(r.Context(), db, sd.TenantID, target); err != nil {
+		revoke := r.FormValue("revoke_keys") == "1"
+		res, err := auth.RemoveMember(r.Context(), db, sd.TenantID, target, revoke)
+		if err != nil {
 			if !errors.Is(err, auth.ErrOwnerMember) && !errors.Is(err, auth.ErrNotMember) {
 				logger.Error("dashboard: remove member", zap.Error(err))
 			}
 			middleware.SetFlash(w, "error", memberFlash(err))
 		} else {
+			if res.KeysRevoked && keys != nil {
+				keys.ForgetRevokedKeys(sd.TenantID, res.KeysMade)
+			}
 			audit.Record(r.Context(), db, audit.Entry{UserID: target, TenantID: sd.TenantID, Action: "member.removed",
-				Resource: "user:" + target, Severity: "warning", Metadata: map[string]any{"via": "dashboard"}})
-			middleware.SetFlash(w, "success", "Member removed.")
+				Resource: "user:" + target, Severity: "warning",
+				Metadata: map[string]any{"via": "dashboard", "keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})
+			switch {
+			case res.KeysRevoked:
+				middleware.SetFlash(w, "success", fmt.Sprintf("Member removed, and the %d keys they made revoked.", len(res.KeysMade)))
+			case len(res.KeysMade) > 0:
+				middleware.SetFlash(w, "success", fmt.Sprintf("Member removed. The %d keys they made are still live: revoke them on the API keys page if they should stop.", len(res.KeysMade)))
+			default:
+				middleware.SetFlash(w, "success", "Member removed.")
+			}
 		}
 		http.Redirect(w, r, "/dashboard/members", http.StatusSeeOther)
 	}

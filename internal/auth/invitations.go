@@ -26,6 +26,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -423,18 +424,118 @@ func SetMemberRole(ctx context.Context, db *sql.DB, tenantID, userID string, rol
 	return nil
 }
 
+// MadeKey is a live key of a tenant and the member who made it (RP84-4).
+type MadeKey struct {
+	ID       string     `json:"id"`
+	Name     string     `json:"name"`
+	LastUsed *time.Time `json:"last_used"`
+}
+
+// KeysMadeBy lists the live keys userID made on tenantID — the tenant's
+// keys (D-STRIPE-40) a removal leaves live unless it revokes them.
+func KeysMadeBy(ctx context.Context, q interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}, tenantID, userID string) ([]MadeKey, error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id::text, name, last_used FROM api_keys
+		 WHERE tenant_id = $1 AND user_id::text = $2 AND revoked_at IS NULL AND NOT is_primary
+		 ORDER BY created_at, id`, tenantID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("keys made by %s on %s: %w", userID, tenantID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []MadeKey{}
+	for rows.Next() {
+		var k MadeKey
+		var used sql.NullTime
+		if err := rows.Scan(&k.ID, &k.Name, &used); err != nil {
+			return nil, fmt.Errorf("keys made by %s on %s: %w", userID, tenantID, err)
+		}
+		if used.Valid {
+			k.LastUsed = &used.Time
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// MemberRemoval is what a removal did: the keys the member made, and
+// whether they were revoked (with STSTokens of their tokens deleted).
+type MemberRemoval struct {
+	KeysMade    []MadeKey
+	KeysRevoked bool
+	STSTokens   int64
+}
+
 // RemoveMember removes a member's row — never a tenant, never the user's
-// own account. The owner cannot be removed.
-func RemoveMember(ctx context.Context, db *sql.DB, tenantID, userID string) error {
+// own account. The owner cannot be removed. The keys the member made stay
+// the tenant's and live, and are named in the answer (RP84-4: the removal
+// used to say nothing of them while the person kept every secret it had
+// copied); revokeKeys revokes them, and deletes their STS tokens, in the
+// removal's own transaction with one member.keys_revoked audit row. The
+// caller drops them from its key cache (AuthService.ForgetRevokedKeys).
+func RemoveMember(ctx context.Context, db *sql.DB, tenantID, userID string, revokeKeys bool) (MemberRemoval, error) {
+	var res MemberRemoval
 	cur, err := targetRole(ctx, db, tenantID, userID)
 	if err != nil {
-		return err
+		return res, err
 	}
 	if cur == RoleOwner {
-		return ErrOwnerMember
+		return res, ErrOwnerMember
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM tenant_members WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
-		return fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+	if res.KeysMade, err = KeysMadeBy(ctx, tx, tenantID, userID); err != nil {
+		return res, err
+	}
+	if revokeKeys && len(res.KeysMade) > 0 {
+		ids := make([]string, len(res.KeysMade))
+		for i, k := range res.KeysMade {
+			ids[i] = k.ID
+		}
+		out, err := tx.ExecContext(ctx, `
+			DELETE FROM sts_tokens WHERE tenant_id = $1
+			   AND parent_key_id IN (SELECT key_id FROM api_keys WHERE id::text = ANY($2) AND tenant_id = $1)`,
+			tenantID, pq.Array(ids))
+		if err != nil {
+			return res, fmt.Errorf("remove %s from %s: sts tokens: %w", userID, tenantID, err)
+		}
+		res.STSTokens, _ = out.RowsAffected()
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE api_keys SET revoked_at = NOW()
+			 WHERE id::text = ANY($2) AND tenant_id = $1 AND revoked_at IS NULL`, tenantID, pq.Array(ids)); err != nil {
+			return res, fmt.Errorf("remove %s from %s: revoke keys: %w", userID, tenantID, err)
+		}
+		if err := audit.RecordTx(ctx, tx, audit.Entry{UserID: userID, TenantID: tenantID, Action: "member.keys_revoked",
+			Resource: "user:" + userID, Severity: "warning",
+			Metadata: map[string]any{"keys": ids, "sts_tokens_deleted": res.STSTokens}}); err != nil {
+			return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
+		}
+		res.KeysRevoked = true
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_members WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
+		return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
+	}
+	return res, nil
+}
+
+// ForgetRevokedKeys marks keys revoked in this process's key cache (the
+// rows were revoked by RemoveMember's transaction). No lookup trusts the
+// cache — LookupCredential reads the row — but the listing and the
+// management calls read it.
+func (a *AuthService) ForgetRevokedKeys(tenantID string, keys []MadeKey) {
+	now := time.Now()
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	for _, k := range keys {
+		if live := a.findOwnedKeyLocked(tenantID, k.ID); live != nil && live.RevokedAt == nil {
+			a.markRevokedLocked(live, now)
+		}
+	}
 }
