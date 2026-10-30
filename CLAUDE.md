@@ -342,6 +342,7 @@ GitHub Actions Deploy (`.github/workflows/deploy.yml`):
 This file is in a public repository (Review R14-20 / decision D-20): the hostnames and paths here are deliberately here and not in README.md.
 
 - Server: `slc-vaultaire-01` (Ubuntu 26.04.1, kernel 7.0, Salt Lake City — upgraded 2026-10-10: HAProxy 3.2.9 / OpenSSL 3.5.5, OpenSSH 10.2, Redis 8.0.5, PostgreSQL 18.6), SSH alias `vaultaire-slc`
+- The slots run as the system user **`vaultaire`** since 2026-10-30 01:33 UTC (Stage 1a Prompt 52E, #1074; no shell, no home; `data/` and `bin/` are its, `configs/.env` `root:vaultaire 0640` with `user1` in the group for the deploy's migrations and `pg-backup.sh`; `vaultaire-switch` installs binaries as the unit's `User=`, the staged upload is still `user1`'s; `deploy/scripts/vaultaire-user-install.sh [--rollback]`; `docs/DEPLOY.md` § The service user)
 - Two app slots `vaultaire@8000` / `vaultaire@8001` behind HAProxy, one active (`/opt/vaultaire/ACTIVE_PORT`; binaries `/opt/vaultaire/bin/vaultaire-800x`); config at `/opt/vaultaire/configs/.env`. Deploys, `.env` restarts and rollbacks go through `sudo vaultaire-switch deploy|restart|rollback|status` (zero downtime; `docs/DEPLOY.md`); the old `vaultaire.service` is masked. Logs: `journalctl -u 'vaultaire@*'`
 - HAProxy fronts the service; Cloudflare proxies stored.ge
 - UFW firewall: ports 22, 80, 443 only
