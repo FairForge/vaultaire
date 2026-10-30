@@ -254,8 +254,71 @@ a vendor fault under investigation), not the host.
 
 **Re-checked 2026-10-22** (`bench-results/HOST-TUNING-CHECK-2026-10-22.md`): the boot unit
 run under systemd (`systemctl start`, exit 0, no link reset), raw iDrive / Lyve / Wasabi
-unchanged before and after it, the customer path at the 10-21 "after" numbers. A reboot
-has not tested its boot ordering yet.
+unchanged before and after it, the customer path at the 10-21 "after" numbers. **The
+2026-10-30 reboot tested its boot ordering:** governor `performance`, rings 4096, the reserved
+ports and BBR all back with no hand step (compared with a snapshot taken before it).
+
+### Host maintenance (2026-10-30)
+
+**One lock for the box.** `vaultaire-switch` has always run one deploy, restart or
+rollback at a time under `/run/vaultaire-switch.lock`. A reboot, an apt pass or a
+service cutover took no lock: on 2026-10-30 a planned reboot landed 4 s into another
+operator's service-user cutover (§ The service user), and the night's apt pass ran
+between two deploys. `deploy/scripts/vaultaire-maint` takes the same lock, so a deploy
+waits for maintenance (up to the switch's 1200 s) and maintenance is refused while a
+deploy runs. Install: `sudo install -m 0755 deploy/scripts/vaultaire-maint /usr/local/sbin/`.
+
+```bash
+vaultaire-maint status                         # free | held: by, reason, since, cmd (exit 0 | 1; no sudo)
+sudo vaultaire-maint run "<reason>" -- <cmd>   # any box-wide change under the lock (refused when held)
+sudo vaultaire-maint upgrade "<reason>"        # the -updates pass (below)
+sudo vaultaire-maint reboot "<reason>"         # refused while long S3 ops run; silences alerts 20 min
+```
+
+Never wrap `vaultaire-switch` in `run` (it takes the lock itself; refused). Several
+operator sessions work on this box at once: the lock covers the box, not a session's
+plan, so before a reboot also ask the others whether one is mid-change.
+
+**Patch policy.**
+
+| What | How | Watched by |
+|---|---|---|
+| `-security` packages | `unattended-upgrades`, daily (`20auto-upgrades`); never reboots | `HostSecurityUpdatesPending` (pending 2 d = stuck), `HostAptListsStale` (no list refresh in 3 d) |
+| `-updates` packages | by hand, about monthly: `vaultaire-maint upgrade` | — (`apt list --upgradable`) |
+| a reboot (kernel, libc, systemd) | `vaultaire-maint reboot`: both slots go down ~1 min (2026-10-30: SSH back in 47 s, `/health` 200 in 67 s) | `HostRebootRequired` (owed 3 d) |
+| a kernel CVE with no fix released yet | a network stopgap + a watcher that pushes to ntfy when the fix is installable, installed, live | its own timer (below) |
+
+Rules: `deploy/monitoring/vaultaire-host.yml` (node_exporter's apt collector).
+
+`upgrade` is the recipe of 2026-10-29: a `policy-rc.d` that refuses every restart a
+package asks for and `NEEDRESTART_MODE=l`, so the slots, Postgres and Redis keep running;
+`apt-get --with-new-pkgs upgrade` keeping our config files (`--force-confold`); when
+HAProxy changed, `haproxy -c` then `systemctl reload haproxy` — the master re-executes on
+the new binary and open connections finish on the old workers; then the services still on
+replaced libraries are listed (they restart with the next reboot). Log
+`/var/log/vaultaire-maint-upgrade-<ts>.log`, HAProxy config backup `/root/haproxy-bak-<ts>`.
+
+**CVE-2026-98432** (kernel IPv4 use-after-free on a SYN's IP options, Ubuntu priority
+High; fix `linux 7.0.0-43`, only in `-proposed` on 2026-10-30). Files in
+`deploy/host/cve-2026-98432/` (sha256 = the box's on 2026-10-30):
+
+| File | Installs to | Does |
+|---|---|---|
+| `cve-2026-98432.nft` + `cve-2026-98432-stopgap.service` | `/etc/vaultaire/`, `/etc/systemd/system/` (enabled) | table `ip cve_2026_98432`, prerouting at priority raw: drops IPv4 TCP SYNs carrying IP options (`ip hdrlength != 5`), with a counter. The freed objects only exist when the SYN carried options; no real client sends them. Its own table, so UFW and fail2ban reloads never touch it. Tested: a SYN with options times out, a plain one connects, on loopback and the public address |
+| `cve-2026-98432-watch.sh` + `.service` + `.timer` | `/usr/local/sbin/`, `/etc/systemd/system/` (timer enabled, 09:00 and 21:00 UTC) | pushes once per state change through the ntfy bridge: fix installable → installed but not booted → live |
+
+When the box runs `7.0.0-43` or later: `sudo systemctl disable --now
+cve-2026-98432-stopgap cve-2026-98432-watch.timer`, delete the files, and remove this row.
+
+**Host changes of 2026-10-29/30** (box-side, recorded here):
+
+| Change | Backup / evidence |
+|---|---|
+| the CVE-2026-98432 stopgap and watcher (above) | — |
+| `user1`'s `authorized_keys`: removed `ci-deploy@fairforge.io` and `github-actions-deploy@vaultaire`, never used in the journal (2026-09-22 on); kept the owner's key and `github-actions-env-deploy@vaultaire-2026-09` (the deploy) | `authorized_keys.bak-20261029T225942Z` |
+| all 29 `-updates` packages (HAProxy 3.2.9 → 3.2.25, systemd 259.9, kernel 7.0.0-42, Grafana 13.3.0) by the `upgrade` recipe | `/var/log/cve-upgrade-20261029T225942Z.log`, `/root/haproxy-bak-20261029T225942Z` |
+| `logrotate` failed every night since 2026-10-11: `/etc/logrotate.d/cloud-init` (2024) and the package's `cloud-init-base` both named `/var/log/cloud-init.log`; the old one moved aside | `/root/logrotate.d-cloud-init.bak-20261030T012746Z` |
+| reboot 01:28 UTC onto 7.0.0-42 (still vulnerable to the CVE; the stopgap stays) | `/root/prereboot-20261030T012746Z/` (units, listeners, sysctl, NIC — all back but a `*:8100` listener nobody claimed, a hand-started process) |
 
 ## The pipeline: push to `main`
 

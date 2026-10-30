@@ -133,6 +133,7 @@ jobs:
           bash deploy/scripts/pg-backup_test.sh
           bash deploy/scripts/pg-pitr_test.sh
           bash deploy/scripts/vaultaire-switch_test.sh
+          bash deploy/scripts/vaultaire-maint_test.sh
           bash deploy/scripts/vaultaire-user-install_test.sh
           bash deploy/scripts/tenant-zero-proof_test.sh
           bash scripts/sbom_test.sh
