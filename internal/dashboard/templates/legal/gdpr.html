@@ -1,7 +1,7 @@
 {{define "title"}}GDPR Compliance, Stored{{end}}
 {{define "content"}}
 <div class="card">
-    <p class="text-muted">Last updated: October 24, 2026</p>
+    <p class="text-muted">Last updated: October 30, 2026</p>
     <h1>GDPR Compliance</h1>
     <p>Stored is committed to compliance with the General Data Protection Regulation (EU) 2016/679 ("GDPR"). This page describes how our service maps to GDPR requirements. For the full legal framework, see our <a href="/legal/privacy">Privacy Policy</a> and <a href="/legal/dpa">Data Processing Agreement</a>.</p>
 
@@ -110,7 +110,7 @@
             <tr><td>ap-northeast-1</td><td>Tokyo, Japan</td></tr>
         </tbody>
     </table>
-    <p>A bucket's region is fixed at creation and its <strong>Standard-tier</strong> objects are stored only in that region: EU regions keep data within the European Union and United Kingdom as labelled above. Two exceptions apply whatever the bucket's region: objects stored in the <strong>Vault tier</strong> (storage class <code>GLACIER</code> / <code>DEEP_ARCHIVE</code>, or a Vault bucket) are written to our tape partner in Los Angeles, United States; and the objects of <strong>public-read buckets</strong> are served from Cloudflare R2. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
+    <p>A bucket's region is fixed at creation and its <strong>Standard-tier</strong> objects are stored only in that region: EU regions keep data within the European Union and United Kingdom as labelled above. Two exceptions apply whatever the bucket's region: objects stored in the <strong>Vault tier</strong> (storage class <code>GLACIER</code> / <code>DEEP_ARCHIVE</code>, or a Vault bucket) are written to our tape partner in Los Angeles, United States, and their parity copy is kept in the United States; and the objects of <strong>public-read buckets</strong> are served from Cloudflare R2. International data transfers are governed by Standard Contractual Clauses as described in our <a href="/legal/dpa">DPA</a>.</p>
 
     <h2 id="sub-processors">Sub-processors</h2>
     <p>Stored engages the following sub-processors in delivering the service:</p>
@@ -124,10 +124,12 @@
         </thead>
         <tbody>
             <tr><td>iDrive Inc.</td><td>Object storage, Standard tier, per-bucket region</td><td>United States / EU</td></tr>
-            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover</td><td>United States</td></tr>
+            <tr><td>Seagate Technology (Lyve Cloud)</td><td>Object storage, resilient tier, failover; the parity second copy of Vault-tier objects</td><td>United States</td></tr>
             <tr><td>Geyser Data Inc.</td><td>Tape archive, Vault tier (all regions)</td><td>United States (Los Angeles)</td></tr>
             <tr><td>Cloudflare Inc.</td><td>CDN, DDoS protection, TLS; the bytes of uploads to the S3 endpoint <code>{{host "s3host"}}</code> in transit through its edge; R2 storage for public-read buckets and the encrypted point-in-time archive of the database</td><td>Global (edge network) / United States</td></tr>
             <tr><td>Microsoft Corporation (OneDrive)</td><td>Internal parity copies, when enabled</td><td>United States</td></tr>
+            <tr><td>Sync.com Inc.</td><td>The encrypted off-site copy of the database backups; a standby location for the parity copies of Vault-tier objects</td><td>Canada</td></tr>
+            <tr><td>Blomp</td><td>A second encrypted off-site copy of the database backups</td><td>United States</td></tr>
             <tr><td>Stripe Inc.</td><td>Payment processing</td><td>United States</td></tr>
             <tr><td>Resend Inc.</td><td>Transactional e-mail, when enabled</td><td>United States</td></tr>
             <tr><td>Google LLC / GitHub Inc.</td><td>OAuth sign-in (only if used)</td><td>United States</td></tr>

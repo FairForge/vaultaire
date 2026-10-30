@@ -5,6 +5,26 @@ what you need and it shows up here.
 
 ---
 
+## 2026-10-30: Vault, written as it is
+
+- **No minimum storage duration on Vault.** The "30-day minimum per object"
+  was printed but never charged; it is gone from every page. Standard never
+  had one.
+- **One sentence for how long a restore takes:** a restore from tape usually
+  takes a few minutes; allow up to 12 hours. The pages used to say "minutes
+  to start", "minutes to hours" and "a few hours" for the same thing.
+- **The allowance, as it is:** one download allowance per account per UTC
+  month, 2× your Standard quota plus 1× your Vault quota. Past it, downloads
+  (Vault restores included) are rate-limited until the 1st and never billed;
+  there is no separate restore queue and no $2.99/TB line. This replaces the
+  "0.5×" and "beyond that they queue" wording of 2026-09-22 and the limits
+  listed on 2026-09-16.
+- **A restored object stays readable for the days your restore request asks
+  for** (the dashboard asks for 2), not a fixed 7 days.
+- **The sub-processor lists** (privacy policy, DPA, GDPR page) now name
+  Sync.com and Blomp, which hold our encrypted off-site database backups,
+  and say that Lyve Cloud holds the parity copy of Vault objects.
+
 ## 2026-10-19: Multipart objects are checked whole; a wrong SSE-C key is refused up front
 
 - **A multipart upload's object is now verified on download like a single

@@ -76,6 +76,10 @@ func renderDocsPages(logger *zap.Logger, h hosts.Hosts) map[string][]byte {
 		for token, value := range landing.EgressTokens() {
 			md = bytes.ReplaceAll(md, []byte(token), []byte(value))
 		}
+		// So is a Vault restore's time (prices.json vault.restore_time).
+		for token, value := range landing.VaultTokens() {
+			md = bytes.ReplaceAll(md, []byte(token), []byte(value))
+		}
 		// Hosts too (internal/hosts, WP-DOMAIN-1): __HOST_S3__ etc.
 		md = []byte(h.Expand(string(md)))
 		var buf bytes.Buffer
