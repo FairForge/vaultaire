@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/account"
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/go-chi/chi/v5"
@@ -37,6 +38,18 @@ type UserInfo struct {
 func (s *Server) registerUserAPIRoutes() {
 	s.router.Route("/api/v1/user", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		// A sign-in with no tenant of its own and no membership asks for
+		// its own erasure (RB10-1, WP-ACCT-1): outside requireMember — it is
+		// a member of nothing — and refused for anyone who still is one.
+		r.Delete("/signin", s.handleDeleteTenantlessSignIn)
+		r.Group(func(r chi.Router) { s.registerUserMemberRoutes(r) })
+	})
+}
+
+// registerUserMemberRoutes are /api/v1/user's routes of a member of the
+// JWT's tenant.
+func (s *Server) registerUserMemberRoutes(r chi.Router) {
+	{
 		r.Use(s.requireMember) // WP-TEAM-1: the JWT's user is a member of its tenant
 
 		r.Get("/", s.handleGetUserInfo)
@@ -59,7 +72,35 @@ func (s *Server) registerUserAPIRoutes() {
 		r.Get("/usage", s.handleGetUsageStats)
 		r.Get("/usage/alerts", s.handleGetUsageAlerts)
 		r.Get("/presigned", s.handleGetPresignedURL)
-	})
+	}
+}
+
+// handleDeleteTenantlessSignIn is DELETE /api/v1/user/signin {reason}: the
+// erasure of a sign-in that owns no tenant and is a member of none (an
+// invitee who left, or was removed): the usual 30-day grace, then the user
+// rows only (account.EraseRows with no tenant; the keys it once made on a
+// team are the team's — RP84-1). 409 still_a_member otherwise.
+func (s *Server) handleDeleteTenantlessSignIn(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value(userIDKey).(string)
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	at, err := s.accounts().ScheduleSignIn(r.Context(), userID, req.Reason)
+	switch {
+	case errors.Is(err, account.ErrStillAMember):
+		writeManagementError(w, ErrTypeConflict, "still_a_member",
+			"this sign-in owns an account or is a member of one: leave it (or delete the account you own) first", "")
+		return
+	case err != nil:
+		s.logger.Error("schedule a tenantless sign-in's erasure", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "deletion_failed", "failed to schedule the deletion", "")
+		return
+	}
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: userID, Action: "account.deletion_scheduled", Resource: "user:" + userID,
+		Severity: "warning", Metadata: map[string]any{"scheduled_at": at, "reason": req.Reason, "via": "signin"}})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "account_deletion", "scheduled_at": at,
+		"message": mgmtDeletionMessage(at), "request_id": getRequestID(w)})
 }
 
 // handleGetUserInfo returns the account as persisted.

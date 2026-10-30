@@ -101,12 +101,13 @@ type ChildOptions struct {
 
 // The predicate "tenant t is in the tree under the platform $n" (a child,
 // or an app's child): the platform's reach over its tenants, at any depth
-// the tree allows. Constants (no SQL is built at run time), one per
+// the tree allows. A SPONSORED child is outside it: its sponsor never mints
+// its keys, reads it or erases it (docs/ACCOUNTS.md). Constants (no SQL is built at run time), one per
 // parameter position.
 const (
-	DescendantT1 = `(t.parent_tenant_id = $1 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $1 AND a.child_kind = 'app'))`
-	DescendantT2 = `(t.parent_tenant_id = $2 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $2 AND a.child_kind = 'app'))`
-	DescendantT3 = `(t.parent_tenant_id = $3 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $3 AND a.child_kind = 'app'))`
+	DescendantT1 = `(COALESCE(t.child_kind, 'managed') <> 'sponsored' AND (t.parent_tenant_id = $1 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $1 AND a.child_kind = 'app')))`
+	DescendantT2 = `(COALESCE(t.child_kind, 'managed') <> 'sponsored' AND (t.parent_tenant_id = $2 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $2 AND a.child_kind = 'app')))`
+	DescendantT3 = `(COALESCE(t.child_kind, 'managed') <> 'sponsored' AND (t.parent_tenant_id = $3 OR t.parent_tenant_id IN (SELECT a.id FROM tenants a WHERE a.parent_tenant_id = $3 AND a.child_kind = 'app')))`
 )
 
 // MaxChildLabel bounds a child's label and external id (runes).

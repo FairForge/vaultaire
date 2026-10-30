@@ -28,7 +28,9 @@ func (s *Server) registerMemberRoutes(r chi.Router) {
 	r.Get("/members", s.handleMgmtListMembers)
 	r.With(s.requireRole(auth.ActionMemberManage)).Post("/members", s.handleMgmtInviteMember)
 	r.With(s.requireRole(auth.ActionMemberManage)).Patch("/members/{user}", s.handleMgmtSetMemberRole)
-	r.With(s.requireRole(auth.ActionMemberManage)).Delete("/members/{user}", s.handleMgmtRemoveMember)
+	// A member removes itself (leaves) whatever its role (RB10-1, WP-ACCT-1);
+	// removing another is member.manage — the handler checks which.
+	r.Delete("/members/{user}", s.handleMgmtRemoveMember)
 	r.With(s.requireRole(auth.ActionMemberManage)).Delete("/invitations/{id}", s.handleMgmtRevokeInvitation)
 	// POST /invitations/{token}/accept is mounted outside requireMember
 	// (registerManagementRoutes): the invitee is a member of no tenant yet.
@@ -169,6 +171,13 @@ func (s *Server) handleMgmtSetMemberRole(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleMgmtRemoveMember(w http.ResponseWriter, r *http.Request) {
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
 	target := chi.URLParam(r, "user")
+	self, _ := r.Context().Value(userIDKey).(string)
+	leaving := target == self && self != ""
+	if role := memberRole(r.Context()); !leaving && !auth.Can(role, auth.ActionMemberManage) {
+		writeManagementError(w, ErrTypePermission, "role_forbidden",
+			"a member with the role "+string(role)+" may not do this ("+string(auth.ActionMemberManage)+"); a member may remove itself", "")
+		return
+	}
 	var req struct {
 		RevokeKeys bool `json:"revoke_keys"`
 	}
@@ -189,7 +198,11 @@ func (s *Server) handleMgmtRemoveMember(w http.ResponseWriter, r *http.Request) 
 	if res.KeysRevoked && s.auth != nil {
 		s.auth.ForgetRevokedKeys(tenantID, res.KeysMade)
 	}
-	audit.Record(r.Context(), s.db, audit.Entry{UserID: target, TenantID: tenantID, Action: "member.removed",
+	action := "member.removed"
+	if leaving {
+		action = "member.left"
+	}
+	audit.Record(r.Context(), s.db, audit.Entry{UserID: target, TenantID: tenantID, Action: action,
 		Resource: "user:" + target, Severity: "warning",
 		Metadata: map[string]any{"keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})
 	writeJSON(w, http.StatusOK, map[string]any{"object": "member", "user_id": target, "deleted": true,

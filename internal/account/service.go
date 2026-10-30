@@ -290,9 +290,10 @@ func (s *Service) ScheduleChildrenNow(ctx context.Context, parent string, now ti
 	if s.db == nil {
 		return nil, ErrNoDatabase
 	}
+	// A sponsored child is never erased with its sponsor (DetachSponsored).
 	rows, err := s.db.QueryContext(ctx, `
 		UPDATE tenants SET deletion_scheduled_at = LEAST(COALESCE(deletion_scheduled_at, $2), $2)
-		 WHERE parent_tenant_id = $1
+		 WHERE parent_tenant_id = $1 AND COALESCE(child_kind, 'managed') <> 'sponsored'
 		 RETURNING id`, parent, now)
 	if err != nil {
 		return nil, fmt.Errorf("schedule the children of %s: %w", parent, err)
@@ -377,4 +378,123 @@ func lockedStillDue(ctx context.Context, tx *sql.Tx, userID string, now time.Tim
 		return false, fmt.Errorf("re-read user %s: %w", userID, err)
 	}
 	return status == StatusPending && at.Valid && at.Time.Before(now), nil
+}
+
+// DetachSponsored detaches every SPONSORED child of parent (WP-ACCT-1,
+// docs/ACCOUNTS.md: a person's own account a sponsor pays for — never
+// erased with the sponsor): each, in its own transaction, leaves the pool —
+// its bytes leave the root's pool counter (the root's quota row locked
+// first, the ledger's order), it becomes its own root (pool_root_id), its
+// pool's counting floor rows (limit 0) go, a cap of 0 becomes freeLimit (a
+// tier of its own) — and its parent edge and kind are cleared, with an
+// account.sponsor_detached audit row on it. Its data, keys and sign-in are
+// untouched. Returns the detached ids.
+func (s *Service) DetachSponsored(ctx context.Context, parent string, freeLimit int64) ([]string, error) {
+	if s.db == nil {
+		return nil, ErrNoDatabase
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM tenants WHERE parent_tenant_id = $1 AND child_kind = 'sponsored' ORDER BY id`, parent)
+	if err != nil {
+		return nil, fmt.Errorf("list the sponsored children of %s: %w", parent, err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("list the sponsored children of %s: %w", parent, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("list the sponsored children of %s: %w", parent, err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the sponsored children of %s: %w", parent, err)
+	}
+	var done []string
+	for _, id := range ids {
+		if err := s.detachOne(ctx, id, freeLimit); err != nil {
+			return done, err
+		}
+		done = append(done, id)
+	}
+	return done, nil
+}
+
+func (s *Service) detachOne(ctx context.Context, child string, freeLimit int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("detach %s: %w", child, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var root string
+	if err := tx.QueryRowContext(ctx, `SELECT pool_root_id FROM tenants WHERE id = $1 FOR UPDATE`, child).Scan(&root); err != nil {
+		return fmt.Errorf("detach %s: %w", child, err)
+	}
+	// The root's quota row first, then the child's (usage/ledger_tx.go).
+	if root != child {
+		if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, root); err != nil {
+			return fmt.Errorf("detach %s: lock the pool: %w", child, err)
+		}
+	}
+	var used int64
+	err = tx.QueryRowContext(ctx, `SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, child).Scan(&used)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("detach %s: %w", child, err)
+	default:
+		if root != child {
+			if _, err := tx.ExecContext(ctx, `UPDATE tenant_quotas SET pool_used_bytes = pool_used_bytes - $2, updated_at = NOW() WHERE tenant_id = $1`,
+				root, used); err != nil {
+				return fmt.Errorf("detach %s: the pool's counter: %w", child, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tenant_quotas
+			   SET pool_used_bytes = storage_used_bytes,
+			       storage_limit_bytes = CASE WHEN storage_limit_bytes = 0 THEN $2 ELSE storage_limit_bytes END,
+			       egress_cap_bytes = 0, updated_at = NOW()
+			 WHERE tenant_id = $1`, child, freeLimit); err != nil {
+			return fmt.Errorf("detach %s: its own pool: %w", child, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_floor_quotas WHERE tenant_id = $1 AND storage_limit_bytes = 0`, child); err != nil {
+			return fmt.Errorf("detach %s: the pool's floor rows: %w", child, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tenants SET parent_tenant_id = NULL, child_kind = NULL, pool_root_id = id WHERE id = $1`, child); err != nil {
+		return fmt.Errorf("detach %s: %w", child, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_logs (tenant_id, event_type, action, resource, result, severity, metadata)
+		VALUES ($1, 'account', 'account.sponsor_detached', $2, 'success', 'info',
+		        '{"reason": "the sponsor''s account was erased; this account keeps its data and pays for itself"}'::jsonb)`, child, "tenant:"+child); err != nil {
+		return fmt.Errorf("detach %s: audit: %w", child, err)
+	}
+	return tx.Commit()
+}
+
+// ErrStillAMember refuses ScheduleSignIn for a user who owns a tenant or is
+// a member of one.
+var ErrStillAMember = errors.New("the sign-in owns an account or is a member of one")
+
+// ScheduleSignIn schedules the erasure of a sign-in that owns no tenant and
+// is a member of none (RB10-1, WP-ACCT-1): Schedule, after checking under
+// the users row's lock. On the date the runner erases the user rows only.
+func (s *Service) ScheduleSignIn(ctx context.Context, userID, reason string) (time.Time, error) {
+	if s.db == nil {
+		return time.Time{}, ErrNoDatabase
+	}
+	var member bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM tenant_members m WHERE m.user_id::text = $1)
+		    OR EXISTS (SELECT 1 FROM users u JOIN tenants t ON lower(t.email) = lower(u.email) WHERE u.id::text = $1)`,
+		userID).Scan(&member); err != nil {
+		return time.Time{}, fmt.Errorf("schedule a sign-in's deletion: %w", err)
+	}
+	if member {
+		return time.Time{}, ErrStillAMember
+	}
+	return s.Schedule(ctx, userID, "", reason)
 }
