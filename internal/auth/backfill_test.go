@@ -223,3 +223,53 @@ func TestBackfillSlugs_EmptyCompanyName(t *testing.T) {
 	assert.True(t, len(slug) >= 2)
 	assert.True(t, slug == "tenant" || len(slug) > len("tenant"))
 }
+
+// RP86-3: a head row with no bucket row (a DeleteBucket racing a PUT's
+// commit) got its bucket back at boot with NO region — the US default under
+// any residency, so the next write landed outside. The backfill takes the
+// region of the head row's recorded backend (idrive-<region> → that region;
+// anything else → the default) and skips, with an Error line, a bucket whose
+// region would be outside its tenant's residency.
+func TestBackfillBuckets_KeepsTheRegionOfTheRecordedBackend(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDB(t)
+	defer func() { _ = db.Close() }()
+	cleanupBackfillData(t, db)
+	defer cleanupBackfillData(t, db)
+	t.Setenv("IDRIVE_REGION", "us-central-1")
+	ctx := context.Background()
+
+	for _, q := range []string{
+		`INSERT INTO tenants (id, name, email, access_key, secret_key, residency) VALUES ('test-backfill-3', 'EU Co', 'backfill3@test.com', 'VK-bf3', 'SK-bf3', 'eu')`,
+		`INSERT INTO tenants (id, name, email, access_key, secret_key) VALUES ('test-backfill-4', 'Any Co', 'backfill4@test.com', 'VK-bf4', 'SK-bf4')`,
+		`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name) VALUES
+			('test-backfill-3', 'eu-bucket', 'a', 1, 'e', 'idrive-eu-west-1'),
+			('test-backfill-3', 'us-bucket', 'a', 1, 'e', 'idrive'),
+			('test-backfill-4', 'paris', 'a', 1, 'e', 'idrive-eu-west-4'),
+			('test-backfill-4', 'plain', 'a', 1, 'e', 'lyve')`,
+	} {
+		_, err := db.ExecContext(ctx, q)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, BackfillBuckets(ctx, db, zap.NewNop()))
+
+	region := func(tenant, bucket string) string {
+		var r string
+		err := db.QueryRowContext(ctx, `SELECT region FROM buckets WHERE tenant_id = $1 AND name = $2`, tenant, bucket).Scan(&r)
+		if err == sql.ErrNoRows {
+			return "(none)"
+		}
+		require.NoError(t, err)
+		return r
+	}
+	assert.Equal(t, "eu-west-1", region("test-backfill-3", "eu-bucket"), "the region of the backend that holds the bytes")
+	assert.Equal(t, "(none)", region("test-backfill-3", "us-bucket"), "outside the residency: skipped, never recreated in the US")
+	assert.Equal(t, "eu-west-4", region("test-backfill-4", "paris"))
+	assert.Equal(t, "us-central-1", region("test-backfill-4", "plain"), "any other backend: the default region")
+	var label string
+	require.NoError(t, db.QueryRowContext(ctx, `SELECT data_residency FROM buckets WHERE tenant_id = 'test-backfill-3' AND name = 'eu-bucket'`).Scan(&label))
+	assert.Equal(t, "eu", label)
+}
