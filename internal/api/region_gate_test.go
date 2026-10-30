@@ -49,6 +49,14 @@ func expectNewBucket(mock sqlmock.Sqlmock, name string) {
 		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM buckets WHERE tenant_id`).WithArgs("test-tenant").
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	expectNoResidency(mock, "test-tenant")
+}
+
+// expectNoResidency is the create's read of the tenant's residency
+// (WP-ACCT-1): none.
+func expectNoResidency(mock sqlmock.Sqlmock, tenantID string) {
+	mock.ExpectQuery(`SELECT residency FROM tenants WHERE id = \$1`).WithArgs(tenantID).
+		WillReturnRows(sqlmock.NewRows([]string{"residency"}).AddRow(nil))
 }
 
 // downByTheProbe fails the region driver's probe twice in a row (after a

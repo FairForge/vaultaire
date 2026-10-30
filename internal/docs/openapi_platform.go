@@ -18,7 +18,7 @@ func generatePlatformPaths() map[string]*PathItem {
 					"`storage_cap_bytes` / `egress_cap_bytes` cap it inside the pool (0 = the pool decides). Audited `platform.tenant_created`; emits `tenant.created`.",
 				map[string]Response{
 					"201": jsonResp("The child", ref("PlatformTenant")),
-					"400": errResp("`invalid_json`, `label_required` (1-200 characters), `invalid_external_id` (at most 200), `invalid_kind`, `invalid_cap`, `child_of_child` (a parent that is not an app, or an app under an app)"),
+					"400": errResp("`invalid_json`, `label_required` (1-200 characters), `invalid_external_id` (at most 200), `invalid_kind`, `invalid_cap`, `invalid_residency`, `residency_widens`, `child_of_child` (a parent that is not an app, or an app under an app)"),
 					"403": errResp("`account_suspended`"),
 					"404": notPlatform,
 					"409": errResp("`external_id_taken` or `idempotency_key_reuse`"),
@@ -31,6 +31,7 @@ func generatePlatformPaths() map[string]*PathItem {
 					"parent_id":         str("One of the platform's `app` children, to make this one under it (optional)"),
 					"storage_cap_bytes": integer("A cap inside the pool, bytes (0 = the pool decides)"),
 					"egress_cap_bytes":  integer("A monthly download cap inside the pool, bytes (0 = the pool decides)"),
+					"residency":         strEnum("Where its bytes may be stored at rest (default: its parent's; a parent's residency cannot be changed: 400 `residency_widens`)", "eu", "uk", "us"),
 				}, "label")))),
 			Get: mgmt(withParams(jsonOp("Platform", "List the child tenants", "PlatformListTenants",
 				"The caller's children by id, with each one's usage (the bytes it counts in the pool).",

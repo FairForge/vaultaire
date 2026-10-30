@@ -56,6 +56,7 @@ func (s *Server) registerPlatformRoutes() {
 // registerAdminPlatformRoutes mounts the grant inside /api/v1/admin.
 func (s *Server) registerAdminPlatformRoutes(r chi.Router) {
 	r.Put("/tenants/{tenant_id}/platform", s.requireAdmin(s.handleAdminSetPlatform))
+	r.Put("/tenants/{tenant_id}/residency", s.requireAdmin(s.handleAdminSetResidency)) // WP-ACCT-1
 }
 
 // requirePlatform answers the unknown route's 404 unless the JWT's tenant
@@ -92,9 +93,10 @@ type platformChild struct {
 	Kind     string         `json:"kind"`
 	ParentID string         `json:"parent_id"`
 	Caps     auth.ChildCaps `json:"caps"`
-	// Residency is the deployment's default bucket region's residency —
-	// a tenant has no region of its own (each bucket picks one); a child's
-	// buckets default where its parent's do.
+	// Residency is where the child's bytes may be stored: its own
+	// tenants.residency (WP-ACCT-1, inherited from its parent), else — no
+	// residency, anywhere — the residency of the deployment's default
+	// bucket region, where its buckets default.
 	Residency           string        `json:"residency"`
 	CreatedAt           time.Time     `json:"created_at"`
 	DeletionScheduledAt *time.Time    `json:"deletion_scheduled_at,omitempty"`
@@ -113,17 +115,28 @@ func platformResidency() string {
 	return drivers.DataResidency(drivers.IDriveDefaultRegion(os.Getenv))
 }
 
+// childResidency is the answer's residency: the child's own, else the
+// default region's.
+func childResidency(own string) string {
+	if own != "" {
+		return own
+	}
+	return platformResidency()
+}
+
 const platformChildColumns = `t.id, COALESCE(t.label, t.name), COALESCE(t.external_id, ''), COALESCE(t.created_at, NOW()),
 	t.deletion_scheduled_at, COALESCE(q.storage_used_bytes, 0), COALESCE(t.child_kind, 'managed'), COALESCE(t.parent_tenant_id, ''),
-	COALESCE(q.storage_limit_bytes, 0), COALESCE(q.egress_cap_bytes, 0)`
+	COALESCE(q.storage_limit_bytes, 0), COALESCE(q.egress_cap_bytes, 0), COALESCE(t.residency, '')`
 
 func scanPlatformChild(sc interface{ Scan(...any) error }) (platformChild, error) {
-	c := platformChild{Object: "tenant", Residency: platformResidency()}
+	c := platformChild{Object: "tenant"}
 	var del *time.Time
+	var residency string
 	if err := sc.Scan(&c.ID, &c.Label, &c.ExternalID, &c.CreatedAt, &del, &c.Usage.StorageUsedBytes,
-		&c.Kind, &c.ParentID, &c.Caps.StorageBytes, &c.Caps.EgressBytes); err != nil {
+		&c.Kind, &c.ParentID, &c.Caps.StorageBytes, &c.Caps.EgressBytes, &residency); err != nil {
 		return c, err
 	}
+	c.Residency = childResidency(residency)
 	c.DeletionScheduledAt = del
 	return c, nil
 }
@@ -139,13 +152,14 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 		ParentID   string `json:"parent_id"`
 		StorageCap int64  `json:"storage_cap_bytes"`
 		EgressCap  int64  `json:"egress_cap_bytes"`
+		Residency  string `json:"residency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
 	opts := auth.ChildOptions{Kind: auth.ChildKind(req.Kind), ParentID: req.ParentID,
-		Caps: auth.ChildCaps{StorageBytes: req.StorageCap, EgressBytes: req.EgressCap}}
+		Caps: auth.ChildCaps{StorageBytes: req.StorageCap, EgressBytes: req.EgressCap}, Residency: req.Residency}
 	c, err := auth.CreateChildTenant(r.Context(), s.db, parent, req.Label, req.ExternalID, opts)
 	switch {
 	case errors.Is(err, auth.ErrBadChildKind):
@@ -153,6 +167,13 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 		return
 	case errors.Is(err, auth.ErrBadCap):
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_cap", err.Error(), "storage_cap_bytes")
+		return
+	case errors.Is(err, auth.ErrBadResidency):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_residency", err.Error(), "residency")
+		return
+	case errors.Is(err, auth.ErrResidencyWidens):
+		writeManagementError(w, ErrTypeInvalidRequest, "residency_widens",
+			"a child keeps its parent's residency: it may narrow it, never widen it", "residency")
 		return
 	case errors.Is(err, auth.ErrTenantNotFound) && req.ParentID != "":
 		writeManagementError(w, ErrTypeNotFound, "parent_not_found", "parent_id is not an app of this platform", "parent_id")
@@ -192,7 +213,7 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 	})
 	writeJSON(w, http.StatusCreated, platformChild{Object: "tenant", ID: c.ID, Label: c.Label, ExternalID: c.ExternalID,
 		Kind: string(c.Kind), ParentID: c.ParentID, Caps: c.Caps,
-		Residency: platformResidency(), CreatedAt: time.Now().UTC(), RequestID: getRequestID(w)})
+		Residency: childResidency(c.Residency), CreatedAt: time.Now().UTC(), RequestID: getRequestID(w)})
 }
 
 // handlePlatformPatchTenant is PATCH /api/v1/platform/tenants/{id}

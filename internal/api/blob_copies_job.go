@@ -297,7 +297,8 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 	}
 	rows, err := j.s.db.QueryContext(ctx, `
 		SELECT h.tenant_id, h.bucket, h.object_key, COALESCE(h.storage_key, h.object_key), h.backend_name, h.size_bytes,
-		       COALESCE(NULLIF(h.body_md5, ''), h.etag), COALESCE(b.region, ''), COALESCE(b.tier_preference, '')
+		       COALESCE(NULLIF(h.body_md5, ''), h.etag), COALESCE(b.region, ''), COALESCE(b.tier_preference, ''),
+		       COALESCE((SELECT t.residency FROM tenants t WHERE t.id = h.tenant_id), '')
 		FROM object_head_cache h
 		LEFT JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 		WHERE ($1 OR h.tenant_id = ANY($2)) AND NOT h.is_chunked AND h.floor <> 'vault'
@@ -322,7 +323,7 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		var c blobCopy
 		var digest string
 		var scope bucketScope
-		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest, &scope.Region, &scope.Tier); err != nil {
+		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest, &scope.Region, &scope.Tier, &scope.Residency); err != nil {
 			_ = rows.Close()
 			return err
 		}

@@ -23,7 +23,6 @@ var poolRootReaders = map[string]string{
 	"internal/account/erase.go":   "the erasure: the key handover's heir (the pool root's owner) and an erased child's bytes leaving its root's counter (the ledger's own move, in the erase transaction)",
 	"internal/auth/platform.go":   "CreateChildTenant writes a child's pool_root_id (its parent's root)",
 	"internal/account/service.go": "a sponsored child's detach resets its pool_root_id to itself (PR C)",
-	"internal/api/residency.go":   "a tenant's residency is read up its tree (PR B)",
 }
 
 func TestTree_PoolRootIsTheOneResolver(t *testing.T) {

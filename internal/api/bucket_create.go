@@ -27,6 +27,7 @@ const (
 	bucketCreateRegionDown                                 // enabled region, down by its probe or breaker (Prompt 10 Part A)
 	bucketCreateLockMismatch                               // re-create of an owned bucket without Object Lock, asking for it (RP16-4)
 	bucketCreateReservedName                               // the name is a web path's first segment (bucket_reserved.go, Prompt 41 item 5); refused for a NEW bucket only
+	bucketCreateOutsideResidency                           // the region is outside the tenant's residency, or none inside it is enabled (WP-ACCT-1)
 )
 
 // bucketCreateOptions are what a CreateBucket asks for beyond the name and
@@ -100,6 +101,27 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 		}
 	}
 
+	// The tenant's residency (WP-ACCT-1, residency.go): a new bucket only in
+	// a region of its jurisdiction; one that names no region gets the first
+	// enabled region inside it. An owned bucket's idempotent re-create
+	// creates nothing and is not refused.
+	if !out.alreadyOwned {
+		residency, err := s.tenantResidency(ctx, tenantID)
+		if err != nil {
+			return out, err
+		}
+		if residency != "" {
+			if region == "" {
+				region = firstRegionInside(residency)
+			}
+			if region == "" || !regionInside(region, residency) {
+				s.log().Info("bucket create refused: outside the tenant's residency",
+					zap.String("tenant", tenantID), zap.String("region", region), zap.String("residency", residency))
+				out.state = bucketCreateOutsideResidency
+				return out, nil
+			}
+		}
+	}
 	if region == "" {
 		region = drivers.IDriveDefaultRegion(os.Getenv)
 	}
@@ -265,6 +287,8 @@ func (s *Server) dashboardBucketCreator() handlers.BucketCreator {
 			res.State = handlers.BucketCreateRegionDown
 		case bucketCreateReservedName:
 			res.State = handlers.BucketCreateReservedName
+		case bucketCreateOutsideResidency:
+			res.State = handlers.BucketCreateOutsideResidency
 		default:
 			res.State = handlers.BucketCreateOK
 		}

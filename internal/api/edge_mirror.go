@@ -67,9 +67,11 @@ func mirrorLegsFromEnv(getenv func(string) string, logger *zap.Logger) []string 
 
 // bucketScope is what of a bucket its mirror leg must satisfy (RP76-1):
 // the region it is pinned to ("" or the default region = unpinned) and its
-// tier preference.
+// tier preference — and its tenant's residency (WP-ACCT-1, residency.go:
+// "" = anywhere).
 type bucketScope struct {
 	Region, Tier string
+	Residency    string
 }
 
 // pinned reports whether the bucket names a region other than the default
@@ -85,10 +87,13 @@ func (s *Server) bucketScopeOf(ctx context.Context, tenantID, bucket string) buc
 	if s.db == nil {
 		return b
 	}
-	var region, tier sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT region, tier_preference FROM buckets WHERE tenant_id = $1 AND name = $2`,
-		tenantID, bucket).Scan(&region, &tier); err == nil {
-		b.Region, b.Tier = region.String, tier.String
+	var region, tier, residency sql.NullString
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT b.region, b.tier_preference, t.residency
+		  FROM buckets b LEFT JOIN tenants t ON t.id = b.tenant_id
+		 WHERE b.tenant_id = $1 AND b.name = $2`,
+		tenantID, bucket).Scan(&region, &tier, &residency); err == nil {
+		b.Region, b.Tier, b.Residency = region.String, tier.String, residency.String
 	}
 	return b
 }
@@ -96,8 +101,13 @@ func (s *Server) bucketScopeOf(ctx context.Context, tenantID, bucket string) buc
 // allows reports whether a leg storing in region may hold the bucket's
 // copy: a leg of the bucket's jurisdiction (an unpinned bucket's is the
 // default region's — a US bucket is never mirrored to the EU), or, for an
-// unpinned bucket only, a leg of no known region.
+// unpinned bucket only, a leg of no known region. A tenant's residency
+// admits only legs of its own jurisdiction: a leg of no known region is
+// outside every residency.
 func (b bucketScope) allows(region string) bool {
+	if b.Residency != "" && (region == "" || jurisdiction(region) != b.Residency) {
+		return false
+	}
 	if region == "" {
 		return !b.pinned()
 	}

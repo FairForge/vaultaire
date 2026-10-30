@@ -249,6 +249,10 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		writeManagementError(w, ErrTypeInvalidRequest, "region_unavailable",
 			fmt.Sprintf("Region %s is not enabled on this deployment.", req.Region), "region")
 		return
+	case bucketCreateOutsideResidency:
+		writeManagementError(w, ErrTypeInvalidRequest, "region_outside_residency",
+			"the account's residency keeps its buckets in regions of one jurisdiction: choose a region inside it (or none is enabled on this deployment)", "region")
+		return
 	case bucketCreateRegionDown:
 		w.Header().Set("Retry-After", regionRetryAfter)
 		writeManagementError(w, ErrTypeUnavailable, "region_unavailable_now", regionDownMessage(req.Region), "region")
