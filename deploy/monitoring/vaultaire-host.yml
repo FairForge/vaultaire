@@ -1,0 +1,52 @@
+# The box's own patch state — install to /etc/prometheus/rules/ (see README).
+#
+# Series come from node_exporter's apt collector (prometheus-node-exporter-apt.timer,
+# every 15 min: /usr/share/prometheus-node-exporter-collectors/apt_info.py → apt.prom):
+#   apt_upgrades_pending{origin,arch}     packages with a newer candidate, by origin
+#                                         ("Ubuntu:resolute/resolute-security"; comma-joined
+#                                         when one version is in several); NO series when none
+#   apt_package_cache_timestamp_seconds   mtime of /var/lib/apt/periodic/update-success-stamp
+#                                         (apt's own daily update, apt-daily.timer)
+#   node_reboot_required                  1 while /run/reboot-required exists
+#
+# unattended-upgrades installs the -security origin once a day and nothing else; the
+# -updates origin is a hand pass (`vaultaire-maint upgrade`). A kernel or library fix
+# runs only after a reboot, which takes BOTH slots down for about a minute — planned
+# with `vaultaire-maint reboot` (docs/DEPLOY.md "Host maintenance"). A kernel CVE with
+# no fix released yet shows in none of these series: that is a stopgap plus a watcher
+# of its own (deploy/host/cve-2026-98432/).
+groups:
+  - name: vaultaire-host
+    rules:
+      - alert: HostRebootRequired
+        expr: node_reboot_required == 1
+        for: 3d
+        labels:
+          severity: warning
+        annotations:
+          summary: "The box has needed a reboot for 3 days"
+          description: "/run/reboot-required is set (cat /run/reboot-required.pkgs): an installed kernel or library, security fixes included, is not running yet. Plan it: vaultaire-maint status, then sudo vaultaire-maint reboot '<reason>' — both slots go down for about a minute (docs/DEPLOY.md, Host maintenance)."
+      - alert: HostSecurityUpdatesPending
+        expr: sum(apt_upgrades_pending{origin=~".*-security.*"}) > 0
+        for: 2d
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} security updates have waited 2 days"
+          description: "unattended-upgrades installs the -security origin daily; packages still pending after 2 days mean it is stuck or holding them back. journalctl -u unattended-upgrades; tail /var/log/unattended-upgrades/unattended-upgrades.log; apt list --upgradable | grep -- -security."
+      - alert: HostAptListsStale
+        expr: time() - apt_package_cache_timestamp_seconds > 3 * 86400
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "apt has not refreshed its package lists for 3 days"
+          description: "apt's daily update (apt-daily.service) has not succeeded for 3 days, so no security update is found or installed — before the 2026-10-10 upgrade a hung apt lock had stopped them for months. systemctl status apt-daily.service; fuser -v /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock."
+      - alert: HostAptMetricsAbsent
+        expr: absent(apt_package_cache_timestamp_seconds) or absent(node_reboot_required)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "node_exporter's apt collector exports nothing"
+          description: "apt_package_cache_timestamp_seconds or node_reboot_required is missing, so the other host rules cannot fire. systemctl status prometheus-node-exporter-apt.timer; cat /var/lib/prometheus/node-exporter/apt.prom."

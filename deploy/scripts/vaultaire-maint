@@ -1,0 +1,170 @@
+#!/bin/bash
+# vaultaire-maint — one lock for every box-wide operation on slc-vaultaire-01
+# (docs/DEPLOY.md "Host maintenance", 2026-10-30).
+#
+# vaultaire-switch runs one deploy/restart/rollback at a time under
+# /run/vaultaire-switch.lock. A reboot, an apt pass or a service cutover took no
+# lock at all: on 2026-10-30 a planned reboot landed 4 s into another operator's
+# service-user cutover, and the night's apt pass ran between two deploys. This
+# tool takes the SAME lock, so a deploy waits for maintenance (vaultaire-switch
+# waits up to 1200 s for it) and maintenance is refused while a deploy runs.
+# Installed at /usr/local/sbin/vaultaire-maint, root:root 0755.
+#
+#   vaultaire-maint status            free or held — by whom, since when, why
+#                                     (exit 0 free, 1 held; needs no root)
+#   vaultaire-maint run REASON -- CMD...
+#                                     run CMD under the lock; refused at once when held
+#   vaultaire-maint upgrade REASON    the -updates pass: apt upgrade with no service
+#                                     restarted by a package, HAProxy reloaded seamlessly
+#                                     onto its new binary, the restarts still owed listed
+#   vaultaire-maint reboot REASON     refused while the active slot has long S3 operations
+#                                     in flight; silences alerts for 20 min, reboots and
+#                                     holds the lock until the box is down
+#
+# The lock is held by flock(1)'s own process (-o), never by CMD: a daemon CMD
+# starts cannot keep it. Never wrap vaultaire-switch in `run` — it takes the same
+# lock and would wait 20 min for itself; refused. The lock lives in /run, so a
+# reboot clears it.
+set -euo pipefail
+
+LOCK=${VAULTAIRE_MAINT_LOCK:-/run/vaultaire-switch.lock}
+HOLDER=${VAULTAIRE_MAINT_HOLDER:-/run/vaultaire-maint.holder}
+STATE=/opt/vaultaire/ACTIVE_PORT
+SELF=$(readlink -f "$0")
+
+log() { echo "[vaultaire-maint] $*" >&2; logger -t vaultaire-maint -- "$*" 2>/dev/null || true; }
+die() { echo "[vaultaire-maint] ERROR: $*" >&2; exit 1; }
+usage() {
+  echo "usage: vaultaire-maint status | run REASON -- CMD... | upgrade REASON | reboot REASON" >&2
+  exit 2
+}
+
+# need_root: the lock file is root's (a test points VAULTAIRE_MAINT_LOCK elsewhere).
+need_root() {
+  [ "$(id -u)" = 0 ] || [ -n "${VAULTAIRE_MAINT_LOCK:-}" ] || die "run as root (through sudo)"
+}
+
+cmd_status() {
+  if [ ! -e "$LOCK" ] || flock -n "$LOCK" true 2>/dev/null; then
+    echo "free"
+    [ -f "$HOLDER" ] && echo "  (a stale note of an interrupted run: $(tr '\n' ' ' < "$HOLDER"))"
+    return 0
+  fi
+  echo "held"
+  if [ -f "$HOLDER" ]; then
+    sed 's/^/  /' "$HOLDER"
+  else
+    echo "  by vaultaire-switch (deploy, restart or rollback): no holder note"
+  fi
+  return 1
+}
+
+# take REASON CMD...: re-enter this script under the lock, or refuse with the holder.
+take() {
+  local reason=$1 rc=0; shift
+  [ -n "$reason" ] || die "a REASON is required: it is what the next operator reads"
+  flock -n -o -E 75 "$LOCK" "$SELF" __held "$reason" "$@" || rc=$?
+  if [ "$rc" = 75 ]; then
+    cmd_status >&2 || true
+    die "the box lock is held — wait for it, or ask its holder"
+  fi
+  return "$rc"
+}
+
+# held REASON CMD...: runs under the lock (flock's process holds it, -o).
+held() {
+  local reason=$1; shift
+  printf 'by=%s\nreason=%s\nsince=%s\npid=%s\ncmd=%s\n' \
+    "${SUDO_USER:-$(id -un)}" "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" > "$HOLDER"
+  trap 'rm -f "$HOLDER"' EXIT
+  log "lock taken: $reason ($*)"
+  local rc=0
+  "$@" || rc=$?
+  log "lock released: $reason (exit $rc)"
+  return "$rc"
+}
+
+do_upgrade() {
+  local ts log before after rc=0
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  log=/var/log/vaultaire-maint-upgrade-$ts.log
+  [ -e /usr/sbin/policy-rc.d ] && die "/usr/sbin/policy-rc.d already exists: not mine to replace"
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
+  cp -a /etc/haproxy "/root/haproxy-bak-$ts"
+  before=$(dpkg-query -W -f='${Version}' haproxy)
+  # No package restarts a service: the slots, Postgres and Redis keep running;
+  # what must restart is listed at the end and goes with the next reboot.
+  printf '#!/bin/sh\n# vaultaire-maint upgrade: packages restart nothing\nexit 101\n' > /usr/sbin/policy-rc.d
+  chmod 0755 /usr/sbin/policy-rc.d
+  trap 'rm -f /usr/sbin/policy-rc.d' EXIT
+  log "apt upgrade (log $log)"
+  { apt-get update -q &&
+    apt-get -y -q --with-new-pkgs -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold upgrade; } >"$log" 2>&1 || rc=$?
+  rm -f /usr/sbin/policy-rc.d
+  grep -E '^Setting up ' "$log" | sed 's/^Setting up /  /' || true
+  [ "$rc" = 0 ] || { tail -20 "$log" >&2; die "apt failed (exit $rc): $log"; }
+  after=$(dpkg-query -W -f='${Version}' haproxy)
+  if [ "$before" != "$after" ]; then
+    # A reload re-executes the master on the new binary; open connections finish
+    # on the old workers (no session is cut, unlike a restart).
+    haproxy -c -q -f /etc/haproxy/haproxy.cfg || die "haproxy $after rejects the config: not reloaded (backup /root/haproxy-bak-$ts)"
+    systemctl reload haproxy
+    sleep 3
+    local pid exe
+    pid=$(systemctl show -p MainPID --value haproxy)
+    exe=$(readlink "/proc/$pid/exe" || true)
+    case "$exe" in *"(deleted)"*|"") die "haproxy master $pid still runs the old binary ($exe)";; esac
+    log "haproxy $before -> $after, reloaded (master $pid)"
+  fi
+  log "services on replaced libraries (restart them, or reboot):"
+  needrestart -b -r l 2>/dev/null | sed -n 's/^NEEDRESTART-SVC: /  /p' || true
+  if [ -e /run/reboot-required ]; then log "reboot required: vaultaire-maint reboot REASON"; fi
+}
+
+# long_ops: what the active slot's /health says is in flight ("?" = no answer).
+long_ops() {
+  local port body
+  port=$(cat "$STATE" 2>/dev/null || echo 8000)
+  body=$(curl -s -m 5 "http://127.0.0.1:$port/health" || true)
+  printf '%s' "$body" | sed -n 's/.*"long_ops_in_flight":\([0-9]*\).*/\1/p' | grep . || echo "?"
+}
+
+do_reboot() {
+  local reason=$1 n
+  n=$(long_ops)
+  [ "$n" = 0 ] || die "the active slot reports long_ops_in_flight=$n: a reboot would hold the shutdown up to 15 min for them — try again when it is 0"
+  if command -v amtool >/dev/null; then
+    amtool --alertmanager.url=http://127.0.0.1:9093 silence add --duration=20m \
+      --author=vaultaire-maint --comment="planned reboot: $reason" 'alertname=~.+' >/dev/null \
+      && log "alerts silenced for 20 min" || log "could not silence alerts (they will page)"
+  fi
+  log "rebooting: $reason"
+  systemctl reboot
+  # Hold the lock until the box goes down: no deploy starts on a stopping box.
+  sleep 600
+  die "still up 10 min after systemctl reboot"
+}
+
+case "${1:-}" in
+  status) [ $# = 1 ] || usage; cmd_status ;;
+  run)
+    [ $# -ge 4 ] && [ "$3" = -- ] || usage
+    need_root
+    reason=$2; shift 3
+    [ "$(basename "$1")" != vaultaire-switch ] || die "vaultaire-switch takes this lock itself: run it directly"
+    take "$reason" "$@" ;;
+  upgrade) [ $# = 2 ] || usage; need_root; take "$2" __upgrade ;;
+  reboot)  [ $# = 2 ] || usage; need_root; take "$2" __reboot "$2" ;;
+  __held)
+    shift
+    reason=$1; shift
+    case "${1:-}" in
+      __upgrade) held "$reason" "$SELF" __do_upgrade ;;
+      __reboot)  held "$reason" "$SELF" __do_reboot "$2" ;;
+      *)         held "$reason" "$@" ;;
+    esac ;;
+  __do_upgrade) do_upgrade ;;
+  __do_reboot) do_reboot "$2" ;;
+  *) usage ;;
+esac

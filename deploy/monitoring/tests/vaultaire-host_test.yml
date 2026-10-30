@@ -1,0 +1,107 @@
+# promtool unit test of vaultaire-host.yml.
+# Run on the box (promtool is there):
+#   scp deploy/monitoring/vaultaire-host.yml deploy/monitoring/tests/vaultaire-host_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-host_test.yml'
+rule_files:
+  - vaultaire-host.yml
+
+evaluation_interval: 1h
+
+tests:
+  # A reboot owed for 4 days fires; one owed for 2 days does not.
+  - interval: 1h
+    input_series:
+      - series: 'node_reboot_required{instance="localhost:9100",job="node"}'
+        values: '1x96'
+      - series: 'apt_package_cache_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0+3600x96'
+    alert_rule_test:
+      - eval_time: 2d
+        alertname: HostRebootRequired
+        exp_alerts: []
+      - eval_time: 4d
+        alertname: HostRebootRequired
+        exp_alerts:
+          - exp_labels:
+              instance: localhost:9100
+              job: node
+              severity: warning
+            exp_annotations:
+              summary: "The box has needed a reboot for 3 days"
+              description: "/run/reboot-required is set (cat /run/reboot-required.pkgs): an installed kernel or library, security fixes included, is not running yet. Plan it: vaultaire-maint status, then sudo vaultaire-maint reboot '<reason>' — both slots go down for about a minute (docs/DEPLOY.md, Host maintenance)."
+      # The lists refreshed every hour (the timestamp keeps up with time): not stale.
+      - eval_time: 4d
+        alertname: HostAptListsStale
+        exp_alerts: []
+      - eval_time: 4d
+        alertname: HostAptMetricsAbsent
+        exp_alerts: []
+
+  # Security updates pending 3 days fire (summed over origins and arches); -updates alone never.
+  - interval: 1h
+    input_series:
+      - series: 'apt_upgrades_pending{arch="amd64",origin="Ubuntu:resolute/resolute-security,Ubuntu:resolute/resolute-updates",instance="localhost:9100",job="node"}'
+        values: '2x72'
+      - series: 'apt_upgrades_pending{arch="all",origin="Ubuntu:resolute/resolute-security",instance="localhost:9100",job="node"}'
+        values: '1x72'
+      - series: 'apt_upgrades_pending{arch="amd64",origin="Ubuntu:resolute/resolute-updates",instance="localhost:9100",job="node"}'
+        values: '29x72'
+      - series: 'node_reboot_required{instance="localhost:9100",job="node"}'
+        values: '0x72'
+      - series: 'apt_package_cache_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x72'
+    alert_rule_test:
+      - eval_time: 1d
+        alertname: HostSecurityUpdatesPending
+        exp_alerts: []
+      - eval_time: 3d
+        alertname: HostSecurityUpdatesPending
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "3 security updates have waited 2 days"
+              description: "unattended-upgrades installs the -security origin daily; packages still pending after 2 days mean it is stuck or holding them back. journalctl -u unattended-upgrades; tail /var/log/unattended-upgrades/unattended-upgrades.log; apt list --upgradable | grep -- -security."
+      # The lists last refreshed at 0 and never again: stale from 3 d + 1 h.
+      - eval_time: 2d
+        alertname: HostAptListsStale
+        exp_alerts: []
+      - eval_time: 3d
+        alertname: HostRebootRequired
+        exp_alerts: []
+
+  - interval: 1h
+    input_series:
+      - series: 'apt_package_cache_timestamp_seconds{instance="localhost:9100",job="node"}'
+        values: '0x100'
+      - series: 'node_reboot_required{instance="localhost:9100",job="node"}'
+        values: '0x100'
+    alert_rule_test:
+      - eval_time: 3d2h
+        alertname: HostAptListsStale
+        exp_alerts:
+          - exp_labels:
+              instance: localhost:9100
+              job: node
+              severity: warning
+            exp_annotations:
+              summary: "apt has not refreshed its package lists for 3 days"
+              description: "apt's daily update (apt-daily.service) has not succeeded for 3 days, so no security update is found or installed — before the 2026-10-10 upgrade a hung apt lock had stopped them for months. systemctl status apt-daily.service; fuser -v /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock."
+
+  # The collector writes nothing: absent fires after an hour.
+  - interval: 15m
+    input_series:
+      - series: 'up{instance="localhost:9100",job="node"}'
+        values: '1x8'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: HostAptMetricsAbsent
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: HostAptMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "node_exporter's apt collector exports nothing"
+              description: "apt_package_cache_timestamp_seconds or node_reboot_required is missing, so the other host rules cannot fire. systemctl status prometheus-node-exporter-apt.timer; cat /var/lib/prometheus/node-exporter/apt.prom."
