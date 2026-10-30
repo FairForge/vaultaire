@@ -1,6 +1,14 @@
 # Status — the live pointer
 
-Updated: 2026-10-29 23:30 UTC — **Stage 1a Prompt 52 — WP-TEAM-1 (teams: members, roles, invitations, a user in several tenants), after Part 0 = D-STRIPE-31 + RP82-1/2/5 — CODE DONE, prod proof owed** (`docs/reviews/WP-STRIPE-4.md`; migration 118; next 120 — 119 is Prompt 52E's):
+Updated: 2026-10-30 01:50 UTC — **Stage 1a Prompt 52E — the Stage 1 closeout, engine lane — DONE and proven on prod** (`docs/reviews/STAGE1-CLOSEOUT.md`; migration 119; next 120; review **RP85**):
+- **#1073 + #1077, the body is what was signed:** chunk signatures and the signed trailer verified as the aws-chunked decoder reads; the `x-amz-checksum-*` trailer / header checked at the origin; the body read to its end before a commit (#1077 — the S3 drivers' single PutObject stops at the declared length, found by the prod proof). Prod: a tampered signed body 403, a wrong CRC trailer 400, nothing committed, on stored.ge and s3.stored.cloud.
+- **#1070, boot and migrations:** a dead DB refuses the boot; the `NewServer` prologue under a 6 s deadline; `PGOPTIONS` lock/statement timeouts on every runner; migration 119 (four duplicate indexes dropped, idempotency + multipart tagging columns).
+- **#1075, API correctness:** idempotency claim-first + request digest + no secret at rest; ListParts / ListMultipartUploads pagination, `EntityTooSmall`, `Location` scheme, multipart tagging, CopyObject `Content-Length`; `last_accessed` coalesced.
+- **#1076, deletions:** the class-B packages (D-1/2/4/7/9) and the Quotaless drivers (`quotaless.go`, `s3.go`, `s3compat.go`).
+- **#1074 + the cutover (2026-10-30 01:33 UTC): the slots run as `vaultaire`** (no shell, no home; `.env` `root:vaultaire 0640`, user1 in the group) — F-14's code prerequisite. A planned reboot by another session met the cutover (about a minute of 503); every check green after.
+- **Stage 1 still owes** (closeout § Stage 1 still owes): the F-14 and translog signing-key ceremonies [owner]; the TPM-resident KEK WP; WP-DOMAIN-1 part 2; after Prompt 52, WP-R12-4/9/11/12 and WP-R14-3; the Trust lane's 43.1 → 43.2, 43.3.
+
+Before that: 2026-10-29 23:30 UTC — **Stage 1a Prompt 52 — WP-TEAM-1 (teams: members, roles, invitations, a user in several tenants), after Part 0 = D-STRIPE-31 + RP82-1/2/5 — CODE DONE, prod proof owed** (`docs/reviews/WP-STRIPE-4.md`; migration 118; next 120 — 119 is Prompt 52E's):
 - **#1067, Part 0:**
   - a platform's child downloads from its POOL (`usage.PoolRoot`: the root's allowance, the pool's month, the meter keyed by the root, the rows per tenant, the alert to the root);
   - floors pooled like the total (a child's counting floor rows; the owner's floor limit against the pool's sum; lock order owner total → child total → owner floor → child floor);

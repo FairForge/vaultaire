@@ -82,7 +82,7 @@ deliberately not in this file — "the production host" is the one box.
 | `/etc/prometheus/rules/*.yml` | alert rules (installed by hand from `deploy/monitoring/`) |
 | `/etc/haproxy/haproxy.cfg`, `/etc/haproxy/certs/*-le.pem` | edge config and the origin cert the certbot deploy hook rebuilds |
 
-### The service user (Stage 1a Prompt 52E)
+### The service user (Stage 1a Prompt 52E — cut over 2026-10-30 01:33 UTC)
 
 The slots run as **`vaultaire`**, a system user with its own group, no shell
 and no home (`deploy/systemd/vaultaire@.service` `User=` / `Group=`). It is
@@ -111,6 +111,7 @@ the first restart the running `user1` slot cannot write `data/`):
 ```bash
 scp deploy/scripts/vaultaire-user-install.sh deploy/scripts/vaultaire-switch vaultaire-slc:/tmp/
 ssh vaultaire-slc
+who; pgrep -fa 'vaultaire-switch|apt|dpkg|reboot'   # nobody else restarting the slots or the box (2026-10-30: a planned reboot met the cutover)
 sudo install -o root -g root -m 0755 /tmp/vaultaire-switch /usr/local/sbin/vaultaire-switch   # run_user reads the unit (hand-installed, like the unit)
 sudo bash /tmp/vaultaire-user-install.sh     # idempotent
 sudo vaultaire-switch restart                # the active build into the idle slot, as vaultaire
