@@ -733,6 +733,18 @@ func generateUserPaths() map[string]*PathItem {
 				}),
 				jsonBody("Why the account is being closed", ref("AccountDeletionRequest"))),
 		},
+		"/api/v1/user/signin": {
+			Delete: withBody(jsonOp("User", "Schedule a sign-in's deletion", "ScheduleSignInDeletion",
+				"For a sign-in that owns no account and is a member of none (an invitee who left or was removed; WP-ACCT-1): the usual 30-day grace, then its user rows only. "+
+					"Keys it once made on an account stay that account's. There is no self-serve cancel for a sign-in with no account: an operator clears the schedule on request before the date.",
+				map[string]Response{
+					"200": jsonResp("Deletion scheduled", ref("AccountDeletionScheduled")),
+					"401": errResp("Bearer token missing/invalid"),
+					"409": errResp("`still_a_member`: it owns an account or is a member of one — leave it first"),
+					"500": errResp("`deletion_failed`"),
+				}),
+				jsonBody("Why (optional)", ref("AccountDeletionRequest"))),
+		},
 		"/api/v1/user/apikeys": {
 			Get: jsonOp("User", "List the caller's API keys", "ListUserAPIKeys",
 				"Every key row of the user, including revoked ones (`revoked_at` set). `secret` is never returned after creation. Plain JSON array (always an array, `[]` for none), not the list envelope.",
@@ -1109,7 +1121,7 @@ func generateManagementPaths() map[string]*PathItem {
 				}),
 				jsonBody("The new role", objectPtr("", map[string]*Schema{"role": strEnum("", "admin", "developer", "viewer")}, "role")))),
 			Delete: mut(jsonOp("Management", "Remove a member", "ManageRemoveMember",
-				"An owner's or an admin's. Removes the membership only: never the person's sign-in, never a bucket. The owner cannot be removed. The answer names the S3 keys the member made (`keys_made`): they are the account's and stay live unless an optional JSON body `{\"revoke_keys\": true}` revokes them, with their temporary credentials, in the same step. Audited `member.removed` (and `member.keys_revoked`).",
+				"An owner's or an admin's — or any member's for itself (it leaves; audited `member.left`). Removes the membership only: never the person's sign-in, never a bucket. The owner cannot be removed or leave. The answer names the S3 keys the member made (`keys_made`): they are the account's and stay live unless an optional JSON body `{\"revoke_keys\": true}` revokes them, with their temporary credentials, in the same step. Audited `member.removed` (and `member.keys_revoked`).",
 				map[string]Response{
 					"200": jsonResp("Removed", objectPtr("", map[string]*Schema{"object": strEnum("", "member"), "user_id": str(""), "deleted": boolean("Always true"),
 						"keys_made":    arrayOf(objectPtr("A live key the member made", map[string]*Schema{"id": str(""), "name": str(""), "last_used": nullable(str(""))})),

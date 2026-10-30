@@ -19,6 +19,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/payments"
 	"github.com/FairForge/vaultaire/internal/tenant"
+	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -185,7 +186,10 @@ type TenantErasure struct {
 	UserID   string `json:"user_id"`
 	// ChildrenErased are the platform's child tenants erased first, each
 	// through this same path (WP-PLAT-1, stage b5).
-	ChildrenErased   []string `json:"children_erased,omitempty"`
+	ChildrenErased []string `json:"children_erased,omitempty"`
+	// ChildrenDetached are its sponsored children (WP-ACCT-1): a person's
+	// own account, never erased with its sponsor — detached, data kept.
+	ChildrenDetached []string `json:"children_detached,omitempty"`
 	Outcome          string   `json:"outcome"`
 	StripeCancelled  bool     `json:"stripe_cancelled"`
 	ObjectsDeleted   int      `json:"objects_deleted"`
@@ -572,6 +576,14 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 			}
 			te.ChildrenErased = append(te.ChildrenErased, c)
 		}
+		// A sponsored child is never erased with its sponsor: it DETACHES
+		// (its own pool, a free tier of its own, its data and keys untouched)
+		// before the sponsor's rows go (WP-ACCT-1, docs/ACCOUNTS.md).
+		detached, dErr := r.account.DetachSponsored(ctx, d.TenantID, usage.FreeTierLimits.StorageBytes)
+		if dErr != nil {
+			return r.defer_(te, log, "detach the sponsored children", dErr)
+		}
+		te.ChildrenDetached = detached
 	}
 
 	// c. Rows (one transaction; refuses when a cancel landed meanwhile).
