@@ -448,6 +448,19 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 		log.Info("account deletion: cancelled before the walk")
 		return te
 	}
+	// A tenant-less sign-in (RB10-1) that is a member of an account again
+	// (RP86-4): the schedule is cleared before anything is asked of a realm.
+	if d.TenantID == "" && !d.Child && d.UserID != "" {
+		released, err := r.account.ReleaseIfMember(ctx, d.UserID)
+		if err != nil {
+			return r.defer_(te, log, "re-check the sign-in's membership", err)
+		}
+		if released {
+			te.Outcome = outcomeCancelled
+			log.Info("account deletion: the sign-in is a member again; its schedule is cleared (became_member)")
+			return te
+		}
+	}
 
 	// a. Stripe.
 	if d.TenantID != "" {

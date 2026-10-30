@@ -156,3 +156,47 @@ func TestAccount_TenantlessSignInErasesTheUserOnly(t *testing.T) {
 	require.NoError(t, f.db.QueryRow(`SELECT user_id::text FROM api_keys WHERE id = $1`, keyRow).Scan(&maker))
 	assert.Equal(t, f.user.ID, maker, "the key it made is the team's owner's now")
 }
+
+// RP86-4: the "member of nothing" check ran only when a sign-in's erasure
+// was scheduled. One that accepted an invitation during its 30-day grace was
+// a member on the date, and the runner's EraseRows(user, "") deleted it with
+// the membership. On the date a tenant-less erasure is re-checked under the
+// user's lock: a member again → the schedule is cleared
+// (account.deletion_cancelled, reason became_member), never an erasure —
+// before the walk (the recovery realms are asked nothing) and again inside
+// the row erase's own transaction.
+func TestAccount_ASignInThatRejoinedIsNotErased(t *testing.T) {
+	f := setupDeletionFixture(t)
+	f.seed(time.Now().Add(24 * time.Hour)) // the team itself is not due
+	ctx := context.Background()
+	u := uuid.NewString()
+	email := "rejoined-" + u[:8] + "@stored.ge"
+	f.exec(`INSERT INTO users (id, email, password_hash, status, deletion_scheduled_at, deletion_reason)
+	        VALUES ($1, $2, 'x', 'pending_deletion', NOW() - INTERVAL '1 hour', 'done')`, u, email)
+	t.Cleanup(func() {
+		_, _ = f.db.Exec(`DELETE FROM tenant_members WHERE user_id = $1`, u)
+		_, _ = f.db.Exec(`DELETE FROM audit_logs WHERE user_id = $1`, u)
+		_, _ = f.db.Exec(`DELETE FROM users WHERE id = $1`, u)
+	})
+	// The invitation accepted during the grace.
+	f.exec(`INSERT INTO tenant_members (tenant_id, user_id, role) VALUES ($1, $2, 'viewer')`, f.tenantID, u)
+	f.runner.onlyDue = func(d account.Due) bool { return d.UserID == u }
+
+	res, err := f.runner.RunOnce(ctx)
+	require.NoError(t, err, "%+v", res)
+	assert.Zero(t, res.Erased, "%+v", res)
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id = $1 AND status = 'active' AND deletion_scheduled_at IS NULL`, u),
+		"the schedule is cleared")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenant_members WHERE user_id = $1`, u), "the membership stays")
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM audit_logs WHERE user_id = $1 AND action = 'account.deletion_cancelled'
+		AND metadata->>'reason' = 'became_member'`, u))
+
+	// The row erase's own guard: a member again between the walk and the
+	// erase is refused in the erase's transaction.
+	f.exec(`UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() - INTERVAL '1 hour' WHERE id = $1`, u)
+	_, err = account.NewService(f.db, nil).EraseRows(ctx, u, "", email, time.Now())
+	assert.ErrorIs(t, err, account.ErrNotPending)
+	assert.ErrorIs(t, err, account.ErrBecameMember)
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM users WHERE id = $1 AND deletion_scheduled_at IS NULL`, u))
+	assert.Equal(t, 1, f.count(`SELECT COUNT(*) FROM tenant_members WHERE user_id = $1`, u))
+}

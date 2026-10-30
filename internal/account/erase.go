@@ -419,6 +419,20 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 	if !due {
 		return res, ErrNotPending
 	}
+	// A tenant-less sign-in that is a member again (RP86-4): its schedule
+	// is cleared in this transaction, under the lock lockedStillDue took.
+	if userID != "" && tenantID == "" {
+		released, err := lockedReleaseIfMember(ctx, tx, userID)
+		if err != nil {
+			return res, err
+		}
+		if released {
+			if err := tx.Commit(); err != nil {
+				return res, fmt.Errorf("clear a rejoined sign-in's schedule: %w", err)
+			}
+			return res, ErrBecameMember
+		}
+	}
 	// A platform's children are erased first (their tenants rows reference
 	// it): the runner's cascade (stage b5); a child row here refuses.
 	if tenantID != "" {
