@@ -42,6 +42,7 @@ func (s *Server) registerPlatformRoutes() {
 		r.With(s.requireRole(auth.ActionChildWrite)).Post("/tenants", s.handlePlatformCreateTenant)
 		r.Get("/tenants", s.handlePlatformListTenants)
 		r.Get("/tenants/{id}", s.handlePlatformGetTenant)
+		r.With(s.requireRole(auth.ActionChildWrite)).Patch("/tenants/{id}", s.handlePlatformPatchTenant) // WP-ACCT-1: caps
 		r.With(s.requireRole(auth.ActionChildWrite)).Delete("/tenants/{id}", s.handlePlatformDeleteTenant)
 
 		// PR C: the child's keys and STS tokens (platform_keys.go).
@@ -86,6 +87,11 @@ type platformChild struct {
 	ID         string `json:"id"`
 	Label      string `json:"label"`
 	ExternalID string `json:"external_id,omitempty"`
+	// Kind is the child's edge (managed | app, WP-ACCT-1); ParentID its
+	// parent (the platform, or one of its apps).
+	Kind     string         `json:"kind"`
+	ParentID string         `json:"parent_id"`
+	Caps     auth.ChildCaps `json:"caps"`
 	// Residency is the deployment's default bucket region's residency —
 	// a tenant has no region of its own (each bucket picks one); a child's
 	// buckets default where its parent's do.
@@ -108,12 +114,14 @@ func platformResidency() string {
 }
 
 const platformChildColumns = `t.id, COALESCE(t.label, t.name), COALESCE(t.external_id, ''), COALESCE(t.created_at, NOW()),
-	t.deletion_scheduled_at, COALESCE(q.storage_used_bytes, 0)`
+	t.deletion_scheduled_at, COALESCE(q.storage_used_bytes, 0), COALESCE(t.child_kind, 'managed'), COALESCE(t.parent_tenant_id, ''),
+	COALESCE(q.storage_limit_bytes, 0), COALESCE(q.egress_cap_bytes, 0)`
 
 func scanPlatformChild(sc interface{ Scan(...any) error }) (platformChild, error) {
 	c := platformChild{Object: "tenant", Residency: platformResidency()}
 	var del *time.Time
-	if err := sc.Scan(&c.ID, &c.Label, &c.ExternalID, &c.CreatedAt, &del, &c.Usage.StorageUsedBytes); err != nil {
+	if err := sc.Scan(&c.ID, &c.Label, &c.ExternalID, &c.CreatedAt, &del, &c.Usage.StorageUsedBytes,
+		&c.Kind, &c.ParentID, &c.Caps.StorageBytes, &c.Caps.EgressBytes); err != nil {
 		return c, err
 	}
 	c.DeletionScheduledAt = del
@@ -127,13 +135,28 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 	var req struct {
 		Label      string `json:"label"`
 		ExternalID string `json:"external_id"`
+		Kind       string `json:"kind"`
+		ParentID   string `json:"parent_id"`
+		StorageCap int64  `json:"storage_cap_bytes"`
+		EgressCap  int64  `json:"egress_cap_bytes"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return
 	}
-	c, err := auth.CreateChildTenant(r.Context(), s.db, parent, req.Label, req.ExternalID)
+	opts := auth.ChildOptions{Kind: auth.ChildKind(req.Kind), ParentID: req.ParentID,
+		Caps: auth.ChildCaps{StorageBytes: req.StorageCap, EgressBytes: req.EgressCap}}
+	c, err := auth.CreateChildTenant(r.Context(), s.db, parent, req.Label, req.ExternalID, opts)
 	switch {
+	case errors.Is(err, auth.ErrBadChildKind):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_kind", err.Error(), "kind")
+		return
+	case errors.Is(err, auth.ErrBadCap):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_cap", err.Error(), "storage_cap_bytes")
+		return
+	case errors.Is(err, auth.ErrTenantNotFound) && req.ParentID != "":
+		writeManagementError(w, ErrTypeNotFound, "parent_not_found", "parent_id is not an app of this platform", "parent_id")
+		return
 	case errors.Is(err, auth.ErrBadChildLabel):
 		writeManagementError(w, ErrTypeInvalidRequest, "label_required", err.Error(), "label")
 		return
@@ -168,7 +191,46 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 		"tenant_id": c.ID, "label": c.Label, "external_id": c.ExternalID,
 	})
 	writeJSON(w, http.StatusCreated, platformChild{Object: "tenant", ID: c.ID, Label: c.Label, ExternalID: c.ExternalID,
+		Kind: string(c.Kind), ParentID: c.ParentID, Caps: c.Caps,
 		Residency: platformResidency(), CreatedAt: time.Now().UTC(), RequestID: getRequestID(w)})
+}
+
+// handlePlatformPatchTenant is PATCH /api/v1/platform/tenants/{id}
+// {storage_cap_bytes?, egress_cap_bytes?}: a tenant's caps inside the pool
+// (WP-ACCT-1; 0 = the pool decides).
+func (s *Server) handlePlatformPatchTenant(w http.ResponseWriter, r *http.Request) {
+	parent, _ := r.Context().Value(tenantIDKey).(string)
+	var req struct {
+		StorageCap *int64 `json:"storage_cap_bytes"`
+		EgressCap  *int64 `json:"egress_cap_bytes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if _, err := auth.SetChildCaps(r.Context(), s.db, parent, id, req.StorageCap, req.EgressCap); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrBadCap):
+			writeManagementError(w, ErrTypeInvalidRequest, "invalid_cap", err.Error(), "")
+		case errors.Is(err, auth.ErrTenantNotFound):
+			writeManagementError(w, ErrTypeNotFound, "tenant_not_found", "no such tenant of this platform", "id")
+		default:
+			s.logger.Error("platform: set caps", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to set the caps", "")
+		}
+		return
+	}
+	if s.egress != nil {
+		s.egress.forgetMember(id) // the new egress cap applies at once
+	}
+	c, err := s.platformChildOf(r, parent, id)
+	if err != nil || c == nil {
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to read the tenant", "")
+		return
+	}
+	c.RequestID = getRequestID(w)
+	writeJSON(w, http.StatusOK, c)
 }
 
 // handlePlatformListTenants is GET /api/v1/platform/tenants
@@ -183,7 +245,7 @@ func (s *Server) handlePlatformListTenants(w http.ResponseWriter, r *http.Reques
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT `+platformChildColumns+`
 		  FROM tenants t LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
-		 WHERE t.parent_tenant_id = $1 AND t.id > $2
+		 WHERE `+auth.DescendantT1+` AND t.id > $2
 		 ORDER BY t.id LIMIT $3`, parent, after, limit+1)
 	if err != nil {
 		s.logger.Error("platform: list children", zap.Error(err))
@@ -223,7 +285,7 @@ func (s *Server) platformChildOf(r *http.Request, parent, id string) (*platformC
 	row := s.db.QueryRowContext(r.Context(), `
 		SELECT `+platformChildColumns+`
 		  FROM tenants t LEFT JOIN tenant_quotas q ON q.tenant_id = t.id
-		 WHERE t.id = $1 AND t.parent_tenant_id = $2`, id, parent)
+		 WHERE t.id = $1 AND `+auth.DescendantT2, id, parent)
 	c, err := scanPlatformChild(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

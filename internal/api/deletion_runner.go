@@ -553,8 +553,10 @@ func (r *AccountDeletionRunner) eraseTenant(ctx context.Context, d account.Due) 
 	// b5. A platform's children (WP-PLAT-1): each made due now and erased
 	// first, through this same path — objects, sweep, keys, rows — before
 	// the platform's own rows (EraseRows refuses a platform while a child
-	// row remains). A child that cannot be erased defers the platform.
-	if d.TenantID != "" && !d.Child {
+	// row remains). A child that cannot be erased defers the platform. An
+	// app's children are erased the same way, before the app (WP-ACCT-1:
+	// depth 2 — the recursion is one level deeper at most).
+	if d.TenantID != "" {
 		children, cErr := r.account.ScheduleChildrenNow(ctx, d.TenantID, r.now())
 		if cErr != nil {
 			return r.defer_(te, log, "schedule the children", cErr)

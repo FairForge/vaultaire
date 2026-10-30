@@ -97,6 +97,10 @@ type egressMeter struct {
 	loadUsed      func(ctx context.Context, tenantID string, monthStart time.Time) (int64, error)
 	// loadRoot resolves a tenant's pool root (usage.PoolRoot).
 	loadRoot func(ctx context.Context, tenantID string) (string, error)
+	// loadMemberCap / loadMemberUsed: a pool member's own egress cap and
+	// month (egress_member.go, WP-ACCT-1).
+	loadMemberCap  func(ctx context.Context, tenantID string) (int64, error)
+	loadMemberUsed func(ctx context.Context, tenantID string, monthStart time.Time) (int64, error)
 
 	allowanceTTL time.Duration
 	reevalEvery  time.Duration // a paced response re-reads its position this often
@@ -141,6 +145,9 @@ type egressTenant struct {
 	throttledStreams [2]atomic.Int32
 	lastSeen         atomic.Int64
 	noticedMonth     atomic.Int64 // month in which "allowance spent" was logged
+	// members: the pool's members' own positions (*egressMember by tenant
+	// id), for a member's egress cap inside the pool (WP-ACCT-1).
+	members sync.Map
 }
 
 func newEgressMeter(db *sql.DB, cfg usage.EgressThrottle, enforced func(string) bool, logger *zap.Logger) *egressMeter {
@@ -176,6 +183,10 @@ func newEgressMeter(db *sql.DB, cfg usage.EgressThrottle, enforced func(string) 
 			return 0, nil
 		}
 		return usage.MonthEgressBytes(ctx, m.db, tenantID, monthStart)
+	}
+	m.loadMemberCap = func(ctx context.Context, tenantID string) (int64, error) { return memberCapOf(ctx, m, tenantID) }
+	m.loadMemberUsed = func(ctx context.Context, tenantID string, monthStart time.Time) (int64, error) {
+		return memberMonthOf(ctx, m, tenantID, monthStart)
 	}
 	return m
 }
@@ -444,8 +455,19 @@ func (m *egressMeter) refresh(ctx context.Context, t *egressTenant, now time.Tim
 // egressDecision is a tenant's position at one instant.
 type egressDecision struct {
 	used, allowance int64
-	over            bool // the allowance is spent
+	over            bool // the allowance is spent (the pool's, or the member's own cap)
 	enforced        bool // the egress_throttle flag is on for the tenant
+	capped          bool // over by the member's own cap only: paced on its own bucket
+}
+
+// decideFor is decide for one member of the pool: the pool's position, and
+// the member's own cap beside it (WP-ACCT-1).
+func (m *egressMeter) decideFor(ctx context.Context, t *egressTenant, mb *egressMember) egressDecision {
+	d := m.decide(ctx, t)
+	if !d.over && mb.over() {
+		d.over, d.capped = true, true
+	}
+	return d
 }
 
 // decide reads the tenant's position, refreshing a stale allowance.
@@ -477,8 +499,8 @@ func (m *egressMeter) admit(w http.ResponseWriter, r *http.Request, tenantID, su
 	t := m.tenant(r.Context(), tenantID)
 	t.streams.Add(1)
 	ew := &egressWriter{ResponseWriter: w, ctx: r.Context(), m: m, t: t, surface: surface,
-		slots: &t.throttledStreams[egressSurfaceIndex(surface)]}
-	if d := m.decide(r.Context(), t); d.over && d.enforced {
+		slots: &t.throttledStreams[egressSurfaceIndex(surface)], mb: m.member(r.Context(), t, tenantID)}
+	if d := m.decideFor(r.Context(), t, ew.mb); d.over && d.enforced {
 		if int(ew.slots.Add(1)) > m.cfg.MaxStreams {
 			ew.slots.Add(-1)
 			t.streams.Add(-1)
@@ -556,6 +578,7 @@ type egressSpan struct {
 	m          *egressMeter
 	t          *egressTenant
 	unrecorded *atomic.Int64 // the response's own tenant's
+	mb         *egressMember // the member's own month (nil for the root)
 
 	month   int64 // month of the bytes counted so far
 	total   int64
@@ -565,7 +588,7 @@ type egressSpan struct {
 // span opens the live count for one response of tenantID.
 func (m *egressMeter) span(ctx context.Context, tenantID string) *egressSpan {
 	t := m.tenant(ctx, tenantID)
-	return &egressSpan{m: m, t: t, unrecorded: t.member(tenantID)}
+	return &egressSpan{m: m, t: t, unrecorded: t.member(tenantID), mb: m.member(ctx, t, tenantID)}
 }
 
 // takeUnrecorded claims up to n of the response's tenant's unrecorded bytes.
@@ -581,4 +604,5 @@ func (s *egressSpan) count(n int64) {
 	}
 	s.total += n
 	s.t.add(n, mk, s.unrecorded)
+	s.mb.count(n, mk)
 }

@@ -23,6 +23,8 @@ type egressWriter struct {
 	t       *egressTenant
 	surface string
 	slots   *atomic.Int32 // the tenant's throttled-stream count for this surface
+	mb      *egressMember // the member of the pool the response is (nil: the root)
+	capped  bool          // paced by the member's own cap: its bucket, not the pool's
 
 	wroteHeader bool
 	body        bool // the response is an object body (200/206)
@@ -73,10 +75,14 @@ func (w *egressWriter) Write(p []byte) (int, error) {
 			n = left
 		}
 		if w.pacing {
-			if slice := w.t.sliceBytes.Load(); n > slice {
+			limiter, slice := w.t.limiter, w.t.sliceBytes.Load()
+			if w.capped {
+				limiter, slice = w.mb.limiter, w.mb.sliceBytes.Load()
+			}
+			if n > slice {
 				n = slice
 			}
-			if err := w.t.limiter.WaitN(w.ctx, int(n)); err != nil {
+			if err := limiter.WaitN(w.ctx, int(n)); err != nil {
 				return total, err
 			}
 		}
@@ -104,7 +110,8 @@ func (w *egressWriter) evaluate() {
 	w.evaluated = true
 	w.sinceEval = 0
 	w.evalAt = w.m.now()
-	d := w.m.decide(w.ctx, w.t)
+	d := w.m.decideFor(w.ctx, w.t, w.mb)
+	w.capped = d.capped
 	switch {
 	case !d.over:
 		w.release()

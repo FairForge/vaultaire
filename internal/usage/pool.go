@@ -38,6 +38,9 @@ type poolOf struct {
 	limit  int64  // the root's storage_limit_bytes
 	used   int64  // the pool's counter for a pooled tenant; the tenant's own row else
 	pooled bool   // in a tree (a child, or a root with children or the platform grant): the pool decides
+	// own, ownCap: a pooled child's own row and its cap inside the pool
+	// (storage_limit_bytes > 0; 0 = the pool decides), read by lockPool.
+	own, ownCap int64
 }
 
 // lockPoolOwner resolves tenantID's pool and locks the root's quota row.
@@ -85,8 +88,9 @@ func poolSum(ctx context.Context, q RowQuerier, root string) (int64, error) {
 
 // lockPool is the reservation's view: the pool the tenant reserves in, with
 // the root's row locked — and, for a child, the child's own row (the row
-// the reservation then charges), after the root's — and what the pool
-// holds (p.used: the pool's counter for a pooled tenant, its own row else).
+// the reservation then charges, and its own cap), after the root's — and
+// what the pool holds (p.used: the pool's counter for a pooled tenant, its
+// own row else).
 func lockPool(ctx context.Context, tx *sql.Tx, tenantID string) (poolOf, error) {
 	p, err := lockPoolOwner(ctx, tx, tenantID)
 	if err != nil {
@@ -95,15 +99,21 @@ func lockPool(ctx context.Context, tx *sql.Tx, tenantID string) (poolOf, error) 
 	if !p.pooled || p.owner == tenantID {
 		return p, nil
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT storage_used_bytes, storage_limit_bytes FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`,
+		tenantID).Scan(&p.own, &p.ownCap); err != nil {
 		return poolOf{}, fmt.Errorf("checking quota for tenant %s: %w", tenantID, err)
 	}
 	return p, nil
 }
 
-// fits reports whether n more bytes fit the pool.
+// fits reports whether n more bytes fit the pool and, for a capped child,
+// its own cap: min(cap, pool) (WP-ACCT-1, docs/ACCOUNTS.md "caps inside
+// the pool").
 func (p poolOf) fits(n int64) bool {
-	return p.used+n <= p.limit
+	if p.used+n > p.limit {
+		return false
+	}
+	return p.ownCap <= 0 || p.own+n <= p.ownCap
 }
 
 // moveUsed moves tenantID's storage_used_bytes by delta (clamped at zero)
