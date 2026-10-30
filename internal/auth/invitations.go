@@ -32,6 +32,17 @@ import (
 // InvitationTTL is how long an invitation's link is good for.
 const InvitationTTL = 7 * 24 * time.Hour
 
+// The invitation caps (RP84-3): a tenant holds at most MaxPendingInvitations
+// usable invitations, and sends at most MaxInvitationsPerDay invitation
+// mails in any 24 hours — counted from rows (the pending invitations; the
+// member.invited audit rows, written in the invitation's own transaction),
+// so both slots and a restart agree. One account could otherwise spend the
+// sending quota every reset, verification and receipt mail shares.
+const (
+	MaxPendingInvitations = 20
+	MaxInvitationsPerDay  = 50
+)
+
 // The refusals of the invitation flow.
 var (
 	ErrInvitationNotFound      = errors.New("no such invitation")
@@ -41,6 +52,7 @@ var (
 	ErrAlreadyMember           = errors.New("the address is already a member")
 	ErrInviteRole              = errors.New("an invitation's role is admin, developer or viewer")
 	ErrOwnerMember             = errors.New("the owner cannot be removed or given another role")
+	ErrInvitationRateLimited   = errors.New("too many invitations: at most 20 pending and 50 sent a day per account")
 )
 
 // Invitation is one tenant_invitations row (never its token).
@@ -78,24 +90,47 @@ func invitableRole(role Role) bool {
 
 // CreateInvitation records an invitation of email to tenantID with role and
 // returns it with its token (shown once: in the e-mailed link). An address
-// that is already a member is ErrAlreadyMember.
+// that is already a member (in any case) is ErrAlreadyMember; past the caps
+// it is ErrInvitationRateLimited. A pending invitation of the same address
+// is REPLACED (RP84-5: one pending invitation per tenant and address — the
+// first link dies, re-inviting is the resend). One transaction under the
+// tenant's invitation lock: the checks, the row, and its member.invited
+// audit row (the day's count).
 func CreateInvitation(ctx context.Context, db *sql.DB, tenantID, invitedBy, email string, role Role, now time.Time) (Invitation, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if !strings.Contains(email, "@") || len(email) > 254 {
+	if !strings.Contains(email, "@") || len(email) > 254 || strings.ContainsAny(email, "\r\n") {
 		return Invitation{}, "", fmt.Errorf("invalid email address")
 	}
 	if !invitableRole(role) {
 		return Invitation{}, "", ErrInviteRole
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('tenant-invitations'), hashtext($1))`, tenantID); err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
+	}
 	var member bool
-	if err := db.QueryRowContext(ctx, `
+	var pending, sentToday int
+	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (SELECT 1 FROM tenant_members m JOIN users u ON u.id = m.user_id
-		                WHERE m.tenant_id = $1 AND u.email = $2)
-		    OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = $1 AND t.email = $2)`, tenantID, email).Scan(&member); err != nil {
+		                WHERE m.tenant_id = $1 AND lower(u.email) = $2)
+		    OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = $1 AND lower(t.email) = $2),
+		       (SELECT COUNT(*) FROM tenant_invitations i
+		         WHERE i.tenant_id = $1 AND i.accepted_at IS NULL AND i.expires_at > $3 AND lower(i.email) <> $2),
+		       (SELECT COUNT(*) FROM audit_logs a
+		         WHERE a.tenant_id = $1 AND a.event_type = 'member' AND a.action = 'member.invited'
+		           AND a.timestamp > $3::timestamptz - INTERVAL '24 hours')`,
+		tenantID, email, now).Scan(&member, &pending, &sentToday); err != nil {
 		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
 	}
 	if member {
 		return Invitation{}, "", ErrAlreadyMember
+	}
+	if pending >= MaxPendingInvitations || sentToday >= MaxInvitationsPerDay {
+		return Invitation{}, "", ErrInvitationRateLimited
 	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
@@ -108,10 +143,21 @@ func CreateInvitation(ctx context.Context, db *sql.DB, tenantID, invitedBy, emai
 	if _, err := uuid.Parse(invitedBy); err == nil {
 		by = invitedBy
 	}
-	if _, err := db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM tenant_invitations WHERE tenant_id = $1 AND lower(email) = $2 AND accepted_at IS NULL`, tenantID, email); err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s: replace the pending one: %w", email, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tenant_invitations (id, tenant_id, kind, email, role, token_hash, invited_by, expires_at, created_at)
 		VALUES ($1, $2, 'member', $3, $4, $5, $6, $7, $8)`,
 		inv.ID, tenantID, email, string(role), HashInvitationToken(token), by, inv.ExpiresAt, inv.CreatedAt); err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
+	}
+	if err := audit.RecordTx(ctx, tx, audit.Entry{TenantID: tenantID, Action: "member.invited", Resource: "invitation:" + inv.ID,
+		Metadata: map[string]any{"email": inv.Email, "role": string(inv.Role)}}); err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
+	}
+	if err := tx.Commit(); err != nil {
 		return Invitation{}, "", fmt.Errorf("invite %s: %w", email, err)
 	}
 	return inv, token, nil
@@ -187,6 +233,14 @@ func acceptTx(ctx context.Context, tx *sql.Tx, token, userID, userEmail string, 
 		ON CONFLICT (tenant_id, user_id) DO NOTHING`, inv.TenantID, userID, string(inv.Role), by, now); err != nil {
 		return inv, fmt.Errorf("accept invitation: member: %w", err)
 	}
+	// The role the person HAS (RP84-5): an accept that found a member row
+	// changed nothing, and answers that row's role.
+	var have string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM tenant_members WHERE tenant_id = $1 AND user_id = $2`,
+		inv.TenantID, userID).Scan(&have); err != nil {
+		return inv, fmt.Errorf("accept invitation: member: %w", err)
+	}
+	inv.Role = Role(have)
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_invitations SET accepted_at = $2 WHERE id = $1`, inv.ID, now); err != nil {
 		return inv, fmt.Errorf("accept invitation: %w", err)
 	}
@@ -243,8 +297,11 @@ func (a *AuthService) RegisterInvitedUser(ctx context.Context, token, password s
 	if err != nil {
 		return nil, inv, fmt.Errorf("hash password: %w", err)
 	}
+	// No TenantID: the person has no tenant of its own (RP84-2 — caching
+	// the inviting tenant kept it after a removal); the tenant it acts on is
+	// its JWT's or its session's, by membership.
 	user := &User{ID: uuid.NewString(), Email: inv.Email, PasswordHash: string(hash), EmailVerified: true,
-		TenantID: inv.TenantID, CreatedAt: now, UpdatedAt: now}
+		CreatedAt: now, UpdatedAt: now}
 	tx, err := a.sqlDB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, inv, fmt.Errorf("register invited user: %w", err)

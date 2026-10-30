@@ -37,6 +37,18 @@ func (s *Server) registerManagementRoutes() {
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
 		r.Use(s.requireJWT)
+		// The invitee is a member of no tenant yet (RP84-2): the accept is
+		// the one route here outside requireMember — the invitation's own
+		// address decides (manage_members.go).
+		r.With(s.logManagementRequest, rl.Middleware).Post("/invitations/{token}/accept", s.handleMgmtAcceptInvitation)
+		r.Group(func(r chi.Router) { s.registerMemberManagementRoutes(r, rl, im) })
+	})
+}
+
+// registerMemberManagementRoutes are /api/v1/manage's routes of a MEMBER of
+// the JWT's tenant.
+func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRateLimiter, im *idempotencyMiddleware) {
+	{
 		r.Use(s.requireMember)        // WP-TEAM-1: the JWT's user is a member of its tenant
 		r.Use(s.logManagementRequest) // RP78-6: the request log
 		r.Use(rl.Middleware)
@@ -74,7 +86,7 @@ func (s *Server) registerManagementRoutes() {
 
 		// WP-TEAM-1 PR B: members and invitations (manage_members.go).
 		s.registerMemberRoutes(r)
-	})
+	}
 }
 
 // --- Buckets ---

@@ -71,14 +71,14 @@ func HandleInviteMember(db *sql.DB, sender email.Sender, baseURL string, logger 
 		switch {
 		case errors.Is(err, auth.ErrAlreadyMember):
 			middleware.SetFlash(w, "error", "That address is already a member.")
+		case errors.Is(err, auth.ErrInvitationRateLimited):
+			middleware.SetFlash(w, "error", "Too many invitations: an account holds at most 20 pending invitations and sends at most 50 a day. Revoke one, or try tomorrow.")
 		case err != nil && err.Error() == "invalid email address":
 			middleware.SetFlash(w, "error", "Enter an e-mail address.")
 		case err != nil:
 			logger.Error("dashboard: invite member", zap.Error(err))
 			middleware.SetFlash(w, "error", "The invitation could not be made. Try again.")
 		default:
-			audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Action: "member.invited", Resource: "invitation:" + inv.ID,
-				Metadata: map[string]any{"email": inv.Email, "role": string(inv.Role), "via": "dashboard"}})
 			var account string
 			_ = db.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), email) FROM tenants WHERE id = $1`, sd.TenantID).Scan(&account)
 			html, text, rerr := email.RenderInvitation(baseURL, token, inv.Email, account, sd.Email, string(inv.Role))

@@ -1565,8 +1565,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// The active tenant (WP-TEAM-1): the user's tenants, and the one the
 	// token is for. A tenant_id the user is no member of is refused; a user
-	// with no membership at all (an operator account) keeps its own.
+	// with no membership at all gets a token on NO tenant (RP84-6: the last
+	// one-user-one-tenant branch) — no role, no tenant surface. Without a
+	// database (unit tests) the user's own tenant, as before.
 	active := auth.Membership{TenantID: user.TenantID}
+	if s.db != nil {
+		active = auth.Membership{}
+	}
 	var tenants []auth.Membership
 	if s.db != nil {
 		a, all, merr := auth.ActiveTenant(ctx, s.db, user.ID, strings.TrimSpace(req.TenantID))
@@ -2085,8 +2090,14 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 		// tenant at once, a changed role applies at once — and the claim's
 		// role (or a JWT minted before 118, with none) is never trusted on
 		// its own. No member: no role (""), which requireMember refuses on
-		// the tenant surfaces; the operator routes do not ask.
-		role := auth.RoleOwner
+		// the tenant surfaces; the operator routes do not ask. A JWT on NO
+		// tenant has no role at all (RP84-2: it was the owner of tenant ''
+		// on the API, and a key was written there). Without a database
+		// (unit tests) a JWT on a tenant is its owner, as before.
+		var role auth.Role
+		if claims.TenantID != "" && s.db == nil {
+			role = auth.RoleOwner
+		}
 		if claims.TenantID != "" && s.db != nil {
 			role, err = auth.MemberRole(r.Context(), s.db, claims.TenantID, claims.UserID)
 			switch {

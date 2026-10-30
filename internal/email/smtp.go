@@ -3,11 +3,29 @@ package email
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"mime"
 	"net"
 	"net/smtp"
 	"strings"
 )
+
+// ErrHeaderValue refuses a From, To or Subject carrying CR or LF (RP84-3):
+// written into the message, it adds headers — a Reply-To, a second body —
+// to a mail DKIM-signed for our domain. Every sender checks it, for every
+// mail, before anything is sent.
+var ErrHeaderValue = errors.New("email: a header value carries CR or LF")
+
+// checkHeaderValues is the one guard of the senders' header values.
+func checkHeaderValues(values ...string) error {
+	for _, v := range values {
+		if strings.ContainsAny(v, "\r\n") {
+			return ErrHeaderValue
+		}
+	}
+	return nil
+}
 
 // SMTPSender sends emails via a generic SMTP server.
 // Supports STARTTLS (port 587) and implicit TLS (port 465).
@@ -25,7 +43,10 @@ func (s *SMTPSender) Send(ctx context.Context, to, subject, htmlBody, textBody s
 		return err
 	}
 
-	msg := buildMIMEMessage(s.from, to, subject, htmlBody, textBody)
+	msg, err := buildMIMEMessage(s.from, to, subject, htmlBody, textBody)
+	if err != nil {
+		return err
+	}
 	addr := net.JoinHostPort(s.host, s.port)
 
 	if s.port == "465" {
@@ -82,11 +103,17 @@ func (s *SMTPSender) sendImplicitTLS(ctx context.Context, addr, to string, msg [
 
 const boundary = "----vaultaire-email-boundary"
 
-func buildMIMEMessage(from, to, subject, htmlBody, textBody string) []byte {
+// buildMIMEMessage is the SMTP message. Header values with CR or LF are
+// refused (ErrHeaderValue); a non-ASCII subject is RFC 2047-encoded (an
+// ASCII one is written as is).
+func buildMIMEMessage(from, to, subject, htmlBody, textBody string) ([]byte, error) {
+	if err := checkHeaderValues(from, to, subject); err != nil {
+		return nil, err
+	}
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: multipart/alternative; boundary=\"" + boundary + "\"\r\n")
 	b.WriteString("\r\n")
@@ -106,5 +133,5 @@ func buildMIMEMessage(from, to, subject, htmlBody, textBody string) []byte {
 	b.WriteString("\r\n")
 
 	b.WriteString("--" + boundary + "--\r\n")
-	return []byte(b.String())
+	return []byte(b.String()), nil
 }

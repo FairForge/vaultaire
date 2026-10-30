@@ -25,7 +25,8 @@ func TestHandleCreateUserAPIKey_PersistsRequestedScope(t *testing.T) {
 
 	body := `{"name":"ro","permissions":["GetObject"],"expiry_days":7}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/user/keys", strings.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), userIDKey, user.ID))
+	// The tenant the JWT names (RP84-2: no fallback to the user's own).
+	req = req.WithContext(context.WithValue(context.WithValue(req.Context(), userIDKey, user.ID), tenantIDKey, user.TenantID))
 	w := httptest.NewRecorder()
 	s.handleCreateUserAPIKey(w, req)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
@@ -56,7 +57,8 @@ func TestHandleCreateUserAPIKey_RejectsUnknownPermission(t *testing.T) {
 	s := &Server{logger: zap.NewNop(), auth: authSvc, config: &config.Config{Server: config.ServerConfig{Port: 8000}}}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/user/keys", strings.NewReader(`{"name":"x","permissions":["Bogus"]}`))
-	req = req.WithContext(context.WithValue(req.Context(), userIDKey, user.ID))
+	// The tenant the JWT names (RP84-2: no fallback to the user's own).
+	req = req.WithContext(context.WithValue(context.WithValue(req.Context(), userIDKey, user.ID), tenantIDKey, user.TenantID))
 	w := httptest.NewRecorder()
 	s.handleCreateUserAPIKey(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)

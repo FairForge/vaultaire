@@ -597,7 +597,7 @@ func TestKeyAPIs_CreateAKeyWithTheBypassPermission(t *testing.T) {
 		require.NoError(t, err)
 		s := &Server{logger: zap.NewNop(), auth: svc, config: &config.Config{Server: config.ServerConfig{Port: 8000}}}
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/user/apikeys", strings.NewReader(body))
-		req = req.WithContext(context.WithValue(req.Context(), userIDKey, user.ID))
+		req = req.WithContext(context.WithValue(context.WithValue(req.Context(), userIDKey, user.ID), tenantIDKey, user.TenantID))
 		w := httptest.NewRecorder()
 
 		s.handleCreateUserAPIKey(w, req)
