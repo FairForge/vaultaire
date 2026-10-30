@@ -803,7 +803,19 @@ Done means: PRs 0, A, B, C, D merged; the proof on prod; Prompt 54 written here.
 - **Caps inside the pool exist for a CHILD** (`storage_limit_bytes` > 0, `egress_cap_bytes`, `PATCH /api/v1/platform/tenants/{id}`). WP-KEY-1's budgets are the same leash one level finer, per key and per bucket. They reuse `poolOf.fits` and `egress_member.go`'s per-member bucket rather than inventing a third shape.
 - **Residency is a tenant attribute** (eu/uk/us), copied to a child at creation.
 
-**Part 0:** RP86's findings (the post-merge review of Prompt 53), in the review's order. Also the one open question of WP-STRIPE-5: is `standard_sealed_default` to become per tenant, which would reverse WP-EDGE-4's "tenant row 400"? Apply it only if the owner has decided it by then.
+**Part 0:** RP86's findings (`docs/reviews/WP-STRIPE-5-REVIEW.md`: HOLDS at P3, all latent on prod), in this order:
+- **RP86-1 (P3):** the GDPR export ignores residency. `ensureSystemBucket` makes `_exports` in the default region (an EU tenant's export sits in `us-central-1` for 7 days), and `treeBucketRegions` counts that hidden row, so after one export an admin can never set a residency (409 "move or delete it first", for a bucket the customer cannot see). Proven by test. Fix: the system bucket is created in the first region inside the residency (none inside = the export fails with a note, never written outside); a `_`-prefixed system bucket with no live object never blocks the set and moves inside in the set's transaction. Tests `TestResidency_TheExportStaysInside`, `TestResidency_TheSystemBucketNeverBlocksTheSet`.
+- **RP86-2 (P4):** `PUT /api/v1/manage/buckets/{name}/residency` writes a free `us|eu` label whatever the region (no `uk`). The label is the region's (`drivers.DataResidency`); a mismatch is 409 `residency_is_the_region`. Test `TestBucketResidencyLabelIsTheRegions`.
+- **RP86-3 (P4):** the boot `BackfillBuckets` recreates a bucket row with no region. Backfill the head row's backend's region, or skip and log under a residency.
+- **RP86-4 (P4):** a tenant-less sign-in that rejoins a team during its grace is still erased on the date, its membership with it. The runner re-checks under the user's lock and clears the schedule (`account.deletion_cancelled`, `became_member`). Test `TestAccount_ASignInThatRejoinedIsNotErased`.
+- **RP86-5 (P4):** CI runs the pinned promtool over `deploy/monitoring/tests/*_test.yml` (the jobs test had been failing unseen since #981; fixed by the review).
+
+**And three corrections to PR A** (RP86, read against the code):
+- `audit_logs.user_id` / `performed_by` are UUID and `audit.Record` writes a non-UUID actor as NULL, so `mk:<id>` would audit as "the system did it". Migration 121 adds `audit_logs.principal TEXT` (and the archive's), and the audit page and its CSV show it.
+- `management_keys.created_by` has no `ON DELETE CASCADE` from `users`. The erasure takes the table ByTenant and hands over (or nulls) `created_by` ByUser. The member removal's `keys_made` includes management keys, under the same `revoke_keys`.
+- A management key never reaches the member routes (invite, role change, removal), besides the owner's acts the draft already keeps JWT-only.
+
+WP-STRIPE-5's open question (`standard_sealed_default` per tenant) stays the owner's. The review's advice is to keep it global until F-14 (turning it on is refused without a master key); apply a change only if the owner has decided by then.
 
 Read first:
 - plan § WP-STRIPE, the WP-KEY-1 row (the contract);
@@ -854,9 +866,23 @@ Closeout: `docs/reviews/WP-STRIPE-6.md`, STATUS, the plan row, CLAUDE.md, `docs/
 
 You are building plan § WP-STRIPE's WP-KEY-1 row in the Vaultaire repository: first the management key of D-STRIPE-29, then the per-key and per-bucket budgets of F-39. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database, migration 121.
 
-Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-5.md`, and its review (RP86) once it is on main. If RP86 is not on main when you start, STOP and say so: never guess a review.
+Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-5.md`, and its review `docs/reviews/WP-STRIPE-5-REVIEW.md` (RP86). If that file is not on main when you start, STOP and say so: never guess a review.
 
-PR 0 — Branch `stage1a-p54-part0`. RP86's findings in the review's order, each test first.
+PR 0 — Branch `stage1a-p54-part0`. RP86's findings in the review's order (`docs/reviews/WP-STRIPE-5-REVIEW.md`), each test first:
+1. **RP86-1 (P3).** Tests first: `TestResidency_TheExportStaysInside` (an EU tenant's export lands in an EU region; with no enabled region inside, the run's note is `no_region_inside` and nothing is written), `TestResidency_TheSystemBucketNeverBlocksTheSet` (a tenant with an empty `_exports` takes a residency and the row moves inside in the same transaction; a live export object is 409 until it expires). Then:
+   - `ensureSystemBucket` reads `tenants.residency` and uses `firstRegionInside`;
+   - `treeBucketRegions` / `setTenantResidency` treat `_`-prefixed system buckets by those rules.
+
+   Verify: `go test -race ./internal/api/ -run 'Residency|Export'`.
+2. **RP86-2 (P4).** Test first: `TestBucketResidencyLabelIsTheRegions`. Then `handleMgmtSetBucketResidency` accepts only the region's own label (409 `residency_is_the_region` otherwise; `uk` known); `docs/API.md` marks the route deprecated.
+3. **RP86-3 (P4).** `BackfillBuckets` sets the region from the head row's recorded backend (`idrive-<region>` → that region; the primary → the default), or skips a tenant with a residency with an Error line. A test on a head row with no bucket row.
+4. **RP86-4 (P4).** Test first: `TestAccount_ASignInThatRejoinedIsNotErased`. The deletion runner's tenant-less branch re-checks membership under the user's lock; a member again → the schedule cleared, `account.deletion_cancelled` with `reason: became_member`.
+5. **RP86-5 (P4).** A CI step (in `ci.yml`, after Lint) downloads a pinned promtool (checksum-verified) and runs `promtool test rules` over every `deploy/monitoring/tests/*_test.yml`, each beside its rule file (promtool resolves `rule_files` from the test's directory).
+
+PR A also takes RP86's three corrections:
+- **`audit_logs.principal TEXT`** (and the archive's) in migration 121, written by `audit.Record` from the context (`mk:<id>` for a key, the user id for a person). `TestManagementKey_AuditNamesThePrincipal`.
+- **`created_by` without a cascade:** the erasure is ByTenant plus a ByUser handover/NULL. `TestErase_AMembersErasureKeepsThePlatformsManagementKey`. The removal's `keys_made` includes management keys.
+- **No member route for a key:** the invite, role and removal routes refuse a management key (403 `person_required`). `TestManagementKey_NeverManagesMembers`.
 
 PR A — the management key. Branch `stage1a-p54-mgmt-key`.
 1. **Migration 121.** One file for the WP, landed with PR A (WP-STRIPE-5's D-STRIPE-43 rule):
@@ -923,6 +949,6 @@ Done means:
   - PR D: this closeout.
   - Open question: `standard_sealed_default` is global only (RP82-4's example).
   - Prod proof: the read half is the operator's; the EU child needs the owner's TOTP.
-  - The post-merge review is RP86.
-- **Prompt 54 — WP-KEY-1** (management keys first, then budgets) — WRITTEN above by Prompt 53's closeout, both editions. Part 0 = RP86. Migration 121. The post-merge review is RP88.
+  - The post-merge review is RP86. **Reviewed by RP86 (2026-10-30, `docs/reviews/WP-STRIPE-5-REVIEW.md`): HOLDS at P3** (all latent): RP86-1, the GDPR export's system bucket ignores residency and blocks the admin's set after one export; four P4s, RP86-5 fixed in the review. `vaultaire-quota.yml` and `vaultaire-jobs.yml` were installed on the box by the review.
+- **Prompt 54 — WP-KEY-1** (management keys first, then budgets) — WRITTEN above by Prompt 53's closeout, both editions. Part 0 = RP86-1…5 (filled by the review, 2026-10-30), plus RP86's three PR A corrections (`audit_logs.principal`, no `created_by` cascade, no member routes for a key). Migration 121. The post-merge review is RP88.
 - **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.

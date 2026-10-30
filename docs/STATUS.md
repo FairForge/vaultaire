@@ -1,6 +1,14 @@
 # Status — the live pointer
 
-Updated: 2026-10-30 — **Stage 1a Prompt 53 (WP-ACCT-1, the account tree) — DONE, merged and deployed** (prod `9e2a5095`; `docs/reviews/WP-STRIPE-5.md`; migration **120**; next **121**; review **RP86**):
+Updated: 2026-10-30 12:30 UTC — **Review RP86 (Prompt 53, WP-ACCT-1): HOLDS at P3** (`docs/reviews/WP-STRIPE-5-REVIEW.md`). Every finding is latent on prod (no residency set, no export made; pool drift 0 on every root):
+- **RP86-1 (P3):** the GDPR export's `_exports` system bucket is made in the default region (US) whatever the residency, and its row then blocks the admin's residency set for good. Proven by test.
+- P4s: RP86-2 (the legacy bucket residency-label route), RP86-3 (the boot bucket backfill has no region), RP86-4 (a sign-in that rejoins during its grace is erased).
+- RP86-5 (P4): the jobs rule test was stale since #981; fixed, and a CI promtool step is in Part 0.
+- **Ops done:** `vaultaire-quota.yml` installed and `vaultaire-jobs.yml` re-installed on SLC (= repo; 129 rules; WP-VAULT-2's scrub and tape-audit alerts and `PoolUsedDrift` are live, none firing).
+- **Prompt 54 (WP-KEY-1, migration 121):** Part 0 is filled in both editions, plus three PR A corrections: `audit_logs.principal`, no `created_by` cascade, no member routes for a management key.
+- **[OWNER]** Blomp reports 62.4 GiB used of its 40 GiB quota (`BackendVendorQuota90` firing), and `BackupSecondOffboxStale` has fired since 05:00 UTC. The second off-box dump leg is down; Sync is fine.
+
+Before that: 2026-10-30 — **Stage 1a Prompt 53 (WP-ACCT-1, the account tree) — DONE, merged and deployed** (prod `9e2a5095`; `docs/reviews/WP-STRIPE-5.md`; migration **120**; next **121**; review **RP86**):
 - **#1085 Part 0:**
   - RP84-1: a key is erased with its tenant, and a member's own erasure hands the team's keys to its owner.
   - RP84-2: no role on no tenant.

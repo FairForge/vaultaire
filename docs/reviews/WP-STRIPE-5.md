@@ -101,4 +101,9 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 
 ## Post-merge review
 
-**RP86** — pending.
+**RP86, 2026-10-30 (`docs/reviews/WP-STRIPE-5-REVIEW.md`): HOLDS at P3**, every finding latent on prod (no residency set, no export ever made):
+- RP86-1 (P3): the `_exports` system bucket is made in the default region whatever the residency, and its row then blocks the admin's residency set forever. Proven by test.
+- P4s: RP86-2 (the legacy bucket-label route), RP86-3 (the boot bucket backfill has no region), RP86-4 (a sign-in that rejoins during its grace is still erased).
+- RP86-5 (P4, the stale jobs rule test): fixed in the review.
+- RB11-8 is done: `vaultaire-quota.yml` and the re-installed `vaultaire-jobs.yml` are on the box, hashes = repo.
+- Prompt 54's Part 0 is filled, with three corrections to its PR A.
