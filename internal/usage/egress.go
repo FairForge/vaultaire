@@ -161,7 +161,7 @@ func MonthEgressBytes(ctx context.Context, db *sql.DB, tenantID string, monthSta
 	var used int64
 	err = db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(egress_bytes), 0) FROM bandwidth_usage_daily
-		  WHERE (tenant_id = $1 OR tenant_id IN (SELECT c.id FROM tenants c WHERE c.parent_tenant_id = $1))
+		  WHERE (tenant_id = $1 OR tenant_id IN (SELECT c.id FROM tenants c WHERE c.pool_root_id = $1 AND c.id <> $1))
 		    AND date >= $2::date`,
 		root, monthStart.UTC().Format("2006-01-02")).Scan(&used)
 	if err != nil {
@@ -244,4 +244,31 @@ func EgressStatusFromDB(ctx context.Context, db *sql.DB, tenantID string, now ti
 // "over".
 func EgressOver(usedBytes, allowanceBytes int64) bool {
 	return allowanceBytes > 0 && usedBytes >= allowanceBytes
+}
+
+// PoolRootsWithEgressSince lists the pool roots whose pool recorded egress
+// since monthStart (the bandwidth alert ladder's candidates: a child's
+// bytes make its root the candidate — D-STRIPE-31). A row of a tenant with
+// no tenants row is its own root.
+func PoolRootsWithEgressSince(ctx context.Context, db *sql.DB, monthStart time.Time) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT COALESCE(t.pool_root_id, b.tenant_id)
+		   FROM bandwidth_usage_daily b
+		   LEFT JOIN tenants t ON t.id = b.tenant_id
+		  WHERE b.date >= $1::date
+		  GROUP BY 1 HAVING SUM(b.egress_bytes) > 0`,
+		monthStart.UTC().Format("2006-01-02"))
+	if err != nil {
+		return nil, fmt.Errorf("pools with egress since %s: %w", monthStart.Format("2006-01-02"), err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("pools with egress: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

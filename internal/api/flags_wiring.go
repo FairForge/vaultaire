@@ -233,7 +233,30 @@ func registerFlags(fl *flags.Service) {
 	fl.GlobalOnly(flagCredentialPlaintextDrop)
 	fl.Register(flagStandardSealedDefault, false)
 	fl.GlobalOnly(flagStandardSealedDefault)
+
+	// How each flag reads a child's account tree (WP-ACCT-1, RP82-4; the
+	// rule is internal/flags'). A sealing default inherits down the tree
+	// and may only be tightened: edge_codec (the edge seals what it chunks)
+	// and standard_sealed_default (global only today, so its one row
+	// already covers every child — declared for the day it is not). The
+	// edge's performance flags inherit as defaults a child may override.
+	// Every other flag stays per tenant: the pin is
+	// TestFlags_TheTreeInheritanceOfEveryFlag.
+	for _, k := range flagsInheritTighten {
+		fl.Inherit(k, flags.InheritTighten)
+	}
+	for _, k := range flagsInheritDefault {
+		fl.Inherit(k, flags.InheritDefault)
+	}
 }
+
+// flagsInheritTighten are the privacy and safety flags: on for a child
+// when on anywhere up its tree, never turned off below.
+var flagsInheritTighten = []string{flagEdgeCodec, flagStandardSealedDefault}
+
+// flagsInheritDefault are the performance flags a child inherits as its
+// default.
+var flagsInheritDefault = []string{flagEdgeIngest, flagEdgeMirror, flagParallelGet, flagDataPlaneSLC, flagEdgeRS}
 
 // tierGate says whether a tenant may place on a flag-gated tier class
 // (SYNC, BLOMP, SIA); nil = never.

@@ -153,7 +153,10 @@ var Deleted = []Rule{
 	// (usage/ledger_tx.go): a write committing during the erase holds the
 	// total and then updates its floor, so deleting the floors first
 	// deadlocked against it (Stage 1a Prompt 7, Part 0; staged: 40P01).
-	{"tenant_quotas", `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, ByTenant}, // a lock, not counted
+	// A child's pool ROOT first (the ledger's order, usage/pool.go), then
+	// the total: the child's bytes leave the root's pool counter below.
+	{"tenant_quotas", `SELECT 1 FROM tenant_quotas WHERE tenant_id = (SELECT pool_root_id FROM tenants WHERE id = $1 AND pool_root_id <> id) FOR UPDATE`, ByTenant}, // a lock, not counted
+	{"tenant_quotas", `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, ByTenant},                                                                      // a lock, not counted
 	{"tenant_floor_quotas", `DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, ByTenant},
 	{"grace_periods", `DELETE FROM grace_periods WHERE tenant_id = $1`, ByTenant},
 	{"upgrade_suggestions", `DELETE FROM upgrade_suggestions WHERE tenant_id = $1`, ByTenant},
@@ -164,6 +167,8 @@ var Deleted = []Rule{
 	{"billing_policies", `DELETE FROM billing_policies WHERE tenant_id = $1`, ByTenant},
 	{"billing_credits", `DELETE FROM billing_credits WHERE tenant_id = $1`, ByTenant}, // no writer (R10-14); cascades from tenant_quotas anyway
 	{"invoices", `DELETE FROM invoices WHERE tenant_id = $1`, ByTenant},               // no writer (R10-14); cascades from tenant_quotas anyway
+	// The child's bytes leave its root's pool counter (RP82-3) with its row.
+	{"tenant_quotas", poolRootRelease, ByTenant},
 	{"tenant_quotas", `DELETE FROM tenant_quotas WHERE tenant_id = $1`, ByTenant},
 
 	// --- the entitlement record (WP-PAY-1, 097) ---
@@ -275,6 +280,21 @@ var Deleted = []Rule{
 	// --- last: the account rows themselves ---
 	{"users", `DELETE FROM users WHERE id::text = $1`, ByUser},
 	{"tenants", `DELETE FROM tenants WHERE id = $1`, ByTenant},
+}
+
+// poolRootRelease takes an erased child's counted bytes out of its pool
+// root's pool_used_bytes (RP82-3) before the child's quota row goes; the
+// root's row is locked first (the rule above the total's lock).
+const poolRootRelease = `
+	UPDATE tenant_quotas r SET pool_used_bytes = r.pool_used_bytes - c.storage_used_bytes, updated_at = NOW()
+	  FROM tenant_quotas c, tenants t
+	 WHERE c.tenant_id = $1 AND t.id = $1 AND t.pool_root_id <> t.id AND r.tenant_id = t.pool_root_id`
+
+// notErased are the Deleted statements that keep rows (a handover, a
+// counter's move): counted under their own name, never as erased rows.
+var notErased = map[string]string{
+	keyMakerHandover: "api_keys:handed_over",
+	poolRootRelease:  "tenant_quotas:pool_released",
 }
 
 // keyMakerHandover is RP84-1 b's statement: the user's ($1) keys on other
@@ -448,8 +468,8 @@ func (s *Service) EraseRows(ctx context.Context, userID, tenantID, email string,
 			continue // a lock (FOR UPDATE): erases nothing
 		}
 		n, _ := out.RowsAffected()
-		if r.SQL == keyMakerHandover {
-			res.Rows["api_keys:handed_over"] += n // kept, not erased
+		if name, kept := notErased[r.SQL]; kept {
+			res.Rows[name] += n
 			continue
 		}
 		res.Rows[r.Table] += n

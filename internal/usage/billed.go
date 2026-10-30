@@ -101,7 +101,7 @@ func (m *QuotaManager) PoolBilledBytes(ctx context.Context, ownerID string) (int
 		SELECT COALESCE(SUM(`+billedBytesOfTQ+`), 0)
 		  FROM tenant_quotas tq
 		 WHERE tq.tenant_id = $1
-		    OR tq.tenant_id IN (SELECT c.id FROM tenants c WHERE c.parent_tenant_id = $1)`, ownerID).Scan(&total); err != nil {
+		    OR tq.tenant_id IN (SELECT c.id FROM tenants c WHERE c.pool_root_id = $1 AND c.id <> $1)`, ownerID).Scan(&total); err != nil {
 		return 0, fmt.Errorf("billed bytes of the pool of %s: %w", ownerID, err)
 	}
 	return total, nil

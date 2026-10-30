@@ -428,6 +428,7 @@ func deleteHeadRowTx(ctx context.Context, tx *sql.Tx, billed bool,
 type storageReconciler interface {
 	ReconcileStorageUsage(ctx context.Context) (int64, error)
 	ReconcileTenantStorageUsage(ctx context.Context, tenantID string) error
+	ReseedPoolUsed(ctx context.Context, root string) (int64, error)
 }
 
 // handleQuotaReconcile rewrites every tenant's storage_used_bytes from the
@@ -455,6 +456,21 @@ func (s *Server) handleQuotaReconcile(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := adminTriggerContext(r)
 	defer cancel()
 	actor, _ := r.Context().Value(userIDKey).(string)
+	if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" && r.URL.Query().Get("pool") == "reseed" {
+		// The operator's explicit fix of a pool counter's drift (RP82-3):
+		// the root's pool_used_bytes rewritten to the pool's sum, audited
+		// with the drift it removed. Nothing else rewrites the counter.
+		drift, err := rec.ReseedPoolUsed(ctx, tenantID)
+		audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, TenantID: tenantID, EventType: "admin", Action: "admin.pool_used_reseeded",
+			Error: err, Metadata: map[string]any{"tenant_id": tenantID, "drift_bytes": drift}})
+		if err != nil {
+			s.logger.Error("pool reseed failed", zap.String("tenant_id", tenantID), zap.Error(err))
+			http.Error(w, "reseed failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"object": "pool_reseed", "tenant_id": tenantID, "drift_bytes": drift})
+		return
+	}
 	if tenantID := r.URL.Query().Get("tenant_id"); tenantID != "" {
 		err := rec.ReconcileTenantStorageUsage(ctx, tenantID)
 		audit.Record(r.Context(), s.db, audit.Entry{UserID: actor, TenantID: tenantID, EventType: "admin", Action: "admin.quota_reconcile",

@@ -497,6 +497,7 @@ func (f *fakeReconciler) ReconcileTenantStorageUsage(_ context.Context, tenantID
 	f.tenant = tenantID
 	return nil
 }
+func (*fakeReconciler) ReseedPoolUsed(context.Context, string) (int64, error) { return 0, nil }
 
 // The quota-reconcile trigger runs on a context that survives the request: a
 // closed admin tab no longer cancels a half-done rewrite (Review R13-08).

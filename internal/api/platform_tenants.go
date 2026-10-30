@@ -157,6 +157,13 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create the tenant", "")
 		return
 	}
+	// The child reads its platform's inherited flags (a sealing default)
+	// from its first request, not the next refresh's (RP82-4).
+	if s.flags != nil {
+		if err := s.flags.Refresh(r.Context()); err != nil {
+			s.logger.Warn("platform: refresh flags after a child", zap.Error(err))
+		}
+	}
 	emitEvent(r.Context(), s.db, s.logger, "tenant.created", parent, map[string]interface{}{
 		"tenant_id": c.ID, "label": c.Label, "external_id": c.ExternalID,
 	})

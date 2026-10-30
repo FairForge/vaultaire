@@ -7,7 +7,12 @@
 // OnWins (Stage 1a Prompt 34a, RP44-2: the transparency log's record of
 // admin reads) is on when the tenant row OR the global state is on: a
 // tenant row can only turn it on, and a per-tenant OFF row under a global
-// ON is refused (ErrNotExemptible). The whole table is
+// ON is refused (ErrNotExemptible). A flag registered with an Inheritance
+// (WP-ACCT-1, RP82-4) reads a child tenant's tree: InheritTighten (a
+// privacy or safety flag — a sealing default) is on when it is on anywhere
+// up the tree, and a child's OFF row under an ancestor's ON is refused
+// (ErrOnlyTightens); InheritDefault (a performance flag) takes the nearest
+// row up the tree as the child's default. The whole table is
 // cached in memory and refreshed every ~15s (it is tiny), so the hot path
 // never touches the database; Set/Unset write through and reload the cache
 // immediately so an admin flip is visible on the next request.
@@ -40,6 +45,30 @@ var ErrNotExemptible = errors.New("flags: this flag cannot be turned off for one
 
 // ErrGlobalOnly: a per-tenant row of a flag that is read only globally.
 var ErrGlobalOnly = errors.New("flags: this flag has a global row only")
+
+// ErrOnlyTightens: a child's OFF row of an InheritTighten flag that an
+// ancestor (or the global state) turns on — a child may tighten a privacy
+// or safety flag, never weaken it (RP82-4).
+var ErrOnlyTightens = errors.New("flags: this flag is on up the account tree; a child may tighten it, never turn it off")
+
+// Inheritance is how a flag reads a child tenant's tree (WP-ACCT-1).
+type Inheritance int
+
+const (
+	// NoInherit: the tenant's own row, else the global state (every flag
+	// not registered otherwise).
+	NoInherit Inheritance = iota
+	// InheritDefault: a performance flag — the nearest row up the tree
+	// (the tenant's own first) decides, else the global state.
+	InheritDefault
+	// InheritTighten: a privacy or safety flag — on when the global state
+	// or any row up the tree (the tenant's own included) is on.
+	InheritTighten
+)
+
+// maxTreeDepth bounds the walk up the tree (depth 2 is the deepest the
+// tree allows; a cycle can never loop).
+const maxTreeDepth = 8
 
 // Refusal is a write a server-side guard refused because the flag's
 // preconditions do not hold (standard_sealed_default without a master key
@@ -110,8 +139,12 @@ type Service struct {
 	defaults   map[string]bool
 	onWins     map[string]bool
 	globalOnly map[string]bool
+	inherit    map[string]Inheritance
 	guard      WriteGuard
 	cache      snapshot
+	// parents is every child tenant's parent (tenants.parent_tenant_id),
+	// loaded with the table: the tree an inherited flag walks.
+	parents map[string]string
 
 	refreshInterval time.Duration
 }
@@ -128,7 +161,9 @@ func New(db *sql.DB, logger *zap.Logger) *Service {
 		defaults:        make(map[string]bool),
 		onWins:          make(map[string]bool),
 		globalOnly:      make(map[string]bool),
+		inherit:         make(map[string]Inheritance),
 		cache:           snapshot{},
+		parents:         map[string]string{},
 		refreshInterval: 15 * time.Second,
 	}
 }
@@ -156,6 +191,25 @@ func (s *Service) GlobalOnly(key string) {
 	s.globalOnly[key] = true
 }
 
+// Inherit declares how a registered flag reads a child's tree.
+func (s *Service) Inherit(key string, how Inheritance) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inherit[key] = how
+}
+
+// Inheritances is every flag's declared inheritance (the registration's
+// pin test reads it).
+func (s *Service) Inheritances() map[string]Inheritance {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]Inheritance, len(s.inherit))
+	for k, v := range s.inherit {
+		out[k] = v
+	}
+	return out
+}
+
 // SetWriteGuard installs g, run before every row write (nil = none).
 func (s *Service) SetWriteGuard(g WriteGuard) {
 	s.mu.Lock()
@@ -170,6 +224,9 @@ func (s *Service) Enabled(key, tenantID string) bool {
 	defer s.mu.RUnlock()
 
 	global := s.globalLocked(key)
+	if how := s.inherit[key]; how != NoInherit && tenantID != "" && tenantID != GlobalTenant {
+		return s.inheritedLocked(key, tenantID, how, global)
+	}
 	if row, ok := s.cache[key][tenantID]; ok && tenantID != "" && tenantID != GlobalTenant {
 		if s.onWins[key] {
 			return row.enabled || global
@@ -177,6 +234,40 @@ func (s *Service) Enabled(key, tenantID string) bool {
 		return row.enabled
 	}
 	return global
+}
+
+// inheritedLocked resolves an inherited flag for tenantID by walking up
+// its tree (the tenant first). s.mu held.
+func (s *Service) inheritedLocked(key, tenantID string, how Inheritance, global bool) bool {
+	t := tenantID
+	for i := 0; t != "" && i < maxTreeDepth; i++ {
+		if row, ok := s.cache[key][t]; ok {
+			switch {
+			case how == InheritDefault:
+				return row.enabled
+			case row.enabled:
+				return true
+			}
+		}
+		t = s.parents[t]
+	}
+	return global
+}
+
+// ancestorsOnLocked reports whether an InheritTighten flag is on for
+// tenantID from ABOVE it (the global state or an ancestor's row). s.mu held.
+func (s *Service) ancestorsOnLocked(key, tenantID string) bool {
+	if s.globalLocked(key) {
+		return true
+	}
+	t := s.parents[tenantID]
+	for i := 0; t != "" && i < maxTreeDepth; i++ {
+		if row, ok := s.cache[key][t]; ok && row.enabled {
+			return true
+		}
+		t = s.parents[t]
+	}
+	return false
 }
 
 // globalLocked is the flag's global state: its global row, else its
@@ -190,15 +281,18 @@ func (s *Service) globalLocked(key string) bool {
 
 // check refuses a write the flag's rules forbid, then asks the guard.
 func (s *Service) check(ctx context.Context, c Change) error {
+	tenantRow := c.TenantID != GlobalTenant
 	s.mu.RLock()
 	onWins, globalOnly, guard, global := s.onWins[c.Key], s.globalOnly[c.Key], s.guard, s.globalLocked(c.Key)
+	tightened := s.inherit[c.Key] == InheritTighten && tenantRow && s.ancestorsOnLocked(c.Key, c.TenantID)
 	s.mu.RUnlock()
-	tenantRow := c.TenantID != GlobalTenant
 	switch {
 	case globalOnly && tenantRow && !c.Clear:
 		return ErrGlobalOnly
 	case onWins && tenantRow && !c.Clear && !c.Enabled && global:
 		return ErrNotExemptible
+	case tightened && !c.Clear && !c.Enabled:
+		return ErrOnlyTightens
 	}
 	if guard != nil {
 		if err := guard(ctx, c); err != nil {
@@ -238,9 +332,29 @@ func (s *Service) Refresh(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// The account tree an inherited flag walks (WP-ACCT-1): every child's
+	// parent. A tenants table older than 117 has no column: no tree.
+	parents := map[string]string{}
+	prows, err := s.db.QueryContext(ctx, `SELECT id, parent_tenant_id FROM tenants WHERE parent_tenant_id IS NOT NULL`)
+	if err != nil {
+		s.logger.Warn("feature flags: the account tree could not be read (inherited flags read no parent)", zap.Error(err))
+	} else {
+		defer func() { _ = prows.Close() }()
+		for prows.Next() {
+			var id, parent string
+			if err := prows.Scan(&id, &parent); err != nil {
+				return err
+			}
+			parents[id] = parent
+		}
+		if err := prows.Err(); err != nil {
+			return err
+		}
+	}
 
 	s.mu.Lock()
 	s.cache = next
+	s.parents = parents
 	s.mu.Unlock()
 	return nil
 }

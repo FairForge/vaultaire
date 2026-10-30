@@ -4,6 +4,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -44,35 +45,18 @@ func (m *QuotaManager) CheckAndReserve(ctx context.Context, tenantID string, byt
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Lock row for update
-	var used, limit int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT storage_used_bytes, storage_limit_bytes
-         FROM tenant_quotas
-         WHERE tenant_id = $1
-         FOR UPDATE`,
-		tenantID).Scan(&used, &limit)
-
+	// The pool's rule (the root's row first, its counter moved with the
+	// total — RP82-3), as ReserveTx without the floors.
+	p, err := lockPool(ctx, tx, tenantID)
 	if err != nil {
-		return false, fmt.Errorf("checking quota for tenant %s: %w", tenantID, err)
+		return false, err
 	}
-
-	if used+bytes > limit {
+	if !p.fits(bytes) {
 		return false, nil // Quota exceeded but not an error
 	}
-
-	// Reserve the space
-	_, err = tx.ExecContext(ctx,
-		`UPDATE tenant_quotas
-         SET storage_used_bytes = storage_used_bytes + $1,
-             updated_at = NOW()
-         WHERE tenant_id = $2`,
-		bytes, tenantID)
-
-	if err != nil {
+	if _, _, _, _, err := moveUsed(ctx, tx, tenantID, p.owner, bytes); err != nil {
 		return false, fmt.Errorf("updating quota: %w", err)
 	}
-
 	return true, tx.Commit()
 }
 
@@ -80,18 +64,15 @@ func (m *QuotaManager) CheckAndReserve(ctx context.Context, tenantID string, byt
 // A negative value adds the bytes unconditionally (no limit check) — used to
 // account data that is already durably stored.
 func (m *QuotaManager) ReleaseQuota(ctx context.Context, tenantID string, bytes int64) error {
-	_, err := m.db.ExecContext(ctx,
-		`UPDATE tenant_quotas
-         SET storage_used_bytes = GREATEST(0, storage_used_bytes - $1),
-             updated_at = NOW()
-         WHERE tenant_id = $2`,
-		bytes, tenantID)
-
+	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("releasing quota for tenant %s: %w", tenantID, err)
 	}
-
-	return nil
+	defer func() { _ = tx.Rollback() }()
+	if err := ApplyLedgerTx(ctx, tx, tenantID, LedgerChange{Total: -bytes}); err != nil {
+		return fmt.Errorf("releasing quota for tenant %s: %w", tenantID, err)
+	}
+	return tx.Commit()
 }
 
 // ReconcileStorageUsage rewrites every tenant's storage_used_bytes — and
@@ -119,12 +100,29 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 		`SELECT tenant_id FROM tenant_quotas ORDER BY tenant_id FOR UPDATE`); err != nil {
 		return 0, fmt.Errorf("reconciling storage usage: lock tenants: %w", err)
 	}
+	// The pools' counters move by the members' corrections (RP82-3): a
+	// drift the counter had stays, for the metric to show.
+	before, err := poolTotals(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE tenant_quotas tq
 		SET storage_used_bytes = `+billedBytesOfTQ+`,
 		    updated_at = NOW()`)
 	if err != nil {
 		return 0, fmt.Errorf("reconciling storage usage: %w", err)
+	}
+	after, err := poolTotals(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	for root, sum := range after {
+		if d := sum - before[root]; d != 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE tenant_quotas SET pool_used_bytes = pool_used_bytes + $2 WHERE tenant_id = $1`, root, d); err != nil {
+				return 0, fmt.Errorf("reconciling the pool of %s: %w", root, err)
+			}
+		}
 	}
 	// The floor ledgers (066) follow the same source of truth, per floor.
 	if _, err := tx.ExecContext(ctx, `
@@ -154,12 +152,33 @@ func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID
 		return fmt.Errorf("reconciling storage usage for tenant %s: begin: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `
+	// The pool's root first (the ledger's order), then the tenant's row;
+	// the root's counter moves by the tenant's correction (RP82-3).
+	root := tenantID
+	if p, err := lockPoolOwner(ctx, tx, tenantID); err == nil {
+		root = p.owner
+	}
+	var oldUsed int64
+	err = tx.QueryRowContext(ctx, `SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID).Scan(&oldUsed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reconciling storage usage for tenant %s: %w", tenantID, err)
+	}
+	var newUsed int64
+	if err := tx.QueryRowContext(ctx, `
 		UPDATE tenant_quotas tq
 		SET storage_used_bytes = `+billedBytesOfTQ+`,
 		    updated_at = NOW()
-		WHERE tq.tenant_id = $1`, tenantID); err != nil {
+		WHERE tq.tenant_id = $1
+		RETURNING storage_used_bytes`, tenantID).Scan(&newUsed); err != nil {
 		return fmt.Errorf("reconciling storage usage for tenant %s: %w", tenantID, err)
+	}
+	if d := newUsed - oldUsed; d != 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE tenant_quotas SET pool_used_bytes = pool_used_bytes + $2 WHERE tenant_id = $1`, root, d); err != nil {
+			return fmt.Errorf("reconciling the pool of %s: %w", root, err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE tenant_floor_quotas f
@@ -276,4 +295,27 @@ func (m *QuotaManager) GetUsageHistory(ctx context.Context, tenantID string, day
 		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return history, nil
+}
+
+// poolTotals is every pool's sum of storage_used_bytes, by root (the
+// reconcile's before/after: a counter moves by its members' corrections).
+func poolTotals(ctx context.Context, tx *sql.Tx) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT COALESCE(t.pool_root_id, q.tenant_id), SUM(q.storage_used_bytes)
+		  FROM tenant_quotas q LEFT JOIN tenants t ON t.id = q.tenant_id
+		 GROUP BY 1`)
+	if err != nil {
+		return nil, fmt.Errorf("reconciling storage usage: pools: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int64{}
+	for rows.Next() {
+		var root string
+		var sum int64
+		if err := rows.Scan(&root, &sum); err != nil {
+			return nil, fmt.Errorf("reconciling storage usage: pools: %w", err)
+		}
+		out[root] = sum
+	}
+	return out, rows.Err()
 }

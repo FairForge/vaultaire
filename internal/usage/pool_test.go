@@ -161,3 +161,88 @@ func TestPool_SetHouseGivesChildrenCountingFloors(t *testing.T) {
 	assert.Equal(t, floorsBilled[FloorStandard], floors[0].UsedBytes)
 	assert.Equal(t, int64(5<<10), floors[0].UsedBytes)
 }
+
+// RP82-3 (Stage 1a Prompt 53, Part 0b): the pool's used bytes are one
+// counter on the root's row (tenant_quotas.pool_used_bytes), moved in the
+// statement that moves the member's — the check reads it, not a SUM over
+// every child. After every write, delete and reconcile it equals the sum;
+// a drift is reported (PoolDrift → vaultaire_pool_used_drift_bytes), never
+// rewritten except by the operator's explicit reseed.
+func TestPool_UsedCounterEqualsTheSum(t *testing.T) {
+	db, owner, child := poolDB(t)
+	child2 := "pool-child2-" + uuid.NewString()[:8]
+	for _, q := range []string{
+		`INSERT INTO tenants (id, name, email, parent_tenant_id) VALUES ('` + child2 + `', 'c2', '` + child2 + `@x.invalid', '` + owner + `')`,
+		`INSERT INTO tenant_quotas (tenant_id, storage_limit_bytes) VALUES ('` + child2 + `', 0)`,
+	} {
+		_, err := db.Exec(q)
+		require.NoError(t, err, q)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id = $1`, child2)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE id = $1`, child2)
+	})
+	m := NewQuotaManager(db)
+	ctx := context.Background()
+	counter := func() int64 {
+		var n int64
+		require.NoError(t, db.QueryRow(`SELECT pool_used_bytes FROM tenant_quotas WHERE tenant_id = $1`, owner).Scan(&n))
+		return n
+	}
+	sum := func() int64 {
+		var n int64
+		require.NoError(t, db.QueryRow(`SELECT COALESCE(SUM(q.storage_used_bytes), 0) FROM tenant_quotas q JOIN tenants t ON t.id = q.tenant_id
+			WHERE t.pool_root_id = $1`, owner).Scan(&n))
+		return n
+	}
+	apply := func(tenant string, c LedgerChange) {
+		tx, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback() }()
+		require.NoError(t, ApplyLedgerTx(ctx, tx, tenant, c))
+		require.NoError(t, tx.Commit())
+	}
+	step := func(what string) {
+		t.Helper()
+		assert.Equal(t, sum(), counter(), "after %s", what)
+	}
+
+	res, err := m.ReserveOnFloor(ctx, child, FloorStandard, 300)
+	require.NoError(t, err)
+	require.True(t, res.OK)
+	step("child 1 reserves 300")
+	res, err = m.ReserveOnFloor(ctx, child2, FloorStandard, 200)
+	require.NoError(t, err)
+	require.True(t, res.OK)
+	step("child 2 reserves 200")
+	apply(child, LedgerChange{Total: -100, Floors: map[string]int64{FloorStandard: -100}})
+	step("child 1 deletes 100")
+	require.NoError(t, m.ReleaseFloor(ctx, child2, FloorStandard, 50))
+	step("child 2 releases 50")
+	apply(owner, LedgerChange{Total: 50, Floors: map[string]int64{FloorStandard: 50}, Guard: FloorStandard})
+	step("the owner writes 50")
+	apply(child2, LedgerChange{Total: -1000})
+	step("child 2 deletes past zero (clamped)")
+	require.NoError(t, m.ReconcileTenantStorageUsage(ctx, child))
+	step("child 1 reconciled to its rows")
+	assert.Equal(t, int64(50), counter(), "the owner's 50 is all the pool holds")
+
+	// The check reads the counter: a counter that drifted decides, and the
+	// drift is reported, not repaired.
+	_, err = db.Exec(`UPDATE tenant_quotas SET pool_used_bytes = pool_used_bytes + 900 WHERE tenant_id = $1`, owner)
+	require.NoError(t, err)
+	res, err = m.ReserveOnFloor(ctx, child, FloorStandard, 51)
+	require.NoError(t, err)
+	assert.False(t, res.OK, "950 + 51 > 1000 by the counter")
+	drift, err := PoolDrift(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(900), drift[owner])
+	require.NoError(t, m.ReconcileTenantStorageUsage(ctx, child2))
+	drift, err = PoolDrift(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, int64(900), drift[owner], "a reconcile never rewrites the drift away")
+	n, err := m.ReseedPoolUsed(ctx, owner)
+	require.NoError(t, err)
+	assert.Equal(t, int64(900), n, "the operator's reseed answers the drift it removed")
+	step("reseeded")
+}
