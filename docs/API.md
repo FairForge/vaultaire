@@ -498,13 +498,20 @@ A **test key** works like any key but writes to the account's **sandbox**, never
 
 A **platform** account creates and runs accounts of its own — **child tenants** — by API, for the users of an app it builds on Stored (the Connect primitive). An account becomes a platform only when an operator grants it; to every other account the routes below do not exist (404).
 
-**A child** is an account with no user, no e-mail and no primary key pair. It has a `label` and, optionally, an `external_id` the app owns (unique per platform). Its buckets default to the same region as the platform's. A child of a child is refused (400 `child_of_child`).
+**A child** is an account with no user, no e-mail and no primary key pair. It has a `label` and, optionally, an `external_id` the app owns (unique per platform). Its buckets default to the same region as the platform's.
+
+**The tree.** A child hangs off its platform by a `kind`:
+- `managed` (the default): the platform's customer;
+- `app`: an app built on the platform, which may have `managed` children of its own. The platform makes them with `parent_id` set to the app. This is depth 2, the only depth beyond 1.
+
+A child of a managed child, an app under an app or anything deeper is 400 `child_of_child`, and `kind: "sponsored"` is 400 `invalid_kind` (a family's edge is made by an invitation). The platform reaches its whole tree: every route below takes a grandchild's id as well as a child's.
 
 | Route | What |
 |---|---|
-| `POST /api/v1/platform/tenants` `{label, external_id?}` | Make a child (201 `{object: "tenant", id, label, external_id, residency, created_at, usage}`); 409 `external_id_taken` |
+| `POST /api/v1/platform/tenants` `{label, external_id?, kind?, parent_id?, storage_cap_bytes?, egress_cap_bytes?, residency?}` | Make a child (201 `{object: "tenant", id, label, external_id, kind, parent_id, caps, residency, created_at, usage}`); 409 `external_id_taken`; 404 `parent_not_found` |
 | `GET /api/v1/platform/tenants` | The platform's children, by id (`limit`, `starting_after`), each with `usage.storage_used_bytes` |
 | `GET /api/v1/platform/tenants/{id}` | One child |
+| `PATCH /api/v1/platform/tenants/{id}` `{storage_cap_bytes?, egress_cap_bytes?}` | Set its caps inside the pool (0 = the pool decides); 400 `invalid_cap` |
 | `DELETE /api/v1/platform/tenants/{id}` | Schedule the child's erasure: its objects, keys and rows go after the usual 30 days |
 | `POST /api/v1/platform/tenants/{id}/keys` | Mint a scoped key of the child; the secret is shown once |
 | `GET /api/v1/platform/tenants/{id}/keys` | The child's keys (never a secret) |
@@ -515,11 +522,26 @@ Every call is a Bearer JWT of the platform, in its request log, rate limited and
 
 **A child's keys never exceed the credential that mints them.** What a request leaves unset is the caller's (permissions, buckets, IP allowlist, expiry); asking more is 400 `scope_exceeds_parent`. The JWT is the account's own authority. A child holds at most 50 live keys.
 
-**The pool.** A child's bytes count against its platform's quota: the platform's limit, against the sum of the platform's own stored bytes and every child's. When the pool is spent, a write by any of them — a child's or the platform's own, through any host — is 403 `QuotaExceeded`. `usage.storage_used_bytes` is each child's own share. A platform's test-mode sandbox is never in the pool.
+**The pool.** A child's bytes count against its platform's quota: the platform's limit, against the bytes the whole tree stores (the platform's own and every child's, at any depth). When the pool is spent, a write by any of them — a child's or the platform's own, through any host — is 403 `QuotaExceeded`. `usage.storage_used_bytes` is each child's own share. A platform's test-mode sandbox is never in the pool.
 
-**Suspension and erasure.** A suspended platform's children answer 403 `AccountSuspended`. When a platform's account is erased, its children are erased first (objects, keys and rows), then the platform. A platform cannot be turned off while it has children.
+**Caps inside the pool.** A child may carry its own caps (`caps`):
+- `storage_cap_bytes` > 0: it may store at most min(cap, what the pool has left). One byte past its cap is 403 `QuotaExceeded`, whatever room the pool has.
+- `egress_cap_bytes` > 0: past that many bytes downloaded this UTC month, its downloads are rate-limited while the others' are not. Past the pool's allowance, every member is.
+- 0 = the pool decides.
 
-**Operator:** `PUT /api/v1/admin/tenants/{id}/platform` `{"platform": true|false}` (admin JWT; audited `admin.platform_granted` / `admin.platform_revoked`).
+**Residency.** `residency` (`eu`, `uk` or `us`) keeps the child's bytes at rest in that jurisdiction:
+- **Buckets:** they can be created only in a region of it (S3 400 `InvalidLocationConstraint`; management 400 `region_outside_residency`), and a create that names no region gets the first one inside it. London (`eu-west-3`) is the UK.
+- **Second copies:** the mirror copy and the Vault parity copy stay inside it. Where there is no second leg inside it, the object has one copy.
+- **Inheritance:** a child keeps its parent's residency. Naming another is 400 `residency_widens`. A parent with none lets the child choose.
+- **Once set,** it changes only by an operator, and only while every bucket complies.
+
+Bytes in transit through an edge location are not storage: residency covers where they are kept.
+
+**Suspension and erasure.** A suspended platform's children (and its apps' children) answer 403 `AccountSuspended`. When a platform's account is erased, its children are erased first (objects, keys and rows; an app's children before the app), then the platform. A platform cannot be turned off while it has children.
+
+**Operator:**
+- `PUT /api/v1/admin/tenants/{id}/platform` `{"platform": true|false}` (admin JWT; audited `admin.platform_granted` / `admin.platform_revoked`).
+- `PUT /api/v1/admin/tenants/{id}/residency` `{"residency": "eu"|"uk"|"us"|null}`: for the tenant and its tree, only while every bucket of the tree complies (409 `buckets_outside_residency`, `children_outside_residency`; audited `admin.residency_set`).
 
 ## Members
 
@@ -539,13 +561,13 @@ A write the role does not allow is 403 `role_forbidden`. A JWT whose user is no 
 | `GET /api/v1/manage/members` | any | The members (`user_id`, `email`, `role`, `invited_by`, `accepted_at`) and the pending `invitations` |
 | `POST /api/v1/manage/members` `{email, role}` | admin | Invite an address (`admin`, `developer` or `viewer`): it receives a link that works **once** and expires after **7 days**. Inviting an address again **replaces** its pending invitation (the first link stops working): that is the resend. An account holds at most **20 pending invitations** and sends at most **50 invitation e-mails a day** (429 `invitation_rate_limited`). 409 `already_a_member`; 400 `invalid_role` |
 | `PATCH /api/v1/manage/members/{user_id}` `{role}` | admin | Change a member's role. 409 `owner_is_permanent` for the owner |
-| `DELETE /api/v1/manage/members/{user_id}` `{revoke_keys?}` | admin | Remove a member: its membership only — never its sign-in, never a bucket. The answer names the S3 keys the member made (`keys_made: [{id, name, last_used}]`): they are the account's and **stay live** unless the body says `"revoke_keys": true`, which revokes them and their temporary credentials in the same step (`keys_revoked: true`). 409 `owner_is_permanent` |
+| `DELETE /api/v1/manage/members/{user_id}` `{revoke_keys?}` | admin, or any member for itself (leaving) | Remove a member: its membership only — never its sign-in, never a bucket. The answer names the S3 keys the member made (`keys_made: [{id, name, last_used}]`): they are the account's and **stay live** unless the body says `"revoke_keys": true`, which revokes them and their temporary credentials in the same step (`keys_revoked: true`). 409 `owner_is_permanent` |
 | `DELETE /api/v1/manage/invitations/{id}` | admin | Revoke a pending invitation |
 | `POST /api/v1/manage/invitations/{token}/accept` | any signed-in user | Accept an invitation sent to the token's address (403 `invitation_other_address` for another one); the answer's `role` is the one the person has. 410 `invitation_expired` / `invitation_used` |
 
 **The link.** An invitation is e-mailed as `https://<host>/auth/invitations/<token>`. Only the token's SHA-256 is stored. An address without an account chooses a password on that page and becomes a member — a sign-in with no account of its own; an address that has an account signs in and accepts from the dashboard. Accepting is open while public sign-ups are closed: it adds a person to an account that exists.
 
-**A sign-in on no account.** A person who is a member of no account (an invitee removed again) signs in to a JWT on no account: it has no role, and every route above but the accept is 403 `not_a_member`.
+**A sign-in on no account.** A person who is a member of no account (an invitee who left, or was removed) signs in to a JWT on no account: it has no role, and every route above but the accept is 403 `not_a_member`. It may ask for its own erasure: `DELETE /api/v1/user/signin` `{reason?}` schedules it (the usual 30 days), then its sign-in rows go and no account is touched (keys it once made stay the account's). Anyone who owns an account or is a member of one is 409 `still_a_member`: leave first (`DELETE /api/v1/manage/members/<your user_id>`; the owner cannot leave its own account).
 
 **Several accounts.** A person may be a member of several accounts. `POST /auth/login` answers `tenants: [{id, role, name}]` and takes an optional `tenant_id` (default: the account the person owns, else the first joined; 403 `not_a_member` for one they are not in). The JWT is for that one account — its `tenant_id` and `role` claims — and every management route acts on it alone; signing in again with another `tenant_id` switches. The dashboard's switcher (Members page) does the same for the session.
 

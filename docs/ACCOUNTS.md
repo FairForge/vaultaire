@@ -31,7 +31,7 @@ A child tenant hangs off its parent by one of three edges (`tenants.child_kind`,
 - **One pool, one root.** `pool_root_id` is denormalised on every tenant of a tree, so the quota check stays one indexed sum at any depth. It locks the root's row first, as PR B does today (`usage/pool.go`).
 - **Caps inside the pool.** A child's own `storage_limit_bytes` is 0 = "the pool decides" (today) or a positive cap = min(cap, pool). The same holds for egress. That is 42.1's "members draw from the pool with optional caps".
 - **Suspension** flows down `managed` and `app` edges only. A sponsored member is an independent person, so the sponsor's suspension for abuse does not suspend them.
-- **Erasure** cascades down `managed` and `app` edges and detaches `sponsored` ones. *(The cascade built in #1058 erases every child: WP-FAMILY-1 must branch it before the first sponsored edge exists. `TestFamily_SponsorErasureDetachesNeverErases` is that WP's first test.)*
+- **Erasure** cascades down `managed` and `app` edges and detaches `sponsored` ones. *(Branched by WP-ACCT-1, Stage 1a Prompt 53: `account.DetachSponsored`, `TestTree_SponsoredNeverSuspendedOrErasedWithTheSponsor` on a sponsored row made by SQL. WP-FAMILY-1's `TestFamily_SponsorErasureDetachesNeverErases` proves it again through a real family invitation.)*
 - **Residency** is a tenant attribute (`tenants.residency`: `eu` / `uk` / `us`, NULL = any). It is set at creation and never changed. A child inherits its parent's and may narrow it, never widen it. Bucket creation, the mirror leg and the parity leg stay inside it (D-STRIPE-30; this also closes RP76-1). It covers where bytes are stored at rest. Bytes in transit through an edge colo are not storage, and the docs say so.
 
 ## The accounts, one by one
