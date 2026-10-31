@@ -1,0 +1,19 @@
+# stored-mcp — Stored's MCP server (WP-AGENT-1, Stage 1a Prompt 55 PR A).
+# Deployed on the PRODUCTION Cloudflare account to the stored.cloud zone's
+# route mcp.stored.cloud/*. No secrets: every call carries the agent grant's
+# own key (a management key, sk_live_… or sk_test_…) as its bearer, minted by
+# the origin's OAuth flow (/oauth/*, the consent on the dashboard).
+#
+# Vars: STORED_API is the origin the management API and the OAuth server
+# answer on (the canonical web origin); STORED_S3 is the S3 endpoint the
+# object tools sign against (the origin, never s3.stored.cloud's Worker).
+name = "stored-mcp"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+routes = [{ pattern = "mcp.stored.cloud/*", zone_name = "stored.cloud" }]
+
+[vars]
+STORED_API = "https://stored.cloud"
+STORED_S3 = "https://stored.ge"
+MCP_RESOURCE = "https://mcp.stored.cloud/mcp"

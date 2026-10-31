@@ -1152,7 +1152,8 @@ func (s *Server) setupRoutes() {
 
 	s.logger.Info("Registering management API routes")
 	s.registerManagementRoutes()
-	s.registerPlatformRoutes() // WP-PLAT-1: 404 for every tenant that is not a platform
+	s.registerPlatformRoutes()   // WP-PLAT-1: 404 for every tenant that is not a platform
+	s.registerAgentOAuthRoutes() // WP-AGENT-1: the MCP authorization flow (agent_oauth.go)
 
 	// POST /api/v1/edge/admit + /commit — the Worker's calls (WP-EDGE-1
 	// Part A, edge_ingest.go); mounted only with EDGE_SERVICE_TOKEN.

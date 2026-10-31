@@ -1,0 +1,53 @@
+{{define "title"}}Connect an AI agent, Stored{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Connect an AI agent</h1>
+        {{if .Client}}<p class="text-muted"><strong>{{if .Client.Name}}{{.Client.Name}}{{else}}An app{{end}}</strong> asks to act on this account for you. It returns to <code>{{.ReturnsTo}}</code>.</p>{{end}}
+    </div>
+</div>
+
+{{if .Unavailable}}
+<div class="card"><p>{{.Unavailable}}</p></div>
+{{else}}
+{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+<div class="card">
+    <div class="card-title">What it may do</div>
+    <p>Create buckets (versioning on, so a mistake is a version back), list them and read and write files in your Standard and Public buckets, make S3 keys within its own limits, and rehearse on your sandbox first.</p>
+    <div class="card-title">What it never does without you</div>
+    <ul>{{range .Never}}<li>{{.}}</li>{{end}}</ul>
+    <p class="text-muted">When it needs one of these, it asks; you approve it once in the dashboard, with your authenticator code for anything destructive.</p>
+</div>
+
+<form method="post" action="/dashboard/agents/connect" class="card">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <input type="hidden" name="client_id" value="{{.Req.ClientID}}">
+    <input type="hidden" name="redirect_uri" value="{{.Req.RedirectURI}}">
+    <input type="hidden" name="state" value="{{.Req.State}}">
+    <input type="hidden" name="code_challenge" value="{{.Req.CodeChallenge}}">
+    <input type="hidden" name="code_challenge_method" value="{{.Req.CodeChallengeMethod}}">
+    <input type="hidden" name="response_type" value="{{.Req.ResponseType}}">
+    <div class="card-title">Its limits</div>
+    <label>Storage its keys may hold (GiB, empty = the account's)
+        <input type="text" name="storage_gib" inputmode="decimal" value="{{.Storage}}"></label>
+    <label>Downloads per month (GiB, empty = the account's)
+        <input type="text" name="egress_gib" inputmode="decimal" value="{{.Egress}}"></label>
+    <label>For
+        <select name="days">
+            <option value="30">30 days (renewable)</option>
+            <option value="7">7 days</option>
+            <option value="1">1 day</option>
+        </select></label>
+    {{if .NeedsMFA}}
+    <p>Connecting an agent needs two-factor sign-in. <a href="/dashboard/settings">Turn it on in Settings</a>, then come back.</p>
+    {{else}}
+    <label>Authenticator code
+        <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></label>
+    {{end}}
+    <div class="form-actions">
+        <button class="btn btn-primary" type="submit" name="decision" value="approve" {{if .NeedsMFA}}disabled{{end}}>Connect</button>
+        <button class="btn" type="submit" name="decision" value="deny" formnovalidate>Cancel</button>
+    </div>
+</form>
+{{end}}
+{{end}}

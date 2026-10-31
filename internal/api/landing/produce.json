@@ -272,6 +272,45 @@
       ]
     },
     {
+      "section": "agents",
+      "label": "AI agents connected to the account, and the approvals they asked for",
+      "fields": [
+        "id",
+        "agent_name",
+        "client_id",
+        "granted_by",
+        "approved_scopes",
+        "storage_limit_bytes",
+        "egress_limit_bytes",
+        "management_key_id",
+        "test_management_key_id",
+        "created_at",
+        "renewed_at",
+        "grant_id",
+        "action",
+        "resource",
+        "requested_at",
+        "expires_at",
+        "decided_at",
+        "decided_by",
+        "decision",
+        "used_at"
+      ]
+    },
+    {
+      "section": "claims",
+      "label": "Claim links of an app made for you (never the token or its hash)",
+      "fields": [
+        "id",
+        "partner_tenant_id",
+        "label",
+        "created_at",
+        "expires_at",
+        "claimed_at",
+        "claimed_by"
+      ]
+    },
+    {
       "section": "members",
       "label": "Members of the account and invitations sent",
       "fields": [

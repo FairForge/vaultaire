@@ -112,6 +112,7 @@ var exportExcludedTables = map[string]string{
 	"portability_downloads":        "no writer (D-12 scaffolding)",
 	"portability_requests":         "no writer (D-12 scaffolding)",
 	"user_roles":                   "no writer (D-11 RBAC removed)",
+	"agent_oauth_codes":            "transient: a person's consent as a single-use ten-minute OAuth code (WP-AGENT-1); what it made is the agents section",
 }
 
 // exportNeverColumns: every column whose name says secret, hash, token,
@@ -133,6 +134,9 @@ var exportNeverColumns = map[string]string{
 	"api_keys.secret_wrapped":              "credential (the secret wrapped under the tenant's key, 108, plan 43.7)",
 	"api_keys.secret_key_version":          "credential bookkeeping: the key version the wrapped secret needs (108)",
 	"management_keys.key_hash":             "credential: the sha256 of a management key's secret (121, WP-KEY-1)",
+	"agent_oauth_codes.code_hash":          "credential: the sha256 of a single-use OAuth code (122, WP-AGENT-1); the table is excluded as a whole",
+	"agent_oauth_codes.code_challenge":     "a PKCE challenge (122): bookkeeping of a ten-minute code, never exported (the table is excluded as a whole)",
+	"claims.token_hash":                    "credential: the sha256 of a claim link's single-use token (122, WP-APP-1)",
 	"sts_tokens.secret_key":                "credential",
 	"sts_tokens.secret_wrapped":            "credential (the secret wrapped under the tenant's key, 108, plan 43.7)",
 	"sts_tokens.secret_key_version":        "credential bookkeeping: the key version the wrapped secret needs (108)",
@@ -458,6 +462,19 @@ const (
 	sqlExportManagementKeys = `
 		SELECT id, prefix, hint, name, scopes, s3_ceiling, created_by, created_at, last_used_at, revoked_at
 		  FROM management_keys WHERE tenant_id = $1 ORDER BY created_at, id`
+	// WP-AGENT-1 (122): who acts for the tenant's members, and what they
+	// were asked and decided.
+	sqlExportAgentGrants = `
+		SELECT id, agent_name, client_id, granted_by, approved_scopes, storage_limit_bytes, egress_limit_bytes,
+		       management_key_id, test_management_key_id, created_at, renewed_at
+		  FROM agent_grants WHERE tenant_id = $1 ORDER BY created_at, id`
+	sqlExportApprovals = `
+		SELECT id, grant_id, action, resource, requested_at, expires_at, decided_at, decided_by, decision, used_at
+		  FROM approvals WHERE tenant_id = $1 ORDER BY requested_at, id`
+	// WP-APP-1 (122): the tenant's claim link (never its hash).
+	sqlExportClaims = `
+		SELECT id, partner_tenant_id, label, created_at, expires_at, claimed_at, claimed_by
+		  FROM claims WHERE tenant_id = $1 ORDER BY created_at, id`
 	sqlExportMembers = `
 		SELECT m.user_id, u.email, m.role, m.invited_by, m.accepted_at
 		  FROM tenant_members m JOIN users u ON u.id = m.user_id
@@ -629,6 +646,24 @@ var exportSections = []exportSection{
 		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
 			return j.array("management_keys", func(emit func(any)) error {
 				return streamQuery(ctx, db, emit, nil, sqlExportManagementKeys, sub.TenantID)
+			})
+		}},
+	{Name: "agents", Tables: []string{"agent_grants", "approvals"}, SQL: []string{sqlExportAgentGrants, sqlExportApprovals},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
+			grants, approvals := []any{}, []any{}
+			if err := streamQuery(ctx, db, func(v any) { grants = append(grants, v) }, nil, sqlExportAgentGrants, sub.TenantID); err != nil {
+				return err
+			}
+			if err := streamQuery(ctx, db, func(v any) { approvals = append(approvals, v) }, nil, sqlExportApprovals, sub.TenantID); err != nil {
+				return err
+			}
+			j.field("agents", map[string]any{"grants": grants, "approvals": approvals})
+			return nil
+		}},
+	{Name: "claims", Tables: []string{"claims"}, SQL: []string{sqlExportClaims},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
+			return j.array("claims", func(emit func(any)) error {
+				return streamQuery(ctx, db, emit, nil, sqlExportClaims, sub.TenantID)
 			})
 		}},
 	// WP-TEAM-1 (118): who may act on the tenant, and the invitations sent

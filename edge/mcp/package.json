@@ -1,0 +1,11 @@
+{
+  "name": "stored-mcp",
+  "private": true,
+  "type": "module",
+  "description": "Stored's MCP server: a Cloudflare Worker on mcp.stored.cloud that lets an AI agent act on an account through its agent grant (WP-AGENT-1).",
+  "scripts": {
+    "test": "node --test",
+    "deploy": "npx -y wrangler@4.151.3 deploy",
+    "dev": "npx -y wrangler@4.151.3 dev --local"
+  }
+}

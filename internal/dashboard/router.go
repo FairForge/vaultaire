@@ -136,6 +136,7 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /apikeys/{id}/caps":               auth.ActionKeyWrite,      // WP-KEY-1
 	"POST /management-keys":                 auth.ActionManagementKey, // WP-KEY-1
 	"POST /management-keys/{id}/revoke":     auth.ActionManagementKey,
+	"POST /agents/connect":                  auth.ActionManagementKey, // WP-AGENT-1: an agent grant IS a management key
 	"POST /settings/profile":                personalWrite,
 	"POST /settings/password":               personalWrite,
 	"POST /settings/notifications":          personalWrite,
@@ -184,6 +185,15 @@ func dashboardAction(route string) func(http.Handler) http.Handler {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return handlers.RequireAction(action)
+}
+
+// afterSignIn is where a sign-in lands: the agent consent it interrupted
+// (dashauth.ReturnToCookie, WP-AGENT-1), else the overview.
+func afterSignIn(w http.ResponseWriter, r *http.Request) string {
+	if uri := dashauth.TakeReturnTo(w, r); uri != "" {
+		return uri
+	}
+	return "/dashboard"
 }
 
 // CSRFKeyFromSecret derives the CSRF key from a persistent server secret
@@ -377,6 +387,14 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.With(act("POST /apikeys/{id}/revoke")).Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
 		dr.With(act("POST /apikeys/{id}/rotate")).Post("/apikeys/{id}/rotate", handlers.HandleRotateKey(apikeysTmpl, deps.Auth, deps.Logger))
 		dr.With(act("POST /apikeys/{id}/caps")).Post("/apikeys/{id}/caps", handlers.HandleSetKeyCaps(deps.DB, deps.Logger))
+
+		// WP-AGENT-1: the MCP authorization flow's consent (a person, the
+		// role to mint a management key, a fresh TOTP code).
+		agentConnectTmpl := template.Must(baseTmpl.Clone())
+		template.Must(agentConnectTmpl.ParseFS(Templates, "templates/customer/agent_connect.html"))
+		agentConnect := handlers.HandleAgentConnect(agentConnectTmpl, deps.DB, deps.Auth, deps.MFA, deps.flagOn("agent_grants"), deps.Logger)
+		dr.With(handlers.RequireAction(auth.ActionManagementKey)).Get("/agents/connect", agentConnect)
+		dr.With(act("POST /agents/connect")).Post("/agents/connect", agentConnect)
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())
@@ -795,7 +813,7 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 		dashauth.SetSessionCookie(w, token, sessionTTL)
 		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
 			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "none"})
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther)
 	}
 }
 
@@ -1124,7 +1142,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 		dashauth.SetSessionCookie(w, token, sessionTTL)
 		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.mfa_succeeded",
 			UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email, Via: via})
-		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther)
 	}
 }
 

@@ -5,7 +5,9 @@
 //	stored listen --forward-to localhost:3000/webhooks
 //
 // It reads STORED_TOKEN (a management JWT: POST /auth/login) and STORED_API
-// (default https://stored.cloud).
+// (default https://stored.cloud). `stored mcp` (WP-AGENT-1) bridges a local
+// MCP client's stdio to mcp.stored.cloud; its STORED_TOKEN is an agent
+// grant's key.
 package main
 
 import (
@@ -29,6 +31,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "stored listen:", err)
 			os.Exit(1)
 		}
+	case "mcp":
+		if err := runMCP(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Getenv); err != nil {
+			fmt.Fprintln(os.Stderr, "stored mcp:", err)
+			os.Exit(1)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -37,4 +44,5 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: stored listen --forward-to localhost:<port>/<path> [--cursor-file f] [--secret whsec_…]")
+	fmt.Fprintln(os.Stderr, "       stored mcp [--url https://mcp.stored.cloud/mcp]   (STORED_TOKEN = the agent grant's key)")
 }
