@@ -48,11 +48,15 @@ func setupPlatformFixture(t *testing.T) *platformFixture {
 	require.NoError(t, db.Ping())
 	authSvc := auth.NewAuthService(nil, db)
 	f := &platformFixture{t: t, db: db}
-	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "plat-"+uuid.NewString()[:8]+"@stored.ge", "Str0ngPassw0rd!", "x")
+	// Not @stored.ge: internal/auth's test helper purges every @stored.ge
+	// user and tenant at its start, and packages share one test database
+	// in parallel (found by Stage 1a Prompt 55's runs: a platform fixture's
+	// owner vanished mid-test).
+	user, _, _, err := authSvc.CreateUserWithTenant(context.Background(), "plat-"+uuid.NewString()[:8]+"@platform.example", "Str0ngPassw0rd!", "x")
 	require.NoError(t, err)
 	f.user = user
 	t.Cleanup(func() { cleanupPlatform(db, user.TenantID) })
-	f.admin = &auth.User{ID: uuid.NewString(), Email: "plat-admin-" + uuid.NewString()[:8] + "@stored.ge", TenantID: "tenant-admin-" + uuid.NewString()[:8]}
+	f.admin = &auth.User{ID: uuid.NewString(), Email: "plat-admin-" + uuid.NewString()[:8] + "@platform.example", TenantID: "tenant-admin-" + uuid.NewString()[:8]}
 	_, err = db.Exec(`INSERT INTO users (id, email, password_hash, role) VALUES ($1, $2, 'x', 'admin')`, f.admin.ID, f.admin.Email)
 	require.NoError(t, err)
 	t.Cleanup(func() {
