@@ -256,6 +256,22 @@
       ]
     },
     {
+      "section": "management_keys",
+      "label": "Management keys (never the secret or its hash)",
+      "fields": [
+        "id",
+        "prefix",
+        "hint",
+        "name",
+        "scopes",
+        "s3_ceiling",
+        "created_by",
+        "created_at",
+        "last_used_at",
+        "revoked_at"
+      ]
+    },
+    {
       "section": "members",
       "label": "Members of the account and invitations sent",
       "fields": [

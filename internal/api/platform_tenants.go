@@ -32,10 +32,10 @@ import (
 func (s *Server) registerPlatformRoutes() {
 	rl, im := s.jsonAPIMiddleware()
 	s.router.Route("/api/v1/platform", func(r chi.Router) {
-		r.Use(s.requireJWT)
-		r.Use(s.requireMember)        // WP-TEAM-1: the JWT's user is a member of the platform
-		r.Use(s.logManagementRequest) // the request log, under the parent
-		r.Use(s.requirePlatform)      // 404 for any tenant that is not a platform
+		r.Use(s.requireCaller(surfacePlatform)) // a JWT, or a management key (WP-KEY-1)
+		r.Use(s.requireMember)                  // WP-TEAM-1: the JWT's user is a member of the platform
+		r.Use(s.logManagementRequest)           // the request log, under the parent
+		r.Use(s.requirePlatform)                // 404 for any tenant that is not a platform
 		r.Use(rl.Middleware)
 		r.Use(im.Middleware)
 
@@ -50,6 +50,9 @@ func (s *Server) registerPlatformRoutes() {
 		r.Get("/tenants/{id}/keys", s.handlePlatformListKeys)
 		r.With(s.requireRole(auth.ActionChildKey)).Delete("/tenants/{id}/keys/{key}", s.handlePlatformDeleteKey)
 		r.With(s.requireRole(auth.ActionChildKey)).Post("/tenants/{id}/sts", s.handlePlatformCreateSTS)
+
+		// WP-KEY-1: an app's management key, minted by its platform.
+		s.registerPlatformManagementKeyRoutes(r)
 	})
 }
 
@@ -66,6 +69,11 @@ func (s *Server) requirePlatform(next http.Handler) http.Handler {
 		tenantID, _ := r.Context().Value(tenantIDKey).(string)
 		if tenantID == "" || s.db == nil {
 			writeManagementError(w, ErrTypeNotFound, "not_found", "no such route", "")
+			return
+		}
+		// An app's key acts here as the app over its own children (WP-KEY-1).
+		if actsAsApp(r.Context()) != nil {
+			next.ServeHTTP(w, r)
 			return
 		}
 		ok, err := auth.IsPlatform(r.Context(), s.db, tenantID)
@@ -160,6 +168,19 @@ func (s *Server) handlePlatformCreateTenant(w http.ResponseWriter, r *http.Reque
 	}
 	opts := auth.ChildOptions{Kind: auth.ChildKind(req.Kind), ParentID: req.ParentID,
 		Caps: auth.ChildCaps{StorageBytes: req.StorageCap, EgressBytes: req.EgressCap}, Residency: req.Residency}
+	// An app's key (WP-KEY-1) makes the app's own managed children: its
+	// platform makes them, under the app (depth 2 stays the deepest).
+	if k := actsAsApp(r.Context()); k != nil {
+		switch {
+		case req.Kind != "" && req.Kind != string(auth.ChildManaged):
+			writeManagementError(w, ErrTypeInvalidRequest, "child_of_child", "an app's children are managed: depth 2 is the deepest", "kind")
+			return
+		case req.ParentID != "" && req.ParentID != parent:
+			writeManagementError(w, ErrTypeNotFound, "parent_not_found", "an app's key makes the app's own children only", "parent_id")
+			return
+		}
+		opts.ParentID, parent = parent, k.ParentTenantID
+	}
 	c, err := auth.CreateChildTenant(r.Context(), s.db, parent, req.Label, req.ExternalID, opts)
 	switch {
 	case errors.Is(err, auth.ErrBadChildKind):

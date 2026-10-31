@@ -132,6 +132,7 @@ var exportNeverColumns = map[string]string{
 	"api_keys.secret_key":                  "credential",
 	"api_keys.secret_wrapped":              "credential (the secret wrapped under the tenant's key, 108, plan 43.7)",
 	"api_keys.secret_key_version":          "credential bookkeeping: the key version the wrapped secret needs (108)",
+	"management_keys.key_hash":             "credential: the sha256 of a management key's secret (121, WP-KEY-1)",
 	"sts_tokens.secret_key":                "credential",
 	"sts_tokens.secret_wrapped":            "credential (the secret wrapped under the tenant's key, 108, plan 43.7)",
 	"sts_tokens.secret_key_version":        "credential bookkeeping: the key version the wrapped secret needs (108)",
@@ -452,6 +453,11 @@ const (
 	sqlExportAPIKeys = `
 		SELECT id, key_id, is_primary, name, permissions, bucket_scope, ip_allowlist, expires_at, revoked_at, last_used, created_at
 		  FROM api_keys WHERE user_id::text = $1 ORDER BY created_at, id`
+	// WP-KEY-1 (121): the tenant's management keys — never the hash; the
+	// hint is four characters of a secret that is 43.
+	sqlExportManagementKeys = `
+		SELECT id, prefix, hint, name, scopes, s3_ceiling, created_by, created_at, last_used_at, revoked_at
+		  FROM management_keys WHERE tenant_id = $1 ORDER BY created_at, id`
 	sqlExportMembers = `
 		SELECT m.user_id, u.email, m.role, m.invited_by, m.accepted_at
 		  FROM tenant_members m JOIN users u ON u.id = m.user_id
@@ -617,6 +623,12 @@ var exportSections = []exportSection{
 		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
 			return j.array("api_keys", func(emit func(any)) error {
 				return streamQuery(ctx, db, emit, nil, sqlExportAPIKeys, sub.UserID)
+			})
+		}},
+	{Name: "management_keys", Tables: []string{"management_keys"}, SQL: []string{sqlExportManagementKeys},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
+			return j.array("management_keys", func(emit func(any)) error {
+				return streamQuery(ctx, db, emit, nil, sqlExportManagementKeys, sub.TenantID)
 			})
 		}},
 	// WP-TEAM-1 (118): who may act on the tenant, and the invitations sent

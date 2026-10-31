@@ -117,32 +117,9 @@ func (a *AuthService) GenerateTestKeyForTenant(ctx context.Context, tenantID, us
 	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM users WHERE id = $1 FOR SHARE`, userID); err != nil {
 		return nil, fmt.Errorf("generate test key: lock the user: %w", err)
 	}
-	var sandboxOf sql.NullString
-	var suspended bool
-	if err := tx.QueryRowContext(ctx, `SELECT sandbox_of, suspended_at IS NOT NULL FROM tenants WHERE id = $1`, parent).
-		Scan(&sandboxOf, &suspended); err != nil {
-		return nil, fmt.Errorf("generate test key: read the tenant: %w", err)
-	}
-	if sandboxOf.String != "" {
-		return nil, ErrSandboxOfSandbox
-	}
-	if suspended {
-		return nil, ErrTenantSuspended
-	}
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return nil, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tenants (id, name, email, sandbox_of)
-		VALUES ($1, 'test data', $2, $3)
-		ON CONFLICT (sandbox_of) WHERE sandbox_of IS NOT NULL DO NOTHING`,
-		"sandbox-"+hex.EncodeToString(b[:]), "sandbox+"+parent+"@sandbox.invalid", parent); err != nil {
-		return nil, fmt.Errorf("generate test key: the sandbox: %w", err)
-	}
-	sandbox, err := SandboxOf(ctx, tx, parent)
+	sandbox, err := ensureSandboxTx(ctx, tx, parent)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generate test key: %w", err)
 	}
 	var live int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, sandbox).Scan(&live); err != nil {
@@ -174,9 +151,6 @@ func (a *AuthService) GenerateTestKeyForTenant(ctx context.Context, tenantID, us
 	if _, err := a.persistAPIKey(ctx, tx, k); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_quotas (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING`, sandbox); err != nil {
-		return nil, fmt.Errorf("generate test key: the sandbox's quota row: %w", err)
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("generate test key: %w", err)
 	}
@@ -184,4 +158,42 @@ func (a *AuthService) GenerateTestKeyForTenant(ctx context.Context, tenantID, us
 	a.record(ctx, audit.Entry{UserID: userID, TenantID: parent, Action: "key.created", Resource: "key:" + k.ID,
 		Metadata: map[string]any{"name": k.Name, "mode": "test", "sandbox": sandbox, "permissions": k.Permissions}})
 	return k, nil
+}
+
+// ensureSandboxTx is parent's sandbox, made in tx when it has none (the
+// tenants row and its tenant_quotas row): the one maker, shared by the test
+// S3 key and the test management key (RP88-1). A sandbox has no sandbox
+// (ErrSandboxOfSandbox); a suspended parent gets none (ErrTenantSuspended).
+func ensureSandboxTx(ctx context.Context, tx *sql.Tx, parent string) (string, error) {
+	var sandboxOf sql.NullString
+	var suspended bool
+	if err := tx.QueryRowContext(ctx, `SELECT sandbox_of, suspended_at IS NOT NULL FROM tenants WHERE id = $1`, parent).
+		Scan(&sandboxOf, &suspended); err != nil {
+		return "", fmt.Errorf("read the tenant: %w", err)
+	}
+	if sandboxOf.String != "" {
+		return "", ErrSandboxOfSandbox
+	}
+	if suspended {
+		return "", ErrTenantSuspended
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenants (id, name, email, sandbox_of)
+		VALUES ($1, 'test data', $2, $3)
+		ON CONFLICT (sandbox_of) WHERE sandbox_of IS NOT NULL DO NOTHING`,
+		"sandbox-"+hex.EncodeToString(b[:]), "sandbox+"+parent+"@sandbox.invalid", parent); err != nil {
+		return "", fmt.Errorf("the sandbox: %w", err)
+	}
+	sandbox, err := SandboxOf(ctx, tx, parent)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_quotas (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING`, sandbox); err != nil {
+		return "", fmt.Errorf("the sandbox's quota row: %w", err)
+	}
+	return sandbox, nil
 }

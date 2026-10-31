@@ -26,12 +26,14 @@ import (
 // registerMemberRoutes adds the members routes to the /api/v1/manage group.
 func (s *Server) registerMemberRoutes(r chi.Router) {
 	r.Get("/members", s.handleMgmtListMembers)
-	r.With(s.requireRole(auth.ActionMemberManage)).Post("/members", s.handleMgmtInviteMember)
-	r.With(s.requireRole(auth.ActionMemberManage)).Patch("/members/{user}", s.handleMgmtSetMemberRole)
+	// A person's only (RP86): a management key never invites, changes a
+	// role or removes a member.
+	r.With(s.requirePerson, s.requireRole(auth.ActionMemberManage)).Post("/members", s.handleMgmtInviteMember)
+	r.With(s.requirePerson, s.requireRole(auth.ActionMemberManage)).Patch("/members/{user}", s.handleMgmtSetMemberRole)
 	// A member removes itself (leaves) whatever its role (RB10-1, WP-ACCT-1);
 	// removing another is member.manage — the handler checks which.
-	r.Delete("/members/{user}", s.handleMgmtRemoveMember)
-	r.With(s.requireRole(auth.ActionMemberManage)).Delete("/invitations/{id}", s.handleMgmtRevokeInvitation)
+	r.With(s.requirePerson).Delete("/members/{user}", s.handleMgmtRemoveMember)
+	r.With(s.requirePerson, s.requireRole(auth.ActionMemberManage)).Delete("/invitations/{id}", s.handleMgmtRevokeInvitation)
 	// POST /invitations/{token}/accept is mounted outside requireMember
 	// (registerManagementRoutes): the invitee is a member of no tenant yet.
 }
