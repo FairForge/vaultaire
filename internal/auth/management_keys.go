@@ -139,8 +139,8 @@ type ManagementKey struct {
 
 	// Set by LookupManagementKey only:
 	// Actor is the user the key's rows hang on (an S3 key's user_id): the
-	// tenant's owner member, else its pool root's owner member, else the
-	// tenant's (then the root's) registering user — the account holder,
+	// tenant's owner member, else its registering user, else (a child: an
+	// app has no member) its parent's, then its grandparent's — the account holder,
 	// never the member who minted the key (a member leaves; the key stays).
 	Actor string `json:"-"`
 	// TenantKind is the tenant's child_kind ("" for a root);
@@ -354,9 +354,12 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 		SELECT `+managementKeyColumns+`,
 		       COALESCE(
 		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.id AND m.role = 'owner'),
-		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.pool_root_id AND m.role = 'owner'),
 		         (SELECT u.id::text FROM users u WHERE lower(u.email) = lower(t.email) ORDER BY u.created_at LIMIT 1),
-		         (SELECT u.id::text FROM tenants r JOIN users u ON lower(u.email) = lower(r.email) WHERE r.id = t.pool_root_id ORDER BY u.created_at LIMIT 1)),
+		         -- a child (an app) has no member: its parent's owner, then the
+		         -- grandparent's (an app's platform; depth 2 is the deepest)
+		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.parent_tenant_id AND m.role = 'owner'),
+		         (SELECT u.id::text FROM tenants p JOIN users u ON lower(u.email) = lower(p.email) WHERE p.id = t.parent_tenant_id ORDER BY u.created_at LIMIT 1),
+		         (SELECT m.user_id::text FROM tenants p JOIN tenant_members m ON m.tenant_id = p.parent_tenant_id AND m.role = 'owner' WHERE p.id = t.parent_tenant_id)),
 		       t.child_kind, t.parent_tenant_id
 		  FROM management_keys k JOIN tenants t ON t.id = k.tenant_id
 		 WHERE k.key_hash = $1 AND k.revoked_at IS NULL`, hashManagementKey(secret)), &actor, &kind, &parent)
