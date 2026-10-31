@@ -24,3 +24,11 @@ groups:
         annotations:
           summary: "The pool counter of {{ $labels.root }} is off by {{ $value }} bytes"
           description: "tenant_quotas.pool_used_bytes of the pool root differs from the sum of its pool's storage_used_bytes, and pooled quota checks read the counter. The code never repairs it: when the pool's writes are quiet, reseed it with POST /api/v1/admin/quota/reconcile?tenant_id=<root>&pool=reseed (deploy/monitoring/vaultaire-quota.yml)."
+      - alert: HolderStorageDrift
+        expr: vaultaire_holder_storage_drift_rows > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} capped {{ $labels.kind }}(s) have a storage counter their rows do not explain"
+          description: "storage_used_bytes of a capped key (kind=key) or a counted bucket (kind=bucket) differs from what its rows hold (vaultaire_holder_storage_drift_bytes says by how much), and that cap is checked against the counter. A deploy overlap (RB12-1) or a bucket seeded while one of its writes was in flight (RB12-10) explains a small one. The code never repairs it: when the tenant's writes are quiet, re-assert the counters with POST /api/v1/admin/quota/reconcile?tenant_id=<tenant> (deploy/monitoring/vaultaire-quota.yml)."

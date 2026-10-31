@@ -142,18 +142,15 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		caps, spent := s.egressCapsOf(ctx, tenantID, bucket)
 		if spent != "" {
 			markClientRefusal(ctx)
-			egressCapRefusals.WithLabelValues(spent).Inc()
-			w.Header().Set("x-stored-cap", spent)
-			w.Header().Set("Retry-After", strconv.Itoa(secondsToNextMonth(time.Now())))
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"error":"this bucket's monthly download cap is spent; it resets at the start of the next UTC month"}`))
+			writeCDNEgressCapRefusal(w, spent)
 			return
 		}
-		if caps.bucketLimit > 0 {
-			cc := &countingResponseWriter{ResponseWriter: w}
-			defer func() { s.countEgress(ctx, tenantID, caps, cc.bytesWritten) }()
-			w = cc
+		// A response larger than what is left is refused at its
+		// WriteHeader, one that fits pre-charged; only 200/206 bodies
+		// count (RP88-6, RP88-9).
+		if capW := s.newEgressCapWriter(w, r, tenantID, caps, writeCDNEgressCapRefusal); capW != nil {
+			defer capW.finish()
+			w = capW
 		}
 	}
 	if r.Method == http.MethodGet && s.egress != nil {
@@ -401,4 +398,15 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 		zap.String("bucket", bucket),
 		zap.String("key", key),
 		zap.Int64("bytes", written))
+}
+
+// writeCDNEgressCapRefusal answers /cdn's spent (or too small) bucket egress
+// cap: 403, x-stored-cap, Retry-After at the next UTC month.
+func writeCDNEgressCapRefusal(w http.ResponseWriter, capName string) {
+	egressCapRefusals.WithLabelValues(capName).Inc()
+	w.Header().Set("x-stored-cap", capName)
+	w.Header().Set("Retry-After", strconv.Itoa(secondsToNextMonth(time.Now())))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"error":"this bucket's monthly download cap does not cover this download; it resets at the start of the next UTC month"}`))
 }

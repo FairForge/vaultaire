@@ -35,6 +35,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"github.com/google/uuid"
 )
 
 // Holder is who besides the tenant holds a write's bytes: the key that
@@ -98,7 +100,7 @@ func applyHolders(ctx context.Context, tx *sql.Tx, tenantID string, moves []Hold
 		var limit sql.NullInt64
 		err := tx.QueryRowContext(ctx, `
 			UPDATE api_keys SET storage_used_bytes = GREATEST(0, storage_used_bytes + $3)
-			 WHERE id::text = $1 AND tenant_id = $2
+			 WHERE id = $1::uuid AND tenant_id = $2
 			RETURNING storage_used_bytes, storage_limit_bytes`, k, tenantID, byKey[k]).Scan(&used, &limit)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue // a key row gone (the erasure): nothing holds there
@@ -155,7 +157,7 @@ func holderFits(ctx context.Context, tx *sql.Tx, tenantID string, h Holder, n in
 		var used int64
 		var limit sql.NullInt64
 		err := tx.QueryRowContext(ctx, `SELECT storage_used_bytes, storage_limit_bytes FROM api_keys
-			 WHERE id::text = $1 AND tenant_id = $2 FOR UPDATE`, h.KeyID, tenantID).Scan(&used, &limit)
+			 WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE`, h.KeyID, tenantID).Scan(&used, &limit)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("checking the cap of key %s: %w", h.KeyID, err)
 		}
@@ -213,6 +215,26 @@ func (m *QuotaManager) BucketHeldBytes(ctx context.Context, tenantID, bucket str
 type Caps struct {
 	StorageLimit *int64
 	EgressLimit  *int64
+	// NarrowOnly: the setter is a management key (RP88-8) — it may set a
+	// cap where none is or lower one, never raise or clear one
+	// (ErrCapWidening), checked under the holder's row lock.
+	NarrowOnly bool
+}
+
+// ErrCapWidening: a management key tried to raise or clear a cap (RP88-8).
+var ErrCapWidening = errors.New("raising or clearing a cap needs a person")
+
+// widens reports whether next raises or clears the cap cur.
+func widens(cur sql.NullInt64, next *int64) bool {
+	return cur.Valid && (next == nil || *next > cur.Int64)
+}
+
+// narrowOnly refuses c's widening of the current caps (none = allowed).
+func (c Caps) narrowOnly(storage, egress sql.NullInt64) error {
+	if c.NarrowOnly && (widens(storage, c.StorageLimit) || widens(egress, c.EgressLimit)) {
+		return ErrCapWidening
+	}
+	return nil
 }
 
 // ErrNegativeCap: a cap below zero.
@@ -257,10 +279,14 @@ func (m *QuotaManager) SetKeyCaps(ctx context.Context, tenantID, keyID string, c
 		return CapsResult{}, fmt.Errorf("set the caps of key %s: %w", keyID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, perr := uuid.Parse(keyID); perr != nil {
+		return CapsResult{}, ErrNoSuchHolder // no key has that id (RP88-11: the column is compared as a uuid)
+	}
 	var primary bool
 	var used int64
-	err = tx.QueryRowContext(ctx, `SELECT is_primary, storage_used_bytes FROM api_keys
-		 WHERE id::text = $1 AND tenant_id = $2 AND revoked_at IS NULL FOR UPDATE`, keyID, tenantID).Scan(&primary, &used)
+	var curStorage, curEgress sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT is_primary, storage_used_bytes, storage_limit_bytes, egress_limit_bytes FROM api_keys
+		 WHERE id = $1::uuid AND tenant_id = $2 AND revoked_at IS NULL FOR UPDATE`, keyID, tenantID).Scan(&primary, &used, &curStorage, &curEgress)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CapsResult{}, ErrNoSuchHolder
 	}
@@ -270,7 +296,10 @@ func (m *QuotaManager) SetKeyCaps(ctx context.Context, tenantID, keyID string, c
 	if primary {
 		return CapsResult{}, ErrPrimaryNeverCapped
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET storage_limit_bytes = $2, egress_limit_bytes = $3 WHERE id::text = $1`,
+	if err := c.narrowOnly(curStorage, curEgress); err != nil {
+		return CapsResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET storage_limit_bytes = $2, egress_limit_bytes = $3 WHERE id = $1::uuid`,
 		keyID, c.StorageLimit, c.EgressLimit); err != nil {
 		return CapsResult{}, fmt.Errorf("set the caps of key %s: %w", keyID, err)
 	}
@@ -297,14 +326,17 @@ func (m *QuotaManager) SetBucketCaps(ctx context.Context, tenantID, bucket strin
 		return CapsResult{}, fmt.Errorf("set the caps of bucket %s: %w", bucket, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	var counted sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT storage_used_bytes FROM buckets WHERE tenant_id = $1 AND name = $2 FOR UPDATE`,
-		tenantID, bucket).Scan(&counted)
+	var counted, curStorage, curEgress sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT storage_used_bytes, storage_limit_bytes, egress_limit_bytes FROM buckets
+		 WHERE tenant_id = $1 AND name = $2 FOR UPDATE`, tenantID, bucket).Scan(&counted, &curStorage, &curEgress)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CapsResult{}, ErrNoSuchHolder
 	}
 	if err != nil {
 		return CapsResult{}, fmt.Errorf("set the caps of bucket %s: %w", bucket, err)
+	}
+	if err := c.narrowOnly(curStorage, curEgress); err != nil {
+		return CapsResult{}, err
 	}
 	var used any
 	var res CapsResult

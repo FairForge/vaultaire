@@ -10,10 +10,15 @@ package api
 // reservation checks min(key, bucket, tenant, pool) and a refusal is 403
 // QuotaExceeded with x-stored-cap naming the first cap that failed.
 //
-// Egress: a key's or a bucket's egress cap per UTC month REFUSES when spent
-// (F-39 (a)): a GET admitted while the month's bytes are under the cap is
-// served whole; once they reach it, 403 QuotaExceeded, x-stored-cap, and
-// Retry-After = the next UTC month's start. The month is a durable counter
+// Egress: a key's or a bucket's egress cap per UTC month REFUSES a response
+// that does not fit what is left of it (F-39 (a); RP88-6, D-STRIPE-63 as
+// restated): the response's size is known before its first body byte (its
+// Content-Length at WriteHeader, the admitted span at the edge), so one
+// whose size is more than the cap's remaining bytes is 403 QuotaExceeded,
+// x-stored-cap, and Retry-After = the next UTC month's start — and one that
+// fits is pre-charged in ONE conditional UPDATE at that moment (concurrent
+// responses can never together pass the cap), then credited back by what it
+// did not send (a client abort). The month is a durable counter
 // on the row (egress_used_bytes / egress_month), moved by each response of
 // a capped key or bucket, so both slots and a restart see one number.
 // key.cap_warning events fire at 80 and 95 %, once each a month
@@ -123,11 +128,29 @@ func secondsToNextMonth(now time.Time) int {
 	return int(math.Ceil(next.Sub(now).Seconds()))
 }
 
-// egressCaps is a request's capped holders, read before the body.
+// egressCaps is a request's capped holders, read before the body, with what
+// is left of each one's month.
 type egressCaps struct {
-	keyID       string // the capped key ("" = no key cap)
-	bucket      string
-	bucketLimit int64 // > 0: the bucket is capped
+	keyID           string // the capped key ("" = no key cap)
+	keyRemaining    int64
+	bucket          string
+	bucketLimit     int64 // > 0: the bucket is capped
+	bucketRemaining int64
+}
+
+// capped: some holder of the response has an egress cap.
+func (c egressCaps) capped() bool { return c.keyID != "" || c.bucketLimit > 0 }
+
+// remaining is the fewest bytes left on the response's capped holders and
+// the cap that leaves them (ok false = no cap).
+func (c egressCaps) remaining() (n int64, capName string, ok bool) {
+	if c.keyID != "" {
+		n, capName, ok = c.keyRemaining, usage.CapKey, true
+	}
+	if c.bucketLimit > 0 && (!ok || c.bucketRemaining < n) {
+		n, capName, ok = c.bucketRemaining, usage.CapBucket, true
+	}
+	return n, capName, ok
 }
 
 // bucketEgressCap reads tenantID's bucket's egress cap and this month's
@@ -156,7 +179,7 @@ func (s *Server) egressCapsOf(ctx context.Context, tenantID, bucket string) (egr
 		if ks.EgressUsed >= ks.EgressCap {
 			return c, usage.CapKey
 		}
-		c.keyID = ks.KeyID
+		c.keyID, c.keyRemaining = ks.KeyID, ks.EgressCap-ks.EgressUsed
 	}
 	limit, used, err := s.bucketEgressCap(ctx, tenantID, bucket)
 	if err != nil {
@@ -168,7 +191,7 @@ func (s *Server) egressCapsOf(ctx context.Context, tenantID, bucket string) (egr
 		if used >= limit {
 			return c, usage.CapBucket
 		}
-		c.bucketLimit = limit
+		c.bucketLimit, c.bucketRemaining = limit, limit-used
 	}
 	return c, ""
 }
@@ -202,15 +225,18 @@ func (s *Server) countEgress(ctx context.Context, tenantID string, c egressCaps,
 	}
 }
 
-// The egress counter's two statements per holder: the month's bytes, and
-// the once-only claim of a warning step.
+// The egress counter's statements per holder: the month's bytes (a count
+// after the response), the conditional pre-charge (RP88-6: the planned
+// bytes, only while they fit), the credit of what was planned and not sent,
+// and the once-only claim of a warning step, which answers the step it
+// displaced (RP88-7) so two responses never both emit the 80 %.
 const (
 	keyEgressCountSQL = `
 		UPDATE api_keys SET
 		       egress_used_bytes = CASE WHEN egress_month = $3::date THEN egress_used_bytes + $4 ELSE $4 END,
 		       egress_warned_pct = CASE WHEN egress_month = $3::date THEN egress_warned_pct ELSE 0 END,
 		       egress_month = $3::date
-		 WHERE id::text = $1 AND tenant_id = $2
+		 WHERE id = $1::uuid AND tenant_id = $2
 		RETURNING egress_used_bytes, COALESCE(egress_limit_bytes, 0), egress_warned_pct`
 	bucketEgressCountSQL = `
 		UPDATE buckets SET
@@ -219,17 +245,65 @@ const (
 		       egress_month = $3::date
 		 WHERE name = $1 AND tenant_id = $2
 		RETURNING egress_used_bytes, COALESCE(egress_limit_bytes, 0), egress_warned_pct`
-	keyEgressWarnSQL = `UPDATE api_keys SET egress_warned_pct = $4
-		 WHERE id::text = $1 AND tenant_id = $2 AND egress_month = $3::date AND egress_warned_pct < $4 RETURNING egress_warned_pct`
-	bucketEgressWarnSQL = `UPDATE buckets SET egress_warned_pct = $4
-		 WHERE name = $1 AND tenant_id = $2 AND egress_month = $3::date AND egress_warned_pct < $4 RETURNING egress_warned_pct`
+	keyEgressChargeSQL = `
+		UPDATE api_keys SET
+		       egress_used_bytes = CASE WHEN egress_month = $3::date THEN egress_used_bytes + $4 ELSE $4 END,
+		       egress_warned_pct = CASE WHEN egress_month = $3::date THEN egress_warned_pct ELSE 0 END,
+		       egress_month = $3::date
+		 WHERE id = $1::uuid AND tenant_id = $2
+		   AND (egress_limit_bytes IS NULL
+		        OR (CASE WHEN egress_month = $3::date THEN egress_used_bytes ELSE 0 END) + $4 <= egress_limit_bytes)
+		RETURNING egress_used_bytes, COALESCE(egress_limit_bytes, 0), egress_warned_pct`
+	bucketEgressChargeSQL = `
+		UPDATE buckets SET
+		       egress_used_bytes = CASE WHEN egress_month = $3::date THEN egress_used_bytes + $4 ELSE $4 END,
+		       egress_warned_pct = CASE WHEN egress_month = $3::date THEN egress_warned_pct ELSE 0 END,
+		       egress_month = $3::date
+		 WHERE name = $1 AND tenant_id = $2
+		   AND (egress_limit_bytes IS NULL
+		        OR (CASE WHEN egress_month = $3::date THEN egress_used_bytes ELSE 0 END) + $4 <= egress_limit_bytes)
+		RETURNING egress_used_bytes, COALESCE(egress_limit_bytes, 0), egress_warned_pct`
+	keyEgressCreditSQL = `UPDATE api_keys SET egress_used_bytes = GREATEST(0, egress_used_bytes - $4)
+		 WHERE id = $1::uuid AND tenant_id = $2 AND egress_month = $3::date`
+	bucketEgressCreditSQL = `UPDATE buckets SET egress_used_bytes = GREATEST(0, egress_used_bytes - $4)
+		 WHERE name = $1 AND tenant_id = $2 AND egress_month = $3::date`
+	keyEgressWarnSQL = `
+		UPDATE api_keys a SET egress_warned_pct = $4
+		  FROM (SELECT id, egress_warned_pct AS prev FROM api_keys
+		         WHERE id = $1::uuid AND tenant_id = $2 AND egress_month = $3::date FOR UPDATE) o
+		 WHERE a.id = o.id AND o.prev < $4
+		RETURNING o.prev`
+	bucketEgressWarnSQL = `
+		UPDATE buckets b SET egress_warned_pct = $4
+		  FROM (SELECT tenant_id, name, egress_warned_pct AS prev FROM buckets
+		         WHERE name = $1 AND tenant_id = $2 AND egress_month = $3::date FOR UPDATE) o
+		 WHERE b.tenant_id = o.tenant_id AND b.name = o.name AND o.prev < $4
+		RETURNING o.prev`
 )
 
-func (s *Server) countEgressOn(ctx context.Context, tenantID, kind, keyID, bucket, month string, n int64) {
-	count, warn, id := keyEgressCountSQL, keyEgressWarnSQL, keyID
+// egressHolder is one capped holder's statements and id.
+func egressHolder(kind string, c egressCaps) (count, charge, credit, warn, id string) {
 	if kind == usage.CapBucket {
-		count, warn, id = bucketEgressCountSQL, bucketEgressWarnSQL, bucket
+		return bucketEgressCountSQL, bucketEgressChargeSQL, bucketEgressCreditSQL, bucketEgressWarnSQL, c.bucket
 	}
+	return keyEgressCountSQL, keyEgressChargeSQL, keyEgressCreditSQL, keyEgressWarnSQL, c.keyID
+}
+
+// kinds is the response's capped holders, key first (the refusal's order).
+func (c egressCaps) kinds() []string {
+	var out []string
+	if c.keyID != "" {
+		out = append(out, usage.CapKey)
+	}
+	if c.bucketLimit > 0 {
+		out = append(out, usage.CapBucket)
+	}
+	return out
+}
+
+func (s *Server) countEgressOn(ctx context.Context, tenantID, kind, keyID, bucket, month string, n int64) {
+	c := egressCaps{keyID: keyID, bucket: bucket}
+	count, _, _, _, id := egressHolder(kind, c)
 	var used, limit int64
 	var warned int
 	if err := s.db.QueryRowContext(ctx, count, id, tenantID, month, n).Scan(&used, &limit, &warned); err != nil {
@@ -238,37 +312,217 @@ func (s *Server) countEgressOn(ctx context.Context, tenantID, kind, keyID, bucke
 		}
 		return
 	}
+	s.warnEgress(ctx, tenantID, kind, c, month, used, limit)
+}
+
+// chargeEgress pre-charges n planned bytes to every capped holder of c in
+// ONE transaction, each by a conditional UPDATE (RP88-6): all fit or none
+// is charged. It answers the cap that refused ("" = charged), and charged
+// false with no refusal when the ledger could not be read (logged: the
+// response is then counted after it ends, as before).
+func (s *Server) chargeEgress(ctx context.Context, tenantID string, c egressCaps, n int64) (refused string, charged bool) {
+	if s.db == nil || !c.capped() {
+		return "", false
+	}
+	month := egressMonth(time.Now())
+	type hit struct {
+		kind        string
+		used, limit int64
+	}
+	var hits []hit
+	err := func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		for _, kind := range c.kinds() {
+			_, charge, _, _, id := egressHolder(kind, c)
+			var h hit
+			var warned int
+			h.kind = kind
+			err := tx.QueryRowContext(ctx, charge, id, tenantID, month, n).Scan(&h.used, &h.limit, &warned)
+			if errors.Is(err, sql.ErrNoRows) {
+				refused = kind
+				return nil // rolled back: nothing charged anywhere
+			}
+			if err != nil {
+				return err
+			}
+			hits = append(hits, h)
+		}
+		return tx.Commit()
+	}()
+	if err != nil {
+		s.logger.Warn("egress cap: the pre-charge failed — the response is counted after it ends",
+			zap.String("tenant_id", tenantID), zap.Error(err))
+		return "", false
+	}
+	if refused != "" {
+		return refused, false
+	}
+	for _, h := range hits {
+		s.warnEgress(ctx, tenantID, h.kind, c, month, h.used, h.limit)
+	}
+	return "", true
+}
+
+// creditEgress gives back n pre-charged bytes a response did not send.
+// Detached: the response is over.
+func (s *Server) creditEgress(ctx context.Context, tenantID string, c egressCaps, n int64) {
+	if s.db == nil || n <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	month := egressMonth(time.Now())
+	for _, kind := range c.kinds() {
+		_, _, credit, _, id := egressHolder(kind, c)
+		if _, err := s.db.ExecContext(ctx, credit, id, tenantID, month, n); err != nil {
+			s.logger.Warn("egress cap: the credit of unsent bytes failed", zap.String("tenant_id", tenantID), zap.String("cap", kind), zap.Error(err))
+		}
+	}
+}
+
+// warnEgress fires the warning steps a holder's month crossed, each once a
+// month: the claim answers the step it displaced, and only the steps above
+// it are emitted (RP88-7).
+func (s *Server) warnEgress(ctx context.Context, tenantID, kind string, c egressCaps, month string, used, limit int64) {
 	if limit <= 0 {
 		return
 	}
 	step := 0
 	for _, pct := range capWarningSteps {
-		if pct > warned && egressCrossed(used, limit, pct) {
+		if egressCrossed(used, limit, pct) {
 			step = pct
 		}
 	}
 	if step == 0 {
 		return
 	}
-	// The claim: one slot, one process, once a month.
-	var claimed int
-	if err := s.db.QueryRowContext(ctx, warn, id, tenantID, month, step).Scan(&claimed); err != nil {
-		return // another response claimed it (no row), or the claim failed
+	_, _, _, warn, id := egressHolder(kind, c)
+	var prev int
+	if err := s.db.QueryRowContext(ctx, warn, id, tenantID, month, step).Scan(&prev); err != nil {
+		return // already claimed at this step or above (no row), or the claim failed
 	}
 	for _, pct := range capWarningSteps {
-		if pct <= warned || pct > step {
+		if pct <= prev || pct > step {
 			continue
 		}
 		data := map[string]any{"cap": kind, "threshold_pct": pct, "used_bytes": used, "limit_bytes": limit,
 			"month": month, "resets_at": usage.EgressMonthStart(time.Now()).AddDate(0, 1, 0).UTC().Format(time.RFC3339)}
 		if kind == usage.CapKey {
-			data["key_id"] = keyID
+			data["key_id"] = c.keyID
 		} else {
-			data["bucket"] = bucket
+			data["bucket"] = c.bucket
 		}
 		emitEvent(ctx, s.db, s.logger, "key.cap_warning", tenantID, data)
 		egressCapWarnings.WithLabelValues(kind, strconv.Itoa(pct)).Inc()
 	}
+}
+
+// egressCapWriter refuses, at the response's WriteHeader, a 200/206 whose
+// Content-Length is more than its capped holders have left this month, and
+// pre-charges one that fits (RP88-6). It sits OUTSIDE the handler (as the
+// counting writer does), so no path inside the handler sends around it. A
+// refusal clears the response's header map, answers 403 QuotaExceeded +
+// x-stored-cap + Retry-After, and drops the body; the status the outer
+// counting writer keeps is then the 403, so nothing is counted.
+type egressCapWriter struct {
+	http.ResponseWriter
+	s        *Server
+	r        *http.Request
+	tenantID string
+	caps     egressCaps
+	// refuse writes the surface's own refusal (S3 XML, /cdn JSON).
+	refuse func(w http.ResponseWriter, capName string)
+
+	decided, refused, charged bool
+	status                    int
+	planned, sent             int64
+}
+
+func (w *egressCapWriter) WriteHeader(code int) {
+	if w.decided {
+		if !w.refused {
+			w.ResponseWriter.WriteHeader(code)
+		}
+		return
+	}
+	w.decided, w.status = true, code
+	if code == http.StatusOK || code == http.StatusPartialContent {
+		if n, err := strconv.ParseInt(w.Header().Get("Content-Length"), 10, 64); err == nil && n >= 0 {
+			capName := ""
+			if left, name, ok := w.caps.remaining(); ok && n > left {
+				capName = name
+			} else {
+				capName, w.charged = w.s.chargeEgress(w.r.Context(), w.tenantID, w.caps, n)
+			}
+			if capName != "" {
+				w.refused = true
+				h := w.Header()
+				for k := range h {
+					delete(h, k)
+				}
+				w.refuse(w.ResponseWriter, capName)
+				return
+			}
+			w.planned = n
+		}
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *egressCapWriter) Write(p []byte) (int, error) {
+	if !w.decided {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.refused {
+		return len(p), nil // the refused response's body is dropped
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.sent += int64(n)
+	return n, err
+}
+
+// Flush passes through (a streaming handler keeps flushing).
+func (w *egressCapWriter) Flush() {
+	if w.refused {
+		return
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		if !w.decided {
+			w.WriteHeader(http.StatusOK)
+		}
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController and noteS3Error reach the writer.
+func (w *egressCapWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// finish settles the response once the handler has returned: a pre-charged
+// response gives back what it planned and did not send (a client abort; it
+// never sends more than its Content-Length); one that went out with no
+// Content-Length is counted now (the count before RP88-6).
+func (w *egressCapWriter) finish() {
+	switch {
+	case w.refused:
+	case w.charged:
+		w.s.creditEgress(w.r.Context(), w.tenantID, w.caps, w.planned-w.sent)
+	case w.status == 0 || w.status == http.StatusOK || w.status == http.StatusPartialContent:
+		w.s.countEgress(w.r.Context(), w.tenantID, w.caps, w.sent)
+	}
+}
+
+// newEgressCapWriter wraps w for a download of the capped holders c; nil
+// when nothing is capped (no wrapper, no cost).
+func (s *Server) newEgressCapWriter(w http.ResponseWriter, r *http.Request, tenantID string, c egressCaps,
+	refuse func(http.ResponseWriter, string)) *egressCapWriter {
+	if !c.capped() {
+		return nil
+	}
+	return &egressCapWriter{ResponseWriter: w, s: s, r: r, tenantID: tenantID, caps: c, refuse: refuse}
 }
 
 var (
@@ -306,7 +560,10 @@ func (s *Server) readCaps(w http.ResponseWriter, r *http.Request) (usage.Caps, b
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
 		return usage.Caps{}, false
 	}
-	return usage.Caps{StorageLimit: req.StorageLimit, EgressLimit: req.EgressLimit}, true
+	// A management key narrows, never widens (RP88-8): a person may do
+	// anything.
+	return usage.Caps{StorageLimit: req.StorageLimit, EgressLimit: req.EgressLimit,
+		NarrowOnly: managementKeyOf(r.Context()) != nil}, true
 }
 
 // tenantEgressAllowance is the tenant's monthly allowance (0 = unknown),
@@ -332,6 +589,9 @@ func (s *Server) writeCapsError(w http.ResponseWriter, err error, what string) {
 	switch {
 	case errors.Is(err, usage.ErrNegativeCap):
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_cap", err.Error(), "storage_limit_bytes")
+	case errors.Is(err, usage.ErrCapWidening):
+		writeManagementError(w, ErrTypeConflict, "cap_widening_needs_person",
+			"a management key may set a cap where none is or lower one; raising or clearing a cap needs a person", "storage_limit_bytes")
 	case errors.Is(err, usage.ErrPrimaryNeverCapped):
 		writeManagementError(w, ErrTypeConflict, "primary_never_capped", "the primary key pair is never capped; cap a scoped key instead", "id")
 	case errors.Is(err, usage.ErrNoSuchHolder):

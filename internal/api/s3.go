@@ -780,25 +780,28 @@ func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req
 		slcTenant = t.ID
 	}
 	// A key's or a bucket's own monthly egress cap (WP-KEY-1, F-39 (a)):
-	// refused once spent; a response admitted under it is counted to it.
+	// refused once spent, and a response larger than what is left is
+	// refused at its WriteHeader (RP88-6) by a writer outside the handler;
+	// one that fits is pre-charged.
 	caps, spent := s.egressCapsOf(r.Context(), slcTenant, req.Bucket)
 	if spent != "" {
 		writeEgressCapRefusal(cw, r, spent)
 		return
 	}
-	before := cw.bytesWritten
-	defer func() {
-		if st := cw.statusCode; st == 0 || st == http.StatusOK || st == http.StatusPartialContent {
-			s.countEgress(r.Context(), slcTenant, caps, cw.bytesWritten-before)
-		}
-	}()
+	var out http.ResponseWriter = cw
+	if capW := s.newEgressCapWriter(cw, r, slcTenant, caps, func(w http.ResponseWriter, capName string) {
+		writeEgressCapRefusal(w, r, capName)
+	}); capW != nil {
+		defer capW.finish()
+		out = capW
+	}
 	if !metered {
-		if !s.slcRead(cw, r, slcTenant) {
-			s.handleGetObject(cw, r, req)
+		if !s.slcRead(out, r, slcTenant) {
+			s.handleGetObject(out, r, req)
 		}
 		return
 	}
-	gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceS3)
+	gw, admitted := s.egress.admit(out, r, tenantID, egressSurfaceS3)
 	if !admitted {
 		// The one refusal: the tenant is being paced and already has
 		// EGRESS_THROTTLE_MAX_STREAMS paced downloads open. It is the
