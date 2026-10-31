@@ -921,6 +921,26 @@ Done means:
 - the proof has run on prod;
 - Prompt 55 is written here.
 
+## Stage 1a Prompt 54 — addendum after RP88's pre-merge pass (2026-10-31)
+
+Read `docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 1 first. PR A (#1093) holds at P4; take these before it merges, then PR B as decided there.
+
+**Rebase on main first:** #1094 (RP88-0) fixes the `internal/payments` calendar failure that made #1093's CI red (not yours: Go's `AddDate` beside Postgres's `+ interval`, red on the 29th–31st).
+
+PR A, before merge (tests first, as always):
+1. **RP88-1:** `"test": true` on the mint body mints the key ON the tenant's sandbox (`auth.SandboxOf`, made on first use) — the one way to an `sk_test_` key; a sandbox reset or purge never deletes a key. `TestManagementKey_TestKeyActsOnTheSandbox`.
+2. **RP88-2:** `expires_at TIMESTAMPTZ` in 121; the lookup refuses an expired key; the mint body takes an optional `expires_at`. `TestManagementKey_ExpiredIsRefused`.
+3. **RP88-3:** `FOR UPDATE` on the tenant row around the live-key count.
+4. **D-RP88-2's columns in 121, now:** `object_head_cache.written_by_key UUID`, `object_versions.written_by_key UUID`, `multipart_uploads.written_by_key UUID`, `api_keys.storage_used_bytes BIGINT NOT NULL DEFAULT 0`, `buckets.storage_used_bytes BIGINT` (NULL = not yet counted). Columns only; PR B writes them. The reapply test and `make test-db` as before.
+
+PR B (`stage1a-p54-budgets`), in this order:
+5. **D-RP88-1 first:** `KeyScope.KeyID` filled by `auth.Auth.LookupCredential` on every scope it answers (an STS token: its parent key's id); `ValidateRequest` and `ValidateDescribed` carry it unchanged; a management key's ceiling has none. `TestKeyScope_NamesItsKey` (a scoped key, the primary, an STS token, a management key's ceiling).
+6. **Attribution:** every row writer sets `written_by_key` from the context's `KeyID` (`commitBlobWrite`, the version write, `CreateMultipartUpload`; the edge admit stores it in `edge_admits.attrs` and the commit writes it). `TestKeyCap_RowsNameTheirWriter`.
+7. **The ledger:** `internal/usage` moves `api_keys.storage_used_bytes` and `buckets.storage_used_bytes` in the statement that moves the tenant's (+ on a landed write, − on the displaced or deleted row's key and bucket, the part reservation on the upload's key); the daily reconcile seeds a NULL bucket counter and re-asserts both, with a drift gauge each. `fits` takes min(key, bucket, tenant, pool); the refusal is 403 `QuotaExceeded` + `x-stored-cap` naming the first cap that failed. The prompt's tests `TestKeyCap_PutRefusedPastTheKeysStorageCap`, `TestKeyCap_403NamesTheCap`, plus `TestKeyCap_DeleteByAnotherKeyReleasesTheWriters` and `TestKeyCap_BucketCapAboveTheTenantsIsANote` (F-39 (b)).
+8. Steps 7 and 8 of the Opus edition as written (the egress cap per key on `egress_member.go`'s bucket keyed by `KeyID`; STS narrows; the edge admit runs the same reservation). F-39 (a) stays the owner's: build pace-then-refuse-at-2× behind one constant.
+
+PR C and PR D as written. The post-merge review stays RP88 (Part 2 of the same file).
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -951,4 +971,5 @@ Done means:
   - Prod proof: the read half is the operator's; the EU child needs the owner's TOTP.
   - The post-merge review is RP86. **Reviewed by RP86 (2026-10-30, `docs/reviews/WP-STRIPE-5-REVIEW.md`): HOLDS at P3** (all latent): RP86-1, the GDPR export's system bucket ignores residency and blocks the admin's set after one export; four P4s, RP86-5 fixed in the review. `vaultaire-quota.yml` and `vaultaire-jobs.yml` were installed on the box by the review.
 - **Prompt 54 — WP-KEY-1** (management keys first, then budgets) — WRITTEN above by Prompt 53's closeout, both editions. Part 0 = RP86-1…5 (filled by the review, 2026-10-30), plus RP86's three PR A corrections (`audit_logs.principal`, no `created_by` cascade, no member routes for a key). Migration 121. The post-merge review is RP88.
+  - **Part 0 DONE** (#1091, on prod 2026-10-30). **PR A #1093 open**, read pre-merge by RP88 Part 1 (2026-10-31, `docs/reviews/WP-STRIPE-6-REVIEW.md`): holds at P4 (RP88-1 no `sk_test_` path, RP88-2 no `expires_at`, RP88-3 the count under `FOR SHARE`); D-RP88-1 (`KeyScope.KeyID`) and D-RP88-2 (held bytes; the attribution and counter columns into 121 before PR A merges) decide PR B. RP88-0 (the payments month-end rule, red CI on the 29th–31st) fixed by #1094. The addendum above.
 - **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.

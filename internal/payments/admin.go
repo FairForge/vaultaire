@@ -176,13 +176,24 @@ func RecordManualPayment(ctx context.Context, db *sql.DB, p ManualPayment) (Manu
 	return res, nil
 }
 
-// addPeriod adds one period in UTC, Go's way (the month-end rule matches
-// Postgres's for the dates a payment lands on).
+// addPeriod adds one period in UTC exactly as Postgres adds the interval
+// Extend and PaidThroughAfter use (RP88): the day is kept, clamped to the
+// last day of the target month. Go's AddDate normalises an overflow forward
+// (Oct 31 + 1 month = Dec 1, Feb 29 + 1 year = Mar 1), so a manual grant
+// made on the 29th–31st ran up to three days past the extension that
+// followed it.
 func addPeriod(t time.Time, p Period) time.Time {
+	t = t.UTC()
+	years, months := 0, 1
 	if p == PeriodAnnual {
-		return t.UTC().AddDate(1, 0, 0)
+		years, months = 1, 0
 	}
-	return t.UTC().AddDate(0, 1, 0)
+	y, m, d := t.Date()
+	first := time.Date(y+years, m+time.Month(months), 1, 0, 0, 0, 0, time.UTC)
+	if last := first.AddDate(0, 1, -1).Day(); d > last {
+		d = last
+	}
+	return time.Date(first.Year(), first.Month(), d, t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.UTC)
 }
 
 // Adjustment sets paid_through and/or the house by hand.
