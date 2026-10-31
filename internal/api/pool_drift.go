@@ -68,7 +68,7 @@ func (c *poolDriftCollector) read() map[string]int64 {
 }
 
 // The holders' drift (WP-KEY-1, D-RP88-2): vaultaire_holder_storage_drift_rows
-// {kind} and _bytes{kind} — how many keys (kind="key") and counted buckets
+// {kind} and _bytes{kind} — how many capped keys (kind="key") and counted buckets
 // (kind="bucket") have a storage counter the rows do not explain, and by
 // how much in all. Read from the tables on scrape (60 s cache); a
 // reservation in flight is a moment's difference, a lasting one a ledger
@@ -86,7 +86,7 @@ type holderDriftCollector struct {
 func newHolderDriftCollector(db *sql.DB, logger *zap.Logger) *holderDriftCollector {
 	return &holderDriftCollector{db: db, logger: logger,
 		rows: prometheus.NewDesc("vaultaire_holder_storage_drift_rows",
-			"Keys (kind=key) and counted buckets (kind=bucket) whose storage_used_bytes differs from what their rows hold (WP-KEY-1). Read from the tables.",
+			"Capped keys (kind=key) and counted buckets (kind=bucket) whose storage_used_bytes differs from what their rows hold (WP-KEY-1). Read from the tables.",
 			[]string{"kind"}, nil),
 		bytes: prometheus.NewDesc("vaultaire_holder_storage_drift_bytes",
 			"The sum of |counter − rows| over those keys or buckets (WP-KEY-1). Repaired only by the operator's reconcile.",
