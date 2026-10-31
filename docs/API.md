@@ -71,6 +71,9 @@ Authorization: Bearer <token>
 session. Accounts with MFA enabled complete it in the dashboard; the JSON API
 has no MFA endpoints.
 
+A server uses a **management key** instead of a JWT on `/api/v1/manage` and
+`/api/v1/platform`: `Authorization: Bearer sk_live_…` (§ Management keys).
+
 ## S3 operations
 
 What `handleS3Request` implements (base `https://stored.ge`). `HEAD` is
@@ -572,6 +575,53 @@ A write the role does not allow is 403 `role_forbidden`. A JWT whose user is no 
 **Several accounts.** A person may be a member of several accounts. `POST /auth/login` answers `tenants: [{id, role, name}]` and takes an optional `tenant_id` (default: the account the person owns, else the first joined; 403 `not_a_member` for one they are not in). The JWT is for that one account — its `tenant_id` and `role` claims — and every management route acts on it alone; signing in again with another `tenant_id` switches. The dashboard's switcher (Members page) does the same for the session.
 
 Every change is in the audit trail (`member.invited`, `member.joined`, `member.role_changed`, `member.removed`, `member.invitation_revoked`), and every audit row of a tenant surface (the management, platform, user, webhook and STS APIs) and the dashboard names the member who acted and the account acted on.
+
+## Management keys
+
+A **management key** lets a server call the management API as the account, with no person signed in: `Authorization: Bearer sk_live_…` on `/api/v1/manage` and `/api/v1/platform`. A platform's backend, an app's backend and (WP-AGENT-1) an agent grant are all management keys. It belongs to the **account**, never to the member who made it: a member's removal or erasure leaves it live (the removal lists it in `keys_made`, `kind: "management"`, and `revoke_keys` revokes it).
+
+**Its scopes are its authority.** A key has no role of its own; its scopes give one per surface, and the role table above decides:
+
+| Scope | Acts as |
+|---|---|
+| `manage:read` | a `viewer` on `/api/v1/manage` |
+| `manage:write` | a `developer` on `/api/v1/manage` (buckets, S3 keys and their caps, the sandbox) |
+| `platform` | an `admin` on `/api/v1/platform` of a platform (its children and their keys) |
+| `apps` | an `admin` on `/api/v1/platform` **as an app child**: its own managed children only (depth 2 stays the deepest). Only an app's key, minted by its platform |
+
+A key with no scope for the surface is 403 `scope_forbidden`. A key never acts for a person: the members (invite, role, removal, an invitation's accept or revoke), the export, the account's erasure and minting a management key are 403 `person_required`. `/api/v1/user`, `/api/v1/webhooks`, `/api/v1/events` and `/api/v1/sts` take a JWT only.
+
+| Route | Who | What |
+|---|---|---|
+| `POST /api/v1/manage/management-keys` `{name?, scopes, s3_ceiling?, test?, expires_at?}` | an admin or the owner (a person) | Mint a key of the account (201): the secret (`sk_live_` + 43 base62 characters) is in this answer only; only its SHA-256 is stored. `"test": true` mints it **on the account's sandbox** (`sk_test_…`, `"livemode": false`; the sandbox is made on first use): it acts on test data only, and a sandbox reset never deletes it. `expires_at` (RFC 3339, in the future; 400 `invalid_expiry`) ends it: refused from then on; none = no expiry. An account holds at most 25 live management keys (409 `key_limit_exceeded`) |
+| `GET /api/v1/manage/management-keys` | any member | The account's keys and its sandbox's (never a secret): `id`, `name`, `prefix`, `hint` (4 characters), `scopes`, `s3_ceiling`, `livemode`, `expires_at`, `last_used_at` (to the minute), `revoked_at` |
+| `DELETE /api/v1/manage/management-keys/{id}` | an admin or the owner | Revoke it: refused from its next request (it is looked up on every request, never cached) |
+| `POST/GET/DELETE /api/v1/platform/tenants/{app}/management-keys[/{key}]` | the platform (a person or a `platform` key) | An app child's keys (scope `apps`); 400 `not_an_app` for another kind. A key minted by a key never outlives it (its `expires_at` is at most the minting key's) |
+
+**The S3 ceiling** (`s3_ceiling: {permissions?, bucket_scope?, ip_allowlist?, max_expiry_seconds?}`) bounds the S3 keys and temporary credentials the key mints, exactly as a scoped key's scope bounds a platform's child keys (400 `scope_exceeds_parent`). It is not a bucket scope of the key's own: a `manage:write` key may still manage every bucket.
+
+**The audit trail** names the key: a row written by a key has `principal = mk:<id>` and no person; the request log's key column and the idempotency key's prefix are `mk:<id>` too.
+
+## Keys
+
+An S3 key (`POST /api/v1/manage/keys`, the dashboard's API keys page) is the primary pair or a **scoped key**: `permissions`, `bucket_scope`, `ip_allowlist`, `expires_at`. A scoped key may also carry **caps** of its own (F-39), and so may a bucket:
+
+| Route | What |
+|---|---|
+| `PUT /api/v1/manage/keys/{id}/caps` `{storage_limit_bytes, egress_limit_bytes}` | A scoped key's caps; `null` (or absent) = none. 409 `primary_never_capped` for the primary pair; 404 `key_not_found` |
+| `PUT /api/v1/manage/buckets/{name}/caps` `{storage_limit_bytes, egress_limit_bytes}` | A bucket's caps |
+
+Both answer `{object, id, storage_limit_bytes, egress_limit_bytes, storage_used_bytes, notes}` and are audited (`key.caps_set`, `bucket.caps_set`).
+
+**The storage cap** is the bytes the key's writes still **hold** — every object, retained version and upload part it wrote, wherever it is — or the bytes the bucket holds. A temporary credential's writes are its parent key's. A delete or overwrite by any key gives the bytes back to the key that wrote them. The primary pair's writes count to no key.
+
+**The egress cap** is the bytes the key (or the bucket) may serve each UTC month, through S3 (header-signed and presigned), the edge and — for a bucket — `/cdn`. A download is served whole while the month's count is under the cap; once it reaches the cap, downloads are refused until the next month. The tenant's own allowance still paces as before (§ Rate limits); a key's or a bucket's cap never paces, it refuses.
+
+**The smallest number always applies.** A write is checked against the key's cap, the bucket's, the account's and its pool's (a platform's tree); a cap above the account's is accepted, with the note `storage_cap_above_tenant` / `egress_cap_above_tenant`, and the account's decides.
+
+**A refusal names the cap.** Past a storage cap: 403 `QuotaExceeded` with `x-stored-cap: key|bucket|tenant|pool` — the first that failed, in that order — on PutObject, CopyObject, UploadPart, the edge and a direct upload. Past an egress cap: 403 `QuotaExceeded`, `x-stored-cap: key|bucket` and `Retry-After` = the seconds to the next UTC month.
+
+**Warnings.** At 80 % and at 95 % of an egress cap, once each a month, the account's webhooks get `key.cap_warning` `{cap: "key"|"bucket", key_id | bucket, threshold_pct, used_bytes, limit_bytes, month, resets_at}`.
 
 ## Rate limits
 

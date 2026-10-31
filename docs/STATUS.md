@@ -1,6 +1,20 @@
 # Status — the live pointer
 
-Updated: 2026-10-30 12:30 UTC — **Review RP86 (Prompt 53, WP-ACCT-1): HOLDS at P3** (`docs/reviews/WP-STRIPE-5-REVIEW.md`). Every finding is latent on prod (no residency set, no export made; pool drift 0 on every root):
+Updated: 2026-10-31 — **Stage 1a Prompt 54 (WP-KEY-1: the management key, then per-key and per-bucket budgets) — DONE, merged and deployed** (prod `93679a1b`; `docs/reviews/WP-STRIPE-6.md`; migration **121**, landed whole with PR A; next **122**; review **RP88 Part 2**):
+- **#1091 Part 0** (RP86-1…5; on prod since 2026-10-30).
+- **#1093 PR A, the management key:** `sk_live_…`, or `sk_test_…` minted with `"test": true` on the sandbox (RP88-1). It is sha256-stored, shown once, has an optional `expires_at` (RP88-2) and is looked up on every request; the 25-key count runs under `FOR UPDATE` (RP88-3). Its scopes are its role (`requireCaller`), and it never does a person's acts (`requirePerson`). Migration 121 took PR B's columns before merge (D-RP88-2).
+- **#1095 PR B, budgets** (F-39 as the owner decided it 2026-10-31):
+  - every row names its writer key (`written_by_key`), and the key's and the bucket's storage counters move in the one ledger;
+  - min(key, bucket, tenant, pool), with `x-stored-cap` on every refusal;
+  - an egress cap on a key or a bucket refuses when its durable month counter is spent (403, `Retry-After` at the next month), with `key.cap_warning` at 80 / 95 %;
+  - STS acts as its parent; the edge admit runs the same reservation;
+  - the primary is never capped;
+  - routes: `PUT /api/v1/manage/keys/{id}/caps`, `/buckets/{name}/caps`.
+- **#1096 PR C, the dashboard:** management keys (test mode, expiry) and a scoped key's caps on the API keys page.
+- **Prod proof owed (RB12-7): it needs the owner's TOTP.** The steps are in the note's § The prod proof; run it with Prompt 55's.
+- **Prompt 55 (WP-AGENT-1 + WP-APP-1, migration 122)** is written in both editions; Part 0 = RP88 Part 2.
+
+Before that: 2026-10-30 12:30 UTC — **Review RP86 (Prompt 53, WP-ACCT-1): HOLDS at P3** (`docs/reviews/WP-STRIPE-5-REVIEW.md`). Every finding is latent on prod (no residency set, no export made; pool drift 0 on every root):
 - **RP86-1 (P3):** the GDPR export's `_exports` system bucket is made in the default region (US) whatever the residency, and its row then blocks the admin's residency set for good. Proven by test.
 - P4s: RP86-2 (the legacy bucket residency-label route), RP86-3 (the boot bucket backfill has no region), RP86-4 (a sign-in that rejoins during its grace is erased).
 - RP86-5 (P4): the jobs rule test was stale since #981; fixed, and a CI promtool step is in Part 0.
