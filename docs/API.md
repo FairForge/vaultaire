@@ -386,7 +386,8 @@ segment registered ahead of the S3 catch-all — so it follows the site:
 `dashboard`, `auth`, `cdn`, `translog`, `health`, `ready`, `version`,
 `metrics`, `llms.txt`, `robots.txt`, `sitemap.xml`, `favicon.ico`,
 `og.png`, `openapi.json`, `static`, `pricing`, `signup`, `compliance`,
-`verify`, `logout`, `forgot-password`, `reset-password` as of 2026-10-25.
+`verify`, `logout`, `forgot-password`, `reset-password` as of 2026-10-25,
+and `oauth` since 2026-10-31 (the MCP authorization flow, § Agents).
 It applies at CREATE only: a bucket that already exists under such a name
 keeps every operation. Why: a request carrying S3 credentials is the S3
 API's on every host (the credential gate), so a signed GetObject of bucket
@@ -624,6 +625,56 @@ Both answer `{object, id, storage_limit_bytes, egress_limit_bytes, storage_used_
 **A refusal names the cap.** Past a storage cap: 403 `QuotaExceeded` with `x-stored-cap: key|bucket|tenant|pool` — the first that failed, in that order — on PutObject, CopyObject, UploadPart, the edge and a direct upload. Past an egress cap: 403 `QuotaExceeded`, `x-stored-cap: key|bucket` and `Retry-After` = the seconds to the next UTC month.
 
 **Warnings.** At 80 % and at 95 % of an egress cap, once each a month, the account's webhooks get `key.cap_warning` `{cap: "key"|"bucket", key_id | bucket, threshold_pct, used_bytes, limit_bytes, month, resets_at}`.
+
+## Agents
+
+An AI agent is never an account: it acts for the person who connected it, who stays accountable (`docs/ACCOUNTS.md` § Agents). Dark behind the `agent_grants` flag.
+
+**Connecting** is the MCP authorization flow — OAuth 2.1 with PKCE (S256 only) and dynamic client registration:
+
+| Step | Where |
+|---|---|
+| Discover | `https://mcp.stored.cloud/.well-known/oauth-protected-resource` names the authorization server; `/.well-known/oauth-authorization-server` on it (RFC 8414) |
+| Register | `POST /oauth/register {client_name, redirect_uris}` (RFC 7591; https, an http loopback address or a native app's scheme) → `client_id` (a public client) |
+| Consent | `GET /oauth/authorize?response_type=code&client_id&redirect_uri&state&code_challenge&code_challenge_method=S256` → the dashboard's `/dashboard/agents/connect`: the person sees who asks, what it may and may never do, sets its caps and lifetime (≤ 30 days) and approves with a fresh authenticator code |
+| Exchange | `POST /oauth/token` (form: `grant_type=authorization_code`, `code`, `client_id`, `redirect_uri`, `code_verifier`) — once; a code is spent by its first exchange → `access_token` (`sk_live_…`), `stored_test_token` (`sk_test_…`, the same grant on the sandbox, to rehearse), `expires_in` |
+
+The **agent grant** is a management key (§ Management keys) with `manage:write`: a developer on `/api/v1/manage`, narrowed below. The request log names its key (`mk:<id>`); the audit trail names the grant (`agent:<id>`) on behalf of the member who connected it. Every S3 key it mints carries the grant's caps (it may lower them, never raise them), expires no later than the grant and is revoked with it.
+
+**Never in an agent's default scope:**
+- deleting a bucket, and revoking a key the grant did not mint: 403 `approval_required` with `approval_id` and `approval_url`. The person approves on the dashboard or with `POST /api/v1/manage/approvals/{id}/approve {"code": "<TOTP>"}` (their own role must allow the act; `…/deny` refuses it). An approval names one action on one resource, is used once by the agent's next identical request, and lives 24 hours;
+- a **Private** bucket, ever: the lists leave it out, every bucket route answers 403 `private_bucket`, and its S3 keys get AccessDenied;
+- what needs a person: members, exports, the erasure, management keys (403 `person_required`);
+- making anything public, turning versioning off, ACLs, Object Lock and retention (outside its S3 keys' permissions).
+
+A bucket an agent creates is **versioning-Enabled**: a mistake is a version back.
+
+| Route | What |
+|---|---|
+| `GET /api/v1/manage/agents` | The grants: the agent, its client, the member it acts for, caps, expiry, last use |
+| `POST /api/v1/manage/agents/{id}/renew` | A fresh 30 days on both its keys; widens nothing. A person's |
+| `DELETE /api/v1/manage/agents/{id}` | Revokes both its keys and every S3 key it minted. A person's |
+| `GET /api/v1/manage/approvals` (`?pending=1`) | What agents asked for, the last 30 days |
+
+**The MCP server** (`https://mcp.stored.cloud/mcp`, Streamable HTTP): `list_buckets`, `create_bucket`, `delete_bucket`, `list_objects`, `put_object`, `get_object`, `delete_object` (files ≤ 4 MiB; an S3 client for larger). Local clients: `stored mcp` bridges stdio to it (`STORED_TOKEN` = the grant's key).
+
+## Apps
+
+An **app** is a child of your account that stores for its own users (`docs/ACCOUNTS.md` § Apps). Dark behind the `apps` flag.
+
+| Route | What |
+|---|---|
+| `POST /api/v1/manage/apps {label, storage_cap_bytes?, egress_cap_bytes?}` | A verified, paying account (an owner or admin), up to 25 apps; no platform grant. Answers the app and its backend's management key (`apps` + `manage:write`), shown once. 403 `apps_need_verified_account` / `apps_need_paying_account`, 409 `app_limit_reached` |
+| `GET /api/v1/manage/apps` | The apps, their caps and usage |
+| `DELETE /api/v1/manage/apps/{id}` | Schedules the app and its users for erasure (30-day grace) and revokes its keys at once |
+
+With its key, the app's backend makes its users — `POST /api/v1/platform/tenants {label}` (managed children: depth 2, the deepest), their keys (`…/{id}/keys`) and STS tokens — all inside your pool. An app's bucket is never Public until your account is verified.
+
+**Claimable apps** (for AI app builders; partners only — an operator grants the scope):
+- `POST /api/v1/partner/claimables {label}` with a partner's key (`partner` scope; any other caller gets 404): a provisional tenant — 1 GiB, never Public, 7 days, inside the partner's pool — with a builder key and a single-use `claim_url`;
+- `GET /api/v1/partner/claimables`: their `state` (open, claimed, expired);
+- the person opens the link (`/dashboard/claim/{token}`, or `POST /api/v1/manage/claims/{token}`) on a verified account and keeps the app with its files and keys: it becomes an app of their account and its bytes count in their pool. Used once (410 `claim_gone` after);
+- unclaimed after 7 days, it is erased.
 
 ## Rate limits
 

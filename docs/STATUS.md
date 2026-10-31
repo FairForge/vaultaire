@@ -1,6 +1,16 @@
 # Status — the live pointer
 
-Updated: 2026-10-31 — **Review RP88 Part 2 (Prompt 54, WP-KEY-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2). Every finding is latent on prod (no cap is set, no management key exists):
+Updated: 2026-10-31 — **Stage 1a Prompt 55 (WP-AGENT-1 + WP-APP-1: AI agents as principals, then AI-created apps) — built** (`docs/reviews/WP-STRIPE-7.md`; migration **122**, landed whole with PR A; next **123**; review **RP90**). Dark behind `agent_grants` and `apps` (default OFF); F-41/F-42/F-43 still the owner's.
+- **#1099 Part 0** (RP88 Part 2): the egress cap refuses a response larger than what is left (`Content-Length` at `WriteHeader`, pre-charged in one conditional UPDATE, the unsent credited back; `/cdn`; the edge admit's span); a management key narrows a cap, never widens one; RP88-7/9/11; 122's `written_by_key` indexes; `HolderStorageDrift`.
+- **PR A agent grants:** a grant IS a management key (live + sandbox test key, 30 days, renewed/revoked by a person); OAuth 2.1 + PKCE + dynamic registration (`/oauth/*`), the consent on the dashboard with TOTP, the code exchanged once; `edge/mcp/` (the MCP server for `mcp.stored.cloud`) and `stored mcp`; audit `agent:<grant>` on behalf of the member.
+- **PR B approvals:** a bucket delete or a foreign key's revoke is 403 `approval_required` (one action, one resource, once, 24 h, TOTP); agent buckets versioned; never a Private bucket (API and S3).
+- **PR C apps:** `POST /api/v1/manage/apps` (verified, paying, ≤ 25), the app's key makes depth-2 users in the builder's pool; never Public until verified.
+- **PR D claimable apps:** a partner's key makes a provisional tenant (1 GiB, 7 days) + a claim link; a claim re-parents it with its data in one transaction; `claimable_purge` hourly.
+- **PR E the dashboard:** Agents, Apps, the claim page.
+- **Prod proof owed:** the owner's TOTP, and `edge/mcp` deployed to `mcp.stored.cloud` (steps in the note) — run WP-KEY-1's (RB12-7) in the same sitting. [OPS] install `vaultaire-quota.yml` (HolderStorageDrift) and `vaultaire-jobs.yml` (claimable_purge) on the box.
+- **Prompt 56 (WP-FAMILY-1)** is written in both editions; Part 0 = RP90.
+
+Before that: 2026-10-31 — **Review RP88 Part 2 (Prompt 54, WP-KEY-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2). Every finding is latent on prod (no cap is set, no management key exists):
 - **RP88-4 (P2, fixed):** `vaultaire_egress_cap_refusals_total` / `_warnings_total` were declared and pre-created but never registered — the active slot's scrape had the holder-drift gauges and no `egress_cap` series (the RB2-6 shape a second time in one week; the pin test now names all four label pairs).
 - **RP88-5 (P3, fixed):** a test management key resolved no actor, so `POST /api/v1/manage/keys` with it was 401 `missing_user`; it now mints the account's test keys (`VLT_TEST_`, the sandbox's).
 - **RP88-6 (P2 → Prompt 55 Part 0):** the egress cap refuses only once spent — a response is admitted whatever its size, so one GET passes a cap by the object's whole size. The size is known before the first byte on every surface; refuse by the remaining bytes.
