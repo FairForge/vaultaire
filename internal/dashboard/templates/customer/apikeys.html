@@ -162,6 +162,66 @@ aws s3 ls --endpoint-url {{host "s3"}}</div>
 </div>
 {{end}}
 
+<h2 id="management-keys">Management keys</h2>
+<p class="text-muted">A management key lets a server call the management API (<code>/api/v1/manage</code>{{if .IsPlatform}} and <code>/api/v1/platform</code>{{end}}) as this account, with no person signed in: <code>Authorization: Bearer sk_live_…</code>. It belongs to the account, not to you, and it can never manage members, export or delete the account, or make another management key.</p>
+
+{{if .NewManagementKey}}
+<div class="card card-highlight">
+    <div class="card-title">New Management Key, Save It Now</div>
+    <div class="alert alert-success">Copy this key. It will not be shown again. Scopes: {{.NewManagementKey.Scopes}}.</div>
+    <div class="code-block">{{.NewManagementKey.Secret}}</div>
+</div>
+{{end}}
+
+<div class="card">
+    <form method="POST" action="/dashboard/management-keys">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label for="mk-name">Name</label>
+                <input type="text" id="mk-name" name="name" maxlength="200" placeholder="e.g. backend server">
+            </div>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="scope" value="manage:read" checked> Read (buckets, keys, usage, the request log)</label>
+            <label><input type="checkbox" name="scope" value="manage:write"> Write (buckets and S3 keys, like a developer)</label>
+            {{if .IsPlatform}}<label><input type="checkbox" name="scope" value="platform"> Platform (your customers' accounts and their keys)</label>{{end}}
+        </div>
+        <button type="submit" class="btn btn-primary">Make a management key</button>
+    </form>
+</div>
+
+{{if .ManagementKeys}}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>Name</th><th>Key</th><th>Scopes</th><th>Created</th><th>Last Used</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+            {{range .ManagementKeys}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td class="mono">{{.Hint}}</td>
+                <td>{{.Scopes}}</td>
+                <td>{{.CreatedFmt}}</td>
+                <td>{{.LastUsedFmt}}</td>
+                <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+                <td>
+                    {{if eq .Status "active"}}
+                    <form method="POST" action="/dashboard/management-keys/{{.ID}}/revoke" style="display:inline"
+                          onsubmit="return confirm('Revoke this management key? The server using it is refused from its next request.')">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
+                    </form>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</div>
+{{end}}
+
 <div class="dashboard-actions">
     <a href="/dashboard/" class="btn">Back to Dashboard</a>
 </div>

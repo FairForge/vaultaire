@@ -53,7 +53,7 @@ func setupAuthWithUser(t *testing.T) (*auth.AuthService, *dashauth.SessionData) 
 func TestHandleAPIKeys_ListEmpty(t *testing.T) {
 	tmpl := testAPIKeysTemplate(t)
 	authSvc, sd := setupAuthWithUser(t)
-	handler := HandleAPIKeys(tmpl, authSvc, zap.NewNop())
+	handler := HandleAPIKeys(tmpl, authSvc, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/apikeys", nil)
 	ctx := context.WithValue(req.Context(), dashauth.SessionKey, sd)
@@ -73,7 +73,7 @@ func TestHandleAPIKeys_ListWithKeys(t *testing.T) {
 	key, err := authSvc.GenerateAPIKey(context.Background(), sd.UserID, "test-key", nil)
 	require.NoError(t, err)
 
-	handler := HandleAPIKeys(tmpl, authSvc, zap.NewNop())
+	handler := HandleAPIKeys(tmpl, authSvc, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/apikeys", nil)
 	ctx := context.WithValue(req.Context(), dashauth.SessionKey, sd)
@@ -176,7 +176,7 @@ func TestHandleRevokeKey(t *testing.T) {
 func TestHandleAPIKeys_NoSession(t *testing.T) {
 	tmpl := testAPIKeysTemplate(t)
 	authSvc := auth.NewAuthService(nil, nil)
-	handler := HandleAPIKeys(tmpl, authSvc, zap.NewNop())
+	handler := HandleAPIKeys(tmpl, authSvc, nil, zap.NewNop())
 
 	req := httptest.NewRequest("GET", "/dashboard/apikeys", nil)
 	w := httptest.NewRecorder()

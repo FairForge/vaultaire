@@ -39,7 +39,8 @@ Template: `templates/customer/bucket_settings.html` — includes a "Storage Tier
 ## API Key Management (`apikeys.go`)
 
 Three handlers:
-- `HandleAPIKeys(tmpl, authSvc, logger)` — lists all keys for current user via `auth.ListAPIKeys()`
+- `HandleAPIKeys(tmpl, authSvc, db, logger)` — lists all keys for current user via `auth.ListAPIKeys()`, and the tenant's management keys (WP-KEY-1)
+- `HandleGenerateManagementKey(tmpl, authSvc, db, logger)` / `HandleRevokeManagementKey(db, logger)` — POST `/dashboard/management-keys` (scopes `manage:read`/`manage:write`, `platform` for a platform; the secret shown once) and `/{id}/revoke`; action `management_key.write` (admin, owner); audited `management_key.created|revoked`
 - `HandleGenerateKey(tmpl, authSvc, db, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
 - `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
 
