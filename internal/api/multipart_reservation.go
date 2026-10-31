@@ -42,6 +42,44 @@ var errUploadEnded = errors.New("multipart upload is not active")
 // errPartOverQuota: the part does not fit in the tenant's quota.
 var errPartOverQuota = errors.New("part over quota")
 
+// partOverQuota is errPartOverQuota naming the cap that refused (WP-KEY-1:
+// the upload's key, its bucket, the tenant or the pool).
+type partOverQuota struct{ cap string }
+
+func (e *partOverQuota) Error() string        { return errPartOverQuota.Error() + " (" + e.cap + ")" }
+func (e *partOverQuota) Is(target error) bool { return target == errPartOverQuota }
+
+// refusedCap is the cap a part refusal names ("" = the tenant's).
+func refusedCap(err error) string {
+	var p *partOverQuota
+	if errors.As(err, &p) {
+		return p.cap
+	}
+	return usage.CapOf(err)
+}
+
+// uploadWriterKey is the key that created uploadID ("" = none, or no
+// database): what its Complete's object is counted to.
+func uploadWriterKey(ctx context.Context, db *sql.DB, uploadID string) string {
+	if db == nil {
+		return ""
+	}
+	var k string
+	_ = db.QueryRowContext(ctx, `SELECT COALESCE(written_by_key::text, '') FROM multipart_uploads WHERE upload_id = $1`, uploadID).Scan(&k)
+	return k
+}
+
+// uploadHolder is who holds an upload's parts besides the tenant: the key
+// that created it and its bucket (WP-KEY-1), read under the row's lock.
+func uploadHolder(ctx context.Context, tx *sql.Tx, uploadID string) (usage.Holder, error) {
+	var h usage.Holder
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(written_by_key::text, ''), bucket FROM multipart_uploads WHERE upload_id = $1`,
+		uploadID).Scan(&h.KeyID, &h.Bucket); err != nil {
+		return usage.Holder{}, fmt.Errorf("read upload %s's holder: %w", uploadID, err)
+	}
+	return h, nil
+}
+
 // lockActiveUpload locks the upload row and returns what a part's
 // reservation needs: the floor its parts are held on and what part
 // partNumber holds now (0 when none). The part's size is read in a second
@@ -134,12 +172,16 @@ func reserveUploadPart(ctx context.Context, db *sql.DB, tenantID, uploadID strin
 		uploadID, up); err != nil {
 		return 0, fmt.Errorf("record the part reservation: %w", err)
 	}
-	res, err := usage.ReserveTx(ctx, tx, tenantID, floor, up)
+	h, err := uploadHolder(ctx, tx, uploadID)
+	if err != nil {
+		return 0, err
+	}
+	res, err := usage.ReserveTxFor(ctx, tx, tenantID, floor, up, h)
 	if err != nil {
 		return 0, err
 	}
 	if !res.OK {
-		return 0, errPartOverQuota
+		return 0, &partOverQuota{cap: res.Cap}
 	}
 	return up, tx.Commit()
 }
@@ -192,12 +234,16 @@ func settleUploadPartWith(ctx context.Context, db *sql.DB, tenantID, uploadID st
 		}
 	}
 	delta := measured - held - reserved
+	h, err := uploadHolder(ctx, tx, uploadID)
+	if err != nil {
+		return err
+	}
 	if delta > 0 {
 		// A part that measured more than it reserved (no declared length,
 		// R108-8): checked before the install, which may replace the part
 		// number's previous file — so this one path holds the quota row
 		// through the rename below.
-		res, err := usage.ReserveTx(ctx, tx, tenantID, floor, delta)
+		res, err := usage.ReserveTxFor(ctx, tx, tenantID, floor, delta, h)
 		if err != nil {
 			return err
 		}
@@ -208,7 +254,7 @@ func settleUploadPartWith(ctx context.Context, db *sql.DB, tenantID, uploadID st
 			if err := tx.Commit(); err != nil {
 				return fmt.Errorf("commit the part's release: %w", err)
 			}
-			return errPartOverQuota
+			return &partOverQuota{cap: res.Cap}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET reserved_bytes = GREATEST(0, reserved_bytes + $2) WHERE upload_id = $1`,
@@ -232,7 +278,8 @@ func settleUploadPartWith(ctx context.Context, db *sql.DB, tenantID, uploadID st
 	// What the part holds less than it reserved goes back last: the quota
 	// row is held from here to COMMIT only (ledger_tx.go).
 	if delta < 0 {
-		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta}}); err != nil {
+		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta},
+			Holders: []usage.HolderMove{{Holder: h, Bytes: delta}}}); err != nil {
 			return err
 		}
 	}
@@ -288,7 +335,12 @@ func giveBackPart(ctx context.Context, tx *sql.Tx, tenantID, uploadID, floor str
 		uploadID, n); err != nil {
 		return fmt.Errorf("release the part reservation: %w", err)
 	}
-	return usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: -n, Floors: map[string]int64{floor: -n}})
+	h, err := uploadHolder(ctx, tx, uploadID)
+	if err != nil {
+		return err
+	}
+	return usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: -n, Floors: map[string]int64{floor: -n},
+		Holders: []usage.HolderMove{{Holder: h, Bytes: -n}}})
 }
 
 // endUploadReleasing ends an active upload (status aborted) and releases
@@ -303,12 +355,13 @@ func endUploadReleasing(ctx context.Context, db *sql.DB, uploadID, tenantID, buc
 	defer func() { _ = tx.Rollback() }()
 	var owner, floor string
 	var held int64
+	var h usage.Holder
 	err = tx.QueryRowContext(ctx, `
-		SELECT u.tenant_id, u.reserved_bytes, `+uploadHoldingFloorSQL+`
+		SELECT u.tenant_id, u.reserved_bytes, `+uploadHoldingFloorSQL+`, COALESCE(u.written_by_key::text, ''), u.bucket
 		FROM multipart_uploads u
 		WHERE u.upload_id = $1 AND u.status = 'active'
 		  AND ($2 = '' OR u.tenant_id = $2) AND ($3 = '' OR u.bucket = $3) AND ($4 = '' OR u.object_key = $4)
-		FOR UPDATE`, uploadID, tenantID, bucket, key).Scan(&owner, &held, &floor)
+		FOR UPDATE`, uploadID, tenantID, bucket, key).Scan(&owner, &held, &floor, &h.KeyID, &h.Bucket)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -319,7 +372,8 @@ func endUploadReleasing(ctx context.Context, db *sql.DB, uploadID, tenantID, buc
 		return false, fmt.Errorf("abort upload %s: %w", uploadID, err)
 	}
 	if held > 0 {
-		if err := usage.ApplyLedgerTx(ctx, tx, owner, usage.LedgerChange{Total: -held, Floors: map[string]int64{floor: -held}}); err != nil {
+		if err := usage.ApplyLedgerTx(ctx, tx, owner, usage.LedgerChange{Total: -held, Floors: map[string]int64{floor: -held},
+			Holders: []usage.HolderMove{{Holder: h, Bytes: -held}}}); err != nil {
 			return false, err
 		}
 	}

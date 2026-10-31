@@ -372,16 +372,16 @@ func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bu
 	}
 	// The null version as it is now, and whether it is retained bytes of
 	// its own (not the head row's: those are the head row's bill).
-	var nullKey, nullBackend, nullFloor string
+	var nullKey, nullBackend, nullFloor, nullWriter string
 	var nullSize int64
 	var nullRetained, nullFound bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(v.storage_key, ''), COALESCE(v.backend_name, ''), v.size_bytes, `+usage.RetainedVersionFloor+`,
-		       `+usage.VersionRetained+`
+		       `+usage.VersionRetained+`, COALESCE(v.written_by_key::text, '')
 		FROM object_versions v
 		LEFT JOIN object_head_cache h ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
 		WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = 'null' AND NOT v.is_delete_marker`,
-		tenantID, bucket, key).Scan(&nullKey, &nullBackend, &nullSize, &nullFloor, &nullRetained)
+		tenantID, bucket, key).Scan(&nullKey, &nullBackend, &nullSize, &nullFloor, &nullRetained, &nullWriter)
 	switch {
 	case err == nil:
 		nullFound = true
@@ -403,7 +403,7 @@ func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bu
 			size_bytes = 0, etag = '', content_type = 'application/octet-stream', is_latest = TRUE, is_delete_marker = TRUE,
 			backend_name = NULL, storage_key = NULL, encryption_algorithm = NULL, encryption_key_version = NULL, floor = NULL,
 			metadata = NULL, content_disposition = NULL, content_encoding = NULL, content_language = NULL,
-			cache_control = NULL, http_expires = NULL, website_redirect_location = NULL, created_at = NOW()`,
+			cache_control = NULL, http_expires = NULL, website_redirect_location = NULL, written_by_key = NULL, created_at = NOW()`,
 		tenantID, bucket, key); err != nil {
 		return false, fmt.Errorf("write the null delete marker: %w", err)
 	}
@@ -415,7 +415,7 @@ func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bu
 			!errors.Is(err, errUnaddressableBlob) {
 			return false, err
 		}
-		rels = append(rels, quotaRelease{Floor: nullFloor, Bytes: nullSize})
+		rels = append(rels, quotaRelease{Floor: nullFloor, Bytes: nullSize, KeyID: nullWriter})
 	}
 	// The head row: its bytes are kept only by a version that still names
 	// them (an Enabled-era current version); otherwise retired with it.
@@ -438,7 +438,7 @@ func (d objectDeleteAftermath) deleteSuspended(ctx context.Context, tenantID, bu
 	}
 	// The bill, last (WP-R10-8).
 	if d.quota != nil {
-		if err := releasesTx(ctx, tx, tenantID, rels); err != nil {
+		if err := releasesTx(ctx, tx, tenantID, bucket, rels); err != nil {
 			return false, err
 		}
 	}

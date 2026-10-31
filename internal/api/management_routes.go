@@ -68,10 +68,12 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
 		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
 		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
+		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/caps", s.handleMgmtSetBucketCaps) // WP-KEY-1
 
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/keys", s.handleMgmtCreateKey)
 		r.With(s.requireRole(auth.ActionKeyWrite)).Delete("/keys/{id}", s.handleMgmtDeleteKey)
+		r.With(s.requireRole(auth.ActionKeyWrite)).Put("/keys/{id}/caps", s.handleMgmtSetKeyCaps)       // WP-KEY-1
 		r.With(s.requireRole(auth.ActionSandboxReset)).Post("/sandbox/reset", s.handleMgmtSandboxReset) // WP-DX-1: test mode
 
 		r.Get("/usage", s.handleMgmtGetUsage)

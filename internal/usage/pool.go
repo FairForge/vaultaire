@@ -116,6 +116,19 @@ func (p poolOf) fits(n int64) bool {
 	return p.ownCap <= 0 || p.own+n <= p.ownCap
 }
 
+// refusedBy names the cap n more bytes fail (fits false): a capped child's
+// own cap is the tenant's, the pool's limit the pool's (a tenant in no pool:
+// its own limit, the tenant's).
+func (p poolOf) refusedBy(n int64) string {
+	if p.ownCap > 0 && p.own+n > p.ownCap {
+		return CapTenant
+	}
+	if p.pooled {
+		return CapPool
+	}
+	return CapTenant
+}
+
 // moveUsed moves tenantID's storage_used_bytes by delta (clamped at zero)
 // and its pool root's pool_used_bytes by what was applied, in ONE statement
 // (RP82-3). The caller holds the root's row (lockPoolOwner) when root is

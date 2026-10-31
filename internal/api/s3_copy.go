@@ -427,7 +427,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 			// Net of what the commit releases at the quota edge (Part B):
 			// restoring a version by copying it onto its own key at 100 %
 			// of the floor is a shrink or a wash, never a refusal.
-			b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, floor, srcSize)
+			b, ok, capName, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, floor, srcSize)
 			if qErr != nil {
 				s.logger.Error("copy: quota check failed",
 					zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -435,8 +435,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 				return
 			}
 			if !ok {
-				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion("Upgrade at "+billingURL()))
+				writeQuotaRefusal(w, r.URL.Path, capName)
 				return
 			}
 			bill = b
@@ -456,7 +455,7 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, req *S3Reque
 	releaseReservation := func() {
 		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, floor, bill.Reserved)
+			s.releaseQuota(ctx, t.ID, floor, bill.Reserved, holderOf(r.Context(), destBucket))
 			cancel()
 		}
 	}
@@ -807,7 +806,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	quotaOn := s.quotaManager != nil
 	var bill *writeBill
 	if quotaOn {
-		b, ok, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, chunkedObjectFloor, srcSize)
+		b, ok, capName, qErr := s.reserveWrite(r.Context(), t.ID, destBucket, destKey, chunkedObjectFloor, srcSize)
 		if qErr != nil {
 			s.logger.Error("chunked copy: quota check failed",
 				zap.Error(qErr), zap.String("tenant_id", t.ID))
@@ -815,8 +814,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if !ok {
-			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-				WithSuggestion("Upgrade at "+billingURL()))
+			writeQuotaRefusal(w, r.URL.Path, capName)
 			return
 		}
 		bill = b
@@ -824,7 +822,7 @@ func (s *Server) handleChunkedCopy(w http.ResponseWriter, r *http.Request,
 	releaseReservation := func() {
 		if bill != nil && bill.Reserved > 0 {
 			ctx, cancel := quotaCtx(r)
-			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, bill.Reserved)
+			s.releaseQuota(ctx, t.ID, chunkedObjectFloor, bill.Reserved, holderOf(r.Context(), destBucket))
 			cancel()
 		}
 	}

@@ -105,6 +105,7 @@ func (s *Server) initMetrics() {
 			reg.MustRegister(newDataPlaneHostsCollector(s.db, s.log()))
 			// The pool counter's drift (RP82-3).
 			reg.MustRegister(newPoolDriftCollector(s.db, s.log()))
+			reg.MustRegister(newHolderDriftCollector(s.db, s.log())) // WP-KEY-1
 		}
 		// The edge codec (WP-EDGE-2 Part A): chunks by outcome, bytes by
 		// kind, index calls.

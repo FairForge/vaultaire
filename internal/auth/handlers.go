@@ -137,6 +137,11 @@ type Credential struct {
 // someone still holding the old pair.
 var ErrAccessKeyRevoked = errors.New("access key revoked")
 
+// keyEgressColumns reads a key row's egress cap and this UTC month's bytes
+// (another month's counter is 0) — WP-KEY-1, F-39 (a).
+const keyEgressColumns = `COALESCE(ak.egress_limit_bytes, 0),
+		       CASE WHEN ak.egress_month = date_trunc('month', NOW() AT TIME ZONE 'UTC')::date THEN COALESCE(ak.egress_used_bytes, 0) ELSE 0 END`
+
 // ErrSTSTokenExpired: the presented id is an STS token past its expiry. The
 // text is the one callers matched before it was typed ("expired STS token").
 var ErrSTSTokenExpired = errors.New("expired STS token")
@@ -167,16 +172,20 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		bucketScope, ipAllowlist pq.StringArray
 		expiresAt, revokedAt     sql.NullTime
 		isPrimary                bool
+		keyID                    string
+		egressCap, egressUsed    int64
 	)
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COALESCE(ak.tenant_id, ''), COALESCE(ak.secret_key, ''), ak.secret_wrapped, ak.secret_key_version,
 		       COALESCE(ak.permissions, '["*"]'::jsonb),
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
-		       ak.expires_at, ak.revoked_at, ak.is_primary
+		       ak.expires_at, ak.revoked_at, ak.is_primary,
+		       ak.id::text, `+keyEgressColumns+`
 		FROM api_keys ak
 		WHERE ak.key_id = $1
-	`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary)
+	`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary,
+		&keyID, &egressCap, &egressUsed)
 	switch {
 	case err == nil:
 		if revokedAt.Valid {
@@ -192,6 +201,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		scope := &KeyScope{
 			BucketScope: []string(bucketScope),
 			IPAllowlist: []string(ipAllowlist),
+			KeyID:       keyID, Primary: isPrimary, EgressCap: egressCap, EgressUsed: egressUsed,
 		}
 		// A permissions column that is not a JSON array of strings grants
 		// NOTHING — it used to grant everything (R5-14).
@@ -227,16 +237,19 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 			stsExpiresAt                  time.Time
 			parentFound, parentRevoked    bool
 			parentExpiresAt               sql.NullTime
+			parentID                      sql.NullString
+			parentPrimary                 sql.NullBool
 		)
 		err = a.db.QueryRowContext(ctx, `
 			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.secret_wrapped, s.secret_key_version,
 			       s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
-			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at
+			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at,
+			       ak.id::text, ak.is_primary, `+keyEgressColumns+`
 			FROM sts_tokens s
 			LEFT JOIN api_keys ak ON ak.key_id = s.parent_key_id
 			WHERE s.access_key = $1
 		`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
-			&parentFound, &parentRevoked, &parentExpiresAt)
+			&parentFound, &parentRevoked, &parentExpiresAt, &parentID, &parentPrimary, &egressCap, &egressUsed)
 		switch {
 		case err == nil:
 			if time.Now().After(stsExpiresAt) {
@@ -253,6 +266,9 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 				IPAllowlist: []string(stsIPRestrict),
 				ExpiresAt:   &stsExpiresAt,
 				Temporary:   true,
+				// A token acts as its parent key: its writes count to it,
+				// its caps are the parent's (it may only narrow — WP-KEY-1).
+				KeyID: parentID.String, Primary: parentPrimary.Bool, EgressCap: egressCap, EgressUsed: egressUsed,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
 				a.logger.Warn("sts token has unparsable permissions — treating as no permissions",

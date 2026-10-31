@@ -251,7 +251,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	overQuota := false
 	var bill *writeBill
 	if g.quota != nil {
-		res, qErr := reserveQuota(tctx, g.quota, tenantID, floor, size)
+		res, qErr := reserveQuota(tctx, g.quota, tenantID, floor, size, holderOf(tctx, bucket))
 		if qErr != nil {
 			return deliveredObject{}, fmt.Errorf("reserve quota: %w", qErr)
 		}
@@ -265,7 +265,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 			}
 			// The allowance: account the bytes unconditionally (a negative
 			// release adds), so the usage the customer sees is true.
-			if err := releaseQuotaOn(tctx, g.quota, tenantID, floor, -size); err != nil {
+			if err := releaseQuotaOn(tctx, g.quota, tenantID, floor, -size, holderOf(tctx, bucket)); err != nil {
 				return deliveredObject{}, fmt.Errorf("account over-quota write: %w", err)
 			}
 			bill.FloorReserved = true
@@ -276,7 +276,7 @@ func (g *generatedObjectWriter) writeOpts(ctx context.Context, tenantID, bucket,
 	}
 	release := func() {
 		if g.quota != nil && size > 0 {
-			if err := releaseQuotaOn(context.WithoutCancel(tctx), g.quota, tenantID, floor, size); err != nil {
+			if err := releaseQuotaOn(context.WithoutCancel(tctx), g.quota, tenantID, floor, size, holderOf(tctx, bucket)); err != nil {
 				g.logger.Error("generated object: quota release failed", zap.Error(err), zap.String("tenant_id", tenantID))
 			}
 		}

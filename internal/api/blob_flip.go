@@ -173,12 +173,12 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 	var displaced displacedRow
 	err = tx.QueryRowContext(ctx, `
 		SELECT size_bytes, floor, COALESCE(backend_name, ''), is_chunked, COALESCE(storage_key, ''),
-		       etag, COALESCE(encryption_algorithm, ''), encryption_key_version
+		       etag, COALESCE(encryption_algorithm, ''), encryption_key_version, COALESCE(written_by_key::text, '')
 		FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3
 		FOR UPDATE`,
 		w.TenantID, w.Bucket, w.Key).Scan(&displaced.Size, &displaced.Floor, &displaced.Backend, &displaced.Chunked,
-		&displaced.StorageKey, &displaced.etag, &displaced.enc.Algorithm, &displaced.enc.KeyVersion)
+		&displaced.StorageKey, &displaced.etag, &displaced.enc.Algorithm, &displaced.enc.KeyVersion, &displaced.WrittenBy)
 	switch {
 	case err == nil:
 		displaced.Found = true
@@ -192,6 +192,12 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 	// names it, otherwise retired for the collector.
 	if err := w.Upsert(tx); err != nil {
 		return flipResult{}, fmt.Errorf("upsert head-cache row: %w", err)
+	}
+	// The row names the key that wrote it (WP-KEY-1; the version row below
+	// copies it with the head row's attributes).
+	if _, err := tx.ExecContext(ctx, `UPDATE object_head_cache SET written_by_key = $4
+		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3`, w.TenantID, w.Bucket, w.Key, nullUUID(writerKeyOf(ctx))); err != nil {
+		return flipResult{}, fmt.Errorf("name the head row's writer: %w", err)
 	}
 	if !w.DryRun {
 		if err := headFlipHook(w.TenantID, w.Bucket, w.Key); err != nil {
@@ -251,7 +257,7 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 					!errors.Is(err, errUnaddressableBlob) {
 					return flipResult{}, err
 				}
-				displaced.ReplacedVersion = quotaRelease{Floor: replaced.floor, Bytes: replaced.size}
+				displaced.ReplacedVersion = quotaRelease{Floor: replaced.floor, Bytes: replaced.size, KeyID: replaced.writtenBy}
 			}
 		}
 	}
@@ -290,7 +296,7 @@ func commitBlobWrite(ctx context.Context, db *sql.DB, w blobWrite) (flipResult, 
 	}
 	// The bill, last: the tenant's quota rows are locked from here to COMMIT.
 	if w.Bill != nil {
-		if err := w.Bill.settleTx(ctx, tx, w.TenantID, newSize, newFloor, displaced); err != nil {
+		if err := w.Bill.settleTx(ctx, tx, w.TenantID, newSize, newFloor, displaced, holderOf(ctx, w.Bucket)); err != nil {
 			return flipResult{}, err
 		}
 	}
@@ -330,10 +336,11 @@ func anchorDisplacedVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, k
 	// The floor too (PR C2): the version is billed where the head row was.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE object_versions SET storage_key = $4, backend_name = NULLIF($5, ''),
-		       encryption_algorithm = NULLIF($6, ''), encryption_key_version = $7, floor = $9
+		       encryption_algorithm = NULLIF($6, ''), encryption_key_version = $7, floor = $9,
+		       written_by_key = $10 -- the bytes stay their writer's (WP-KEY-1)
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND is_latest AND NOT is_delete_marker
 		  AND etag = $8 AND (storage_key IS NULL OR storage_key = $4)`,
-		tenantID, bucket, key, addr, backend, d.enc.Algorithm, d.enc.KeyVersion, d.etag, d.Floor); err != nil {
+		tenantID, bucket, key, addr, backend, d.enc.Algorithm, d.enc.KeyVersion, d.etag, d.Floor, nullUUID(d.WrittenBy)); err != nil {
 		return fmt.Errorf("anchor the displaced version's blob: %w", err)
 	}
 	return nil
@@ -363,12 +370,14 @@ const anchorNullVersionSQL = `
 	INSERT INTO object_versions
 		(tenant_id, bucket, object_key, version_id, size_bytes, etag, content_type, is_latest, is_delete_marker,
 		 backend_name, storage_key, encryption_algorithm, encryption_key_version, floor, created_at,
-		 metadata, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location)
+		 metadata, content_disposition, content_encoding, content_language, cache_control, http_expires, website_redirect_location,
+		 written_by_key)
 	SELECT h.tenant_id, h.bucket, h.object_key, 'null', h.size_bytes, h.etag, h.content_type, TRUE, FALSE,
 	       CASE WHEN h.is_chunked THEN '` + chunkedBackendSentinel + `' ELSE h.backend_name END,
 	       COALESCE(h.storage_key, h.object_key), NULLIF(h.encryption_algorithm, ''), h.encryption_key_version,
 	       h.floor, h.updated_at,
-	       h.metadata, h.content_disposition, h.content_encoding, h.content_language, h.cache_control, h.http_expires, h.website_redirect_location
+	       h.metadata, h.content_disposition, h.content_encoding, h.content_language, h.cache_control, h.http_expires, h.website_redirect_location,
+	       h.written_by_key
 	FROM object_head_cache h
 	WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
 	  AND NOT EXISTS (SELECT 1 FROM object_versions v
@@ -379,7 +388,8 @@ const anchorNullVersionSQL = `
 type replacedNullVersion struct {
 	storageKey, backend, floor string
 	size                       int64
-	chunked                    bool // its address names a manifest (WP-VM-1)
+	chunked                    bool   // its address names a manifest (WP-VM-1)
+	writtenBy                  string // its writer key (WP-KEY-1)
 }
 
 // retainedNullVersion reads the key's "null" version when it keeps bytes
@@ -392,12 +402,12 @@ func retainedNullVersion(ctx context.Context, tx *sql.Tx, tenantID, bucket, key,
 	err := tx.QueryRowContext(ctx, `
 		SELECT storage_key, COALESCE(backend_name, ''), size_bytes,
 		       COALESCE(floor, NULLIF($5, ''), CASE WHEN backend_name = 'geyser' THEN 'vault' ELSE 'standard' END),
-		       COALESCE(backend_name, '') = '`+chunkedBackendSentinel+`'
+		       COALESCE(backend_name, '') = '`+chunkedBackendSentinel+`', COALESCE(written_by_key::text, '')
 		FROM object_versions
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND version_id = 'null'
 		  AND NOT is_delete_marker AND storage_key IS NOT NULL
 		  AND NOT (storage_key = $4 AND (COALESCE(backend_name, '') = '`+chunkedBackendSentinel+`') = $6)`,
-		tenantID, bucket, key, dAddr, headFloor, dChunked).Scan(&r.storageKey, &r.backend, &r.size, &r.floor, &r.chunked)
+		tenantID, bucket, key, dAddr, headFloor, dChunked).Scan(&r.storageKey, &r.backend, &r.size, &r.floor, &r.chunked, &r.writtenBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return replacedNullVersion{}, nil
 	}

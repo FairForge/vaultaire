@@ -21,6 +21,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/FairForge/vaultaire/internal/usage"
 )
 
 const (
@@ -169,6 +170,11 @@ func purgeSandbox(ctx context.Context, db *sql.DB, eng engine.Engine, sandboxID 
 		updated_at = NOW()
 		WHERE tenant_id = $1`, sandboxID); err != nil {
 		return res, fmt.Errorf("purge %s: counter: %w", sandboxID, err)
+	}
+	// Its keys' and buckets' counters too (WP-KEY-1): the rows removed here
+	// leave the ledger's path.
+	if err := usage.ReassertHolders(ctx, db, sandboxID); err != nil {
+		return res, fmt.Errorf("purge %s: %w", sandboxID, err)
 	}
 	return res, nil
 }

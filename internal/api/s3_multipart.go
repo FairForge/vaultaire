@@ -209,12 +209,12 @@ func (s *Server) handleInitiateMultipartUpload(w http.ResponseWriter, r *http.Re
 			INSERT INTO multipart_uploads
 				(upload_id, tenant_id, bucket, object_key, status, content_type, metadata, storage_class,
 				 content_disposition, content_encoding, content_language, cache_control, http_expires,
-				 website_redirect_location, sse_requested, reserved_floor, ssec_key_md5, tagging)
-			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NULLIF($17, ''))
+				 website_redirect_location, sse_requested, reserved_floor, ssec_key_md5, tagging, written_by_key)
+			VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NULLIF($17, ''), $18)
 		`, uploadID, t.ID, bucket, object, attrs.ContentType, attrs.metadataJSON(), storageClass,
 			attrs.ContentDisposition, attrs.ContentEncoding, attrs.ContentLanguage,
 			attrs.CacheControl, attrs.Expires, attrs.WebsiteRedirect, sseRequested, reservedFloor, ssecKeyMD5,
-			r.Header.Get("x-amz-tagging"))
+			r.Header.Get("x-amz-tagging"), nullUUID(writerKeyOf(r.Context()))) // the upload's key holds its parts (WP-KEY-1)
 		if err != nil {
 			s.logger.Error("failed to create multipart upload record", zap.Error(err))
 			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
@@ -522,6 +522,7 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 			WriteS3ErrorWithContext(w, ErrInvalidRequest, r.URL.Path, generateRequestID(), WithSuggestion(codecUploadRefusal))
 			return "", 0, false
 		case errors.Is(err, errPartOverQuota):
+			setStoredCap(w, refusedCap(err))
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
 			return "", 0, false
@@ -666,6 +667,7 @@ func (s *Server) stageUploadPart(w http.ResponseWriter, r *http.Request, tenantI
 		case errors.Is(sErr, errPartOverQuota):
 			installed = true // settleUploadPart gave the reservation back
 			_ = os.Remove(tmp)
+			setStoredCap(w, refusedCap(sErr))
 			WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
 				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+"."))
 			return "", 0, false
@@ -1066,6 +1068,9 @@ func (s *Server) completeMultipartUpload(w http.ResponseWriter, r *http.Request,
 		placement.Refusal.write(w, r)
 		return
 	}
+	// The object is the upload's key's, whoever completes it: the parts were
+	// held on it (WP-KEY-1).
+	r = r.WithContext(withWriterKey(r.Context(), uploadWriterKey(r.Context(), s.db, uploadID)))
 	if edgeUp.Codec {
 		// A codec upload (WP-EDGE-2): the parts' chunk lists concatenated
 		// into one manifest — the chunks are sealed (AES256-EW), so a bucket

@@ -249,6 +249,9 @@ func (m *QuotaManager) GetHouse(ctx context.Context, tenantID string) (House, bo
 type Reservation struct {
 	OK    bool
 	Floor bool
+	// Cap names the cap that refused (OK false): key, bucket, tenant or
+	// pool — the first that failed in that order (WP-KEY-1, x-stored-cap).
+	Cap string
 }
 
 // CheckAndReserveFloor is ReserveOnFloor's yes/no.
@@ -263,6 +266,12 @@ func (m *QuotaManager) CheckAndReserveFloor(ctx context.Context, tenantID, floor
 // transaction. A house without that floor (no attic bought) refuses the
 // write. OK is false (no error) when either ledger has no room.
 func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor string, bytes int64) (Reservation, error) {
+	return m.ReserveOnFloorFor(ctx, tenantID, floor, bytes, Holder{})
+}
+
+// ReserveOnFloorFor is ReserveOnFloor charging h too: the key's and the
+// bucket's counters, each within its own cap (WP-KEY-1).
+func (m *QuotaManager) ReserveOnFloorFor(ctx context.Context, tenantID, floor string, bytes int64, h Holder) (Reservation, error) {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Reservation{}, fmt.Errorf("beginning transaction: %w", err)
@@ -271,7 +280,7 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 	// No quota_usage_events row (WP-R10-8 Part D, R10-25): one per
 	// reservation, with no key, was the table's only writer — read as
 	// "activity" and as usage history that summed operations nobody wrote.
-	res, err := ReserveTx(ctx, tx, tenantID, floor, bytes)
+	res, err := ReserveTxFor(ctx, tx, tenantID, floor, bytes, h)
 	if err != nil || !res.OK {
 		return res, err
 	}
@@ -287,12 +296,36 @@ func (m *QuotaManager) ReserveOnFloor(ctx context.Context, tenantID, floor strin
 // child's counter (lockPool), and the bytes are reserved on the child's
 // own row. A tenant in no pool is its own row, as before.
 func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes int64) (Reservation, error) {
+	return ReserveTxFor(ctx, tx, tenantID, floor, bytes, Holder{})
+}
+
+// ReserveTxFor is ReserveTx charging h too (WP-KEY-1, holders.go): the
+// check is min(key, bucket, tenant, pool) and a refusal names the first cap
+// that failed in that order. The holders' rows are locked after the
+// tenant's own quota row (which serialises the tenant's ledger) and before
+// its floor rows; nothing is charged anywhere unless everything fits.
+func ReserveTxFor(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes int64, h Holder) (Reservation, error) {
 	p, err := lockPool(ctx, tx, tenantID)
 	if err != nil {
 		return Reservation{}, err
 	}
+	tenantCap := ""
 	if !p.fits(bytes) {
-		return Reservation{}, nil
+		tenantCap = p.refusedBy(bytes)
+	}
+	hc, err := holderFits(ctx, tx, tenantID, h, bytes)
+	if err != nil {
+		return Reservation{}, err
+	}
+	if hc != "" {
+		return Reservation{Cap: hc}, nil
+	}
+	if tenantCap != "" {
+		return Reservation{Cap: tenantCap}, nil
+	}
+	floorCap := CapTenant
+	if p.pooled {
+		floorCap = CapPool
 	}
 
 	res := Reservation{OK: true}
@@ -310,14 +343,14 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 				return Reservation{}, err
 			}
 			if !ok {
-				return Reservation{}, nil // the house has no such floor
+				return Reservation{Cap: floorCap}, nil // the house has no such floor
 			}
 			fUsed, err := poolFloorUsed(ctx, tx, p.owner, floor)
 			if err != nil {
 				return Reservation{}, err
 			}
 			if fUsed+bytes > fLimit {
-				return Reservation{}, nil
+				return Reservation{Cap: floorCap}, nil
 			}
 			if p.owner != tenantID {
 				if err := ensureChildFloorRow(ctx, tx, tenantID, floor); err != nil {
@@ -354,13 +387,13 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 				`SELECT storage_used_bytes, storage_limit_bytes FROM tenant_floor_quotas
 				  WHERE tenant_id = $1 AND floor = $2`, tenantID, floor).Scan(&fUsed, &fLimit)
 			if err == sql.ErrNoRows {
-				return Reservation{}, nil // the house has no such floor
+				return Reservation{Cap: floorCap}, nil // the house has no such floor
 			}
 			if err != nil {
 				return Reservation{}, fmt.Errorf("checking floor %s for tenant %s: %w", floor, tenantID, err)
 			}
 			if fUsed+bytes > fLimit {
-				return Reservation{}, nil
+				return Reservation{Cap: floorCap}, nil
 			}
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE tenant_floor_quotas
@@ -376,6 +409,10 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 	if _, _, _, _, err := moveUsed(ctx, tx, tenantID, p.owner, bytes); err != nil {
 		return Reservation{}, fmt.Errorf("updating quota: %w", err)
 	}
+	// The holders (their rows already locked by holderFits).
+	if err := applyHolders(ctx, tx, tenantID, []HolderMove{{Holder: h, Bytes: bytes}}, false); err != nil {
+		return Reservation{}, err
+	}
 	return res, nil
 }
 
@@ -384,6 +421,11 @@ func ReserveTx(ctx context.Context, tx *sql.Tx, tenantID, floor string, bytes in
 // negative value adds unconditionally on both ledgers — bytes that are
 // already durably stored must be accounted even past the limit.
 func (m *QuotaManager) ReleaseFloor(ctx context.Context, tenantID, floor string, bytes int64) error {
+	return m.ReleaseFloorFor(ctx, tenantID, floor, bytes, Holder{})
+}
+
+// ReleaseFloorFor is ReleaseFloor giving h's counters back too.
+func (m *QuotaManager) ReleaseFloorFor(ctx context.Context, tenantID, floor string, bytes int64, h Holder) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("releasing quota for tenant %s: begin: %w", tenantID, err)
@@ -391,7 +433,8 @@ func (m *QuotaManager) ReleaseFloor(ctx context.Context, tenantID, floor string,
 	defer func() { _ = tx.Rollback() }()
 	// The ledger's one writer (the pool's root first, its counter moved
 	// with the total — RP82-3); unguarded, so a negative value adds.
-	if err := ApplyLedgerTx(ctx, tx, tenantID, LedgerChange{Total: -bytes, Floors: map[string]int64{floor: -bytes}}); err != nil {
+	if err := ApplyLedgerTx(ctx, tx, tenantID, LedgerChange{Total: -bytes, Floors: map[string]int64{floor: -bytes},
+		Holders: []HolderMove{{Holder: h, Bytes: -bytes}}}); err != nil {
 		return fmt.Errorf("releasing quota for tenant %s: %w", tenantID, err)
 	}
 	return tx.Commit()

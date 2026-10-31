@@ -1052,6 +1052,57 @@ func generateManagementPaths() map[string]*PathItem {
 					"residency": nullable(strEnum("`us`, `eu`, or null to clear", "us", "eu")),
 				})))),
 		},
+		"/api/v1/manage/buckets/{name}/caps": {
+			Parameters: []Parameter{name},
+			Put: mut(withBody(jsonOp("Management", "Set a bucket's caps", "ManageSetBucketCaps",
+				"WP-KEY-1 (F-39): the bucket's own storage cap (bytes held, counted from its first cap) and egress cap per UTC month, inside the tenant's and the pool's — the smallest always applies. "+
+					"A write past the storage cap is 403 `QuotaExceeded` with `x-stored-cap: bucket`; a download once the month's egress cap is spent is 403 `QuotaExceeded`, `x-stored-cap: bucket`, `Retry-After` at the next UTC month, on S3 and `/cdn`. "+
+					"`key.cap_warning` fires at 80 and 95 % of the egress cap. Audited `bucket.caps_set`.",
+				map[string]Response{
+					"200": jsonResp("The caps as set", objectPtr("", map[string]*Schema{
+						"object":              strEnum("", "bucket_caps"),
+						"id":                  str("Bucket name"),
+						"storage_limit_bytes": nullable(integer("The storage cap in bytes; null = none")),
+						"egress_limit_bytes":  nullable(integer("The egress cap per UTC month in bytes; null = none")),
+						"storage_used_bytes":  integer("What the bucket holds now"),
+						"notes":               arrayOf(strEnum("`storage_cap_above_tenant` / `egress_cap_above_tenant`: accepted; the tenant's smaller number decides (F-39 (b))", "storage_cap_above_tenant", "egress_cap_above_tenant")),
+						"request_id":          str(""),
+					}, "object", "id", "storage_limit_bytes", "egress_limit_bytes", "storage_used_bytes", "notes", "request_id")),
+					"400": errResp("`invalid_json` or `invalid_cap` (a negative number)"),
+					"404": errResp("`bucket_not_found`"),
+					"500": errResp("`internal_error` or `no_database`"),
+				}),
+				jsonBody("Caps (both members; null or absent = none)", objectPtr("", map[string]*Schema{
+					"storage_limit_bytes": nullable(integer("Bytes, 0 or more")),
+					"egress_limit_bytes":  nullable(integer("Bytes per UTC month, 0 or more")),
+				})))),
+		},
+		"/api/v1/manage/keys/{id}/caps": {
+			Parameters: []Parameter{pathParam("id", "API key id")},
+			Put: mut(withBody(jsonOp("Management", "Set a scoped key's caps", "ManageSetKeyCaps",
+				"WP-KEY-1 (F-39): the key's own storage cap (the bytes its writes still hold, wherever they are; an STS token's writes are its parent key's) and egress cap per UTC month. "+
+					"The primary pair is never capped (409 `primary_never_capped`). A refusal names the cap: `x-stored-cap: key|bucket|tenant|pool`, the first that failed. "+
+					"`key.cap_warning` fires at 80 and 95 % of the egress cap. Audited `key.caps_set`.",
+				map[string]Response{
+					"200": jsonResp("The caps as set", objectPtr("", map[string]*Schema{
+						"object":              strEnum("", "key_caps"),
+						"id":                  str("API key id"),
+						"storage_limit_bytes": nullable(integer("The storage cap in bytes; null = none")),
+						"egress_limit_bytes":  nullable(integer("The egress cap per UTC month in bytes; null = none")),
+						"storage_used_bytes":  integer("What the key holds now"),
+						"notes":               arrayOf(strEnum("`storage_cap_above_tenant` / `egress_cap_above_tenant`: accepted; the tenant's smaller number decides (F-39 (b))", "storage_cap_above_tenant", "egress_cap_above_tenant")),
+						"request_id":          str(""),
+					}, "object", "id", "storage_limit_bytes", "egress_limit_bytes", "storage_used_bytes", "notes", "request_id")),
+					"400": errResp("`invalid_json` or `invalid_cap` (a negative number)"),
+					"404": errResp("`key_not_found` (no live key of this account has that id)"),
+					"409": errResp("`primary_never_capped`"),
+					"500": errResp("`internal_error` or `no_database`"),
+				}),
+				jsonBody("Caps (both members; null or absent = none)", objectPtr("", map[string]*Schema{
+					"storage_limit_bytes": nullable(integer("Bytes, 0 or more")),
+					"egress_limit_bytes":  nullable(integer("Bytes per UTC month, 0 or more")),
+				})))),
+		},
 		"/api/v1/manage/keys": {
 			Get: mgmt(jsonOp("Management", "List API keys", "ManageListKeys",
 				"The caller's keys (including revoked ones) as `api_key` objects without the secret. Not paginated: `has_more` is always false.",
