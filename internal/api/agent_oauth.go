@@ -112,7 +112,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the authorization server failed", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/dashboard/agents/connect?"+r.URL.RawQuery, http.StatusFound)
+	http.Redirect(w, r, "/dashboard/agents/connect?"+r.URL.RawQuery, http.StatusFound) // #nosec G710 -- a fixed local path; the query only rides along (the consent re-validates it)
 }
 
 // oauthRedirect is redirect with v added to its query.

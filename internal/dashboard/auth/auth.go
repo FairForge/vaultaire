@@ -472,7 +472,7 @@ func SetReturnTo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: ReturnToCookie, Value: url.QueryEscape(r.URL.RequestURI()), Path: "/",
-		MaxAge: 900, HttpOnly: true, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", SameSite: http.SameSiteLaxMode})
+		MaxAge: 900, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode}) // Secure as the session cookie is
 }
 
 // TakeReturnTo answers the remembered page ("" = none) and forgets it.
@@ -481,7 +481,7 @@ func TakeReturnTo(w http.ResponseWriter, r *http.Request) string {
 	if err != nil {
 		return ""
 	}
-	http.SetCookie(w, &http.Cookie{Name: ReturnToCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: ReturnToCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
 	uri, err := url.QueryUnescape(c.Value)
 	if err != nil || !returnToAllowed(uri) {
 		return ""

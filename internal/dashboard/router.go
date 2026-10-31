@@ -813,7 +813,7 @@ func handleLogin(baseTmpl *template.Template, deps Deps, lockout *middleware.Acc
 		dashauth.SetSessionCookie(w, token, sessionTTL)
 		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.login_succeeded",
 			UserID: user.ID, TenantID: user.TenantID, Email: user.Email, Via: "password", MFA: "none"})
-		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther)
+		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther) // #nosec G710 -- afterSignIn answers "/dashboard" or a path returnToAllowed admits (a local /dashboard page), never a host
 	}
 }
 
@@ -1142,7 +1142,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 		dashauth.SetSessionCookie(w, token, sessionTTL)
 		handlers.RecordLoginEvent(r.Context(), deps.DB, handlers.LoginEvent{Action: "auth.mfa_succeeded",
 			UserID: pending.UserID, TenantID: pending.TenantID, Email: pending.Email, Via: via})
-		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther)
+		http.Redirect(w, r, afterSignIn(w, r), http.StatusSeeOther) // #nosec G710 -- afterSignIn answers "/dashboard" or a path returnToAllowed admits (a local /dashboard page), never a host
 	}
 }
 
