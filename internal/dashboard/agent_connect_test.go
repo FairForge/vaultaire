@@ -34,7 +34,7 @@ func TestAgentConnect_ConsentNeedsTOTPAndIssuesOneCode(t *testing.T) {
 	ctx := context.Background()
 	logger := zap.NewNop()
 	authSvc := auth.NewAuthService(nil, db)
-	u, _, _, err := authSvc.CreateUserWithTenant(ctx, "agent-"+uuid.NewString()[:8]+"@stored.ge", "Str0ngPassw0rd!", "x")
+	u, _, _, err := authSvc.CreateUserWithTenant(ctx, "agent-"+uuid.NewString()[:8]+"@agents.example", "Str0ngPassw0rd!", "x")
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM agent_oauth_codes WHERE tenant_id = $1`, u.TenantID)
