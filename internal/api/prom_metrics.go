@@ -110,6 +110,9 @@ func (s *Server) initMetrics() {
 		// The edge codec (WP-EDGE-2 Part A): chunks by outcome, bytes by
 		// kind, index calls.
 		reg.MustRegister(edgeCodecChunks, edgeCodecBytes, edgeCodecIndexCalls)
+		// The egress caps (WP-KEY-1, F-39 (a)): refusals by cap, warnings by
+		// cap and step (RP88-4: declared and pre-created, never registered).
+		reg.MustRegister(egressCapRefusals, egressCapWarnings)
 		// The retired_blobs collector (WP-R2-1 Part C): its outcomes, and
 		// the backlog of due rows read from the table.
 		reg.MustRegister(retiredBlobsTotal, newRetiredBlobsBacklogCollector(s.db, s.log()))

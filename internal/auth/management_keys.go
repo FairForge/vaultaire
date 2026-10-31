@@ -156,6 +156,10 @@ type ManagementKey struct {
 	// ParentTenantID its parent ("" for a root) — an app's platform.
 	TenantKind     string `json:"-"`
 	ParentTenantID string `json:"-"`
+	// SandboxOf is the account whose sandbox the key's tenant is ("" = a
+	// live tenant): a test key (RP88-1) acts on the sandbox and its S3 keys
+	// are the account's test keys (RP88-5).
+	SandboxOf string `json:"-"`
 }
 
 // Principal is the key's name in the request log, the audit trail and the
@@ -392,28 +396,32 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 	if !IsManagementKeySecret(secret) {
 		return nil, ErrManagementKeyInvalid
 	}
-	var actor, kind, parent sql.NullString
+	var actor, kind, parent, sandboxOf sql.NullString
 	k, err := scanManagementKey(db.QueryRowContext(ctx, `
 		SELECT `+managementKeyColumns+`,
 		       COALESCE(
 		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.id AND m.role = 'owner'),
 		         (SELECT u.id::text FROM users u WHERE lower(u.email) = lower(t.email) ORDER BY u.created_at LIMIT 1),
+		         -- a sandbox has no member and a synthetic e-mail (RP88-5): the
+		         -- account's owner, as a person's test key hangs on them
+		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.sandbox_of AND m.role = 'owner'),
+		         (SELECT u.id::text FROM tenants p JOIN users u ON lower(u.email) = lower(p.email) WHERE p.id = t.sandbox_of ORDER BY u.created_at LIMIT 1),
 		         -- a child (an app) has no member: its parent's owner, then the
 		         -- grandparent's (an app's platform; depth 2 is the deepest)
 		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.parent_tenant_id AND m.role = 'owner'),
 		         (SELECT u.id::text FROM tenants p JOIN users u ON lower(u.email) = lower(p.email) WHERE p.id = t.parent_tenant_id ORDER BY u.created_at LIMIT 1),
 		         (SELECT m.user_id::text FROM tenants p JOIN tenant_members m ON m.tenant_id = p.parent_tenant_id AND m.role = 'owner' WHERE p.id = t.parent_tenant_id)),
-		       t.child_kind, t.parent_tenant_id
+		       t.child_kind, t.parent_tenant_id, t.sandbox_of
 		  FROM management_keys k JOIN tenants t ON t.id = k.tenant_id
 		 WHERE k.key_hash = $1 AND k.revoked_at IS NULL
-		   AND (k.expires_at IS NULL OR k.expires_at > NOW())`, hashManagementKey(secret)), &actor, &kind, &parent)
+		   AND (k.expires_at IS NULL OR k.expires_at > NOW())`, hashManagementKey(secret)), &actor, &kind, &parent, &sandboxOf)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrManagementKeyInvalid
 	}
 	if err != nil {
 		return nil, fmt.Errorf("look up a management key: %w", err)
 	}
-	k.Actor, k.TenantKind, k.ParentTenantID = actor.String, kind.String, parent.String
+	k.Actor, k.TenantKind, k.ParentTenantID, k.SandboxOf = actor.String, kind.String, parent.String, sandboxOf.String
 	now := time.Now()
 	if k.LastUsedAt == nil || now.Sub(*k.LastUsedAt) >= managementKeyUseEvery {
 		if err := db.QueryRowContext(ctx, `

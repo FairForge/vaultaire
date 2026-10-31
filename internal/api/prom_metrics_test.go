@@ -65,6 +65,14 @@ func TestMetricsEndpoint_KeepsLegacySeries(t *testing.T) {
 	assert.Contains(t, body, `vaultaire_edge_codec_chunks_total{outcome="hit"}`)
 	assert.Contains(t, body, `vaultaire_edge_codec_bytes_total{kind="sealed"}`)
 	assert.Contains(t, body, "vaultaire_edge_codec_index_calls_total")
+	// The egress caps' counters are REGISTERED too (WP-KEY-1, RP88-4: the
+	// same shape — declared and pre-created in key_caps.go, never registered;
+	// prod's scrape of 93679a1b had the holder-drift gauges and no
+	// vaultaire_egress_cap_* series).
+	assert.Contains(t, body, `vaultaire_egress_cap_refusals_total{cap="key"}`)
+	assert.Contains(t, body, `vaultaire_egress_cap_refusals_total{cap="bucket"}`)
+	assert.Contains(t, body, `vaultaire_egress_cap_warnings_total{cap="key",step="80"}`)
+	assert.Contains(t, body, `vaultaire_egress_cap_warnings_total{cap="bucket",step="95"}`)
 }
 
 func TestBackendCollector_HealthCircuitAndWriteFailures(t *testing.T) {
