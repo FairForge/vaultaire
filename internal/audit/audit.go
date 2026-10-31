@@ -57,6 +57,7 @@ const (
 	requestKey ctxKey = iota
 	actorKey
 	tenantKey
+	principalKey
 )
 
 type requestInfo struct {
@@ -89,6 +90,25 @@ func WithActor(ctx context.Context, userID string) context.Context {
 func ActorFromContext(ctx context.Context) string {
 	a, _ := ctx.Value(actorKey).(string)
 	return a
+}
+
+// WithPrincipal stashes WHO acts when it is not a person (WP-KEY-1: a
+// management key, mk:<id>). user_id / performed_by are uuid columns, so a
+// key's act would read as the system's: a row written under a principal
+// has it in audit_logs.principal and NO performed_by (the user a key's
+// rows hang on did not act). A person needs none: their row's principal
+// is the actor's user id.
+func WithPrincipal(ctx context.Context, principal string) context.Context {
+	if principal == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, principalKey, principal)
+}
+
+// PrincipalFromContext returns the principal stashed by WithPrincipal.
+func PrincipalFromContext(ctx context.Context) string {
+	p, _ := ctx.Value(principalKey).(string)
+	return p
 }
 
 // WithTenant stashes the tenant the request acts on (WP-TEAM-1: the
@@ -177,6 +197,14 @@ func insert(ctx, info context.Context, q Execer, e Entry) error {
 	if actor == "" {
 		actor = e.UserID
 	}
+	// The principal (121): a key's mk:<id> — then no person acted — else
+	// the acting person's user id.
+	principal := PrincipalFromContext(info)
+	if principal != "" {
+		actor = ""
+	} else if nullUUID(actor).Valid {
+		principal = actor
+	}
 	var ip, ua sql.NullString
 	if ri, ok := info.Value(requestKey).(requestInfo); ok {
 		if net.ParseIP(ri.ip) != nil {
@@ -195,29 +223,32 @@ func insert(ctx, info context.Context, q Execer, e Entry) error {
 
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO audit_logs (user_id, tenant_id, event_type, action, resource, result, severity,
-		                        ip, user_agent, error_msg, metadata, performed_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10, $11, $12)`,
+		                        ip, user_agent, error_msg, metadata, performed_by, principal)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9, $10, $11, $12, $13)`,
 		nullUUID(e.UserID), nullString(e.TenantID), e.EventType, e.Action, nullString(e.Resource),
-		result, severity, ip, ua, errMsg, meta, nullUUID(actor))
+		result, severity, ip, ua, errMsg, meta, nullUUID(actor), nullString(principal))
 	return err
 }
 
 // Row is one audit_logs record as read back by List.
 type Row struct {
-	ID          string          `json:"id"`
-	Timestamp   time.Time       `json:"timestamp"`
-	UserID      string          `json:"user_id,omitempty"`
-	PerformedBy string          `json:"performed_by,omitempty"`
-	TenantID    string          `json:"tenant_id,omitempty"`
-	EventType   string          `json:"event_type"`
-	Action      string          `json:"action"`
-	Resource    string          `json:"resource,omitempty"`
-	Result      string          `json:"result"`
-	Severity    string          `json:"severity"`
-	IP          string          `json:"ip,omitempty"`
-	UserAgent   string          `json:"user_agent,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Metadata    json.RawMessage `json:"metadata"`
+	ID          string    `json:"id"`
+	Timestamp   time.Time `json:"timestamp"`
+	UserID      string    `json:"user_id,omitempty"`
+	PerformedBy string    `json:"performed_by,omitempty"`
+	// Principal is who acted: mk:<id> for a management key, the user id
+	// for a person ("" on a row written before 121, or by the system).
+	Principal string          `json:"principal,omitempty"`
+	TenantID  string          `json:"tenant_id,omitempty"`
+	EventType string          `json:"event_type"`
+	Action    string          `json:"action"`
+	Resource  string          `json:"resource,omitempty"`
+	Result    string          `json:"result"`
+	Severity  string          `json:"severity"`
+	IP        string          `json:"ip,omitempty"`
+	UserAgent string          `json:"user_agent,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Metadata  json.RawMessage `json:"metadata"`
 }
 
 // Filter narrows List. Limit is clamped to 1..100 (default 50).
@@ -268,7 +299,7 @@ func List(ctx context.Context, db *sql.DB, f Filter) (*Page, error) {
 		}
 		cursorTS, cursorID = ts, id
 	}
-	const q = `SELECT id::text, timestamp, COALESCE(user_id::text,''), COALESCE(performed_by::text,''), COALESCE(tenant_id,''),
+	const q = `SELECT id::text, timestamp, COALESCE(user_id::text,''), COALESCE(performed_by::text,''), COALESCE(principal,''), COALESCE(tenant_id,''),
 	             event_type, action, COALESCE(resource,''), result, COALESCE(severity,''), COALESCE(host(ip),''),
 	             COALESCE(user_agent,''), COALESCE(error_msg,''), COALESCE(metadata, '{}'::jsonb)
 	      FROM audit_logs
@@ -291,7 +322,7 @@ func List(ctx context.Context, db *sql.DB, f Filter) (*Page, error) {
 	page := &Page{Rows: []Row{}}
 	for rows.Next() {
 		var r Row
-		if err := rows.Scan(&r.ID, &r.Timestamp, &r.UserID, &r.PerformedBy, &r.TenantID, &r.EventType, &r.Action,
+		if err := rows.Scan(&r.ID, &r.Timestamp, &r.UserID, &r.PerformedBy, &r.Principal, &r.TenantID, &r.EventType, &r.Action,
 			&r.Resource, &r.Result, &r.Severity, &r.IP, &r.UserAgent, &r.Error, &r.Metadata); err != nil {
 			return nil, fmt.Errorf("scan audit row: %w", err)
 		}

@@ -227,7 +227,7 @@ func GenerateOpenAPISpec(h hosts.Hosts) *OpenAPISpec {
 			{Name: "Webhooks", Description: "Tenant webhook endpoints and their deliveries. Bearer JWT, rate limited per tenant, Idempotency-Key honoured on mutations"},
 			{Name: "Events", Description: "The tenant's event log (what webhooks are fed from). Bearer JWT, rate limited per tenant"},
 			{Name: "STS", Description: "Temporary S3 credentials bounded by the caller's authority. Bearer JWT"},
-			{Name: "Platform", Description: "Child tenants of a platform tenant under /api/v1/platform (WP-PLAT-1): Bearer JWT of a platform tenant (404 for any other), rate limited per tenant, Idempotency-Key honoured on mutations"},
+			{Name: "Platform", Description: "Child tenants of a platform tenant under /api/v1/platform (WP-PLAT-1): Bearer JWT of a platform tenant, or its management key (404 for any other), rate limited per tenant, Idempotency-Key honoured on mutations"},
 			{Name: "Admin", Description: "Operator endpoints under /api/v1/admin: Bearer JWT whose user has role admin (403 otherwise)"},
 			{Name: "Health", Description: "Health checks"},
 		},
@@ -454,6 +454,7 @@ func generatePaths() map[string]*PathItem {
 		generateWebhookPaths(),
 		generateSTSPaths(),
 		generatePlatformPaths(),
+		generateManagementKeyPaths(),
 		generateAdminPaths(),
 	} {
 		for p, item := range group {
@@ -1927,6 +1928,9 @@ func generateSchemas() map[string]Schema {
 		schemas[name] = s
 	}
 	for name, s := range platformSchemas() {
+		schemas[name] = s
+	}
+	for name, s := range managementKeySchemas() {
 		schemas[name] = s
 	}
 	return schemas

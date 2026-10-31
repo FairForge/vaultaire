@@ -27,10 +27,13 @@ import (
 var auditEventTypes = []string{"account", "admin", "auth", "flag", "key", "mfa", "sts", "webhook"}
 
 type auditRowView struct {
-	Time        string
-	EventType   string
-	Action      string
-	Actor       string
+	Time      string
+	EventType string
+	Action    string
+	Actor     string
+	// Principal is who acted (121): mk:<id> for a management key, the
+	// user id for a person; shown when it is not the actor itself.
+	Principal   string
 	Subject     string
 	TenantID    string
 	Resource    string
@@ -106,6 +109,7 @@ func auditView(row audit.Row) auditRowView {
 		EventType: row.EventType,
 		Action:    row.Action,
 		Actor:     row.PerformedBy,
+		Principal: row.Principal,
 		Subject:   row.UserID,
 		TenantID:  row.TenantID,
 		Resource:  row.Resource,
@@ -207,7 +211,7 @@ func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 
 		cw := csv.NewWriter(w)
 		defer cw.Flush()
-		_ = cw.Write([]string{"timestamp", "event_type", "action", "result", "severity", "performed_by", "user_id",
+		_ = cw.Write([]string{"timestamp", "event_type", "action", "result", "severity", "performed_by", "principal", "user_id",
 			"tenant_id", "resource", "ip", "user_agent", "error", "metadata"})
 
 		if db == nil {
@@ -223,7 +227,7 @@ func HandleAdminAuditExport(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			}
 			for _, row := range page.Rows {
 				_ = cw.Write(csvSafeRow(row.Timestamp.UTC().Format(time.RFC3339), row.EventType, row.Action, row.Result,
-					row.Severity, row.PerformedBy, row.UserID, row.TenantID, row.Resource, row.IP, row.UserAgent,
+					row.Severity, row.PerformedBy, row.Principal, row.UserID, row.TenantID, row.Resource, row.IP, row.UserAgent,
 					row.Error, string(row.Metadata)))
 			}
 			if !page.HasMore {
