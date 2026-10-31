@@ -118,3 +118,129 @@ func TestManagementKey_RevokedIsRefusedAtOnce(t *testing.T) {
 	assert.ErrorIs(t, err, ErrManagementKeyInvalid, "refused on the very next request: no cache")
 	assert.ErrorIs(t, RevokeManagementKey(ctx, db, tenant, key.ID), ErrManagementKeyNotFound, "revoked once")
 }
+
+// RP88-2: every principal has an expiry (docs/ACCOUNTS.md § Principal); a
+// management key's is optional (NULL = none, a server key's default), and
+// the lookup refuses a key past it on the very next request.
+func TestManagementKey_ExpiredIsRefused(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	tenant := seedManagementTenant(t, db, "")
+
+	past := time.Now().Add(-time.Minute)
+	_, _, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}, ExpiresAt: &past})
+	assert.ErrorIs(t, err, ErrManagementKeyExpiry, "a key is never minted already expired")
+
+	soon := time.Now().Add(time.Hour)
+	key, secret, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}, ExpiresAt: &soon})
+	require.NoError(t, err)
+	require.NotNil(t, key.ExpiresAt)
+	assert.WithinDuration(t, soon, *key.ExpiresAt, time.Second)
+	_, err = LookupManagementKey(ctx, db, secret)
+	require.NoError(t, err, "live until its expiry")
+	keys, err := ListManagementKeys(ctx, db, tenant)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	require.NotNil(t, keys[0].ExpiresAt, "the list shows it")
+
+	_, err = db.Exec(`UPDATE management_keys SET expires_at = NOW() - INTERVAL '1 second' WHERE id = $1`, key.ID)
+	require.NoError(t, err)
+	_, err = LookupManagementKey(ctx, db, secret)
+	assert.ErrorIs(t, err, ErrManagementKeyInvalid, "refused past its expiry")
+
+	_, never, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}})
+	require.NoError(t, err)
+	got, err := LookupManagementKey(ctx, db, never)
+	require.NoError(t, err)
+	assert.Nil(t, got.ExpiresAt, "no expiry is the default")
+}
+
+// RP88-3: the live-key count runs under the tenant row's FOR UPDATE, so two
+// concurrent mints at 24 never both insert.
+func TestManagementKey_LiveCountHoldsUnderConcurrentMints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	tenant := seedManagementTenant(t, db, "")
+	for i := 0; i < MaxLiveManagementKeys-1; i++ {
+		_, _, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}})
+		require.NoError(t, err)
+	}
+	// Every mint lingers between its count and its insert: without the
+	// lock, all of them count 24.
+	mintAfterCount = func() { time.Sleep(50 * time.Millisecond) }
+	t.Cleanup(func() { mintAfterCount = func() {} })
+	const racers = 6
+	errs := make(chan error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		go func() {
+			<-start
+			_, _, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}})
+			errs <- err
+		}()
+	}
+	close(start)
+	ok := 0
+	for i := 0; i < racers; i++ {
+		if err := <-errs; err == nil {
+			ok++
+		} else {
+			assert.ErrorIs(t, err, ErrKeyLimitReached)
+		}
+	}
+	assert.Equal(t, 1, ok, "exactly one mint takes the last place")
+	var live int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM management_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, tenant).Scan(&live))
+	assert.Equal(t, MaxLiveManagementKeys, live)
+}
+
+// RP88-1: Test on the mint makes the key ON the tenant's sandbox (made on
+// first use, as a test S3 key's is) — the one way to an sk_test_ key.
+func TestManagementKey_TestMintIsTheSandboxs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires database")
+	}
+	db := testDB(t)
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+	tenant := seedManagementTenant(t, db, "")
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM management_keys WHERE tenant_id IN (SELECT id FROM tenants WHERE sandbox_of = $1)`, tenant)
+		_, _ = db.Exec(`DELETE FROM tenant_quotas WHERE tenant_id IN (SELECT id FROM tenants WHERE sandbox_of = $1)`, tenant)
+		_, _ = db.Exec(`DELETE FROM tenants WHERE sandbox_of = $1`, tenant)
+	})
+
+	k, secret, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageWrite}, Test: true})
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(secret, ManagementKeyTestPrefix), secret)
+	sandbox, err := SandboxOf(ctx, db, tenant)
+	require.NoError(t, err)
+	require.NotEmpty(t, sandbox, "the sandbox is made on first use")
+	assert.Equal(t, sandbox, k.TenantID, "the key is the sandbox's")
+	var quota int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM tenant_quotas WHERE tenant_id = $1`, sandbox).Scan(&quota))
+	assert.Equal(t, 1, quota, "the sandbox has its quota row")
+
+	k2, _, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}, Test: true})
+	require.NoError(t, err)
+	assert.Equal(t, sandbox, k2.TenantID, "one sandbox per tenant")
+
+	_, _, err = MintManagementKey(ctx, db, sandbox, ManagementKeyOptions{Scopes: []string{ScopeManageRead}, Test: true})
+	assert.ErrorIs(t, err, ErrSandboxOfSandbox)
+	_, live, err := MintManagementKey(ctx, db, tenant, ManagementKeyOptions{Scopes: []string{ScopeManageRead}})
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(live, ManagementKeyLivePrefix), "without Test, the live tenant's")
+
+	keys, err := ListManagementKeys(ctx, db, tenant)
+	require.NoError(t, err)
+	assert.Len(t, keys, 3, "the tenant's list holds its sandbox's keys")
+	require.NoError(t, RevokeManagementKey(ctx, db, tenant, k.ID), "and the tenant revokes them")
+}

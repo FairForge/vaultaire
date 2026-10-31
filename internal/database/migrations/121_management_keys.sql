@@ -26,6 +26,9 @@
 -- scoped key's and a bucket's own caps inside the tenant's and the pool's.
 -- NULL = inherit (today). The egress cap is per UTC month.
 --
+-- expires_at (RP88-2), and the attribution and counter columns of PR B
+-- (D-RP88-2), are below.
+--
 -- audit_logs.principal (and the archive's): WHO acted, as text — mk:<id>
 -- for a management key, the user id for a person. user_id / performed_by
 -- are uuid columns, and audit.Record writes a non-uuid actor as NULL, so a
@@ -46,8 +49,14 @@ CREATE TABLE IF NOT EXISTS management_keys (
     created_by   UUID,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_used_at TIMESTAMPTZ,
-    revoked_at   TIMESTAMPTZ
+    revoked_at   TIMESTAMPTZ,
+    -- RP88-2: every principal has an expiry (docs/ACCOUNTS.md § Principal;
+    -- WP-AGENT-1's agent grant lives 30 days by default). NULL = none, a
+    -- server key's default; the lookup refuses a key past it.
+    expires_at   TIMESTAMPTZ
 );
+
+ALTER TABLE management_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_management_keys_tenant ON management_keys (tenant_id);
 CREATE INDEX IF NOT EXISTS idx_management_keys_created_by ON management_keys (created_by) WHERE created_by IS NOT NULL;
@@ -56,6 +65,40 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS storage_limit_bytes BIGINT CHECK (
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS egress_limit_bytes BIGINT CHECK (egress_limit_bytes IS NULL OR egress_limit_bytes >= 0);
 ALTER TABLE buckets ADD COLUMN IF NOT EXISTS storage_limit_bytes BIGINT CHECK (storage_limit_bytes IS NULL OR storage_limit_bytes >= 0);
 ALTER TABLE buckets ADD COLUMN IF NOT EXISTS egress_limit_bytes BIGINT CHECK (egress_limit_bytes IS NULL OR egress_limit_bytes >= 0);
+
+-- D-RP88-2 (RP88 Part 1): a key's storage cap is the bytes its writes still
+-- HOLD, so a row names the key that wrote it and two counters hold the sum.
+-- Columns only here; WP-KEY-1 PR B writes them.
+--   written_by_key: the api_keys.id of the credential that wrote the row (an
+--     STS token: its parent key's). NULL = written before 121, or by the
+--     primary pair (F-39 (c): the primary is never capped), counted to no
+--     key. No foreign key: a revoked key's rows still name it, and the
+--     counter it leaves is released by whoever displaces or deletes them.
+--   api_keys.storage_used_bytes: the bytes the key's rows hold, moved by the
+--     one ledger (internal/usage) in the statement that moves the tenant's.
+--   buckets.storage_used_bytes: NULL = not yet counted; seeded under the
+--     bucket's lock at the first cap set and by the daily reconcile.
+ALTER TABLE object_head_cache ADD COLUMN IF NOT EXISTS written_by_key UUID;
+ALTER TABLE object_versions ADD COLUMN IF NOT EXISTS written_by_key UUID;
+ALTER TABLE multipart_uploads ADD COLUMN IF NOT EXISTS written_by_key UUID;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS storage_used_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE buckets ADD COLUMN IF NOT EXISTS storage_used_bytes BIGINT;
+
+-- F-39 (a), decided by the owner 2026-10-31: an egress cap on a key or a
+-- bucket REFUSES when spent (no pacing at the key or the bucket; pacing
+-- stays the tenant allowance's, D-25), with key.cap_warning events at 80
+-- and 95 %. The month's bytes are a durable counter on the row, so both
+-- slots and a restart see one number: egress_used_bytes counts the UTC
+-- month egress_month names (another month = 0), moved by each response of
+-- a capped key or bucket; egress_warned_pct is the highest step warned
+-- this month (the warning's once-only guard, an UPDATE … RETURNING).
+-- Columns only here; PR B writes them.
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS egress_used_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS egress_month DATE;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS egress_warned_pct SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE buckets ADD COLUMN IF NOT EXISTS egress_used_bytes BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE buckets ADD COLUMN IF NOT EXISTS egress_month DATE;
+ALTER TABLE buckets ADD COLUMN IF NOT EXISTS egress_warned_pct SMALLINT NOT NULL DEFAULT 0;
 
 ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS principal TEXT;
 ALTER TABLE audit_logs_archive ADD COLUMN IF NOT EXISTS principal TEXT;

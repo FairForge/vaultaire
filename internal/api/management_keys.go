@@ -143,7 +143,8 @@ func managementKeyJSON(k *auth.ManagementKey, secret string) map[string]any {
 	out := map[string]any{
 		"object": "management_key", "id": k.ID, "tenant_id": k.TenantID, "name": k.Name, "prefix": k.Prefix,
 		"hint": k.Hint, "scopes": k.Scopes, "s3_ceiling": k.Ceiling, "created_at": k.CreatedAt.UTC(),
-		"last_used_at": k.LastUsedAt, "revoked_at": k.RevokedAt,
+		"last_used_at": k.LastUsedAt, "revoked_at": k.RevokedAt, "expires_at": k.ExpiresAt,
+		"livemode": k.Prefix == auth.ManagementKeyLivePrefix,
 	}
 	if k.CreatedBy != "" {
 		out["created_by"] = k.CreatedBy
@@ -154,11 +155,27 @@ func managementKeyJSON(k *auth.ManagementKey, secret string) map[string]any {
 	return out
 }
 
-// mintRequest is a mint's body.
+// mintRequest is a mint's body. Test mints the key on the tenant's
+// sandbox (sk_test_, RP88-1); ExpiresAt is optional (RP88-2).
 type mintRequest struct {
-	Name    string          `json:"name"`
-	Scopes  []string        `json:"scopes"`
-	Ceiling *auth.S3Ceiling `json:"s3_ceiling"`
+	Name      string          `json:"name"`
+	Scopes    []string        `json:"scopes"`
+	Ceiling   *auth.S3Ceiling `json:"s3_ceiling"`
+	Test      bool            `json:"test"`
+	ExpiresAt *time.Time      `json:"expires_at"`
+}
+
+// capExpiry bounds a minted key's expiry by the minting key's: a key never
+// outlives the key that mints it (nil caller = a person: no bound).
+func capExpiry(caller *auth.ManagementKey, at *time.Time) *time.Time {
+	if caller == nil || caller.ExpiresAt == nil {
+		return at
+	}
+	if at == nil || at.After(*caller.ExpiresAt) {
+		t := *caller.ExpiresAt
+		return &t
+	}
+	return at
 }
 
 // capCeiling bounds a minted key's ceiling by the calling credential's
@@ -201,12 +218,23 @@ func (s *Server) mintManagementKey(w http.ResponseWriter, r *http.Request, tenan
 		return
 	}
 	createdBy := ""
-	if managementKeyOf(r.Context()) == nil {
+	caller := managementKeyOf(r.Context())
+	if caller == nil {
 		createdBy, _ = r.Context().Value(userIDKey).(string)
 	}
 	k, secret, err := auth.MintManagementKey(r.Context(), s.db, tenantID,
-		auth.ManagementKeyOptions{Name: req.Name, Scopes: req.Scopes, Ceiling: ceiling, CreatedBy: createdBy})
+		auth.ManagementKeyOptions{Name: req.Name, Scopes: req.Scopes, Ceiling: ceiling, CreatedBy: createdBy,
+			Test: req.Test, ExpiresAt: capExpiry(caller, req.ExpiresAt)})
 	switch {
+	case errors.Is(err, auth.ErrManagementKeyExpiry):
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_expiry", err.Error(), "expires_at")
+		return
+	case errors.Is(err, auth.ErrSandboxOfSandbox):
+		writeManagementError(w, ErrTypeInvalidRequest, "sandbox_of_sandbox", "a test-mode account has no sandbox of its own", "test")
+		return
+	case errors.Is(err, auth.ErrTenantSuspended):
+		writeManagementError(w, ErrTypePermission, "account_suspended", "the account is suspended: no test key can be made", "test")
+		return
 	case errors.Is(err, auth.ErrManagementKeyScope):
 		writeManagementError(w, ErrTypeInvalidRequest, "invalid_scope", err.Error(), "scopes")
 		return
@@ -224,8 +252,15 @@ func (s *Server) mintManagementKey(w http.ResponseWriter, r *http.Request, tenan
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to mint the key", "")
 		return
 	}
+	meta := map[string]any{"scopes": k.Scopes, "prefix": k.Prefix, "name": k.Name}
+	if k.TenantID != tenantID {
+		meta["sandbox"] = k.TenantID
+	}
+	if k.ExpiresAt != nil {
+		meta["expires_at"] = k.ExpiresAt.UTC()
+	}
 	audit.Record(r.Context(), s.db, audit.Entry{TenantID: tenantID, Action: "management_key.created",
-		Resource: "management_key:" + k.ID, Metadata: map[string]any{"scopes": k.Scopes, "prefix": k.Prefix, "name": k.Name}})
+		Resource: "management_key:" + k.ID, Metadata: meta})
 	resp := managementKeyJSON(k, secret)
 	resp["request_id"] = getRequestID(w)
 	writeJSON(w, http.StatusCreated, resp)

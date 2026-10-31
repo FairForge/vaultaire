@@ -6,7 +6,9 @@
 // person's JWT — a platform's backend, an app's backend, later an agent
 // grant (WP-AGENT-1). It is the TENANT's, never a person's: a member's
 // removal or erasure never revokes it (created_by is recorded, no foreign
-// key). sk_live_… for an account, sk_test_… for its sandbox; stored as the
+// key). sk_live_… for an account, sk_test_… for its sandbox (minted with
+// Test: the key is the sandbox's, RP88-1); an optional expiry (RP88-2);
+// stored as the
 // sha256 of the whole secret, which is shown once; looked up on every
 // request under revoked_at IS NULL (no cache: a revoke is refused at the
 // very next request, as a member's role is re-read). Its scopes are its
@@ -55,6 +57,10 @@ const (
 // MaxLiveManagementKeys bounds a tenant's live management keys.
 const MaxLiveManagementKeys = 25
 
+// mintAfterCount runs between the live-key count and the insert (a test
+// widens the window with it; RP88-3).
+var mintAfterCount = func() {}
+
 // managementKeyUseEvery coalesces last_used_at writes.
 const managementKeyUseEvery = time.Minute
 
@@ -70,6 +76,8 @@ var (
 	ErrManagementKeyScope = errors.New("invalid management key scopes")
 	// ErrManagementKeyCeiling: an S3 ceiling that does not validate.
 	ErrManagementKeyCeiling = errors.New("invalid S3 ceiling")
+	// ErrManagementKeyExpiry: an expiry that is not in the future.
+	ErrManagementKeyExpiry = errors.New("invalid management key expiry")
 )
 
 // S3Ceiling is the most a management key may mint (an S3 key, a child's
@@ -136,6 +144,7 @@ type ManagementKey struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at"`
 
 	// Set by LookupManagementKey only:
 	// Actor is the user the key's rows hang on (an S3 key's user_id): the
@@ -171,6 +180,12 @@ type ManagementKeyOptions struct {
 	// CreatedBy is the person who minted it ("" = a key minted it: a
 	// platform's key minting its app's).
 	CreatedBy string
+	// Test mints the key ON the tenant's sandbox (made on first use): the
+	// one way to an sk_test_ key (RP88-1). A sandbox reset or purge deletes
+	// data, never keys.
+	Test bool
+	// ExpiresAt is the key's end (nil = none); it must be in the future.
+	ExpiresAt *time.Time
 }
 
 // IsManagementKeySecret reports whether a bearer token is shaped like a
@@ -229,15 +244,21 @@ func validScopes(scopes []string) error {
 	return nil
 }
 
-// MintManagementKey makes a key of tenantID and returns it with its
-// secret — the only time the secret exists outside the caller. platform
-// needs a platform tenant; apps needs an app child (ErrManagementKeyScope).
+// MintManagementKey makes a key of tenantID (of its sandbox with Test) and
+// returns it with its secret — the only time the secret exists outside the
+// caller. platform needs a platform tenant; apps needs an app child
+// (ErrManagementKeyScope) — a sandbox is neither. The live-key count runs
+// under the key's tenant row FOR UPDATE, so two mints never both take the
+// last place (RP88-3).
 func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o ManagementKeyOptions) (*ManagementKey, string, error) {
 	if err := validScopes(o.Scopes); err != nil {
 		return nil, "", err
 	}
 	if err := o.Ceiling.Validate(); err != nil {
 		return nil, "", err
+	}
+	if o.ExpiresAt != nil && !o.ExpiresAt.After(time.Now()) {
+		return nil, "", fmt.Errorf("%w: expires_at must be in the future", ErrManagementKeyExpiry)
 	}
 	name := strings.TrimSpace(o.Name)
 	if len([]rune(name)) > 200 {
@@ -248,9 +269,23 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if o.Test {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`, tenantID).Scan(&exists); err != nil {
+			return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
+		}
+		if !exists {
+			return nil, "", ErrTenantNotFound
+		}
+		sandbox, err := ensureSandboxTx(ctx, tx, tenantID)
+		if err != nil {
+			return nil, "", fmt.Errorf("mint a test management key of %s: %w", tenantID, err)
+		}
+		tenantID = sandbox
+	}
 	var platform bool
 	var sandboxOf, kind sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT platform, sandbox_of, child_kind FROM tenants WHERE id = $1 FOR SHARE`, tenantID).
+	err = tx.QueryRowContext(ctx, `SELECT platform, sandbox_of, child_kind FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).
 		Scan(&platform, &sandboxOf, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrTenantNotFound
@@ -270,6 +305,7 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM management_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, tenantID).Scan(&live); err != nil {
 		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
 	}
+	mintAfterCount()
 	if live >= MaxLiveManagementKeys {
 		return nil, "", ErrKeyLimitReached
 	}
@@ -294,13 +330,17 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 	}
 	k := &ManagementKey{TenantID: tenantID, Prefix: prefix, Hint: body[:4], Name: name,
 		Scopes: append([]string(nil), o.Scopes...), Ceiling: o.Ceiling, CreatedBy: o.CreatedBy}
+	var expires sql.NullTime
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO management_keys (tenant_id, prefix, key_hash, hint, name, scopes, s3_ceiling, created_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id::text, created_at`,
-		tenantID, prefix, hashManagementKey(secret), k.Hint, name, pq.Array(k.Scopes), nullJSON(ceiling), createdBy).
-		Scan(&k.ID, &k.CreatedAt); err != nil {
+		INSERT INTO management_keys (tenant_id, prefix, key_hash, hint, name, scopes, s3_ceiling, created_by, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id::text, created_at, expires_at`,
+		tenantID, prefix, hashManagementKey(secret), k.Hint, name, pq.Array(k.Scopes), nullJSON(ceiling), createdBy, o.ExpiresAt).
+		Scan(&k.ID, &k.CreatedAt, &expires); err != nil {
 		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
+	}
+	if expires.Valid {
+		k.ExpiresAt = &expires.Time
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
@@ -316,14 +356,14 @@ func nullJSON(b []byte) any {
 }
 
 const managementKeyColumns = `k.id::text, k.tenant_id, k.prefix, k.hint, k.name, k.scopes, k.s3_ceiling,
-	COALESCE(k.created_by::text, ''), k.created_at, k.last_used_at, k.revoked_at`
+	COALESCE(k.created_by::text, ''), k.created_at, k.last_used_at, k.revoked_at, k.expires_at`
 
 func scanManagementKey(sc interface{ Scan(...any) error }, extra ...any) (*ManagementKey, error) {
 	var k ManagementKey
 	var ceiling []byte
-	var used, revoked sql.NullTime
+	var used, revoked, expires sql.NullTime
 	dest := append([]any{&k.ID, &k.TenantID, &k.Prefix, &k.Hint, &k.Name, pq.Array(&k.Scopes), &ceiling,
-		&k.CreatedBy, &k.CreatedAt, &used, &revoked}, extra...)
+		&k.CreatedBy, &k.CreatedAt, &used, &revoked, &expires}, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return nil, err
 	}
@@ -339,12 +379,15 @@ func scanManagementKey(sc interface{ Scan(...any) error }, extra ...any) (*Manag
 	if revoked.Valid {
 		k.RevokedAt = &revoked.Time
 	}
+	if expires.Valid {
+		k.ExpiresAt = &expires.Time
+	}
 	return &k, nil
 }
 
 // LookupManagementKey finds the live key whose secret this is, records its
-// use (at most once a minute) and resolves the user its rows hang on.
-// Anything else is ErrManagementKeyInvalid.
+// use (at most once a minute) and resolves the user its rows hang on. A
+// revoked or expired key is ErrManagementKeyInvalid, as is anything else.
 func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*ManagementKey, error) {
 	if !IsManagementKeySecret(secret) {
 		return nil, ErrManagementKeyInvalid
@@ -362,7 +405,8 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 		         (SELECT m.user_id::text FROM tenants p JOIN tenant_members m ON m.tenant_id = p.parent_tenant_id AND m.role = 'owner' WHERE p.id = t.parent_tenant_id)),
 		       t.child_kind, t.parent_tenant_id
 		  FROM management_keys k JOIN tenants t ON t.id = k.tenant_id
-		 WHERE k.key_hash = $1 AND k.revoked_at IS NULL`, hashManagementKey(secret)), &actor, &kind, &parent)
+		 WHERE k.key_hash = $1 AND k.revoked_at IS NULL
+		   AND (k.expires_at IS NULL OR k.expires_at > NOW())`, hashManagementKey(secret)), &actor, &kind, &parent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrManagementKeyInvalid
 	}
@@ -384,10 +428,15 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 	return k, nil
 }
 
-// ListManagementKeys lists the tenant's keys, live first, newest first.
+// ownOrSandbox matches a key of the tenant ($1) or of its sandbox: the
+// tenant lists and revokes its test keys (RP88-1).
+const ownOrSandbox = `(k.tenant_id = $1 OR k.tenant_id IN (SELECT s.id FROM tenants s WHERE s.sandbox_of = $1))`
+
+// ListManagementKeys lists the tenant's keys and its sandbox's, live first,
+// newest first.
 func ListManagementKeys(ctx context.Context, db *sql.DB, tenantID string) ([]*ManagementKey, error) {
 	rows, err := db.QueryContext(ctx, `SELECT `+managementKeyColumns+` FROM management_keys k
-		 WHERE k.tenant_id = $1 ORDER BY (k.revoked_at IS NULL) DESC, k.created_at DESC, k.id`, tenantID)
+		 WHERE `+ownOrSandbox+` ORDER BY (k.revoked_at IS NULL) DESC, k.created_at DESC, k.id`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list the management keys of %s: %w", tenantID, err)
 	}
@@ -403,10 +452,10 @@ func ListManagementKeys(ctx context.Context, db *sql.DB, tenantID string) ([]*Ma
 	return out, rows.Err()
 }
 
-// RevokeManagementKey revokes the tenant's live key id.
+// RevokeManagementKey revokes the tenant's (or its sandbox's) live key id.
 func RevokeManagementKey(ctx context.Context, db *sql.DB, tenantID, id string) error {
-	res, err := db.ExecContext(ctx, `UPDATE management_keys SET revoked_at = NOW()
-		 WHERE id::text = $2 AND tenant_id = $1 AND revoked_at IS NULL`, tenantID, id)
+	res, err := db.ExecContext(ctx, `UPDATE management_keys k SET revoked_at = NOW()
+		 WHERE k.id::text = $2 AND `+ownOrSandbox+` AND k.revoked_at IS NULL`, tenantID, id)
 	if err != nil {
 		return fmt.Errorf("revoke management key %s: %w", id, err)
 	}

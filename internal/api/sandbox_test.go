@@ -299,6 +299,9 @@ func TestSandbox_ResetPurgesEverything(t *testing.T) {
 	}
 	r := f.test(http.MethodPost, b+"/up.bin?uploads", nil, nil)
 	require.Equal(t, http.StatusOK, r.StatusCode)
+	mk, _, err := auth.MintManagementKey(context.Background(), f.db, f.tenantID, auth.ManagementKeyOptions{Scopes: []string{auth.ScopeManageWrite}, Test: true})
+	require.NoError(t, err)
+	require.Equal(t, f.sandboxID, mk.TenantID)
 	local, _ := f.srv.engine.GetDriver("local")
 	skA := f.storageKeyOf(b[1:], "a")
 	ok, err := local.Exists(context.Background(), f.sandboxID+"_"+b[1:], skA)
@@ -332,6 +335,8 @@ func TestSandbox_ResetPurgesEverything(t *testing.T) {
 	var keys int
 	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, f.sandboxID).Scan(&keys))
 	assert.Equal(t, 1, keys, "the test key stays")
+	require.NoError(t, f.db.QueryRow(`SELECT COUNT(*) FROM management_keys WHERE id = $1 AND revoked_at IS NULL`, mk.ID).Scan(&keys))
+	assert.Equal(t, 1, keys, "and so does a test management key (RP88-1: a reset deletes data, never keys)")
 
 	// A tenant with no sandbox: nothing to reset, 200 with zeros.
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/manage/sandbox/reset", nil)

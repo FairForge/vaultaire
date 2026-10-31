@@ -277,3 +277,45 @@ func TestErase_AMembersErasureKeepsThePlatformsManagementKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, out)
 	assert.Equal(t, 1, countRows(t, f.db, `SELECT COUNT(*) FROM management_keys WHERE id = $1 AND revoked_at IS NOT NULL`, id2))
 }
+
+// RP88-1: "test": true mints the key ON the tenant's sandbox (made on first
+// use) — the one way to an sk_test_ key — and the key acts on the sandbox.
+// RP88-2: the mint body takes an optional expires_at, and the list shows it.
+func TestManagementKey_TestKeyActsOnTheSandbox(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement()
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM management_keys WHERE tenant_id = $1`, f.user.TenantID) })
+
+	code, out := f.call(http.MethodPost, "/api/v1/manage/management-keys", f.jwt,
+		map[string]any{"name": "ci", "scopes": []string{"manage:write"}, "test": true})
+	require.Equal(t, http.StatusCreated, code, out)
+	secret := out["secret"].(string)
+	assert.Regexp(t, `^sk_test_[0-9A-Za-z]{43}$`, secret)
+	sandbox, err := auth.SandboxOf(context.Background(), f.db, f.user.TenantID)
+	require.NoError(t, err)
+	require.NotEmpty(t, sandbox, "the sandbox is made on first use")
+	assert.Equal(t, sandbox, out["tenant_id"])
+	assert.Equal(t, false, out["livemode"])
+
+	name := "mk-test-" + f.user.TenantID[7:15]
+	code, out = f.call(http.MethodPost, "/api/v1/manage/buckets", secret, map[string]any{"name": name})
+	require.Equal(t, http.StatusCreated, code, out)
+	assert.Equal(t, 1, countRows(t, f.db, `SELECT COUNT(*) FROM buckets WHERE tenant_id = $1 AND name = $2`, sandbox, name), "the bucket is the sandbox's")
+	assert.Zero(t, countRows(t, f.db, `SELECT COUNT(*) FROM buckets WHERE tenant_id = $1 AND name = $2`, f.user.TenantID, name))
+
+	code, out = f.call(http.MethodGet, "/api/v1/manage/management-keys", f.jwt, nil)
+	require.Equal(t, http.StatusOK, code, out)
+	require.Len(t, out["data"].([]any), 1, "the tenant lists its sandbox's keys")
+
+	// RP88-2 through the API.
+	code, out = f.call(http.MethodPost, "/api/v1/manage/management-keys", f.jwt,
+		map[string]any{"scopes": []string{"manage:read"}, "expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)})
+	assert.Equal(t, http.StatusBadRequest, code, out)
+	assert.Equal(t, "invalid_expiry", errCode(out))
+	at := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	code, out = f.call(http.MethodPost, "/api/v1/manage/management-keys", f.jwt,
+		map[string]any{"scopes": []string{"manage:read"}, "expires_at": at.Format(time.RFC3339)})
+	require.Equal(t, http.StatusCreated, code, out)
+	got, err := time.Parse(time.RFC3339, out["expires_at"].(string))
+	require.NoError(t, err)
+	assert.True(t, at.Equal(got), "%v vs %v", at, got)
+}
