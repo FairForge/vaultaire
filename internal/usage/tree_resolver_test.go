@@ -23,6 +23,7 @@ var poolRootReaders = map[string]string{
 	"internal/account/erase.go":   "the erasure: the key handover's heir (the pool root's owner) and an erased child's bytes leaving its root's counter (the ledger's own move, in the erase transaction)",
 	"internal/auth/platform.go":   "CreateChildTenant writes a child's pool_root_id (its parent's root)",
 	"internal/account/service.go": "a sponsored child's detach resets its pool_root_id to itself (PR C)",
+	"internal/modes/bucket.go":    "the door refuses Public for an app whose pool root is unverified (WP-APP-1 PR C): reads the root's owner, never resolves it",
 }
 
 func TestTree_PoolRootIsTheOneResolver(t *testing.T) {

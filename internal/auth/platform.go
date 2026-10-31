@@ -97,7 +97,23 @@ type ChildOptions struct {
 	// "" = its parent's, or anywhere). A child inherits its parent's
 	// residency and may not name another (WP-ACCT-1).
 	Residency string
+	// SelfServe makes an app child of a root that is no platform (WP-APP-1,
+	// F-43): a verified, paying account, up to MaxSelfServeApps live apps.
+	SelfServe bool
 }
+
+// MaxSelfServeApps bounds the live apps a self-serve builder holds (F-43).
+var MaxSelfServeApps = 25
+
+var (
+	// ErrAppsNeedVerified: a self-serve app needs the builder's e-mail
+	// verified.
+	ErrAppsNeedVerified = errors.New("apps need a verified account")
+	// ErrAppsNeedPaying: a self-serve app needs a paying account.
+	ErrAppsNeedPaying = errors.New("apps need a paying account")
+	// ErrAppLimit: the builder holds MaxSelfServeApps live apps.
+	ErrAppLimit = errors.New("app limit reached")
+)
 
 // The predicate "tenant t is in the tree under the platform $n" (a child,
 // or an app's child): the platform's reach over its tenants, at any depth
@@ -196,14 +212,21 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var platform, suspended bool
+	var platform, suspended, verified bool
 	var sandboxOf, parentOf sql.NullString
 	var tier string
+	// A self-serve app's count runs under the builder's row FOR UPDATE: two
+	// creates never both take the last place.
+	lock := "FOR SHARE OF t"
+	if o.SelfServe {
+		lock = "FOR UPDATE OF t"
+	}
 	err = tx.QueryRowContext(ctx, `
 		SELECT t.platform, t.suspended_at IS NOT NULL, t.sandbox_of, t.parent_tenant_id,
-		       COALESCE((SELECT q.tier FROM tenant_quotas q WHERE q.tenant_id = t.id), 'free')
-		  FROM tenants t WHERE t.id = $1 FOR SHARE OF t`, parentTenantID).
-		Scan(&platform, &suspended, &sandboxOf, &parentOf, &tier)
+		       COALESCE((SELECT q.tier FROM tenant_quotas q WHERE q.tenant_id = t.id), 'free'),
+		       EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = lower(t.email) AND COALESCE(u.email_verified, FALSE))
+		  FROM tenants t WHERE t.id = $1 `+lock, parentTenantID).
+		Scan(&platform, &suspended, &sandboxOf, &parentOf, &tier, &verified)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrTenantNotFound
 	}
@@ -213,10 +236,31 @@ func CreateChildTenant(ctx context.Context, db *sql.DB, parentTenantID, label, e
 	switch {
 	case sandboxOf.String != "" || parentOf.String != "":
 		return nil, ErrChildOfChild
-	case !platform:
-		return nil, ErrNotPlatform
 	case suspended:
 		return nil, ErrTenantSuspended
+	case o.SelfServe:
+		// WP-APP-1 (F-43): no platform grant; a verified, paying root.
+		if o.Kind != ChildApp || o.ParentID != "" {
+			return nil, ErrBadChildKind
+		}
+		if !verified {
+			return nil, ErrAppsNeedVerified
+		}
+		if tier == "" || tier == "free" {
+			return nil, ErrAppsNeedPaying
+		}
+		var apps int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants WHERE parent_tenant_id = $1 AND child_kind = 'app'
+			 AND deletion_scheduled_at IS NULL`, parentTenantID).Scan(&apps); err != nil {
+			return nil, fmt.Errorf("create child of %s: count the apps: %w", parentTenantID, err)
+		}
+		if apps >= MaxSelfServeApps {
+			return nil, ErrAppLimit
+		}
+	case !platform && o.ParentID == "":
+		return nil, ErrNotPlatform
+		// A non-platform's depth 2 is its self-serve app's own end user (the
+		// app's key on the platform routes): checked as an app of it below.
 	}
 	platformID, parent := parentTenantID, parentTenantID
 	if o.ParentID != "" && o.ParentID != platformID {

@@ -210,6 +210,7 @@ func registerFlags(fl *flags.Service) {
 	// Default OFF, global: a 404 to everyone until the owner opens it. Read
 	// before authentication, so a tenant row could open nothing: refused.
 	fl.Register(flagAgentGrants, false) // WP-AGENT-1: per tenant first
+	fl.Register(flagApps, false)        // WP-APP-1: per tenant first
 	fl.Register(flagRecoveryVault, false)
 	fl.GlobalOnly(flagRecoveryVault)
 	// 43.4: the law-enforcement policy and the "what we can produce" page

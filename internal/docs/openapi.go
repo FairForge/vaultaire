@@ -1202,6 +1202,36 @@ func generateManagementPaths() map[string]*PathItem {
 					"409": errResp("`approval_decided` or `approval_expired`"),
 				})),
 		},
+		// WP-APP-1 PR C: self-serve apps (docs/API.md § Apps).
+		"/api/v1/manage/apps": {
+			Get: mgmt(jsonOp("Management", "List apps", "ManageListApps",
+				"The account's app children (`object: app`), with their caps and usage. Dark behind `apps` (404).",
+				map[string]Response{
+					"200": jsonResp("Apps", listSchema("", objectPtr("An app", map[string]*Schema{"object": strEnum("", "app"), "id": str(""), "label": str(""), "kind": strEnum("", "app")}))),
+					"404": errResp("`not_found` (apps are off for the account)"),
+				})),
+			Post: mut(withBody(jsonOp("Management", "Create an app", "ManageCreateApp",
+				"An app child of the caller's account with no platform grant (F-43): a verified, paying account, up to 25 live apps; an owner or admin. "+
+					"Answers the app and its backend's management key (`apps` + `manage:write`, the secret shown once): with it the app makes its end users (`POST /api/v1/platform/tenants`, managed children at depth 2), their keys and STS tokens, all inside the builder's pool. "+
+					"An app's bucket is never Public until the account is verified. Audited `app.created`.",
+				map[string]Response{
+					"201": jsonResp("The app and its key", objectPtr("", map[string]*Schema{"object": strEnum("", "app"), "id": str(""), "label": str(""),
+						"management_key": objectPtr("Its backend's key; `secret` only here", map[string]*Schema{"id": str(""), "secret": str("")})})),
+					"400": errResp("`invalid_json`, `label_required`, `invalid_cap` or `child_of_child`"),
+					"403": errResp("`apps_need_verified_account`, `apps_need_paying_account`, `role_forbidden` or `account_suspended`"),
+					"409": errResp("`app_limit_reached` (25)"),
+				}),
+				jsonBody("The app", objectPtr("", map[string]*Schema{"label": str("Its name"), "storage_cap_bytes": integer("0 = the pool decides"), "egress_cap_bytes": integer("0 = the pool decides")})))),
+		},
+		"/api/v1/manage/apps/{id}": {
+			Parameters: []Parameter{pathParam("id", "App id")},
+			Delete: mut(jsonOp("Management", "Delete an app", "ManageDeleteApp",
+				"Schedules the app and its end users for erasure (the cascade, 30-day grace) and revokes the app's keys at once. Audited `app.deletion_scheduled`.",
+				map[string]Response{
+					"200": jsonResp("Scheduled", objectPtr("", map[string]*Schema{"object": strEnum("", "app"), "id": str(""), "deletion_scheduled": boolean("")})),
+					"404": errResp("`app_not_found`"),
+				})),
+		},
 		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
 		// (docs/API.md § Members).
 		"/api/v1/manage/members": {

@@ -99,6 +99,8 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		s.registerManagementKeyRoutes(r)
 		// WP-AGENT-1: agent grants and their approvals (agents.go).
 		s.registerAgentRoutes(r)
+		// WP-APP-1: self-serve apps (apps.go).
+		s.registerAppRoutes(r)
 	}
 }
 
