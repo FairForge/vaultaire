@@ -297,18 +297,21 @@ func TestKeyCap_BucketCapAboveTheTenantsIsANote(t *testing.T) {
 
 func TestKeyCap_EgressCapRefusesAtTheKey(t *testing.T) {
 	f := setupKeyCapFixture(t)
-	require.Equal(t, http.StatusOK, f.put(f.ak, f.sk, "obj", 60).Code)
+	require.Equal(t, http.StatusOK, f.put(f.ak, f.sk, "obj", 40).Code)
+	require.Equal(t, http.StatusOK, f.put(f.ak, f.sk, "w15", 15).Code)
+	require.Equal(t, http.StatusOK, f.put(f.ak, f.sk, "w5", 5).Code)
 	code, out := f.keyCaps(f.keyID, nil, 100)
 	require.Equal(t, http.StatusOK, code, out)
 
-	get := func(ak, sk string) *httptest.ResponseRecorder {
-		return f.do(http.MethodGet, "/"+f.bucket+"/obj", nil, ak, sk, nil)
+	get := func(key, ak, sk string) *httptest.ResponseRecorder {
+		return f.do(http.MethodGet, "/"+f.bucket+"/"+key, nil, ak, sk, nil)
 	}
-	require.Equal(t, http.StatusOK, get(f.kak, f.ksk).Code)
-	assert.Zero(t, f.capWarnings(), "60 % warns nothing")
-	require.Equal(t, http.StatusOK, get(f.kak, f.ksk).Code, "under the cap when admitted: served whole")
-	w := get(f.kak, f.ksk)
-	require.Equal(t, http.StatusForbidden, w.Code, "spent: refused")
+	require.Equal(t, http.StatusOK, get("obj", f.kak, f.ksk).Code)
+	assert.Zero(t, f.capWarnings(), "40 % warns nothing")
+	require.Equal(t, http.StatusOK, get("obj", f.kak, f.ksk).Code, "80 bytes: it fits")
+	assert.Equal(t, []int{80}, f.capWarningSteps())
+	w := get("obj", f.kak, f.ksk)
+	require.Equal(t, http.StatusForbidden, w.Code, "40 bytes with 20 left: refused (RP88-6)")
 	assert.Contains(t, w.Body.String(), "<Code>QuotaExceeded</Code>")
 	assert.Equal(t, "key", capOf(w))
 	ra, err := strconv.Atoi(w.Header().Get("Retry-After"))
@@ -317,26 +320,118 @@ func TestKeyCap_EgressCapRefusesAtTheKey(t *testing.T) {
 	next := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 	assert.InDelta(t, next.Sub(now).Seconds(), float64(ra), 5, "Retry-After is the next UTC month's start")
 
+	require.Equal(t, http.StatusOK, get("w15", f.kak, f.ksk).Code, "95 bytes")
 	assert.Equal(t, []int{80, 95}, f.capWarningSteps(), "80 and 95 %, once each")
-	_ = get(f.kak, f.ksk)
+	require.Equal(t, http.StatusOK, get("w5", f.kak, f.ksk).Code, "exactly the cap")
+	w = get("w5", f.kak, f.ksk)
+	require.Equal(t, http.StatusForbidden, w.Code, "spent: refused")
 	assert.Equal(t, []int{80, 95}, f.capWarningSteps(), "never twice in a month")
+	assert.EqualValues(t, 100, f.keyEgressUsed(f.keyID), "the month is exact")
 
 	// The primary is never capped; the tenant's allowance alone paces it.
-	require.Equal(t, http.StatusOK, get(f.ak, f.sk).Code)
+	require.Equal(t, http.StatusOK, get("obj", f.ak, f.sk).Code)
 
 	// A bucket's egress cap applies to every key, the primary's too.
 	code, out = f.bucketCaps(nil, 100)
 	require.Equal(t, http.StatusOK, code, out)
-	require.Equal(t, http.StatusOK, get(f.ak, f.sk).Code)
-	require.Equal(t, http.StatusOK, get(f.ak, f.sk).Code)
-	w = get(f.ak, f.sk)
+	require.Equal(t, http.StatusOK, get("obj", f.ak, f.sk).Code)
+	require.Equal(t, http.StatusOK, get("obj", f.ak, f.sk).Code)
+	w = get("obj", f.ak, f.sk)
 	require.Equal(t, http.StatusForbidden, w.Code)
 	assert.Equal(t, "bucket", capOf(w))
 
 	// A new month is a new budget.
 	f.exec(`UPDATE api_keys SET egress_month = DATE '2001-01-01' WHERE id = $1`, f.keyID)
 	f.exec(`UPDATE buckets SET egress_month = DATE '2001-01-01' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
-	require.Equal(t, http.StatusOK, get(f.kak, f.ksk).Code)
+	require.Equal(t, http.StatusOK, get("obj", f.kak, f.ksk).Code)
+}
+
+func (f *keyCapFixture) keyEgressUsed(id string) int64 {
+	f.t.Helper()
+	var n int64
+	require.NoError(f.t, f.db.QueryRow(`SELECT egress_used_bytes FROM api_keys WHERE id = $1`, id).Scan(&n))
+	return n
+}
+
+func (f *keyCapFixture) bucketEgressUsed() int64 {
+	f.t.Helper()
+	var n int64
+	require.NoError(f.t, f.db.QueryRow(`SELECT egress_used_bytes FROM buckets WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket).Scan(&n))
+	return n
+}
+
+// RP88-6: an egress cap refuses a response larger than what is left of the
+// month — never only once the month is spent. The size is known before the
+// first body byte on every surface: the response's Content-Length at the
+// origin (whole or a Range), the admitted span at the edge.
+func TestKeyCap_EgressCapRefusesAResponseLargerThanWhatIsLeft(t *testing.T) {
+	f := setupKeyCapFixture(t)
+	require.Equal(t, http.StatusOK, f.put(f.ak, f.sk, "obj", 60).Code)
+	code, out := f.keyCaps(f.keyID, nil, 100)
+	require.Equal(t, http.StatusOK, code, out)
+	get := func(hdr map[string]string) *httptest.ResponseRecorder {
+		return f.do(http.MethodGet, "/"+f.bucket+"/obj", nil, f.kak, f.ksk, hdr)
+	}
+
+	// S3, whole: 60 then 60 with 40 left.
+	require.Equal(t, http.StatusOK, get(nil).Code)
+	w := get(nil)
+	require.Equal(t, http.StatusForbidden, w.Code, "60 bytes with 40 left")
+	assert.Equal(t, "key", capOf(w))
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+	assert.Contains(t, w.Body.String(), "<Code>QuotaExceeded</Code>")
+	assert.Empty(t, w.Header().Get("ETag"), "the refused response's own headers are cleared")
+	assert.EqualValues(t, 60, f.keyEgressUsed(f.keyID), "a refusal counts nothing")
+
+	// S3, Range: 30 fits in 40, then 30 in 10 does not.
+	w = get(map[string]string{"Range": "bytes=0-29"})
+	require.Equal(t, http.StatusPartialContent, w.Code)
+	assert.Len(t, w.Body.Bytes(), 30)
+	w = get(map[string]string{"Range": "bytes=0-29"})
+	require.Equal(t, http.StatusForbidden, w.Code, "30 bytes with 10 left")
+	assert.EqualValues(t, 90, f.keyEgressUsed(f.keyID))
+
+	// The edge admit: the admitted span against what is left.
+	f.exec(`UPDATE api_keys SET egress_used_bytes = 50 WHERE id = $1`, f.keyID)
+	f.ak, f.sk = f.kak, f.ksk
+	resp := f.admit(f.signedGet("/"+f.bucket+"/obj", nil, nil))
+	assert.False(t, resp.Edge, "%+v", resp)
+	assert.Equal(t, "capped", resp.Reason, "60 bytes with 50 left: the origin's")
+	f.exec(`UPDATE api_keys SET egress_used_bytes = 40 WHERE id = $1`, f.keyID)
+	resp = f.admit(f.signedGet("/"+f.bucket+"/obj", nil, nil))
+	assert.True(t, resp.Edge, "60 with 60 left fits: %+v", resp)
+
+	// /cdn: a public bucket's cap, its readers' responses against what is left.
+	f.exec(`UPDATE tenants SET slug = $2 WHERE id = $1`, f.tenantID, "kc-"+strings.ToLower(f.tenantID[:8]))
+	f.exec(`UPDATE buckets SET visibility = 'public-read' WHERE tenant_id = $1 AND name = $2`, f.tenantID, f.bucket)
+	code, out = f.bucketCaps(nil, 100)
+	require.Equal(t, http.StatusOK, code, out)
+	rt := chi.NewRouter()
+	rt.Get("/cdn/{slug}/{bucket}/*", f.srv.handleCDNRequest)
+	cdn := func(key string, hdr map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/cdn/kc-"+strings.ToLower(f.tenantID[:8])+"/"+f.bucket+"/"+key, nil)
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		rt.ServeHTTP(w, r)
+		return w
+	}
+	require.Equal(t, http.StatusOK, cdn("obj", nil).Code)
+	w = cdn("obj", nil)
+	require.Equal(t, http.StatusForbidden, w.Code, "/cdn: 60 bytes with 40 left")
+	assert.Equal(t, "bucket", capOf(w))
+	assert.EqualValues(t, 60, f.bucketEgressUsed())
+	w = cdn("obj", map[string]string{"Range": "bytes=0-9"})
+	require.Equal(t, http.StatusPartialContent, w.Code, "/cdn: 10 bytes fit")
+	assert.EqualValues(t, 70, f.bucketEgressUsed())
+
+	// RP88-9: /cdn counts 200/206 bodies only.
+	f.exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, content_type)
+		VALUES ($1, $2, 'gone', 5, 'e', 'text/plain')`, f.tenantID, f.bucket)
+	w = cdn("gone", nil)
+	require.NotEqual(t, http.StatusOK, w.Code, "no bytes behind the row")
+	assert.EqualValues(t, 70, f.bucketEgressUsed(), "an error body is not egress")
 }
 
 func (f *keyCapFixture) capWarnings() int {
@@ -363,7 +458,7 @@ func (f *keyCapFixture) capWarningSteps() []int {
 // the key's — it never escapes them.
 func TestKeyCap_STSNarrowsNeverWidens(t *testing.T) {
 	f := setupKeyCapFixture(t)
-	code, out := f.keyCaps(f.keyID, 100, 50)
+	code, out := f.keyCaps(f.keyID, 100, 70)
 	require.Equal(t, http.StatusOK, code, out)
 	tok, err := auth.GenerateSTSToken(context.Background(), f.db, nil, f.tenantID, f.kak,
 		&auth.KeyScope{Permissions: []string{"*"}}, auth.STSRequest{Permissions: []string{"GetObject", "PutObject"}, TTL: 600})
@@ -378,7 +473,7 @@ func TestKeyCap_STSNarrowsNeverWidens(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, f.do(http.MethodGet, "/"+f.bucket+"/s1", nil, tok.AccessKey, tok.SecretKey, nil).Code)
 	w = f.do(http.MethodGet, "/"+f.bucket+"/s1", nil, f.kak, f.ksk, nil)
-	require.Equal(t, http.StatusForbidden, w.Code, "the token's download spent the key's month")
+	require.Equal(t, http.StatusForbidden, w.Code, "the token's download spent the key's month: 60 with 10 left")
 	assert.Equal(t, "key", capOf(w))
 }
 
@@ -404,4 +499,111 @@ func TestKeyCap_EdgeAdmitEnforcesIt(t *testing.T) {
 	assert.Equal(t, "key", resp.Refusal.Headers["X-Stored-Cap"], "%+v", resp.Refusal)
 	assert.Zero(t, f.pending(), "a refused admit leaves nothing pending")
 	assert.EqualValues(t, 60, f.keyUsed(f.keyID))
+}
+
+// RP88-6, exactness: a pre-charged response that sends less than its
+// Content-Length (a client abort) gives back what it did not send.
+func TestKeyCap_EgressPreChargeCreditsBackWhatWasNotSent(t *testing.T) {
+	f := setupKeyCapFixture(t)
+	code, out := f.keyCaps(f.keyID, nil, 100)
+	require.Equal(t, http.StatusOK, code, out)
+	c := egressCaps{keyID: f.keyID, keyRemaining: 100, bucket: f.bucket}
+	r := httptest.NewRequest(http.MethodGet, "/"+f.bucket+"/obj", nil)
+	rec := httptest.NewRecorder()
+	w := f.srv.newEgressCapWriter(rec, r, f.tenantID, c, func(w http.ResponseWriter, capName string) { writeEgressCapRefusal(w, r, capName) })
+	require.NotNil(t, w)
+	w.Header().Set("Content-Length", "60")
+	w.WriteHeader(http.StatusOK)
+	assert.EqualValues(t, 60, f.keyEgressUsed(f.keyID), "pre-charged at WriteHeader")
+	_, _ = w.Write([]byte(strings.Repeat("x", 20)))
+	w.finish()
+	assert.EqualValues(t, 20, f.keyEgressUsed(f.keyID), "credited back the 40 it never sent")
+
+	// Two responses that each fit what is left, together do not: the
+	// second's conditional pre-charge refuses it.
+	a, b := httptest.NewRecorder(), httptest.NewRecorder()
+	wa := f.srv.newEgressCapWriter(a, r, f.tenantID, egressCaps{keyID: f.keyID, keyRemaining: 80}, func(w http.ResponseWriter, capName string) { writeEgressCapRefusal(w, r, capName) })
+	wb := f.srv.newEgressCapWriter(b, r, f.tenantID, egressCaps{keyID: f.keyID, keyRemaining: 80}, func(w http.ResponseWriter, capName string) { writeEgressCapRefusal(w, r, capName) })
+	wa.Header().Set("Content-Length", "50")
+	wb.Header().Set("Content-Length", "50")
+	wa.WriteHeader(http.StatusOK)
+	wb.WriteHeader(http.StatusOK)
+	assert.Equal(t, http.StatusOK, a.Code)
+	assert.Equal(t, http.StatusForbidden, b.Code, "both under the snapshot, only one fits the counter")
+	assert.Equal(t, "key", b.Header().Get("x-stored-cap"))
+	assert.EqualValues(t, 70, f.keyEgressUsed(f.keyID))
+}
+
+// RP88-7: the warning claim answers the step it displaced, so a response
+// whose own view of the month predates another's claim never emits that
+// claim's step again.
+func TestKeyCap_EgressWarningClaimAnswersThePreviousStep(t *testing.T) {
+	f := setupKeyCapFixture(t)
+	code, out := f.keyCaps(f.keyID, nil, 100)
+	require.Equal(t, http.StatusOK, code, out)
+	month := egressMonth(time.Now())
+	f.exec(`UPDATE api_keys SET egress_month = $2::date, egress_used_bytes = 85 WHERE id = $1`, f.keyID, month)
+	c := egressCaps{keyID: f.keyID}
+	f.srv.warnEgress(context.Background(), f.tenantID, usage.CapKey, c, month, 85, 100)
+	assert.Equal(t, []int{80}, f.capWarningSteps())
+	f.srv.warnEgress(context.Background(), f.tenantID, usage.CapKey, c, month, 96, 100)
+	assert.Equal(t, []int{80, 95}, f.capWarningSteps(), "the 80 % is never emitted twice")
+	f.srv.warnEgress(context.Background(), f.tenantID, usage.CapKey, c, month, 99, 100)
+	assert.Equal(t, []int{80, 95}, f.capWarningSteps())
+}
+
+// RP88-8: a management key narrows a cap, never widens one. It may set a cap
+// where none is or lower one; raising or clearing is a person's (409
+// cap_widening_needs_person). A person may do anything.
+func TestKeyCap_AKeyNeverWidensACap(t *testing.T) {
+	f := setupKeyCapFixture(t)
+	mk := &auth.ManagementKey{ID: uuid.NewString(), TenantID: f.tenantID, Scopes: []string{auth.ScopeManageWrite}}
+	asKey := func(h http.HandlerFunc, path string, params map[string]string, body any) (int, map[string]any) {
+		f.t.Helper()
+		raw, _ := json.Marshal(body)
+		req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(string(raw)))
+		ctx := context.WithValue(req.Context(), tenantIDKey, f.tenantID)
+		ctx = context.WithValue(ctx, userIDKey, f.userID)
+		ctx = context.WithValue(ctx, mgmtKeyCtxKey{}, mk)
+		rc := chi.NewRouteContext()
+		for k, v := range params {
+			rc.URLParams.Add(k, v)
+		}
+		req = req.WithContext(context.WithValue(ctx, chi.RouteCtxKey, rc))
+		w := httptest.NewRecorder()
+		h(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+	keyCaps := func(storage, egress any) (int, map[string]any) {
+		return asKey(f.srv.handleMgmtSetKeyCaps, "/api/v1/manage/keys/"+f.keyID+"/caps", map[string]string{"id": f.keyID},
+			map[string]any{"storage_limit_bytes": storage, "egress_limit_bytes": egress})
+	}
+	bucketCaps := func(storage, egress any) (int, map[string]any) {
+		return asKey(f.srv.handleMgmtSetBucketCaps, "/api/v1/manage/buckets/"+f.bucket+"/caps", map[string]string{"name": f.bucket},
+			map[string]any{"storage_limit_bytes": storage, "egress_limit_bytes": egress})
+	}
+	for name, set := range map[string]func(storage, egress any) (int, map[string]any){"key": keyCaps, "bucket": bucketCaps} {
+		code, out := set(1000, 1000)
+		require.Equal(t, http.StatusOK, code, "%s: a cap where none is: %v", name, out)
+		code, out = set(500, 1000)
+		require.Equal(t, http.StatusOK, code, "%s: lower one, keep one: %v", name, out)
+		code, out = set(600, 1000)
+		assert.Equal(t, http.StatusConflict, code, "%s: raised", name)
+		assert.Equal(t, "cap_widening_needs_person", errCode(out), name)
+		code, out = set(500, nil)
+		assert.Equal(t, http.StatusConflict, code, "%s: cleared", name)
+		assert.Equal(t, "cap_widening_needs_person", errCode(out), name)
+	}
+	var s, e int64
+	require.NoError(t, f.db.QueryRow(`SELECT storage_limit_bytes, egress_limit_bytes FROM api_keys WHERE id = $1`, f.keyID).Scan(&s, &e))
+	assert.EqualValues(t, 500, s, "a refused widening changes nothing")
+	assert.EqualValues(t, 1000, e)
+
+	// A person may raise and clear.
+	code, out := f.keyCaps(f.keyID, nil, 5000)
+	require.Equal(t, http.StatusOK, code, out)
+	code, out = f.bucketCaps(nil, nil)
+	require.Equal(t, http.StatusOK, code, out)
 }

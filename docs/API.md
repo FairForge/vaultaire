@@ -613,9 +613,11 @@ An S3 key (`POST /api/v1/manage/keys`, the dashboard's API keys page) is the pri
 
 Both answer `{object, id, storage_limit_bytes, egress_limit_bytes, storage_used_bytes, notes}` and are audited (`key.caps_set`, `bucket.caps_set`).
 
+**A management key narrows a cap, never widens one** (RP88-8): it may set a cap where none is or lower one; raising or clearing a cap is 409 `cap_widening_needs_person`, and a person (the dashboard, a JWT) may do anything. A server — or an agent grant — can never lift its own budget.
+
 **The storage cap** is the bytes the key's writes still **hold** — every object, retained version and upload part it wrote, wherever it is — or the bytes the bucket holds. A temporary credential's writes are its parent key's. A delete or overwrite by any key gives the bytes back to the key that wrote them. The primary pair's writes count to no key.
 
-**The egress cap** is the bytes the key (or the bucket) may serve each UTC month, through S3 (header-signed and presigned), the edge and — for a bucket — `/cdn`. A download is served whole while the month's count is under the cap; once it reaches the cap, downloads are refused until the next month. The tenant's own allowance still paces as before (§ Rate limits); a key's or a bucket's cap never paces, it refuses.
+**The egress cap** is the bytes the key (or the bucket) may serve each UTC month, through S3 (header-signed and presigned), the edge and — for a bucket — `/cdn`. A download is admitted only if it **fits what is left** of the month: its size — the object's, or the Range's — is known before the first byte, and one larger than the cap's remaining bytes is refused, never cut. One that fits is charged at once, so parallel downloads can never together pass the cap; a download the client abandons is credited back by what it did not receive. The tenant's own allowance still paces as before (§ Rate limits); a key's or a bucket's cap never paces, it refuses.
 
 **The smallest number always applies.** A write is checked against the key's cap, the bucket's, the account's and its pool's (a platform's tree); a cap above the account's is accepted, with the note `storage_cap_above_tenant` / `egress_cap_above_tenant`, and the account's decides.
 

@@ -25,3 +25,38 @@ tests:
             exp_annotations:
               summary: "The pool counter of tenant-zero is off by 900 bytes"
               description: "tenant_quotas.pool_used_bytes of the pool root differs from the sum of its pool's storage_used_bytes, and pooled quota checks read the counter. The code never repairs it: when the pool's writes are quiet, reseed it with POST /api/v1/admin/quota/reconcile?tenant_id=<root>&pool=reseed (deploy/monitoring/vaultaire-quota.yml)."
+
+  # RB12-6: a capped key's or a counted bucket's drift held 30 minutes fires,
+  # per kind; one that cleared after 10 does not; 0 never does.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_holder_storage_drift_rows{kind="key"}'
+        values: '2x40'
+      - series: 'vaultaire_holder_storage_drift_rows{kind="bucket"}'
+        values: '1x10 0x30'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: HolderStorageDrift
+        exp_alerts:
+          - exp_labels:
+              kind: key
+              severity: warning
+            exp_annotations:
+              summary: "2 capped key(s) have a storage counter their rows do not explain"
+              description: "storage_used_bytes of a capped key (kind=key) or a counted bucket (kind=bucket) differs from what its rows hold (vaultaire_holder_storage_drift_bytes says by how much), and that cap is checked against the counter. A deploy overlap (RB12-1) or a bucket seeded while one of its writes was in flight (RB12-10) explains a small one. The code never repairs it: when the tenant's writes are quiet, re-assert the counters with POST /api/v1/admin/quota/reconcile?tenant_id=<tenant> (deploy/monitoring/vaultaire-quota.yml)."
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_holder_storage_drift_rows{kind="key"}'
+        values: '0x40'
+      - series: 'vaultaire_holder_storage_drift_rows{kind="bucket"}'
+        values: '3x40'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: HolderStorageDrift
+        exp_alerts:
+          - exp_labels:
+              kind: bucket
+              severity: warning
+            exp_annotations:
+              summary: "3 capped bucket(s) have a storage counter their rows do not explain"
+              description: "storage_used_bytes of a capped key (kind=key) or a counted bucket (kind=bucket) differs from what its rows hold (vaultaire_holder_storage_drift_bytes says by how much), and that cap is checked against the counter. A deploy overlap (RB12-1) or a bucket seeded while one of its writes was in flight (RB12-10) explains a small one. The code never repairs it: when the tenant's writes are quiet, re-assert the counters with POST /api/v1/admin/quota/reconcile?tenant_id=<tenant> (deploy/monitoring/vaultaire-quota.yml)."

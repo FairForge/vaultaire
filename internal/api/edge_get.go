@@ -206,11 +206,12 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 			egressWouldThrottle.WithLabelValues(edgeHost).Inc()
 		}
 	}
-	// A key's or a bucket's own egress cap (WP-KEY-1, F-39 (a)): spent = the
-	// origin's refusal (never one of the admit's own); under it, the read's
-	// bytes are counted to it at the commit.
+	// A key's or a bucket's own egress cap (WP-KEY-1, F-39 (a)): spent, or
+	// less left than the admitted span (RP88-6), = the origin's refusal
+	// (never one of the admit's own); under it, the read's bytes are counted
+	// to it at the commit.
 	ecaps, spent := s.egressCapsOf(sctx, tenantID, bucket)
-	if spent != "" {
+	if left, _, capped := ecaps.remaining(); spent != "" || (capped && length > left) {
 		return passThrough("capped")
 	}
 
