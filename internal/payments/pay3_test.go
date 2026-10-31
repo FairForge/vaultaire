@@ -64,7 +64,7 @@ func TestManualPayment_GrantsWithoutRow_ThenExtends(t *testing.T) {
 
 	// Assert 2
 	assert.False(t, res2.Granted)
-	assert.WithinDuration(t, e.PaidThrough.UTC().AddDate(0, 1, 0), res2.PaidThrough, time.Minute, "one month on, in UTC (the Postgres rule)")
+	assert.WithinDuration(t, addPeriod(e.PaidThrough, PeriodMonthly), res2.PaidThrough, time.Minute, "one month on, in UTC (the Postgres rule: the day clamped to the month, RP88)")
 	assert.NotEqual(t, res.InvoiceNumber, res2.InvoiceNumber)
 	assert.Equal(t, 2, f.auditCount(t, "billing.house_granted"), "an extension is a grant that changed the row")
 }
