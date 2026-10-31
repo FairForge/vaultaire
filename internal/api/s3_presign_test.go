@@ -142,8 +142,9 @@ func expectTenantLookup(mock sqlmock.Sqlmock) {
 
 // primaryKeyRow is what LookupCredential scans for a live primary row.
 func primaryKeyRow(tenantID, secret string) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}).
-		AddRow(tenantID, secret, nil, nil, []byte(`["*"]`), "{}", "{}", nil, nil, true)
+	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary",
+		"id", "egress_cap", "egress_used"}).
+		AddRow(tenantID, secret, nil, nil, []byte(`["*"]`), "{}", "{}", nil, nil, true, "00000000-0000-0000-0000-0000000000aa", 0, 0)
 }
 
 func TestIsPresignedRequest(t *testing.T) {
@@ -215,7 +216,8 @@ func TestVerifyPresignedURL_InvalidAccessKey(t *testing.T) {
 
 	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs("NONEXISTENT000000000").
-		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary"}))
+		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary",
+			"id", "egress_cap", "egress_used"}))
 
 	now := time.Now().UTC()
 	q := signPresignedURL("GET", "/bucket/key", "localhost:8000", "NONEXISTENT000000000", testSecretKey, 3600, now)
@@ -418,6 +420,9 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WillReturnError(sql.ErrNoRows)
 	mock.ExpectExec(`INSERT INTO object_head_cache`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// The row names its writer (WP-KEY-1): the primary pair, none.
+	mock.ExpectExec(`UPDATE object_head_cache SET written_by_key`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT is_chunked, COALESCE\(storage_key, ''\), floor, size_bytes, COALESCE\(encryption_algorithm, ''\) FROM object_head_cache`).
 		WillReturnRows(sqlmock.NewRows([]string{"is_chunked", "storage_key", "floor", "size_bytes", "encryption_algorithm"}).AddRow(false, objectKey+"@"+zeroID, "standard", len(testContent), ""))
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
@@ -428,6 +433,9 @@ func TestPresignedURL_Integration(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectCommit()
 
+	// The bucket's own egress cap (WP-KEY-1): none.
+	mock.ExpectQuery(`SELECT COALESCE\(egress_limit_bytes, 0\)`).
+		WillReturnError(sql.ErrNoRows)
 	// HandleGet internals: versioning check, the head row (naming the
 	// address the PUT wrote).
 	mock.ExpectQuery(`SELECT versioning_status FROM buckets`).
