@@ -8,7 +8,7 @@ Authentication service for Vaultaire. Handles user registration, login, JWT toke
 - **User** — `{ID, Email, PasswordHash, Company, TenantID, EmailVerified, CreatedAt, UpdatedAt}`
 - **Tenant** — `{ID, UserID, AccessKey, SecretKey, CreatedAt}` — the pair is the MIRROR of the live primary `api_keys` row (WP-R5-14); the in-memory `keyIndex[accessKey]` is built from live `api_keys` rows only
 - **APIKey** — `{ID, UserID, TenantID, IsPrimary, Name, Key, Secret, Hash, Permissions, BucketScope, IPAllowlist, ExpiresAt, LastUsed, CreatedAt, RevokedAt, Metadata, UsageCount, LastIP}`
-- **KeyScope** — `{Permissions, BucketScope, IPAllowlist, ExpiresAt}` — returned from auth lookups for scope enforcement
+- **KeyScope** — `{Permissions, BucketScope, IPAllowlist, ExpiresAt, Temporary, KeyID, Primary, EgressCap, EgressUsed}` — returned from auth lookups for scope enforcement. **WP-KEY-1 (D-RP88-1):** `KeyID` is the `api_keys.id` that signed (an STS token: its parent's), `Primary` the primary pair (or a token of it; never capped, its writes counted to no key), `EgressCap`/`EgressUsed` the key's own egress cap and this UTC month's counter — all filled by `LookupCredential`'s one SELECT (`keyEgressColumns`); a management key's ceiling (`S3Ceiling.KeyScope`) has no KeyID
 - **KeyCreateOptions** — optional scope params for `GenerateAPIKey`
 
 ## Audit trail (Review R11-09)
