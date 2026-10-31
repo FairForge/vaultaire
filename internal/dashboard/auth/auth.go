@@ -460,9 +460,11 @@ func generateToken() (string, error) {
 // be signed in. Only that page's path is ever stored or followed.
 const ReturnToCookie = "stored_return_to"
 
-// returnToAllowed: the consent page of the MCP authorization flow, only.
+// returnToAllowed: the consent page of the MCP authorization flow, and a
+// claim link (WP-APP-1 PR D), only.
 func returnToAllowed(uri string) bool {
-	return uri == "/dashboard/agents/connect" || strings.HasPrefix(uri, "/dashboard/agents/connect?")
+	return uri == "/dashboard/agents/connect" || strings.HasPrefix(uri, "/dashboard/agents/connect?") ||
+		(strings.HasPrefix(uri, "/dashboard/claim/") && !strings.ContainsAny(strings.TrimPrefix(uri, "/dashboard/claim/"), "/?#\\"))
 }
 
 // SetReturnTo remembers r's page for after the sign-in when it is one a

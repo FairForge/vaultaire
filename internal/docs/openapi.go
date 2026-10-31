@@ -1202,6 +1202,32 @@ func generateManagementPaths() map[string]*PathItem {
 					"409": errResp("`approval_decided` or `approval_expired`"),
 				})),
 		},
+		// WP-APP-1 PR D: claimable apps.
+		"/api/v1/partner/claimables": {
+			Get: mgmt(jsonOp("Platform", "List claimables", "PartnerListClaimables",
+				"The partner's claimable apps, newest first (never a token): `state` open | claimed | expired. A partner's key only; any other caller gets 404.",
+				map[string]Response{"200": jsonResp("Claimables", listSchema("", objectPtr("A claimable", map[string]*Schema{"id": str(""), "tenant_id": str(""), "state": str("")})))})),
+			Post: mut(withBody(jsonOp("Platform", "Create a claimable app", "PartnerCreateClaimable",
+				"A provisional tenant (1 GiB, never Public, 7 days, inside the partner's pool) and its single-use `claim_url` (only its sha256 kept), with a management key (`manage:write`) the partner's builder stores with. "+
+					"A person who opens the link keeps it, with its data and keys, as an app of their account; unclaimed, it is erased when its 7 days end. A partner's key only (404 otherwise).",
+				map[string]Response{
+					"201": jsonResp("The claimable", objectPtr("", map[string]*Schema{"id": str(""), "tenant_id": str(""), "claim_url": str("Shown once"), "expires_at": str(""),
+						"management_key": objectPtr("", map[string]*Schema{"secret": str("Shown once")})})),
+					"400": errResp("`invalid_json` or `label_required`"),
+					"404": errResp("`not_found` (not a partner's key)"),
+				}),
+				jsonBody("The claimable", objectPtr("", map[string]*Schema{"label": str("The app's name")}, "label")))),
+		},
+		"/api/v1/manage/claims/{token}": {
+			Parameters: []Parameter{pathParam("token", "The claim link's token")},
+			Post: mut(jsonOp("Management", "Claim an app", "ManageClaim",
+				"A person (a verified account; owner or admin) keeps a partner's claimable as an app of the account they act on, in one transaction: re-parented, its bytes moved into this account's pool, its keys kept. 410 `claim_gone` for a used, expired or unknown link. Audited `app.claimed`.",
+				map[string]Response{
+					"200": jsonResp("The app", objectPtr("", map[string]*Schema{"object": strEnum("", "app"), "id": str(""), "storage_used_bytes": integer("")})),
+					"403": errResp("`person_required`, `role_forbidden` or `claim_needs_verified_account`"),
+					"410": errResp("`claim_gone`"),
+				})),
+		},
 		// WP-APP-1 PR C: self-serve apps (docs/API.md § Apps).
 		"/api/v1/manage/apps": {
 			Get: mgmt(jsonOp("Management", "List apps", "ManageListApps",
@@ -1983,6 +2009,17 @@ func generateAdminPaths() map[string]*PathItem {
 						"flags": arrayOf(ref("Flag")),
 					}, "flags")),
 				})),
+		},
+		"/api/v1/admin/tenants/{tenant_id}/partner": {
+			Parameters: []Parameter{pathParam("tenant_id", "The root tenant to make (or unmake) a partner")},
+			Put: admin(withBody(jsonOp("Admin", "Grant or revoke the partner flag", "AdminSetPartner",
+				"WP-APP-1 PR D (F-42): a partner's management key (scope `partner`) makes claimable apps under /api/v1/partner. Audited `admin.partner_granted` / `admin.partner_revoked`.",
+				map[string]Response{
+					"200": jsonResp("The flag as set", objectPtr("", map[string]*Schema{"object": strEnum("", "tenant"), "id": str(""), "partner": boolean("")})),
+					"400": errResp("`invalid_json` or `child_of_child`"),
+					"404": errResp("`tenant_not_found`"),
+				}),
+				jsonBody("The flag", objectPtr("", map[string]*Schema{"partner": boolean("")}, "partner")))),
 		},
 		"/api/v1/admin/tenants/{tenant_id}/platform": {
 			Parameters: []Parameter{pathParam("tenant_id", "The tenant to make (or unmake) a platform")},

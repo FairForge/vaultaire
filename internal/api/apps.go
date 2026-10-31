@@ -32,6 +32,8 @@ func (s *Server) registerAppRoutes(r chi.Router) {
 	r.Get("/apps", s.handleMgmtListApps)
 	r.With(s.requireRole(auth.ActionChildWrite)).Post("/apps", s.handleMgmtCreateApp)
 	r.With(s.requireRole(auth.ActionChildWrite)).Delete("/apps/{id}", s.handleMgmtDeleteApp)
+	// WP-APP-1 PR D: a person keeps a claimable as an app (claimable.go).
+	r.With(s.requirePerson, s.requireRole(auth.ActionChildWrite)).Post("/claims/{token}", s.handleMgmtClaim)
 }
 
 func (s *Server) appsOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
