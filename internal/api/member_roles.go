@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
@@ -40,6 +41,10 @@ func activeTenant(r *http.Request) string {
 func (s *Server) requireMember(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if memberRole(r.Context()) == "" {
+			if managementKeyOf(r.Context()) != nil {
+				writeManagementError(w, ErrTypePermission, "scope_forbidden", "this management key has no scope for this surface", "")
+				return
+			}
 			writeManagementError(w, ErrTypePermission, "not_a_member", "this account is not a member of the token's tenant", "")
 			return
 		}
@@ -53,6 +58,11 @@ func (s *Server) requireRole(action auth.Action) func(http.Handler) http.Handler
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if role := memberRole(r.Context()); !auth.Can(role, action) {
+				if k := managementKeyOf(r.Context()); k != nil {
+					writeManagementError(w, ErrTypePermission, "scope_forbidden",
+						"this management key's scopes ("+strings.Join(k.Scopes, ", ")+") do not allow this ("+string(action)+")", "")
+					return
+				}
 				writeManagementError(w, ErrTypePermission, "role_forbidden",
 					"a member with the role "+string(role)+" may not do this ("+string(action)+")", "")
 				return

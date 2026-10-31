@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/audit"
 )
 
 const (
@@ -105,7 +107,11 @@ func (im *idempotencyMiddleware) Middleware(next http.Handler) http.Handler {
 		// one tenant replayed one's answer to the other — a viewer got a
 		// developer's presigned PUT. Stored as <user id>:<key>, no schema
 		// change; a request with no user (none today) keeps the bare key.
-		if actor, _ := r.Context().Value(userIDKey).(string); actor != "" {
+		// A management key's own (WP-KEY-1): mk:<id>, never the owner its
+		// rows hang on.
+		if p := audit.PrincipalFromContext(r.Context()); p != "" {
+			key = p + ":" + key
+		} else if actor, _ := r.Context().Value(userIDKey).(string); actor != "" {
 			key = actor + ":" + key
 		}
 

@@ -210,6 +210,10 @@ var Deleted = []Rule{
 	// rule alone left a developer's key live for the erased tenant). A
 	// platform's child and a sandbox lose theirs by this rule too.
 	{"api_keys", `DELETE FROM api_keys WHERE tenant_id = $1`, ByTenant},
+	// WP-KEY-1 (121): a management key is the TENANT's too (a platform's
+	// server key, an app's backend key): it goes with the tenant, never
+	// with the member who minted it (below: created_by is forgotten).
+	{"management_keys", `DELETE FROM management_keys WHERE tenant_id = $1`, ByTenant},
 	{"admin_notifications", `DELETE FROM admin_notifications WHERE tenant_id = $1`, ByTenant},
 	{"admin_notes", `DELETE FROM admin_notes WHERE tenant_id = $1`, ByTenant},
 	{"change_history", `DELETE FROM change_history WHERE tenant_id = $1`, ByTenant},
@@ -226,6 +230,11 @@ var Deleted = []Rule{
 	// other owner to take it goes with the user, below.
 	{"api_keys", keyMakerHandover, ByUser},
 	{"api_keys", `DELETE FROM api_keys WHERE user_id::text = $1`, ByUser},
+	// A management key the user minted on a tenant stays that tenant's and
+	// live (RP86: no cascade from users — a member's erasure must not
+	// revoke the platform's server key); its maker is forgotten. It acts
+	// as the tenant's owner whoever minted it (auth.LookupManagementKey).
+	{"management_keys", `UPDATE management_keys SET created_by = NULL WHERE created_by::text = $1`, ByUser},
 	// WP-TEAM-1 (118): the tenant's members and invitations go with the
 	// tenant; the user's memberships of tenants it does not own go with the
 	// user (a member's own users row is never erased with someone else's
@@ -270,9 +279,9 @@ var Deleted = []Rule{
 	// what they did to other accounts and to the service is not their own
 	// entry — it is de-identified first, so the DELETE no longer matches it.
 	{"audit_logs", operatorTrailScrub("audit_logs"), ByAccount},
-	{"audit_logs", `DELETE FROM audit_logs WHERE user_id::text = $1 OR performed_by::text = $1`, ByUser},
+	{"audit_logs", `DELETE FROM audit_logs WHERE user_id::text = $1 OR performed_by::text = $1 OR principal = $1`, ByUser},
 	{"audit_logs_archive", operatorTrailScrub("audit_logs_archive"), ByAccount},
-	{"audit_logs_archive", `DELETE FROM audit_logs_archive WHERE user_id::text = $1 OR performed_by::text = $1`, ByUser},
+	{"audit_logs_archive", `DELETE FROM audit_logs_archive WHERE user_id::text = $1 OR performed_by::text = $1 OR principal = $1`, ByUser},
 	// The waitlist row is the sign-up; with the account it is PII with no
 	// purpose left.
 	{"waitlist_signups", `DELETE FROM waitlist_signups WHERE email = $1`, ByEmail},
@@ -346,6 +355,7 @@ func operatorTrailScrub(table string) string {
 	return `UPDATE ` + table + `
 	   SET user_id      = CASE WHEN user_id::text = $1 THEN NULL ELSE user_id END,
 	       performed_by = CASE WHEN performed_by::text = $1 THEN NULL ELSE performed_by END,
+	       principal    = CASE WHEN principal = $1 THEN NULL ELSE principal END,
 	       ip         = CASE WHEN performed_by IS NULL OR performed_by::text = $1 THEN NULL ELSE ip END,
 	       user_agent = CASE WHEN performed_by IS NULL OR performed_by::text = $1 THEN NULL ELSE user_agent END,
 	       metadata = (CASE WHEN jsonb_typeof(metadata) = 'object' THEN
@@ -354,7 +364,7 @@ func operatorTrailScrub(table string) string {
 	                         WHERE jsonb_typeof(m.v) <> 'string'
 	                            OR lower(m.v #>> '{}') NOT IN (lower($1), lower($3)))
 	                   ELSE '{}'::jsonb END) || '{"actor_erased": true}'::jsonb
-	 WHERE (user_id::text = $1 OR performed_by::text = $1)
+	 WHERE (user_id::text = $1 OR performed_by::text = $1 OR principal = $1)
 	   AND ((tenant_id IS NOT NULL AND tenant_id <> $2)
 	     OR event_type = 'admin'
 	     OR (tenant_id IS NULL AND user_id::text IS DISTINCT FROM $1))`

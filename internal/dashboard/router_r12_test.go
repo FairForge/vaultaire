@@ -51,7 +51,7 @@ func TestLogin_WritesAuditRowsForFailureAndSuccess(t *testing.T) {
 	// Failure: one auth.login_failed row with the reason and the e-mail.
 	mock.ExpectExec(`INSERT INTO audit_logs`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "auth", "auth.login_failed", sqlmock.AnyArg(), "success", "warning",
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	w := postForm(r, "/login", url.Values{"email": {"audited@stored.ge"}, "password": {"wrong"}})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -59,7 +59,7 @@ func TestLogin_WritesAuditRowsForFailureAndSuccess(t *testing.T) {
 	// Unknown user: same message, still a row (reason=unknown_user).
 	mock.ExpectExec(`INSERT INTO audit_logs`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "auth", "auth.login_failed", sqlmock.AnyArg(), "success", "warning",
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	w = postForm(r, "/login", url.Values{"email": {"ghost@stored.ge"}, "password": {"wrong"}})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -69,7 +69,7 @@ func TestLogin_WritesAuditRowsForFailureAndSuccess(t *testing.T) {
 	mock.ExpectQuery(`SELECT role FROM users`).WillReturnRows(sqlmock.NewRows([]string{"role"}).AddRow("user"))
 	mock.ExpectExec(`INSERT INTO audit_logs`).
 		WithArgs(sqlmock.AnyArg(), sqlmock.AnyArg(), "auth", "auth.login_succeeded", sqlmock.AnyArg(), "success", "info",
-			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
+			sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg(), sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	w = postForm(r, "/login", url.Values{"email": {"audited@stored.ge"}, "password": {"securepass123"}})
 	assert.Equal(t, http.StatusSeeOther, w.Code)

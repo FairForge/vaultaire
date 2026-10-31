@@ -424,22 +424,35 @@ func SetMemberRole(ctx context.Context, db *sql.DB, tenantID, userID string, rol
 	return nil
 }
 
-// MadeKey is a live key of a tenant and the member who made it (RP84-4).
+// MadeKey is a live key of a tenant and the member who made it (RP84-4):
+// Kind "s3" (api_keys) or "management" (management_keys, WP-KEY-1).
 type MadeKey struct {
 	ID       string     `json:"id"`
+	Kind     string     `json:"kind"`
 	Name     string     `json:"name"`
 	LastUsed *time.Time `json:"last_used"`
 }
 
+// The two kinds of MadeKey.
+const (
+	MadeKeyS3         = "s3"
+	MadeKeyManagement = "management"
+)
+
 // KeysMadeBy lists the live keys userID made on tenantID — the tenant's
-// keys (D-STRIPE-40) a removal leaves live unless it revokes them.
+// keys (D-STRIPE-40) a removal leaves live unless it revokes them: its S3
+// keys, then its management keys (RP86).
 func KeysMadeBy(ctx context.Context, q interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }, tenantID, userID string) ([]MadeKey, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id::text, name, last_used FROM api_keys
-		 WHERE tenant_id = $1 AND user_id::text = $2 AND revoked_at IS NULL AND NOT is_primary
-		 ORDER BY created_at, id`, tenantID, userID)
+		SELECT id, kind, name, last_used FROM (
+		  SELECT id::text AS id, 's3' AS kind, name, last_used, created_at, 0 AS ord FROM api_keys
+		   WHERE tenant_id = $1 AND user_id::text = $2 AND revoked_at IS NULL AND NOT is_primary
+		  UNION ALL
+		  SELECT id::text, 'management', name, last_used_at::timestamp, created_at::timestamp, 1 FROM management_keys
+		   WHERE tenant_id = $1 AND created_by::text = $2 AND revoked_at IS NULL) k
+		 ORDER BY ord, created_at, id`, tenantID, userID)
 	if err != nil {
 		return nil, fmt.Errorf("keys made by %s on %s: %w", userID, tenantID, err)
 	}
@@ -448,7 +461,7 @@ func KeysMadeBy(ctx context.Context, q interface {
 	for rows.Next() {
 		var k MadeKey
 		var used sql.NullTime
-		if err := rows.Scan(&k.ID, &k.Name, &used); err != nil {
+		if err := rows.Scan(&k.ID, &k.Kind, &k.Name, &used); err != nil {
 			return nil, fmt.Errorf("keys made by %s on %s: %w", userID, tenantID, err)
 		}
 		if used.Valid {
@@ -492,9 +505,18 @@ func RemoveMember(ctx context.Context, db *sql.DB, tenantID, userID string, revo
 		return res, err
 	}
 	if revokeKeys && len(res.KeysMade) > 0 {
-		ids := make([]string, len(res.KeysMade))
-		for i, k := range res.KeysMade {
-			ids[i] = k.ID
+		var ids, mgmt []string
+		for _, k := range res.KeysMade {
+			if k.Kind == MadeKeyManagement {
+				mgmt = append(mgmt, k.ID)
+			} else {
+				ids = append(ids, k.ID)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE management_keys SET revoked_at = NOW()
+			 WHERE id::text = ANY($2) AND tenant_id = $1 AND revoked_at IS NULL`, tenantID, pq.Array(mgmt)); err != nil {
+			return res, fmt.Errorf("remove %s from %s: revoke management keys: %w", userID, tenantID, err)
 		}
 		out, err := tx.ExecContext(ctx, `
 			DELETE FROM sts_tokens WHERE tenant_id = $1
@@ -511,7 +533,7 @@ func RemoveMember(ctx context.Context, db *sql.DB, tenantID, userID string, revo
 		}
 		if err := audit.RecordTx(ctx, tx, audit.Entry{UserID: userID, TenantID: tenantID, Action: "member.keys_revoked",
 			Resource: "user:" + userID, Severity: "warning",
-			Metadata: map[string]any{"keys": ids, "sts_tokens_deleted": res.STSTokens}}); err != nil {
+			Metadata: map[string]any{"keys": ids, "management_keys": mgmt, "sts_tokens_deleted": res.STSTokens}}); err != nil {
 			return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
 		}
 		res.KeysRevoked = true
