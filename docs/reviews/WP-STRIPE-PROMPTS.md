@@ -937,9 +937,126 @@ PR B (`stage1a-p54-budgets`), in this order:
 5. **D-RP88-1 first:** `KeyScope.KeyID` filled by `auth.Auth.LookupCredential` on every scope it answers (an STS token: its parent key's id); `ValidateRequest` and `ValidateDescribed` carry it unchanged; a management key's ceiling has none. `TestKeyScope_NamesItsKey` (a scoped key, the primary, an STS token, a management key's ceiling).
 6. **Attribution:** every row writer sets `written_by_key` from the context's `KeyID` (`commitBlobWrite`, the version write, `CreateMultipartUpload`; the edge admit stores it in `edge_admits.attrs` and the commit writes it). `TestKeyCap_RowsNameTheirWriter`.
 7. **The ledger:** `internal/usage` moves `api_keys.storage_used_bytes` and `buckets.storage_used_bytes` in the statement that moves the tenant's (+ on a landed write, − on the displaced or deleted row's key and bucket, the part reservation on the upload's key); the daily reconcile seeds a NULL bucket counter and re-asserts both, with a drift gauge each. `fits` takes min(key, bucket, tenant, pool); the refusal is 403 `QuotaExceeded` + `x-stored-cap` naming the first cap that failed. The prompt's tests `TestKeyCap_PutRefusedPastTheKeysStorageCap`, `TestKeyCap_403NamesTheCap`, plus `TestKeyCap_DeleteByAnotherKeyReleasesTheWriters` and `TestKeyCap_BucketCapAboveTheTenantsIsANote` (F-39 (b)).
-8. Steps 7 and 8 of the Opus edition as written (the egress cap per key on `egress_member.go`'s bucket keyed by `KeyID`; STS narrows; the edge admit runs the same reservation). F-39 (a) stays the owner's: build pace-then-refuse-at-2× behind one constant.
+8. Steps 7 and 8 of the Opus edition as written (the egress cap per key on `egress_member.go`'s bucket keyed by `KeyID`; STS narrows; the edge admit runs the same reservation). F-39 (a) stays the owner's: build pace-then-refuse-at-2× behind one constant. **Superseded 2026-10-31: the owner decided F-39** — an egress cap on a key or a bucket refuses when spent (no pacing, no 2×), the minimum always applies, the primary is never capped (`docs/reviews/WP-STRIPE-6.md` D-STRIPE-61; the test is `TestKeyCap_EgressCapRefusesAtTheKey`).
 
 PR C and PR D as written. The post-merge review stays RP88 (Part 2 of the same file).
+
+## Stage 1a Prompt 55: WP-AGENT-1 + WP-APP-1 — AI agents as principals, then AI-created apps (Part 0: RP88 Part 2's findings)
+
+**From 54 (`docs/reviews/WP-STRIPE-6.md`; the post-merge review is RP88 Part 2):**
+- **The management key is live and dark** (migration 121, `management_keys`): a TENANT's bearer key, `sk_live_…` or (with `"test": true`, on the sandbox) `sk_test_…`, sha256-stored, shown once, an optional `expires_at`, looked up on every request. Its scopes are its role per surface (`requireCaller`), and it never does what needs a person (`requirePerson`, 403 `person_required`). Its `s3_ceiling` bounds what it mints. An app child's key (`apps`) reaches its own subtree only.
+- **An agent grant IS a management key** (`docs/ACCOUNTS.md` § Principal): this WP adds who it acts for, the consent, the approvals and the default scope. It never adds a second credential kind. The key's expiry (RP88-2) is the grant's lifetime (30 days by default).
+- **Budgets are live and dark:**
+  - a scoped key's and a bucket's storage cap (the bytes held, `written_by_key`) and egress cap per UTC month (refused when spent, `key.cap_warning` at 80 / 95 %);
+  - min(key, bucket, tenant, pool) on every write, `x-stored-cap` on every refusal;
+  - an agent grant's caps are its S3 keys' caps, and an app's cap is its tenant cap inside the pool.
+- **D-STRIPE-49:** depth 2 is made by the platform (`parent_id` = the app). An app's own key (`apps`) now makes its end users itself.
+
+**Part 0:** RP88 Part 2's findings (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2), in the review's order. The review fills them. Also take any of WP-STRIPE-6's residuals RB12-1…8 the review marks for this prompt.
+
+Read first:
+- plan § WP-STRIPE, the WP-AGENT-1 and WP-APP-1 rows (the contract);
+- `docs/ACCOUNTS.md` (§ Principal, § Apps, § Agents);
+- `docs/reviews/WP-STRIPE-6.md` and its review;
+- `internal/api/management_keys.go`, `internal/auth/management_keys.go`, `internal/api/key_caps.go`, `internal/usage/holders.go`;
+- the Workers MCP server's notes (40.7 / 26.8);
+- `internal/api/platform_tenants.go` (`handlePlatformCreateTenant`, the app's children).
+
+Lane: Developer surface (agents) and Consumer-adjacent (apps). Migration **122**, one file for the prompt, landed with its first PR.
+
+PRs:
+- (0) RP88 Part 2's fixes;
+- (A) **agent grants** (WP-AGENT-1):
+  - `agent_grants` (the management key's id, `actor = agent`, the agent's name, the granting member, `approved_scopes`);
+  - the OAuth 2.1 + PKCE flow with dynamic client registration at `mcp.stored.cloud` and `stored mcp` over stdio. The consent screen shows the scope, the caps and the lifetime;
+  - the result is a management key with `expires_at` = +30 days (renewable) and a test key on the sandbox to rehearse;
+  - the request log and the audit name the agent and its person;
+- (B) **approvals:**
+  - `approvals`: a request outside the default agent scope answers 403 `approval_required` with a link (DeleteBucket, making anything Public, Object Lock bypass, minting beyond its scope, exports, the account's erasure);
+  - the person grants it once in the dashboard, with TOTP for a destructive act;
+  - buckets an agent creates are versioning-Enabled;
+  - the optional agent workspace is a `managed` child with its own cap;
+- (C) **apps** (WP-APP-1):
+  - any verified, paying account makes up to 25 `app` children with no admin grant (the grant stays for third-party platforms);
+  - an app's management key (`apps`) makes its end users at depth 2 and stores within the builder's pool;
+  - an app is deleted as a unit (the cascade);
+  - an app's content is never Public until its root is verified (line 14);
+- (D) **claimable apps:**
+  - a PARTNER key kind (a management key with scope `partner`, granted by an operator) creates a provisional account (1 GiB, never public, 7 days) and a claim link (`claims`);
+  - claimed, it becomes an app under the claimer with its data; unclaimed, it is purged like test data. No anonymous creation;
+- (E) the dashboard (Agents, Apps pages);
+- (F) docs.
+
+Tests (red first):
+- `TestAgent_DefaultScopeCannotDeleteABucket`, `TestAgent_ApprovalGrantsOnce`, `TestAgent_GrantExpires`, `TestAgent_CreatedBucketsAreVersioned`, `TestAgent_RequestLogNamesTheAgent`, `TestAgent_NeverReadsPrivate`;
+- `TestApps_BuilderCreatesWithoutAGrant`, `TestApps_EndUsersAtDepthTwoDrawFromTheBuildersPool`, `TestApps_DeleteCascades`, `TestApps_NeverPublicUntilVerified`;
+- `TestClaimable_PartnerOnlyAndExpires`, `TestClaimable_ClaimMovesTheDataUnderTheClaimer`.
+
+Prod proof:
+- Claude connects to tenant zero over MCP, writes an object, and a DeleteBucket asks for approval, which the owner grants;
+- tenant zero makes an app, whose backend key makes an end user and stores an object;
+- a partner-keyed claimable is claimed by tenant zero.
+
+Also owed: WP-KEY-1's own proof (RB12-7, the owner's TOTP).
+
+Closeout: `docs/reviews/WP-STRIPE-7.md`, STATUS, both plan rows, CLAUDE.md, `docs/API.md` § Agents + § Apps, `llms.txt`, the ledger row; Prompt 56 (WP-FAMILY-1) written here. The post-merge review is RP90.
+
+## Stage 1a Prompt 55 — Opus edition
+
+**From 54:** see the chain edition's "From 54" block above.
+
+You are building plan § WP-STRIPE's WP-AGENT-1 and WP-APP-1 rows in the Vaultaire repository: AI agents as principals (an agent grant is a management key with a person behind it, a default scope and approvals), then AI-created apps (an `app` child any paying account makes, and the claimable apps of AI app builders). Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database (`make test-db TEST_DB=vaultaire_test_p55`), migration 122.
+
+Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-6.md`, and its review `docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2 (RP88). If Part 2 is not on main when you start, STOP and say so: never guess a review.
+
+PR 0 — Branch `stage1a-p55-part0`. RP88 Part 2's findings in the review's order, each test first. The review fills this list.
+
+PR A — agent grants. Branch `stage1a-p55-agents`.
+1. **Migration 122.** One file for the prompt, landed with this PR (D-STRIPE-43's rule):
+   - `agent_grants`: `id`, `tenant_id`, `management_key_id` (the grant's key), `agent_name`, `client_id` (the OAuth client), `granted_by` (uuid, no foreign key — the RP84-1 lesson), `approved_scopes text[]`, `created_at`, `renewed_at`;
+   - `approvals`: `id`, `tenant_id`, `grant_id`, `action`, `resource`, `requested_at`, `decided_at`, `decided_by`, `decision`, `used_at`;
+   - `claims` and the `partner` scope, for PR D;
+   - the erasure rules and the export sections in the same PR.
+2. Test first: `TestAgent_GrantExpires`, `TestAgent_RequestLogNamesTheAgent`. Then the grant:
+   - a management key (`auth.MintManagementKey`) with `expires_at` = +30 days and a test key on the sandbox (`"test": true`, RP88-1);
+   - renewal pushes `expires_at` and never widens the scope;
+   - the request log's key column is `mk:<id>`, and the audit's principal is `agent:<grant>` on behalf of the granting member.
+3. The connect flow: OAuth 2.1 + PKCE with dynamic client registration, the MCP authorization flow.
+   - On the Worker `mcp.stored.cloud` (`edge/mcp/`, new) and in `stored mcp` over stdio.
+   - The consent page is the dashboard's, a person's session with TOTP, and shows the scope, the caps and the lifetime.
+   - The code is exchanged once.
+   - Test `TestAgent_ConsentMintsOneGrant`.
+
+PR B — approvals. Branch `stage1a-p55-approvals`.
+4. Test first: `TestAgent_DefaultScopeCannotDeleteABucket`, `TestAgent_ApprovalGrantsOnce`. A grant's key reaching an action outside the default agent scope answers 403 `approval_required` with `approval_url`. The person approves in the dashboard (TOTP for a destructive act). The approval is single-use (`used_at`), names one action on one resource, and expires in 24 h.
+5. Test first: `TestAgent_CreatedBucketsAreVersioned`, `TestAgent_NeverReadsPrivate`. A bucket an agent creates is versioning-Enabled. A grant never reaches a Private bucket (line 8): a list leaves it out and a read is 403. The optional workspace is a `managed` child of the tenant with its own cap.
+
+PR C — apps. Branch `stage1a-p55-apps`.
+6. Test first: `TestApps_BuilderCreatesWithoutAGrant`, `TestApps_EndUsersAtDepthTwoDrawFromTheBuildersPool`, `TestApps_DeleteCascades`, `TestApps_NeverPublicUntilVerified`. `POST /api/v1/manage/apps` makes an `app` child of the caller's tenant without the platform grant: a verified, paying account, up to 25 apps. Then:
+   - the app's management key (`apps`) makes its end users (depth 2) and stores within the builder's pool;
+   - `DELETE` cascades;
+   - an app is never Public until its root is verified.
+
+PR D — claimable apps. Branch `stage1a-p55-claimable`.
+7. Test first: `TestClaimable_PartnerOnlyAndExpires`, `TestClaimable_ClaimMovesTheDataUnderTheClaimer`.
+   - A `partner` management key (an operator grants the scope) makes a provisional tenant (1 GiB, never Public, 7 days) and a single-use claim link (`claims`, only its sha256 stored).
+   - A claim moves the tenant under the claimer as an `app` child with its data, in one transaction: the pool counter moves (`usage.moveUsed`), as do the keys' counters (they stay the tenant's).
+   - An unclaimed tenant is purged like test data.
+
+PR E — the dashboard: an Agents page (the grants, their person, renew, revoke, the pending approvals) and an Apps page (make, list, delete), each behind `dashboardAction`.
+
+PR F — docs: `docs/reviews/WP-STRIPE-7.md`, STATUS, both plan rows DONE, CLAUDE.md, `docs/API.md` § Agents + § Apps, `llms.txt`, the ledger row; Prompt 56 (WP-FAMILY-1) in both editions with Part 0 = RP90.
+
+Prod (migration 122 first, additive):
+- Claude connects to tenant zero over MCP, writes an object, and a DeleteBucket asks for approval, which the owner grants;
+- tenant zero makes an app, and the app's backend key makes an end user that stores an object;
+- a partner-keyed claimable is claimed by tenant zero;
+- WP-KEY-1's owed proof runs in the same sitting (one TOTP).
+
+Done means:
+- PRs 0 and A–F are merged;
+- the proofs have run on prod;
+- Prompt 56 is written here.
 
 ## The chain
 
@@ -970,6 +1087,13 @@ PR C and PR D as written. The post-merge review stays RP88 (Part 2 of the same f
   - Open question: `standard_sealed_default` is global only (RP82-4's example).
   - Prod proof: the read half is the operator's; the EU child needs the owner's TOTP.
   - The post-merge review is RP86. **Reviewed by RP86 (2026-10-30, `docs/reviews/WP-STRIPE-5-REVIEW.md`): HOLDS at P3** (all latent): RP86-1, the GDPR export's system bucket ignores residency and blocks the admin's set after one export; four P4s, RP86-5 fixed in the review. `vaultaire-quota.yml` and `vaultaire-jobs.yml` were installed on the box by the review.
-- **Prompt 54 — WP-KEY-1** (management keys first, then budgets) — WRITTEN above by Prompt 53's closeout, both editions. Part 0 = RP86-1…5 (filled by the review, 2026-10-30), plus RP86's three PR A corrections (`audit_logs.principal`, no `created_by` cascade, no member routes for a key). Migration 121. The post-merge review is RP88.
-  - **Part 0 DONE** (#1091, on prod 2026-10-30). **PR A #1093 open**, read pre-merge by RP88 Part 1 (2026-10-31, `docs/reviews/WP-STRIPE-6-REVIEW.md`): holds at P4 (RP88-1 no `sk_test_` path, RP88-2 no `expires_at`, RP88-3 the count under `FOR SHARE`); D-RP88-1 (`KeyScope.KeyID`) and D-RP88-2 (held bytes; the attribution and counter columns into 121 before PR A merges) decide PR B. RP88-0 (the payments month-end rule, red CI on the 29th–31st) fixed by #1094. The addendum above.
-- **55 — WP-AGENT-1 + WP-APP-1**; **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
+- **Prompt 54 — WP-KEY-1 — DONE 2026-10-31** (`docs/reviews/WP-STRIPE-6.md`; migration 121, landed whole with PR A). PRs:
+  - #1091: Part 0, RP86-1…5.
+  - #1093: PR A, the management key. Read pre-merge by RP88 Part 1 (holds at P4); RP88-1…3 and D-RP88-2's columns were taken before it merged.
+  - #1095: PR B, budgets, to F-39 as the owner decided it 2026-10-31: refused when spent, min(key, bucket, tenant, pool), the primary never capped.
+  - #1096: PR C, the dashboard.
+  - PR D: this closeout.
+  - Prod proof owed (RB12-7: the owner's TOTP).
+  - The post-merge review is **RP88 Part 2**.
+- **Prompt 55 — WP-AGENT-1 + WP-APP-1** — WRITTEN above by Prompt 54's closeout, both editions. Part 0 = RP88 Part 2 (the review fills it). Migration 122. The post-merge review is RP90.
+- **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
