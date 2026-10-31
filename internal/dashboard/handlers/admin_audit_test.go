@@ -32,11 +32,11 @@ func testAdminAuditTemplate(t *testing.T) *template.Template {
 	return tmpl
 }
 
-var auditLogCols = []string{"id", "timestamp", "user_id", "performed_by", "tenant_id", "event_type", "action",
+var auditLogCols = []string{"id", "timestamp", "user_id", "performed_by", "principal", "tenant_id", "event_type", "action",
 	"resource", "result", "severity", "ip", "user_agent", "error_msg", "metadata"}
 
 func auditRow(id, action, actor, tenant, ip, result string) []driver.Value {
-	return []driver.Value{id, time.Now(), "u-subject", actor, tenant, strings.SplitN(action, ".", 2)[0], action,
+	return []driver.Value{id, time.Now(), "u-subject", actor, actor, tenant, strings.SplitN(action, ".", 2)[0], action,
 		"key:k1", result, "info", ip, "curl/8", "", []byte(`{"email":"a@b.test"}`)}
 }
 
@@ -134,7 +134,7 @@ func TestHandleAdminAuditExport_CSVIsAuditedAndEscaped(t *testing.T) {
 
 	mock.ExpectExec(`INSERT INTO audit_logs`).WillReturnResult(sqlmock.NewResult(1, 1))
 	rows := sqlmock.NewRows(auditLogCols).
-		AddRow("a1", time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), "u-1", "admin-1", "t-1", "auth", "auth.login_failed",
+		AddRow("a1", time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC), "u-1", "admin-1", "admin-1", "t-1", "auth", "auth.login_failed",
 			"", "success", "warning", "203.0.113.7", "curl/8", "", []byte(`{"email":"=HYPERLINK(\"x\")@evil.test"}`))
 	mock.ExpectQuery(`FROM audit_logs`).WithArgs("", "", "", "", "", "auth", false, sqlmock.AnyArg(), "", 101).WillReturnRows(rows)
 
@@ -146,8 +146,8 @@ func TestHandleAdminAuditExport_CSVIsAuditedAndEscaped(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/csv", w.Header().Get("Content-Type"))
 	body := w.Body.String()
-	assert.True(t, strings.HasPrefix(body, "timestamp,event_type,action,result,severity,performed_by,user_id,tenant_id,resource,ip,user_agent,error,metadata\n"))
-	assert.Contains(t, body, "2026-09-30T12:00:00Z,auth,auth.login_failed,success,warning,admin-1,u-1,t-1,,203.0.113.7,curl/8,,")
+	assert.True(t, strings.HasPrefix(body, "timestamp,event_type,action,result,severity,performed_by,principal,user_id,tenant_id,resource,ip,user_agent,error,metadata\n"))
+	assert.Contains(t, body, "2026-09-30T12:00:00Z,auth,auth.login_failed,success,warning,admin-1,admin-1,u-1,t-1,,203.0.113.7,curl/8,,")
 	assert.Contains(t, body, `"{""email"":""=HYPERLINK`, "the metadata cell is quoted JSON, it starts with { so no prefix")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

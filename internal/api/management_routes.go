@@ -37,11 +37,11 @@ func (s *Server) registerManagementRoutes() {
 	rl, im := s.jsonAPIMiddleware()
 
 	s.router.Route("/api/v1/manage", func(r chi.Router) {
-		r.Use(s.requireJWT)
+		r.Use(s.requireCaller(surfaceManage)) // a JWT, or a management key (WP-KEY-1)
 		// The invitee is a member of no tenant yet (RP84-2): the accept is
 		// the one route here outside requireMember — the invitation's own
-		// address decides (manage_members.go).
-		r.With(s.logManagementRequest, rl.Middleware).Post("/invitations/{token}/accept", s.handleMgmtAcceptInvitation)
+		// address decides (manage_members.go). A person's only.
+		r.With(s.requirePerson, s.logManagementRequest, rl.Middleware).Post("/invitations/{token}/accept", s.handleMgmtAcceptInvitation)
 		r.Group(func(r chi.Router) { s.registerMemberManagementRoutes(r, rl, im) })
 	})
 }
@@ -77,16 +77,19 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		r.Get("/usage", s.handleMgmtGetUsage)
 		r.Get("/requests", s.handleMgmtRequests) // WP-LOG-1: the request log
 
-		r.With(s.requireRole(auth.ActionAccountExport)).Post("/account/export", s.handleMgmtExportData)
-		r.With(s.requireRole(auth.ActionAccountExport)).Get("/account/export/{id}", s.handleMgmtGetExport)
-		r.With(s.requireRole(auth.ActionAccountDelete)).Delete("/account", s.handleMgmtDeleteAccount)
-		r.With(s.requireRole(auth.ActionAccountDelete)).Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
+		// An owner's acts need a person (WP-KEY-1): never a management key.
+		r.With(s.requirePerson, s.requireRole(auth.ActionAccountExport)).Post("/account/export", s.handleMgmtExportData)
+		r.With(s.requirePerson, s.requireRole(auth.ActionAccountExport)).Get("/account/export/{id}", s.handleMgmtGetExport)
+		r.With(s.requirePerson, s.requireRole(auth.ActionAccountDelete)).Delete("/account", s.handleMgmtDeleteAccount)
+		r.With(s.requirePerson, s.requireRole(auth.ActionAccountDelete)).Post("/account/cancel-deletion", s.handleMgmtCancelDeletion)
 		// The tenant's own admin-read entries in the transparency log (K4c-1),
 		// dark behind translog_customer_view.
 		r.Get("/account/transparency", s.handleMgmtAccountTransparency)
 
 		// WP-TEAM-1 PR B: members and invitations (manage_members.go).
 		s.registerMemberRoutes(r)
+		// WP-KEY-1: the management keys (management_keys.go).
+		s.registerManagementKeyRoutes(r)
 	}
 }
 
@@ -716,6 +719,19 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 			BucketScope: req.BucketScope,
 			IPAllowlist: req.IPAllowlist,
 			ExpiresAt:   req.ExpiresAt,
+		}
+	}
+	// A management key's S3 ceiling bounds the keys it mints (RP82-6, its
+	// own field): what the mint leaves unset is the ceiling's. A person's
+	// JWT carries none.
+	if caller := auth.KeyScopeFromContext(r.Context()); caller != nil {
+		if opts == nil {
+			opts = &auth.KeyCreateOptions{}
+		}
+		if err := auth.CapScope(caller, opts); err != nil {
+			writeManagementError(w, ErrTypeInvalidRequest, "scope_exceeds_parent",
+				strings.TrimPrefix(err.Error(), auth.ErrScopeExceedsParent.Error()+": ")+": a key never exceeds the ceiling of the management key that mints it", "")
+			return
 		}
 	}
 

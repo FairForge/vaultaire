@@ -63,7 +63,7 @@
                 <tr>
                     <td style="white-space:nowrap">{{.Time}}</td>
                     <td><code>{{.Action}}</code></td>
-                    <td style="font-family:monospace;font-size:0.8rem">{{if .Actor}}<a href="/admin/audit?actor={{.Actor}}">{{.Actor}}</a>{{else}}&mdash;{{end}}</td>
+                    <td style="font-family:monospace;font-size:0.8rem">{{if .Actor}}<a href="/admin/audit?actor={{.Actor}}">{{.Actor}}</a>{{else if .Principal}}{{.Principal}}{{else}}&mdash;{{end}}{{if and .Actor .Principal (ne .Principal .Actor)}}<br>{{.Principal}}{{end}}</td>
                     <td style="font-family:monospace;font-size:0.8rem">{{if .Subject}}{{.Subject}}{{end}}{{if .TenantID}}<br><a href="/admin/support/{{.TenantID}}">{{.TenantID}}</a>{{end}}</td>
                     <td style="font-family:monospace;font-size:0.85rem;white-space:nowrap">{{if .IP}}<a href="/admin/audit?ip={{.IP}}" title="{{.UserAgent}}">{{.IP}}</a>{{else}}&mdash;{{end}}</td>
                     <td><span class="badge badge-{{.ResultClass}}">{{.Result}}{{if ne .Severity "info"}} · {{.Severity}}{{end}}</span>{{if .Error}}<div style="font-size:0.8rem;color:var(--danger-ink)">{{.Error}}</div>{{end}}</td>

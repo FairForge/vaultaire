@@ -85,8 +85,9 @@ func TestCan_TheActionTable(t *testing.T) {
 	want := map[Role][]Action{
 		RoleViewer:    {ActionRead},
 		RoleDeveloper: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey},
-		RoleAdmin:     {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey, ActionChildWrite, ActionMemberManage},
-		RoleOwner:     Actions(),
+		RoleAdmin: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey, ActionChildWrite, ActionMemberManage,
+			ActionManagementKey},
+		RoleOwner: Actions(),
 	}
 	for role, allowed := range want {
 		set := map[Action]bool{}
