@@ -11,7 +11,9 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -32,6 +34,10 @@ type ManagementKeyRow struct {
 	LastUsedFmt string
 	Status      string
 	StatusClass string
+	// Mode: live, or test (the sandbox's key, sk_test_ — RP88-1);
+	// ExpiresFmt its expiry ("never" — RP88-2).
+	Mode       string
+	ExpiresFmt string
 }
 
 // NewManagementKeyData is the just-minted key (shown once).
@@ -56,7 +62,17 @@ func withManagementKeys(r *http.Request, db *sql.DB, tenantID string, data map[s
 	rows := make([]ManagementKeyRow, 0, len(keys))
 	for _, k := range keys {
 		row := ManagementKeyRow{ID: k.ID, Name: k.Name, Hint: k.Prefix + k.Hint + "…", Scopes: strings.Join(k.Scopes, ", "),
-			CreatedFmt: k.CreatedAt.Format("Jan 2, 2006"), LastUsedFmt: "never", Status: "active", StatusClass: "success"}
+			CreatedFmt: k.CreatedAt.Format("Jan 2, 2006"), LastUsedFmt: "never", Status: "active", StatusClass: "success",
+			Mode: "live", ExpiresFmt: "never"}
+		if k.Prefix == auth.ManagementKeyTestPrefix {
+			row.Mode = "test"
+		}
+		if k.ExpiresAt != nil {
+			row.ExpiresFmt = k.ExpiresAt.Format("Jan 2, 2006")
+			if k.ExpiresAt.Before(time.Now()) {
+				row.Status, row.StatusClass = "expired", "default"
+			}
+		}
 		if k.LastUsedAt != nil {
 			row.LastUsedFmt = relativeTime(*k.LastUsedAt)
 		}
@@ -92,11 +108,31 @@ func HandleGenerateManagementKey(tmpl *template.Template, authSvc *auth.AuthServ
 			render()
 			return
 		}
+		var expires *time.Time
+		if v := strings.TrimSpace(r.PostFormValue("expires_days")); v != "" && v != "0" {
+			days, err := strconv.Atoi(v)
+			if err != nil || days < 1 || days > 3650 {
+				data["GenerateError"] = "Choose an expiry from the list."
+				render()
+				return
+			}
+			at := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+			expires = &at
+		}
 		k, secret, err := auth.MintManagementKey(r.Context(), db, sd.TenantID, auth.ManagementKeyOptions{
-			Name: strings.TrimSpace(r.PostFormValue("name")), Scopes: r.PostForm["scope"], CreatedBy: sd.UserID})
+			Name: strings.TrimSpace(r.PostFormValue("name")), Scopes: r.PostForm["scope"], CreatedBy: sd.UserID,
+			Test: r.PostFormValue("test") != "", ExpiresAt: expires})
 		switch {
 		case errors.Is(err, auth.ErrManagementKeyScope):
 			data["GenerateError"] = "Choose at least one scope for the management key."
+			render()
+			return
+		case errors.Is(err, auth.ErrManagementKeyExpiry):
+			data["GenerateError"] = "Choose an expiry from the list."
+			render()
+			return
+		case errors.Is(err, auth.ErrTenantSuspended):
+			data["GenerateError"] = "The account is suspended: no test key can be made."
 			render()
 			return
 		case errors.Is(err, auth.ErrKeyLimitReached):
@@ -110,7 +146,8 @@ func HandleGenerateManagementKey(tmpl *template.Template, authSvc *auth.AuthServ
 			return
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "management_key.created",
-			Resource: "management_key:" + k.ID, Metadata: map[string]any{"scopes": k.Scopes, "prefix": k.Prefix, "name": k.Name, "via": "dashboard"}})
+			Resource: "management_key:" + k.ID, Metadata: map[string]any{"scopes": k.Scopes, "prefix": k.Prefix, "name": k.Name, "via": "dashboard",
+				"sandbox": k.TenantID != sd.TenantID}})
 		data["NewManagementKey"] = &NewManagementKeyData{Secret: secret, Scopes: strings.Join(k.Scopes, ", ")}
 		render()
 	}

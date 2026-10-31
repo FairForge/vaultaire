@@ -133,6 +133,7 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /apikeys":                         auth.ActionKeyWrite,
 	"POST /apikeys/{id}/revoke":             auth.ActionKeyWrite,
 	"POST /apikeys/{id}/rotate":             auth.ActionKeyWrite,
+	"POST /apikeys/{id}/caps":               auth.ActionKeyWrite,      // WP-KEY-1
 	"POST /management-keys":                 auth.ActionManagementKey, // WP-KEY-1
 	"POST /management-keys/{id}/revoke":     auth.ActionManagementKey,
 	"POST /settings/profile":                personalWrite,
@@ -375,6 +376,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.With(act("POST /apikeys")).Post("/apikeys", handlers.HandleGenerateKey(apikeysTmpl, deps.Auth, deps.DB, deps.Logger))
 		dr.With(act("POST /apikeys/{id}/revoke")).Post("/apikeys/{id}/revoke", handlers.HandleRevokeKey(deps.Auth, deps.Logger))
 		dr.With(act("POST /apikeys/{id}/rotate")).Post("/apikeys/{id}/rotate", handlers.HandleRotateKey(apikeysTmpl, deps.Auth, deps.Logger))
+		dr.With(act("POST /apikeys/{id}/caps")).Post("/apikeys/{id}/caps", handlers.HandleSetKeyCaps(deps.DB, deps.Logger))
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())

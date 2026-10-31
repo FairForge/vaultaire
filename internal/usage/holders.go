@@ -416,3 +416,38 @@ func HolderDrift(ctx context.Context, db *sql.DB) (rows, bytes map[string]int64,
 	}
 	return rows, bytes, nil
 }
+
+// KeyCapsRow is a key's caps and counters, for the dashboard.
+type KeyCapsRow struct {
+	StorageLimit, EgressLimit *int64
+	StorageUsed, EgressUsed   int64 // EgressUsed: this UTC month's
+}
+
+// ListKeyCaps is tenantID's keys' caps and counters by key id.
+func ListKeyCaps(ctx context.Context, db *sql.DB, tenantID string) (map[string]KeyCapsRow, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id::text, storage_limit_bytes, egress_limit_bytes, storage_used_bytes,
+		       CASE WHEN egress_month = date_trunc('month', NOW() AT TIME ZONE 'UTC')::date THEN egress_used_bytes ELSE 0 END
+		  FROM api_keys WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("the key caps of %s: %w", tenantID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]KeyCapsRow{}
+	for rows.Next() {
+		var id string
+		var r KeyCapsRow
+		var s, e sql.NullInt64
+		if err := rows.Scan(&id, &s, &e, &r.StorageUsed, &r.EgressUsed); err != nil {
+			return nil, fmt.Errorf("the key caps of %s: %w", tenantID, err)
+		}
+		if s.Valid {
+			r.StorageLimit = &s.Int64
+		}
+		if e.Valid {
+			r.EgressLimit = &e.Int64
+		}
+		out[id] = r
+	}
+	return out, rows.Err()
+}

@@ -40,7 +40,8 @@ Template: `templates/customer/bucket_settings.html` — includes a "Storage Tier
 
 Three handlers:
 - `HandleAPIKeys(tmpl, authSvc, db, logger)` — lists all keys for current user via `auth.ListAPIKeys()`, and the tenant's management keys (WP-KEY-1)
-- `HandleGenerateManagementKey(tmpl, authSvc, db, logger)` / `HandleRevokeManagementKey(db, logger)` — POST `/dashboard/management-keys` (scopes `manage:read`/`manage:write`, `platform` for a platform; the secret shown once) and `/{id}/revoke`; action `management_key.write` (admin, owner); audited `management_key.created|revoked`
+- `HandleGenerateManagementKey(tmpl, authSvc, db, logger)` / `HandleRevokeManagementKey(db, logger)` — POST `/dashboard/management-keys` (scopes `manage:read`/`manage:write`, `platform` for a platform; `test` = the sandbox's `sk_test_` key, RP88-1; `expires_days` 30/90/365 or never, RP88-2; the secret shown once) and `/{id}/revoke`; action `management_key.write` (admin, owner); audited `management_key.created|revoked`; the list shows mode and expiry
+- `HandleSetKeyCaps(db, logger)` — POST `/dashboard/apikeys/{id}/caps` (`storage_gib`, `egress_gib`; empty = none) through `usage.SetKeyCaps` (WP-KEY-1, F-39); action `key.write`; the primary is never capped (flash); audited `key.caps_set`. `withKeyCaps` adds each row's `CapsSummary` ("512 MiB stored · 10 GiB/month out") and the form's GiB values
 - `HandleGenerateKey(tmpl, authSvc, db, logger)` — creates key via `auth.GenerateAPIKey()`, shows secret once
 - `HandleRevokeKey(authSvc, logger)` — revokes key via `auth.RevokeAPIKey()`, redirects back
 
