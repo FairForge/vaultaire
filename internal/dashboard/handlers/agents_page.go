@@ -12,6 +12,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -111,18 +112,20 @@ func HandleApprovalDecide(db *sql.DB, authSvc *auth.AuthService, mfa *auth.MFASe
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		id := chi.URLParam(r, "id")
-		back := "/dashboard/agents?approval=" + id
 		ap, err := auth.GetApproval(r.Context(), db, sd.TenantID, id)
 		if err != nil {
 			middleware.SetFlash(w, "error", "No such request.")
 			http.Redirect(w, r, "/dashboard/agents", http.StatusSeeOther)
 			return
 		}
+		// The approval exists, so its id is a uuid of this account's: the way
+		// back is a local path with it escaped.
+		back := "/dashboard/agents?approval=" + url.QueryEscape(ap.ID)
 		act := auth.ApprovalActions[ap.Action]
 		if decision == "approved" {
 			if act.Role != "" && !auth.Can(sessionRole(sd), act.Role) {
 				middleware.SetFlash(w, "error", "Your role may not "+act.Says+" yourself, so it may not approve an agent doing it.")
-				http.Redirect(w, r, back, http.StatusSeeOther)
+				http.Redirect(w, r, back, http.StatusSeeOther) // #nosec G710 -- a fixed local path, the id a validated uuid
 				return
 			}
 			if act.Destructive {
@@ -130,14 +133,14 @@ func HandleApprovalDecide(db *sql.DB, authSvc *auth.AuthService, mfa *auth.MFASe
 				secret, err := authSvc.GetMFASecret(r.Context(), sd.UserID)
 				if code == "" || err != nil || secret == "" || mfa == nil || !mfa.ValidateCode(secret, code) || !authSvc.ConsumeTOTPCode(sd.UserID, code) {
 					middleware.SetFlash(w, "error", "Enter the current code of your authenticator app to approve this.")
-					http.Redirect(w, r, back, http.StatusSeeOther)
+					http.Redirect(w, r, back, http.StatusSeeOther) // #nosec G710 -- a fixed local path, the id a validated uuid
 					return
 				}
 			}
 		}
 		if _, err := auth.DecideApproval(r.Context(), db, sd.TenantID, id, sd.UserID, decision); err != nil {
 			middleware.SetFlash(w, "error", "That request was decided already, or its 24 hours have passed.")
-			http.Redirect(w, r, back, http.StatusSeeOther)
+			http.Redirect(w, r, back, http.StatusSeeOther) // #nosec G710 -- a fixed local path, the id a validated uuid
 			return
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "agent.approval_" + decision, Resource: ap.Resource,
