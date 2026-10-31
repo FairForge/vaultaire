@@ -551,6 +551,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithSuggestion(hint))
 			return
 		}
+		// A key an agent grant minted never reaches a Private bucket
+		// (WP-AGENT-1, contract line 8), as the bucket or a copy's source.
+		if scope.AgentGrantID != "" && s.agentS3PrivateRefused(r, tenantID, s3Req) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithMessage("An agent never reaches a Private bucket."),
+				WithSuggestion("Only the bucket owner's own devices read a Private bucket."))
+			return
+		}
 	}
 
 	// A system bucket (WP-R10-3b) does not exist to the S3 API, except for

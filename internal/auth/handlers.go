@@ -172,7 +172,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		bucketScope, ipAllowlist pq.StringArray
 		expiresAt, revokedAt     sql.NullTime
 		isPrimary                bool
-		keyID                    string
+		keyID, agentGrant        string
 		egressCap, egressUsed    int64
 	)
 	err := a.db.QueryRowContext(ctx, `
@@ -181,11 +181,11 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
 		       ak.expires_at, ak.revoked_at, ak.is_primary,
-		       ak.id::text, `+keyEgressColumns+`
+		       ak.id::text, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, '')
 		FROM api_keys ak
 		WHERE ak.key_id = $1
 	`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary,
-		&keyID, &egressCap, &egressUsed)
+		&keyID, &egressCap, &egressUsed, &agentGrant)
 	switch {
 	case err == nil:
 		if revokedAt.Valid {
@@ -201,7 +201,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		scope := &KeyScope{
 			BucketScope: []string(bucketScope),
 			IPAllowlist: []string(ipAllowlist),
-			KeyID:       keyID, Primary: isPrimary, EgressCap: egressCap, EgressUsed: egressUsed,
+			KeyID:       keyID, Primary: isPrimary, EgressCap: egressCap, EgressUsed: egressUsed, AgentGrantID: agentGrant,
 		}
 		// A permissions column that is not a JSON array of strings grants
 		// NOTHING — it used to grant everything (R5-14).
@@ -244,12 +244,12 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.secret_wrapped, s.secret_key_version,
 			       s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
 			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at,
-			       ak.id::text, ak.is_primary, `+keyEgressColumns+`
+			       ak.id::text, ak.is_primary, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, '')
 			FROM sts_tokens s
 			LEFT JOIN api_keys ak ON ak.key_id = s.parent_key_id
 			WHERE s.access_key = $1
 		`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
-			&parentFound, &parentRevoked, &parentExpiresAt, &parentID, &parentPrimary, &egressCap, &egressUsed)
+			&parentFound, &parentRevoked, &parentExpiresAt, &parentID, &parentPrimary, &egressCap, &egressUsed, &agentGrant)
 		switch {
 		case err == nil:
 			if time.Now().After(stsExpiresAt) {
@@ -268,7 +268,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 				Temporary:   true,
 				// A token acts as its parent key: its writes count to it,
 				// its caps are the parent's (it may only narrow — WP-KEY-1).
-				KeyID: parentID.String, Primary: parentPrimary.Bool, EgressCap: egressCap, EgressUsed: egressUsed,
+				KeyID: parentID.String, Primary: parentPrimary.Bool, EgressCap: egressCap, EgressUsed: egressUsed, AgentGrantID: agentGrant,
 			}
 			if jsonErr := json.Unmarshal(stsPermJSON, &scope.Permissions); jsonErr != nil {
 				a.logger.Warn("sts token has unparsable permissions — treating as no permissions",

@@ -59,20 +59,25 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		// member's role is checked by requireRole, auth.Can the one rule.
 		r.Get("/buckets", s.handleMgmtListBuckets)
 		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets", s.handleMgmtCreateBucket)
-		r.Get("/buckets/{name}", s.handleMgmtGetBucket)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Patch("/buckets/{name}", s.handleMgmtPatchBucket)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
+		// A bucket's routes: an agent never reaches a Private one (line 8),
+		// and deleting one is an agent's to ask for (WP-AGENT-1, approvals.go).
+		r.Group(func(r chi.Router) {
+			r.Use(s.agentNeverPrivate)
+			r.Get("/buckets/{name}", s.handleMgmtGetBucket)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Patch("/buckets/{name}", s.handleMgmtPatchBucket)
+			r.With(s.requireRole(auth.ActionBucketWrite), s.requireApproval("bucket.delete", bucketResource)).Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 
-		r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
-		r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/caps", s.handleMgmtSetBucketCaps) // WP-KEY-1
+			r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads", s.handleMgmtCreateDirectUpload)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Post("/buckets/{name}/direct-uploads/complete", s.handleMgmtCompleteDirectUpload)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/residency", s.handleMgmtSetBucketResidency)
+			r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/caps", s.handleMgmtSetBucketCaps) // WP-KEY-1
+		})
 
 		r.Get("/keys", s.handleMgmtListKeys)
 		r.With(s.requireRole(auth.ActionKeyWrite)).Post("/keys", s.handleMgmtCreateKey)
-		r.With(s.requireRole(auth.ActionKeyWrite)).Delete("/keys/{id}", s.handleMgmtDeleteKey)
+		r.With(s.requireRole(auth.ActionKeyWrite), s.agentKeyRevoke).Delete("/keys/{id}", s.handleMgmtDeleteKey)
 		r.With(s.requireRole(auth.ActionKeyWrite)).Put("/keys/{id}/caps", s.handleMgmtSetKeyCaps)       // WP-KEY-1
 		r.With(s.requireRole(auth.ActionSandboxReset)).Post("/sandbox/reset", s.handleMgmtSandboxReset) // WP-DX-1: test mode
 
@@ -110,9 +115,11 @@ type mgmtBucket struct {
 	Mode string `json:"mode"`
 	// SSECRequired: every write into the bucket must carry a customer key
 	// (WP-SSEC-1 B.5, 096); present on get/patch.
-	SSECRequired *bool     `json:"ssec_required,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	RequestID    string    `json:"request_id,omitempty"`
+	SSECRequired *bool `json:"ssec_required,omitempty"`
+	// Versioning: "Enabled" on a bucket an agent created (WP-AGENT-1, F-41).
+	Versioning string    `json:"versioning,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	RequestID  string    `json:"request_id,omitempty"`
 }
 
 func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
@@ -137,13 +144,18 @@ func (s *Server) handleMgmtListBuckets(w http.ResponseWriter, r *http.Request) {
 
 	var rows *sql.Rows
 	var dbErr error
+	// An agent's list leaves Private buckets out (WP-AGENT-1, line 8).
+	notPrivate := ""
+	if agentOf(r.Context()) != nil {
+		notPrivate = ` AND mode <> 'private'`
+	}
 	if startingAfter != "" {
 		rows, dbErr = s.db.QueryContext(r.Context(),
-			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name > $2 ORDER BY name LIMIT $3`,
+			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name > $2`+notPrivate+` ORDER BY name LIMIT $3`,
 			tenantID, startingAfter, limit+1)
 	} else {
 		rows, dbErr = s.db.QueryContext(r.Context(),
-			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name LIMIT $2`,
+			`SELECT name, created_at, mode FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%'`+notPrivate+` ORDER BY name LIMIT $2`,
 			tenantID, limit+1)
 	}
 	if dbErr != nil {
@@ -282,6 +294,17 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		Mode:      createdMode(req.Mode),
 		CreatedAt: time.Now().UTC(),
 		RequestID: getRequestID(w),
+	}
+	// A bucket an agent creates is versioning-Enabled (F-41): an agent's
+	// mistake is a version back. Its keys may never turn it off.
+	if agentOf(r.Context()) != nil && s.db != nil {
+		if _, err := s.db.ExecContext(r.Context(), `UPDATE buckets SET versioning_status = 'Enabled', updated_at = NOW()
+			 WHERE tenant_id = $1 AND name = $2`, tenantID, req.Name); err != nil {
+			s.logger.Error("agent bucket versioning", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "the bucket was created but its versioning could not be turned on", "")
+			return
+		}
+		bucket.Versioning = "Enabled"
 	}
 	writeJSON(w, http.StatusCreated, bucket)
 }
