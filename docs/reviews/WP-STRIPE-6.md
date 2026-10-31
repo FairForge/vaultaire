@@ -83,4 +83,6 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 
 ## Post-merge review
 
-**RP88 Part 2** (`docs/reviews/WP-STRIPE-6-REVIEW.md`): the budgets' enforcement on the three surfaces, the dashboard, the prod proof, this note.
+**RP88 Part 2** (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2, 2026-10-31): **HOLDS at P2**, every finding latent on prod (no cap, no management key exists). Fixed in the review's PR: RP88-4 (the two egress-cap counters were never registered — the RB2-6 shape again), RP88-5 (a test management key resolved no actor: `POST /keys` was 401 `missing_user`; it now mints the account's test keys). To Prompt 55's Part 0: RP88-6 (P2: the egress cap admits a response whatever its size — refuse by the remaining bytes at `WriteHeader`, at `/cdn` and at the edge admit's `length`), RP88-8 (a management key may set or lower a cap, never raise or clear one), RP88-7 / RP88-9 / RP88-11 (P4s), RB12-6 and RB12-9 with their shapes; RB12-10 added (the seed and a write in flight). The prod proof (RB12-7) stays owed.
+
+- **RB12-10:** a bucket counter seeded while a write of that bucket is in flight (its reservation ran before the bucket was counted, its commit after the seed) is low by that write until an operator's reconcile; the drift gauge shows it (RP88-10).

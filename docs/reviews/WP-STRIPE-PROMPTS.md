@@ -952,7 +952,15 @@ PR C and PR D as written. The post-merge review stays RP88 (Part 2 of the same f
   - an agent grant's caps are its S3 keys' caps, and an app's cap is its tenant cap inside the pool.
 - **D-STRIPE-49:** depth 2 is made by the platform (`parent_id` = the app). An app's own key (`apps`) now makes its end users itself.
 
-**Part 0:** RP88 Part 2's findings (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2), in the review's order. The review fills them. Also take any of WP-STRIPE-6's residuals RB12-1…8 the review marks for this prompt.
+**Part 0:** RP88 Part 2's findings (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2; the review fixed RP88-4 and RP88-5 itself), in this order, each test first:
+1. **RP88-6 (P2): the egress cap refuses by the remaining bytes, not only once spent.** `egressCaps` carries each capped holder's remaining (`cap − used`); the S3 GET refuses at the response's `WriteHeader` through a wrapper outside the handler (a 200/206 whose `Content-Length` exceeds the remaining becomes the 403 `QuotaExceeded` + `x-stored-cap` + `Retry-After`, header map cleared, body dropped, nothing counted); `/cdn` the same; the edge admit `length > remaining → passThrough("capped")`. Then exactness: pre-charge the planned bytes in ONE conditional UPDATE at that moment and credit back `planned − served` after the response when they differ. `TestKeyCap_EgressCapRefusesAResponseLargerThanWhatIsLeft` (S3 whole + Range, `/cdn`, the edge admit). D-STRIPE-63 restated in WP-STRIPE-6.md and `docs/API.md` § Keys.
+2. **RP88-8 (P3): a key narrows, never widens.** `PUT …/keys/{id}/caps` and `/buckets/{name}/caps` from a management key may set a cap where none is or lower one, never raise or clear it (409 `cap_widening_needs_person`); a person may do anything. `TestKeyCap_AKeyNeverWidensACap`. The agent grant of PR A then cannot lift its own budget, by construction.
+3. **RP88-7 (P4):** the warning claim returns the PREVIOUS step (`UPDATE … FROM (SELECT … FOR UPDATE) o … RETURNING o.egress_warned_pct`) and the emit loop starts above it — the 80 % event fired twice when two responses claimed 80 then 95 off one read.
+4. **RP88-9 (P4):** `/cdn` counts 200/206 bodies only to the bucket's cap, as `serveGetObject` does.
+5. **RP88-11 (P4):** `WHERE id = $1::uuid` (not `id::text = $1`) in `holderFits`, `applyHolders`, `SetKeyCaps` and the egress count SQL — the `api_keys` primary key's index.
+6. **RB12-9 → migration 122** (this prompt's one file, with PR A): partial indexes `(written_by_key) WHERE written_by_key IS NOT NULL` on `object_head_cache`, `object_versions`, `multipart_uploads`.
+7. **RB12-6:** `HolderStorageDrift` (kinds `key`, `bucket`) beside `PoolUsedDrift` in `deploy/monitoring/vaultaire-quota.yml` + `tests/vaultaire-quota_test.yml` cases; install on the box at the closeout ([OPS]).
+8. RB12-10 (the seed and a write in flight) stays a residual; RB12-7 (WP-KEY-1's prod proof, the owner's TOTP) runs with this prompt's.
 
 Read first:
 - plan § WP-STRIPE, the WP-AGENT-1 and WP-APP-1 rows (the contract);
@@ -1009,7 +1017,7 @@ You are building plan § WP-STRIPE's WP-AGENT-1 and WP-APP-1 rows in the Vaultai
 
 Read before editing: the chain edition's "Read first" list, `docs/reviews/WP-STRIPE-6.md`, and its review `docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2 (RP88). If Part 2 is not on main when you start, STOP and say so: never guess a review.
 
-PR 0 — Branch `stage1a-p55-part0`. RP88 Part 2's findings in the review's order, each test first. The review fills this list.
+PR 0 — Branch `stage1a-p55-part0`. RP88 Part 2's findings (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2) in the chain edition's Part 0 order, each test first — the eight items as written there: RP88-6 (the egress cap refuses by the remaining bytes at `WriteHeader`, at `/cdn` and at the edge admit's `length`, then the one-UPDATE pre-charge), RP88-8 (a management key sets or lowers a cap, never raises or clears one — 409 `cap_widening_needs_person`), RP88-7, RP88-9, RP88-11, RB12-9's three partial indexes (they go into migration 122, which PR A lands whole: write 122 in PR 0 and let PR A extend the same file before it merges), RB12-6's `HolderStorageDrift` rule with its promtool cases. Nothing else in PR 0.
 
 PR A — agent grants. Branch `stage1a-p55-agents`.
 1. **Migration 122.** One file for the prompt, landed with this PR (D-STRIPE-43's rule):

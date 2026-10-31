@@ -739,7 +739,12 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 
 	var key *auth.APIKey
 	var err error
-	if req.Test {
+	if k := managementKeyOf(r.Context()); k != nil && k.SandboxOf != "" {
+		// A test management key IS the sandbox's (RP88-1/RP88-5): the S3
+		// keys it mints are the account's test keys, made by the one test-key
+		// maker on the account — "test" is implied, never sandbox_of_sandbox.
+		key, err = s.auth.GenerateTestKeyForTenant(r.Context(), k.SandboxOf, userID, req.Name, opts)
+	} else if req.Test {
 		key, err = s.auth.GenerateTestKeyForTenant(r.Context(), activeTenant(r), userID, req.Name, opts)
 	} else {
 		key, err = s.auth.GenerateAPIKeyForTenant(r.Context(), activeTenant(r), userID, req.Name, opts)

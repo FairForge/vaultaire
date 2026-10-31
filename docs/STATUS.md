@@ -1,6 +1,13 @@
 # Status — the live pointer
 
-Updated: 2026-10-31 — **Stage 1a Prompt 54 (WP-KEY-1: the management key, then per-key and per-bucket budgets) — DONE, merged and deployed** (prod `93679a1b`; `docs/reviews/WP-STRIPE-6.md`; migration **121**, landed whole with PR A; next **122**; review **RP88 Part 2**):
+Updated: 2026-10-31 — **Review RP88 Part 2 (Prompt 54, WP-KEY-1): HOLDS at P2** (`docs/reviews/WP-STRIPE-6-REVIEW.md` § Part 2). Every finding is latent on prod (no cap is set, no management key exists):
+- **RP88-4 (P2, fixed):** `vaultaire_egress_cap_refusals_total` / `_warnings_total` were declared and pre-created but never registered — the active slot's scrape had the holder-drift gauges and no `egress_cap` series (the RB2-6 shape a second time in one week; the pin test now names all four label pairs).
+- **RP88-5 (P3, fixed):** a test management key resolved no actor, so `POST /api/v1/manage/keys` with it was 401 `missing_user`; it now mints the account's test keys (`VLT_TEST_`, the sandbox's).
+- **RP88-6 (P2 → Prompt 55 Part 0):** the egress cap refuses only once spent — a response is admitted whatever its size, so one GET passes a cap by the object's whole size. The size is known before the first byte on every surface; refuse by the remaining bytes.
+- → Part 0 too: RP88-8 (a `manage:write` key may raise or clear the caps of the keys it minted — a key narrows, never widens), RP88-7 (the 80 % warning twice), RP88-9 (`/cdn` counts error bodies), RP88-11 (`id::text` predicates), RB12-6 (the drift rule) and RB12-9 (the `written_by_key` indexes, migration 122). RB12-10 added. The prod proof (RB12-7) stays the owner's.
+- [OPS] `vaultaire-host.yml` (#1080) installed on the box; every rule file on the box = origin/main's.
+
+Before that: 2026-10-31 17:30 UTC — **Stage 1a Prompt 54 (WP-KEY-1: the management key, then per-key and per-bucket budgets) — DONE, merged and deployed** (prod `93679a1b`; `docs/reviews/WP-STRIPE-6.md`; migration **121**, landed whole with PR A; next **122**; review **RP88 Part 2**):
 - **#1091 Part 0** (RP86-1…5; on prod since 2026-10-30).
 - **#1093 PR A, the management key:** `sk_live_…`, or `sk_test_…` minted with `"test": true` on the sandbox (RP88-1). It is sha256-stored, shown once, has an optional `expires_at` (RP88-2) and is looked up on every request; the 25-key count runs under `FOR UPDATE` (RP88-3). Its scopes are its role (`requireCaller`), and it never does a person's acts (`requirePerson`). Migration 121 took PR B's columns before merge (D-RP88-2).
 - **#1095 PR B, budgets** (F-39 as the owner decided it 2026-10-31):

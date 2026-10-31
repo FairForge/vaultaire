@@ -11,6 +11,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,4 +319,37 @@ func TestManagementKey_TestKeyActsOnTheSandbox(t *testing.T) {
 	got, err := time.Parse(time.RFC3339, out["expires_at"].(string))
 	require.NoError(t, err)
 	assert.True(t, at.Equal(got), "%v vs %v", at, got)
+}
+
+// RP88-5 (RP88 Part 2): a test management key mints the sandbox's S3 keys —
+// test-shaped (VLT_TEST_, mode test, the sandbox's), hanging on the account's
+// owner as a person's test key does. It answered 401 missing_user: the
+// lookup resolved no actor for a sandbox (its e-mail is
+// sandbox+…@sandbox.invalid, it has no member and no parent), so the one
+// rehearsal step a server integration needs was closed.
+func TestManagementKey_TestKeyMintsTheSandboxsS3Key(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement()
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM management_keys WHERE tenant_id = $1`, f.user.TenantID) })
+
+	code, out := f.call(http.MethodPost, "/api/v1/manage/management-keys", f.jwt,
+		map[string]any{"name": "ci", "scopes": []string{"manage:write"}, "test": true})
+	require.Equal(t, http.StatusCreated, code, out)
+	secret := out["secret"].(string)
+	sandbox := out["tenant_id"].(string)
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM api_keys WHERE tenant_id = $1`, sandbox) })
+
+	code, out = f.call(http.MethodPost, "/api/v1/manage/keys", secret, map[string]any{"name": "rehearsal"})
+	require.Equal(t, http.StatusCreated, code, out)
+	accessKey, _ := out["key"].(string)
+	assert.True(t, strings.HasPrefix(accessKey, auth.TestKeyPrefix), "a sandbox key is test-shaped: %q", accessKey)
+	var tenantID, userID string
+	require.NoError(t, f.db.QueryRow(`SELECT tenant_id, user_id::text FROM api_keys WHERE key_id = $1`, accessKey).Scan(&tenantID, &userID))
+	assert.Equal(t, sandbox, tenantID, "the key is the sandbox's")
+	assert.Equal(t, f.user.ID, userID, "it hangs on the account's owner")
+
+	// "test": true from a key that IS the sandbox's is the same mint — never
+	// sandbox_of_sandbox.
+	code, out = f.call(http.MethodPost, "/api/v1/manage/keys", secret, map[string]any{"name": "rehearsal-2", "test": true})
+	require.Equal(t, http.StatusCreated, code, out)
+	assert.Equal(t, 2, countRows(t, f.db, `SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND revoked_at IS NULL`, sandbox))
 }

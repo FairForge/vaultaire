@@ -474,3 +474,5 @@ promtool check rules /etc/prometheus/rules/vaultaire-<name>.yml
 sudo systemctl reload prometheus
 curl -s localhost:9090/api/v1/rules | python3 -c 'import sys,json; print([g["name"] for g in json.load(sys.stdin)["data"]["groups"]])'
 ```
+
+2026-10-31 (RP88 Part 2): `vaultaire-host.yml` (#1080) installed on the box after its `promtool test`; every rule file on the box now equals origin/main's by sha256.
