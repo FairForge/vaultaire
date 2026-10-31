@@ -53,7 +53,13 @@ func TestPoolDrift_TheGaugeNamesTheDriftingRoot(t *testing.T) {
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &file))
 	require.Len(t, file.Groups, 1)
-	require.Len(t, file.Groups[0].Rules, 1)
-	assert.Equal(t, "PoolUsedDrift", file.Groups[0].Rules[0].Alert)
-	assert.True(t, strings.Contains(file.Groups[0].Rules[0].Expr, "vaultaire_pool_used_drift_bytes"))
+	// PoolUsedDrift, and RB12-6's HolderStorageDrift beside it (Prompt 55
+	// Part 0): each rule reads the gauge its collector exports.
+	exprs := map[string]string{}
+	for _, rule := range file.Groups[0].Rules {
+		exprs[rule.Alert] = rule.Expr
+	}
+	require.Len(t, exprs, 2)
+	assert.True(t, strings.Contains(exprs["PoolUsedDrift"], "vaultaire_pool_used_drift_bytes"))
+	assert.True(t, strings.Contains(exprs["HolderStorageDrift"], "vaultaire_holder_storage_drift_rows"))
 }
