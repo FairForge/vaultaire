@@ -1,0 +1,17 @@
+{{define "title"}}Keep an app, Stored{{end}}
+{{define "content"}}
+<div class="page-header"><div><h1>Keep an app</h1></div></div>
+{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+{{if .Gone}}
+<div class="card"><p>This link was used already, has expired, or is unknown. An unclaimed app is kept for 7 days.</p></div>
+{{else if .Claim}}
+<div class="card">
+    <p><strong>{{.Claim.Label}}</strong>{{if .Claim.PartnerName}}, made with {{.Claim.PartnerName}},{{end}} holds {{.Claim.UsedBytes}} bytes. Keep it and it becomes an app of this account, with its files and its keys; its storage then counts in yours.</p>
+    <p class="text-muted">Until {{.Claim.ExpiresAt.Format "2006-01-02 15:04"}} UTC.</p>
+    <form method="post" action="/dashboard/claim/{{.Token}}">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="btn btn-primary" type="submit">Keep it</button>
+    </form>
+</div>
+{{end}}
+{{end}}
