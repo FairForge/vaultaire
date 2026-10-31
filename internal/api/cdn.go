@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,6 +136,26 @@ func (s *Server) handleCDNRequest(w http.ResponseWriter, r *http.Request) {
 	// as they are written and, past the egress allowance, pace them through
 	// the SAME token bucket the tenant's S3 downloads use (WP-R10-9). The
 	// public bucket's readers spend the owner's allowance.
+	// The bucket's own monthly egress cap (WP-KEY-1, F-39 (a)): a public
+	// bucket's readers spend it too; refused once spent.
+	if r.Method == http.MethodGet {
+		caps, spent := s.egressCapsOf(ctx, tenantID, bucket)
+		if spent != "" {
+			markClientRefusal(ctx)
+			egressCapRefusals.WithLabelValues(spent).Inc()
+			w.Header().Set("x-stored-cap", spent)
+			w.Header().Set("Retry-After", strconv.Itoa(secondsToNextMonth(time.Now())))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"this bucket's monthly download cap is spent; it resets at the start of the next UTC month"}`))
+			return
+		}
+		if caps.bucketLimit > 0 {
+			cc := &countingResponseWriter{ResponseWriter: w}
+			defer func() { s.countEgress(ctx, tenantID, caps, cc.bytesWritten) }()
+			w = cc
+		}
+	}
 	if r.Method == http.MethodGet && s.egress != nil {
 		cw := &countingResponseWriter{ResponseWriter: w, span: s.egress.span(ctx, tenantID)}
 		gw, admitted := s.egress.admit(cw, r, tenantID, egressSurfaceCDN)

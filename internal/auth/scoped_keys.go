@@ -21,6 +21,20 @@ type KeyScope struct {
 	// wildcard: `*` on a token is "every operation", not "every privilege"
 	// (see CanBypassGovernanceRetention).
 	Temporary bool
+
+	// KeyID is the api_keys.id of the credential that signed (an STS token:
+	// its parent key's) — WHICH key acts, so a per-key cap can be enforced,
+	// metered and named (WP-KEY-1, D-RP88-1). Filled by LookupCredential on
+	// every scope it answers; "" for a scope that is no S3 credential (a
+	// management key's ceiling).
+	KeyID string
+	// Primary: the tenant's primary pair (or a token of it). It is never
+	// capped (F-39 (c)) and its writes are counted to no key (D-RP88-2).
+	Primary bool
+	// EgressCap is the key's own egress cap per UTC month (0 = none) and
+	// EgressUsed what the key has served this month, read with the key's row
+	// on every request (F-39 (a): refused when spent).
+	EgressCap, EgressUsed int64
 }
 
 // PermBypassGovernanceRetention is the one entry of ValidPermissions that is

@@ -66,3 +66,62 @@ func (c *poolDriftCollector) read() map[string]int64 {
 	c.drift = d
 	return d
 }
+
+// The holders' drift (WP-KEY-1, D-RP88-2): vaultaire_holder_storage_drift_rows
+// {kind} and _bytes{kind} — how many keys (kind="key") and counted buckets
+// (kind="bucket") have a storage counter the rows do not explain, and by
+// how much in all. Read from the tables on scrape (60 s cache); a
+// reservation in flight is a moment's difference, a lasting one a ledger
+// bug. Repaired only by the operator's reconcile (usage.ReassertHolders in
+// POST /api/v1/admin/quota/reconcile). Never a tenant, key or bucket label.
+type holderDriftCollector struct {
+	db          *sql.DB
+	logger      *zap.Logger
+	rows, bytes *prometheus.Desc
+	mu          sync.Mutex
+	at          time.Time
+	r, b        map[string]int64
+}
+
+func newHolderDriftCollector(db *sql.DB, logger *zap.Logger) *holderDriftCollector {
+	return &holderDriftCollector{db: db, logger: logger,
+		rows: prometheus.NewDesc("vaultaire_holder_storage_drift_rows",
+			"Keys (kind=key) and counted buckets (kind=bucket) whose storage_used_bytes differs from what their rows hold (WP-KEY-1). Read from the tables.",
+			[]string{"kind"}, nil),
+		bytes: prometheus.NewDesc("vaultaire_holder_storage_drift_bytes",
+			"The sum of |counter − rows| over those keys or buckets (WP-KEY-1). Repaired only by the operator's reconcile.",
+			[]string{"kind"}, nil)}
+}
+
+func (c *holderDriftCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.rows; ch <- c.bytes }
+
+func (c *holderDriftCollector) Collect(ch chan<- prometheus.Metric) {
+	r, b := c.read()
+	for _, kind := range []string{usage.CapKey, usage.CapBucket} {
+		if r == nil {
+			return
+		}
+		ch <- prometheus.MustNewConstMetric(c.rows, prometheus.GaugeValue, float64(r[kind]), kind)
+		ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(b[kind]), kind)
+	}
+}
+
+func (c *holderDriftCollector) read() (map[string]int64, map[string]int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.db == nil || (c.r != nil && time.Since(c.at) < poolDriftMetricsTTL) {
+		return c.r, c.b
+	}
+	c.at = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r, b, err := usage.HolderDrift(ctx, c.db)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("holder drift metric: could not read the counters", zap.Error(err))
+		}
+		return c.r, c.b
+	}
+	c.r, c.b = r, b
+	return r, b
+}

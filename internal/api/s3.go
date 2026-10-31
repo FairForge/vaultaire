@@ -779,6 +779,19 @@ func (s *Server) serveGetObject(cw *countingResponseWriter, r *http.Request, req
 	if t, err := tenant.FromContext(r.Context()); err == nil && t != nil {
 		slcTenant = t.ID
 	}
+	// A key's or a bucket's own monthly egress cap (WP-KEY-1, F-39 (a)):
+	// refused once spent; a response admitted under it is counted to it.
+	caps, spent := s.egressCapsOf(r.Context(), slcTenant, req.Bucket)
+	if spent != "" {
+		writeEgressCapRefusal(cw, r, spent)
+		return
+	}
+	before := cw.bytesWritten
+	defer func() {
+		if st := cw.statusCode; st == 0 || st == http.StatusOK || st == http.StatusPartialContent {
+			s.countEgress(r.Context(), slcTenant, caps, cw.bytesWritten-before)
+		}
+	}()
 	if !metered {
 		if !s.slcRead(cw, r, slcTenant) {
 			s.handleGetObject(cw, r, req)
@@ -1242,7 +1255,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 		if quotaOn {
 			// Net of what the commit releases on this floor at the quota
 			// edge (Part B); settled in the commit's transaction (Part A).
-			b, ok, err := s.reserveWrite(r.Context(), req.TenantID, req.Bucket, req.Object, floor, size)
+			b, ok, capName, err := s.reserveWrite(r.Context(), req.TenantID, req.Bucket, req.Object, floor, size)
 			if err != nil {
 				// Fail closed: an unmetered write would corrupt billing.
 				s.logger.Error("quota check failed",
@@ -1251,8 +1264,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 				return
 			}
 			if !ok {
-				WriteS3ErrorWithContext(w, ErrQuotaExceeded, r.URL.Path, generateRequestID(),
-					WithSuggestion("Upgrade at "+billingURL()))
+				writeQuotaRefusal(w, r.URL.Path, capName)
 				return
 			}
 			bill = b
@@ -1278,7 +1290,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 	if quotaOn && bill != nil && !adapter.billSettled {
 		ctx, cancel := quotaCtx(r)
 		defer cancel()
-		s.releaseQuota(ctx, req.TenantID, floor, bill.Reserved)
+		s.releaseQuota(ctx, req.TenantID, floor, bill.Reserved, holderOf(r.Context(), req.Bucket))
 	}
 }
 

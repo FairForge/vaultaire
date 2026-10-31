@@ -131,6 +131,10 @@ func (m *QuotaManager) ReconcileStorageUsage(ctx context.Context) (int64, error)
 		    updated_at = NOW()`); err != nil {
 		return 0, fmt.Errorf("reconciling floor usage: %w", err)
 	}
+	// The key and bucket counters by the same rows (WP-KEY-1, holders.go).
+	if err := ReassertHolders(ctx, tx, ""); err != nil {
+		return 0, err
+	}
 	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, fmt.Errorf("reconciling storage usage: rows: %w", err)
@@ -186,6 +190,10 @@ func (m *QuotaManager) ReconcileTenantStorageUsage(ctx context.Context, tenantID
 		    updated_at = NOW()
 		WHERE f.tenant_id = $1`, tenantID); err != nil {
 		return fmt.Errorf("reconciling floor usage for tenant %s: %w", tenantID, err)
+	}
+	// The key and bucket counters by the same rows (WP-KEY-1, holders.go).
+	if err := ReassertHolders(ctx, tx, tenantID); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("reconciling storage usage for tenant %s: commit: %w", tenantID, err)

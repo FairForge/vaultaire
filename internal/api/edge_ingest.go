@@ -143,6 +143,14 @@ type edgeAdmitAttrs struct {
 	// KeyID is the access key id that signed the request (never its
 	// secret): the request log's key column (WP-LOG-1).
 	KeyID string `json:"key_id,omitempty"`
+	// ActingKey is the api_keys.id a write's admit counted to (WP-KEY-1:
+	// none for the primary pair): the write's writer and holder.
+	ActingKey string `json:"acting_key,omitempty"`
+	// EgressKey / EgressBucket: the capped key and whether the bucket is
+	// capped, found by a read's admit — its bytes are counted to them at
+	// the commit (WP-KEY-1, F-39 (a)).
+	EgressKey    string `json:"egress_key,omitempty"`
+	EgressBucket bool   `json:"egress_bucket,omitempty"`
 	// Status is what a GET answers the client (200, 206) — the access-log
 	// row's status when the Worker served it.
 	Status int `json:"status,omitempty"`
@@ -718,7 +726,8 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	row := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: req.Op, Backend: backend,
 		ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
-			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr)},
+			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr),
+			ActingKey: writerKeyOf(sctx)},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	row.Attrs.CheckLength = stream != nil && !streamProps.EnforcesDecodedLength
 	container := tenantID + "_" + bucket
@@ -730,19 +739,19 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	switch req.Op {
 	case edgeOpPut:
 		if s.quotaManager != nil {
-			bill, ok, qErr := s.reserveWrite(sctx, tenantID, bucket, key, floor, size)
+			bill, ok, capName, qErr := s.reserveWrite(sctx, tenantID, bucket, key, floor, size)
 			if qErr != nil {
 				s.logger.Error("edge admit: quota check failed", zap.Error(qErr), zap.String("tenant_id", tenantID))
 				return edgeAdmitResponse{}, http.StatusInternalServerError
 			}
 			if !ok {
-				WriteS3ErrorWithContext(rec, ErrQuotaExceeded, sr.URL.Path, generateRequestID(), WithSuggestion("Upgrade at "+billingURL()))
+				writeQuotaRefusal(rec, sr.URL.Path, capName)
 				return refusalOf(rec)
 			}
 			row.ReservedBytes, row.ReservedFloor, row.FloorReserved, row.Credited = bill.Reserved, bill.Floor, bill.FloorReserved, bill.Credited
 			defer func() {
 				if !settled {
-					s.releaseQuota(context.WithoutCancel(sctx), tenantID, row.ReservedFloor, row.ReservedBytes)
+					s.releaseQuota(context.WithoutCancel(sctx), tenantID, row.ReservedFloor, row.ReservedBytes, row.holder())
 				}
 			}()
 		}
@@ -805,6 +814,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 			WriteS3Error(rec, ErrNoSuchUpload, sr.URL.Path, generateRequestID())
 			return refusalOf(rec)
 		case errors.Is(rErr, errPartOverQuota):
+			setStoredCap(rec, refusedCap(rErr))
 			WriteS3ErrorWithContext(rec, ErrQuotaExceeded, sr.URL.Path, generateRequestID(),
 				WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
 			return refusalOf(rec)
@@ -1205,6 +1215,9 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	}
 
 	rec := newRelayRecorder()
+	// The admit's key is the write's (and a read's egress cap): the commit
+	// request carries no S3 credential of its own (WP-KEY-1).
+	ctx = withWriterKey(ctx, row.Attrs.ActingKey)
 	state, bytes, after := s.settleEdgeAdmit(ctx, row, req, rec)
 	relay := rec.relay()
 	result, _ := json.Marshal(relay)
@@ -1259,13 +1272,18 @@ func lockEdgeAdmit(ctx context.Context, tx *sql.Tx, id string) (edgeAdmitRow, er
 	return row, nil
 }
 
+// holder is who besides the tenant the admit charged (WP-KEY-1).
+func (row edgeAdmitRow) holder() usage.Holder {
+	return usage.Holder{KeyID: row.Attrs.ActingKey, Bucket: row.Bucket}
+}
+
 // releaseEdgeAdmit gives an admit's reservation back (a failed or expired
 // write). On its own context: the request's may be gone.
 func (s *Server) releaseEdgeAdmit(ctx context.Context, row edgeAdmitRow) {
 	ctx = context.WithoutCancel(ctx)
 	switch row.Op {
 	case edgeOpPut:
-		s.releaseQuota(ctx, row.TenantID, row.ReservedFloor, row.ReservedBytes)
+		s.releaseQuota(ctx, row.TenantID, row.ReservedFloor, row.ReservedBytes, row.holder())
 	case edgeOpPart:
 		if err := releaseUploadPart(ctx, s.db, row.TenantID, row.UploadID, row.PartNumber, row.ReservedBytes); err != nil {
 			s.logger.Error("edge: part reservation not given back — the reconcile and the upload's end release it",
@@ -1287,6 +1305,7 @@ func (s *Server) expireEdgeAdmit(ctx context.Context, tx *sql.Tx, row edgeAdmitR
 	case edgeOpGet:
 		if row.Host != dataplane.HostSLC { // host=slc: the origin metered what it streamed
 			s.recordEdgeEgress(ctx, row.TenantID, row.Backend, row.ContentLength)
+			s.countEdgeCapEgress(ctx, row, row.ContentLength)
 		}
 		s.logger.Info("edge get admit expired without a commit — the admitted size is metered",
 			zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket), zap.String("key", row.Key),
@@ -1592,6 +1611,7 @@ func (s *Server) commitEdgePart(ctx context.Context, row edgeAdmitRow, req edgeC
 		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0
 	case errors.Is(sErr, errPartOverQuota):
+		setStoredCap(rec, refusedCap(sErr))
 		WriteS3ErrorWithContext(rec, ErrQuotaExceeded, path, reqID, WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+"."))
 		s.recordEdgeAccess(row, rec.status, 0, 0)
 		return "failed", 0

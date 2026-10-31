@@ -178,24 +178,24 @@ func (s *Server) edgeAdmitCodecPut(req edgeAdmitRequest, p edgePrelude, size int
 		ContentLength: size, ContentType: attrs.ContentType, Codec: true,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
 			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr),
-			CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(sctx, tenantID, bucket, s.engine.GetPrimary())},
+			ActingKey: writerKeyOf(sctx), CodecVersion: grant.Version, MirrorLeg: s.mirrorFor(sctx, tenantID, bucket, s.engine.GetPrimary())},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	settled := false
 	if s.quotaManager != nil {
-		bill, okQ, qErr := s.reserveWrite(sctx, tenantID, bucket, key, floor, size)
+		bill, okQ, capName, qErr := s.reserveWrite(sctx, tenantID, bucket, key, floor, size)
 		if qErr != nil {
 			s.logger.Error("edge codec admit: quota check failed", zap.Error(qErr), zap.String("tenant_id", tenantID))
 			return edgeAdmitResponse{}, http.StatusInternalServerError, edgeCodecTaken
 		}
 		if !okQ {
-			WriteS3ErrorWithContext(rec, ErrQuotaExceeded, sr.URL.Path, generateRequestID(), WithSuggestion("Upgrade at "+billingURL()))
+			writeQuotaRefusal(rec, sr.URL.Path, capName)
 			resp, st := refusalOf(rec)
 			return resp, st, edgeCodecTaken
 		}
 		row.ReservedBytes, row.ReservedFloor, row.FloorReserved, row.Credited = bill.Reserved, bill.Floor, bill.FloorReserved, bill.Credited
 		defer func() {
 			if !settled {
-				s.releaseQuota(context.WithoutCancel(sctx), tenantID, row.ReservedFloor, row.ReservedBytes)
+				s.releaseQuota(context.WithoutCancel(sctx), tenantID, row.ReservedFloor, row.ReservedBytes, row.holder())
 			}
 		}()
 	}

@@ -248,7 +248,7 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 	}
 	var bill *writeBill
 	if s.quotaManager != nil {
-		res, qErr := reserveQuota(ctx, s.quotaManager, tenantID, "standard", size)
+		res, qErr := reserveQuota(ctx, s.quotaManager, tenantID, "standard", size, holderOf(ctx, bucket))
 		if qErr != nil {
 			s.logger.Error("direct upload: quota", zap.Error(qErr))
 			writeManagementError(w, ErrTypeAPI, "internal_error", "failed to reserve quota", "")
@@ -258,6 +258,9 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 		if !res.OK {
 			// The bytes are already on R2: they must not stay there unregistered.
 			removeUpload("quota")
+			if res.Cap != "" {
+				w.Header().Set("x-stored-cap", res.Cap)
+			}
 			writeManagementError(w, ErrTypePermission, "quota_exceeded", "storage quota exceeded; the uploaded object was removed", "")
 			return
 		}
@@ -270,7 +273,7 @@ func (s *Server) handleMgmtCompleteDirectUpload(w http.ResponseWriter, r *http.R
 				objectAttrs{ContentType: contentType}, etag) // R2's own HEAD answer
 		}})
 	if err != nil {
-		s.releaseQuota(context.WithoutCancel(ctx), tenantID, "standard", size)
+		s.releaseQuota(context.WithoutCancel(ctx), tenantID, "standard", size, holderOf(ctx, bucket))
 		retireOrphanWrite(ctx, s.db, s.logger, tenantID, bucket, blob, "r2")
 		if errors.Is(err, errSSECRequiredAtCommit) {
 			// A public bucket never requires a key (096); a bucket made

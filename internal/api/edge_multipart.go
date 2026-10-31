@@ -145,12 +145,16 @@ func reserveEdgePart(ctx context.Context, db *sql.DB, tenantID, uploadID, object
 			uploadID, upBytes); err != nil {
 			return edgePartReservation{}, fmt.Errorf("record the part reservation: %w", err)
 		}
-		qr, err := usage.ReserveTx(ctx, tx, tenantID, floor, upBytes)
+		h, err := uploadHolder(ctx, tx, uploadID)
+		if err != nil {
+			return edgePartReservation{}, err
+		}
+		qr, err := usage.ReserveTxFor(ctx, tx, tenantID, floor, upBytes, h)
 		if err != nil {
 			return edgePartReservation{}, err
 		}
 		if !qr.OK {
-			return edgePartReservation{}, errPartOverQuota
+			return edgePartReservation{}, &partOverQuota{cap: qr.Cap}
 		}
 		res.Reserved = upBytes
 	}

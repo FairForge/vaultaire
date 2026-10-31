@@ -144,7 +144,7 @@ var (
 var floorLockAllowed = map[string]string{
 	// WP-PLAT-1: the total's lock is taken by lockPool (pool.go) — the
 	// pool owner's row, then the tenant's own — before the floor statement.
-	"usage.ReserveTx": "the tenant_quotas lock is lockPool's call, before the floor",
+	"usage.ReserveTxFor": "the tenant_quotas lock is lockPool's call, before the floor",
 	// RP82-1: the pool's floor helpers are called only after lockPool /
 	// lockPoolOwner (the owner's total, then the child's) — the order
 	// TestLedger_LockOrder_PoolOwnerFirst_Structure pins in their callers.
@@ -166,7 +166,7 @@ func TestLedger_LockOrder_PoolOwnerFirst_Structure(t *testing.T) {
 		require.NoError(t, err)
 		for _, decl := range file.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || (fd.Name.Name != "ReserveTx" && fd.Name.Name != "ApplyLedgerTx") {
+			if !ok || (fd.Name.Name != "ReserveTxFor" && fd.Name.Name != "applyTenantLedgerTx") {
 				continue
 			}
 			found[fd.Name.Name] = true
@@ -201,7 +201,9 @@ func TestLedger_LockOrder_PoolOwnerFirst_Structure(t *testing.T) {
 			assert.Less(t, int(ownerFloor), int(ownFloor), "%s: the owner's floor before the tenant's own", fd.Name.Name)
 		}
 	}
-	assert.True(t, found["ReserveTx"] && found["ApplyLedgerTx"], "both functions were found")
+	// WP-KEY-1: the bodies are ReserveTxFor (ReserveTx charges no holder)
+	// and ApplyLedgerTx's tenant half.
+	assert.True(t, found["ReserveTxFor"] && found["applyTenantLedgerTx"], "both functions were found")
 }
 
 func TestLedger_LockOrder_TotalBeforeFloors_Structure(t *testing.T) {

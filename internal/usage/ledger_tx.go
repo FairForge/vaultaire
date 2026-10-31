@@ -42,8 +42,12 @@ type LedgerChange struct {
 	Total  int64
 	Floors map[string]int64
 	// Guard, when set, refuses (ErrOverQuota) a change that increases the
-	// total or the floor named here past its limit.
+	// total or the floor named here past its limit — and a holder past its
+	// cap (WP-KEY-1: a *CapError naming it).
 	Guard string
+	// Holders: the key and bucket counters this change moves beside the
+	// tenant's (holders.go, WP-KEY-1), moved after the tenant's rows.
+	Holders []HolderMove
 }
 
 // Zero reports a change that moves nothing.
@@ -53,6 +57,11 @@ func (c LedgerChange) Zero() bool {
 	}
 	for _, d := range c.Floors {
 		if d != 0 {
+			return false
+		}
+	}
+	for _, h := range c.Holders {
+		if h.Bytes != 0 {
 			return false
 		}
 	}
@@ -66,6 +75,30 @@ func ApplyLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerCha
 	if c.Zero() {
 		return nil
 	}
+	// The tenant's rows first, then the holders' (holders.go). Only holders
+	// moving (a write whose reservation equals its size, over a row another
+	// key wrote) locks no tenant row.
+	if c.Total != 0 || floorsMove(c.Floors) || (c.Guard != "" && c.Floors[c.Guard] > 0) {
+		if err := applyTenantLedgerTx(ctx, tx, tenantID, c); err != nil {
+			return err
+		}
+	}
+	return applyHolders(ctx, tx, tenantID, c.Holders, c.Guard != "")
+}
+
+// floorsMove reports a non-zero floor move.
+func floorsMove(f map[string]int64) bool {
+	for _, d := range f {
+		if d != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// applyTenantLedgerTx is ApplyLedgerTx's tenant half: the total, the pool's
+// counter and the floors.
+func applyTenantLedgerTx(ctx context.Context, tx *sql.Tx, tenantID string, c LedgerChange) error {
 	// The total's row is UPDATEd only when the total moves: a new key whose
 	// reservation equals its size changes no ledger at all and takes no
 	// lock — the quota row is the tenant's one hot row, and every commit of

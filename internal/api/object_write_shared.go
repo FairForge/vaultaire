@@ -346,6 +346,7 @@ type headRepoint struct {
 	NewSize         int64
 	Floor           string
 	Backend         string // the dropped/old row's backend
+	OldWriter       string // the old head row's writer key (WP-KEY-1)
 	VersionReleased quotaRelease
 }
 
@@ -376,16 +377,16 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 	// What the version holds, read under both locks before it goes: a
 	// retained version (bytes of its own, not the current object's blob) is
 	// billed on its own and released with it.
-	var storageKey, backend, floor string
+	var storageKey, backend, floor, writer string
 	var size int64
 	var retained bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(v.storage_key, ''), COALESCE(v.backend_name, ''), v.size_bytes, `+usage.RetainedVersionFloor+`,
-		       `+usage.VersionRetained+`
+		       `+usage.VersionRetained+`, COALESCE(v.written_by_key::text, '')
 		FROM object_versions v
 		LEFT JOIN object_head_cache h ON h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key
 		WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4`,
-		tenantID, bucket, key, versionID).Scan(&storageKey, &backend, &size, &floor, &retained)
+		tenantID, bucket, key, versionID).Scan(&storageKey, &backend, &size, &floor, &retained, &writer)
 	chunked := backend == chunkedBackendSentinel // its address names a manifest (WP-VM-1)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, rp, nil
@@ -414,7 +415,7 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 		}
 	}
 	if retained && size > 0 {
-		rp.VersionReleased = quotaRelease{Floor: floor, Bytes: size}
+		rp.VersionReleased = quotaRelease{Floor: floor, Bytes: size, KeyID: writer}
 	}
 	// A version that kept its bytes (WP-R2-1) or its manifest (WP-VM-1):
 	// they go to the collector with the row delete, unless the head row or
@@ -432,9 +433,9 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 	if billed {
 		rels := []quotaRelease{rp.VersionReleased}
 		if rp.Changed {
-			rels = append(rels, quotaRelease{Floor: rp.Floor, Bytes: rp.OldSize})
+			rels = append(rels, quotaRelease{Floor: rp.Floor, Bytes: rp.OldSize, KeyID: rp.OldWriter})
 		}
-		if err := releasesTx(ctx, tx, tenantID, rels); err != nil {
+		if err := releasesTx(ctx, tx, tenantID, bucket, rels); err != nil {
 			return true, rp, err
 		}
 	}
@@ -447,9 +448,9 @@ func deleteVersion(ctx context.Context, db *sql.DB, billed bool, tenantID, bucke
 func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bucket, key, deletedBlob string, chunked bool) (headRepoint, error) {
 	var rp headRepoint
 	err := tx.QueryRowContext(ctx, `
-		SELECT size_bytes, floor, COALESCE(backend_name, '') FROM object_head_cache
+		SELECT size_bytes, floor, COALESCE(backend_name, ''), COALESCE(written_by_key::text, '') FROM object_head_cache
 		WHERE tenant_id = $1 AND bucket = $2 AND object_key = $3 AND COALESCE(storage_key, object_key) = $4 AND is_chunked = $5
-		FOR UPDATE`, tenantID, bucket, key, deletedBlob, chunked).Scan(&rp.OldSize, &rp.Floor, &rp.Backend)
+		FOR UPDATE`, tenantID, bucket, key, deletedBlob, chunked).Scan(&rp.OldSize, &rp.Floor, &rp.Backend, &rp.OldWriter)
 	if errors.Is(err, sql.ErrNoRows) {
 		return headRepoint{}, nil // the head row names other bytes (or none): not this delete's business
 	}
@@ -473,6 +474,7 @@ func repointHeadAfterVersionDelete(ctx context.Context, tx *sql.Tx, tenantID, bu
 			website_redirect_location = COALESCE(v.website_redirect_location, ''),
 			body_md5 = v.body_md5, ssec_key_md5 = v.ssec_key_md5, -- what the row knows about ITS bytes (094, RP16-1)
 			backend_etag = NULL, -- a version records no backend answer (RP72-1): its created_at dates the rule
+			written_by_key = v.written_by_key, -- the re-pointed bytes are their writer's (WP-KEY-1)
 			updated_at = v.created_at
 		FROM object_versions v
 		WHERE h.tenant_id = $1 AND h.bucket = $2 AND h.object_key = $3
@@ -567,7 +569,8 @@ const copyHeadAttrsToVersionSQL = `
 		metadata = h.metadata, content_disposition = h.content_disposition, content_encoding = h.content_encoding,
 		content_language = h.content_language, cache_control = h.cache_control, http_expires = h.http_expires,
 		website_redirect_location = h.website_redirect_location,
-		body_md5 = h.body_md5, ssec_key_md5 = h.ssec_key_md5
+		body_md5 = h.body_md5, ssec_key_md5 = h.ssec_key_md5,
+		written_by_key = h.written_by_key -- WP-KEY-1: the version is its writer's
 	FROM object_head_cache h
 	WHERE v.tenant_id = $1 AND v.bucket = $2 AND v.object_key = $3 AND v.version_id = $4
 	  AND h.tenant_id = v.tenant_id AND h.bucket = v.bucket AND h.object_key = v.object_key`

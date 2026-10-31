@@ -126,6 +126,7 @@ func (s *Server) edgeAdmitCodecPart(req edgeAdmitRequest, p edgePrelude, size in
 		resp, st := refusalOf(rec)
 		return resp, st, edgeCodecTaken
 	case errors.Is(rErr, errPartOverQuota):
+		setStoredCap(rec, refusedCap(rErr))
 		WriteS3ErrorWithContext(rec, ErrQuotaExceeded, sr.URL.Path, generateRequestID(),
 			WithSuggestion("Parts in progress count against your storage. Upgrade at "+billingURL()+", or abort uploads you no longer need."))
 		resp, st := refusalOf(rec)
@@ -219,12 +220,16 @@ func reserveEdgeCodecPart(ctx context.Context, db *sql.DB, tenantID, uploadID, o
 			uploadID, upBytes); err != nil {
 			return edgeCodecPartReservation{}, fmt.Errorf("record the part reservation: %w", err)
 		}
-		qr, err := usage.ReserveTx(ctx, tx, tenantID, floor, upBytes)
+		h, err := uploadHolder(ctx, tx, uploadID)
+		if err != nil {
+			return edgeCodecPartReservation{}, err
+		}
+		qr, err := usage.ReserveTxFor(ctx, tx, tenantID, floor, upBytes, h)
 		if err != nil {
 			return edgeCodecPartReservation{}, err
 		}
 		if !qr.OK {
-			return edgeCodecPartReservation{}, errPartOverQuota
+			return edgeCodecPartReservation{}, &partOverQuota{cap: qr.Cap}
 		}
 		res.Reserved = upBytes
 	}
@@ -362,8 +367,12 @@ func settleEdgeCodecPart(ctx context.Context, db *sql.DB, gci *crypto.GlobalCont
 		return fmt.Errorf("read the part's previous chunks: %w", err)
 	}
 	delta := measured - held - reserved
+	h, err := uploadHolder(ctx, tx, uploadID)
+	if err != nil {
+		return err
+	}
 	if delta > 0 {
-		res, err := usage.ReserveTx(ctx, tx, tenantID, floor, delta)
+		res, err := usage.ReserveTxFor(ctx, tx, tenantID, floor, delta, h)
 		if err != nil {
 			return err
 		}
@@ -374,7 +383,7 @@ func settleEdgeCodecPart(ctx context.Context, db *sql.DB, gci *crypto.GlobalCont
 			if err := tx.Commit(); err != nil {
 				return fmt.Errorf("commit the part's release: %w", err)
 			}
-			return errPartOverQuota
+			return &partOverQuota{cap: res.Cap}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE multipart_uploads SET reserved_bytes = GREATEST(0, reserved_bytes + $2) WHERE upload_id = $1`,
@@ -394,7 +403,8 @@ func settleEdgeCodecPart(ctx context.Context, db *sql.DB, gci *crypto.GlobalCont
 		return fmt.Errorf("record part metadata: %w", err)
 	}
 	if delta < 0 {
-		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta}}); err != nil {
+		if err := usage.ApplyLedgerTx(ctx, tx, tenantID, usage.LedgerChange{Total: delta, Floors: map[string]int64{floor: delta},
+			Holders: []usage.HolderMove{{Holder: h, Bytes: delta}}}); err != nil {
 			return err
 		}
 	}

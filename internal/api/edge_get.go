@@ -206,6 +206,13 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 			egressWouldThrottle.WithLabelValues(edgeHost).Inc()
 		}
 	}
+	// A key's or a bucket's own egress cap (WP-KEY-1, F-39 (a)): spent = the
+	// origin's refusal (never one of the admit's own); under it, the read's
+	// bytes are counted to it at the commit.
+	ecaps, spent := s.egressCapsOf(sctx, tenantID, bucket)
+	if spent != "" {
+		return passThrough("capped")
+	}
 
 	// The version this response names, as HandleGet names it: the latest
 	// version on a versioned bucket (a delete marker is the origin's 404),
@@ -330,7 +337,8 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 	// to every link (a Range always); the client's status is the origin's.
 	admit := edgeAdmitRow{TenantID: tenantID, Bucket: bucket, Key: key, Op: edgeOpGet, Backend: row.backend, StorageKey: blob,
 		ContentLength: length, ContentType: contentType, Floor: row.floor, ClientIP: req.ClientIP, RequestID: req.RequestID,
-		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr), Status: status, MirrorLeg: mirrorLeg}}
+		Attrs: edgeAdmitAttrs{UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr), Status: status, MirrorLeg: mirrorLeg,
+			EgressKey: ecaps.keyID, EgressBucket: ecaps.bucketLimit > 0}}
 	if admit.ID, err = newEdgeAdmitID(); err != nil {
 		return edgeAdmitResponse{}, http.StatusInternalServerError
 	}
@@ -504,6 +512,7 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 			// host=slc: the bytes crossed this box and the origin's own
 			// writer metered them (handleS3Request) — never twice.
 			s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
+			s.countEdgeCapEgress(cctx, row, n)
 		}
 		status := row.Attrs.Status
 		if status == 0 {
@@ -534,6 +543,7 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 			// fallback the origin really served is then metered twice, the
 			// trade for never trusting a customer-run host's report.
 			s.recordEdgeEgress(cctx, row.TenantID, row.Backend, row.ContentLength)
+			s.countEdgeCapEgress(cctx, row, row.ContentLength)
 			if req.BytesSent <= 0 {
 				state, _ := s.settleEdgeGetFallback(row, req, rec)
 				return state, row.ContentLength
@@ -551,6 +561,7 @@ func (s *Server) settleEdgeGet(ctx context.Context, row edgeAdmitRow, req edgeCo
 			n = 0 // metered above at the admitted span
 		}
 		s.recordEdgeEgress(cctx, row.TenantID, row.Backend, n)
+		s.countEdgeCapEgress(cctx, row, n)
 		s.recordEdgeAccess(row, http.StatusInternalServerError, 0, n)
 		if s.engine != nil {
 			if rerr := edgeBackendReadError(req); rerr != nil {
@@ -622,6 +633,16 @@ func edgeBackendReadError(req edgeCommitRequest) error {
 // unrecorded bytes to the daily row (the month split, the backend
 // attribution). An unknown backend attributes to none, as the origin's
 // BackendUsed would.
+// countEdgeCapEgress counts an edge read's bytes to the key's and the
+// bucket's own egress caps the admit found (WP-KEY-1).
+func (s *Server) countEdgeCapEgress(ctx context.Context, row edgeAdmitRow, n int64) {
+	c := egressCaps{keyID: row.Attrs.EgressKey, bucket: row.Bucket}
+	if row.Attrs.EgressBucket {
+		c.bucketLimit = 1 // capped (the count re-reads the cap)
+	}
+	s.countEgress(ctx, row.TenantID, c, n)
+}
+
 func (s *Server) recordEdgeEgress(ctx context.Context, tenantID, backend string, n int64) {
 	if n <= 0 || tenantID == "" {
 		return
