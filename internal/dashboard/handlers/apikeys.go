@@ -30,6 +30,9 @@ type KeyRow struct {
 	// IsPrimary: the account's primary pair — rotated, never revoked
 	// (WP-R5-14).
 	IsPrimary bool
+	// CapsSummary, StorageGiB, EgressGiB: the key's own caps (WP-KEY-1),
+	// as the list words them and as the caps form shows them.
+	CapsSummary, StorageGiB, EgressGiB string
 }
 
 // NewKeyData holds the just-generated key credentials (shown once).
@@ -40,7 +43,7 @@ type NewKeyData struct {
 
 // HandleAPIKeys returns an http.HandlerFunc that lists API keys for the
 // current user.
-func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *zap.Logger) http.HandlerFunc {
+func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
 		if sd == nil {
@@ -52,6 +55,8 @@ func HandleAPIKeys(tmpl *template.Template, authSvc *auth.AuthService, logger *z
 		withCSRF(r.Context(), data)
 		withFlash(r.Context(), data)
 		data["Keys"] = listKeys(r, authSvc, sd.TenantID)
+		withKeyCaps(r, db, sd.TenantID, data)        // WP-KEY-1
+		withManagementKeys(r, db, sd.TenantID, data) // WP-KEY-1
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "base", data); err != nil {

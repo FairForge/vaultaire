@@ -120,6 +120,7 @@ aws s3 ls --endpoint-url {{host "s3"}}</div>
                 <th>Name</th>
                 <th>Access Key</th>
                 <th>Scope</th>
+                <th>Caps</th>
                 <th>Created</th>
                 <th>Last Used</th>
                 <th>Status</th>
@@ -132,6 +133,24 @@ aws s3 ls --endpoint-url {{host "s3"}}</div>
                 <td>{{.Name}}{{if .IsPrimary}} <span class="badge badge-success" title="The pair you got at signup. It can be rotated, never revoked: your account always keeps one way in.">primary</span>{{end}}</td>
                 <td class="mono">{{.KeyID}}</td>
                 <td>{{.ScopeSummary}}</td>
+                <td>
+                    {{if .IsPrimary}}<span class="text-muted" title="The primary pair is never capped: your account's own limits apply.">never capped</span>
+                    {{else}}
+                    {{if .CapsSummary}}{{.CapsSummary}}{{else}}none{{end}}
+                    {{if eq .Status "active"}}
+                    <details>
+                        <summary class="text-muted">Set caps</summary>
+                        <form method="POST" action="/dashboard/apikeys/{{.ID}}/caps">
+                            <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                            <label>Stored, GiB <input type="number" name="storage_gib" min="0" step="any" value="{{.StorageGiB}}" placeholder="none"></label>
+                            <label>Downloads a month, GiB <input type="number" name="egress_gib" min="0" step="any" value="{{.EgressGiB}}" placeholder="none"></label>
+                            <p class="text-muted">A write past the storage cap, or a download once the month's cap is spent, is refused (403, <code>x-stored-cap: key</code>). Your account's limits still apply; the smaller number wins. Webhooks get <code>key.cap_warning</code> at 80 and 95 %.</p>
+                            <button type="submit" class="btn btn-sm">Save caps</button>
+                        </form>
+                    </details>
+                    {{end}}
+                    {{end}}
+                </td>
                 <td>{{.CreatedFmt}}</td>
                 <td>{{.LastUsedFmt}}</td>
                 <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
@@ -159,6 +178,82 @@ aws s3 ls --endpoint-url {{host "s3"}}</div>
 {{else}}
 <div class="card">
     <p class="text-muted empty-state">No API keys yet. Generate one to start using the S3 API.</p>
+</div>
+{{end}}
+
+<h2 id="management-keys">Management keys</h2>
+<p class="text-muted">A management key lets a server call the management API (<code>/api/v1/manage</code>{{if .IsPlatform}} and <code>/api/v1/platform</code>{{end}}) as this account, with no person signed in: <code>Authorization: Bearer sk_live_…</code>. It belongs to the account, not to you, and it can never manage members, export or delete the account, or make another management key.</p>
+
+{{if .NewManagementKey}}
+<div class="card card-highlight">
+    <div class="card-title">New Management Key, Save It Now</div>
+    <div class="alert alert-success">Copy this key. It will not be shown again. Scopes: {{.NewManagementKey.Scopes}}.</div>
+    <div class="code-block">{{.NewManagementKey.Secret}}</div>
+</div>
+{{end}}
+
+<div class="card">
+    <form method="POST" action="/dashboard/management-keys">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label for="mk-name">Name</label>
+                <input type="text" id="mk-name" name="name" maxlength="200" placeholder="e.g. backend server">
+            </div>
+        </div>
+        <div class="form-group">
+            <label><input type="checkbox" name="scope" value="manage:read" checked> Read (buckets, keys, usage, the request log)</label>
+            <label><input type="checkbox" name="scope" value="manage:write"> Write (buckets and S3 keys, like a developer)</label>
+            {{if .IsPlatform}}<label><input type="checkbox" name="scope" value="platform"> Platform (your customers' accounts and their keys)</label>{{end}}
+        </div>
+        <div class="form-row">
+            <div class="form-group form-group-inline">
+                <label><input type="checkbox" name="test" value="on"> Test mode (<code>sk_test_…</code>: acts on your sandbox, never on live data)</label>
+            </div>
+            <div class="form-group form-group-inline">
+                <label for="mk-expires">Expires</label>
+                <select id="mk-expires" name="expires_days">
+                    <option value="">Never</option>
+                    <option value="30">In 30 days</option>
+                    <option value="90">In 90 days</option>
+                    <option value="365">In a year</option>
+                </select>
+            </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Make a management key</button>
+    </form>
+</div>
+
+{{if .ManagementKeys}}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr><th>Name</th><th>Key</th><th>Scopes</th><th>Mode</th><th>Expires</th><th>Created</th><th>Last Used</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+            {{range .ManagementKeys}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td class="mono">{{.Hint}}</td>
+                <td>{{.Scopes}}</td>
+                <td>{{if eq .Mode "test"}}<span class="badge badge-default">test</span>{{else}}live{{end}}</td>
+                <td>{{.ExpiresFmt}}</td>
+                <td>{{.CreatedFmt}}</td>
+                <td>{{.LastUsedFmt}}</td>
+                <td><span class="badge badge-{{.StatusClass}}">{{.Status}}</span></td>
+                <td>
+                    {{if eq .Status "active"}}
+                    <form method="POST" action="/dashboard/management-keys/{{.ID}}/revoke" style="display:inline"
+                          onsubmit="return confirm('Revoke this management key? The server using it is refused from its next request.')">
+                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                        <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
+                    </form>
+                    {{end}}
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
 </div>
 {{end}}
 
