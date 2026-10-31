@@ -395,14 +395,16 @@ func ReassertHolders(ctx context.Context, q Execer, tenantID string) error {
 
 // HolderDrift is how far the holders' counters are from the rows: per kind
 // ("key", "bucket"), the rows whose counter differs and the sum of the
-// differences' magnitudes. Read on scrape (a reservation in flight is a
+// differences' magnitudes — over the CAPPED keys and the counted buckets
+// only (the counters a refusal reads; written_by_key has no index, so a
+// walk of every key on every scrape would scan the head rows per key). Read on scrape (a reservation in flight is a
 // transient difference; a sustained one is a ledger bug).
 func HolderDrift(ctx context.Context, db *sql.DB) (rows, bytes map[string]int64, err error) {
 	rows, bytes = map[string]int64{}, map[string]int64{}
 	for kind, q := range map[string]string{
 		CapKey: `SELECT COUNT(*), COALESCE(SUM(ABS(d)), 0) FROM (
 			SELECT a.storage_used_bytes - ` + keyHeldOfA + ` AS d FROM api_keys a
-			 WHERE a.revoked_at IS NULL OR a.storage_used_bytes > 0) x WHERE d <> 0`,
+			 WHERE a.storage_limit_bytes IS NOT NULL) x WHERE d <> 0`,
 		CapBucket: `SELECT COUNT(*), COALESCE(SUM(ABS(d)), 0) FROM (
 			SELECT COALESCE(b.storage_used_bytes, 0) - ` + bucketHeldOfB + ` AS d FROM buckets b WHERE ` + bucketCounted + `) x WHERE d <> 0`,
 	} {
