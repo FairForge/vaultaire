@@ -137,6 +137,13 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /management-keys":                 auth.ActionManagementKey, // WP-KEY-1
 	"POST /management-keys/{id}/revoke":     auth.ActionManagementKey,
 	"POST /agents/connect":                  auth.ActionManagementKey, // WP-AGENT-1: an agent grant IS a management key
+	"POST /agents/{id}/renew":               auth.ActionManagementKey,
+	"POST /agents/{id}/revoke":              auth.ActionManagementKey,
+	"POST /approvals/{id}/approve":          auth.ActionBucketWrite, // the act's own role is checked per approval
+	"POST /approvals/{id}/deny":             auth.ActionBucketWrite,
+	"POST /apps":                            auth.ActionChildWrite, // WP-APP-1
+	"POST /apps/{id}/delete":                auth.ActionChildWrite,
+	"POST /claim/{token}":                   auth.ActionChildWrite,
 	"POST /settings/profile":                personalWrite,
 	"POST /settings/password":               personalWrite,
 	"POST /settings/notifications":          personalWrite,
@@ -395,6 +402,26 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		agentConnect := handlers.HandleAgentConnect(agentConnectTmpl, deps.DB, deps.Auth, deps.MFA, deps.flagOn("agent_grants"), deps.Logger)
 		dr.With(handlers.RequireAction(auth.ActionManagementKey)).Get("/agents/connect", agentConnect)
 		dr.With(act("POST /agents/connect")).Post("/agents/connect", agentConnect)
+
+		// WP-AGENT-1 / WP-APP-1 PR E: the Agents and Apps pages, the claim link.
+		agentsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(agentsTmpl.ParseFS(Templates, "templates/customer/agents.html"))
+		dr.Get("/agents", handlers.HandleAgentsPage(agentsTmpl, deps.DB, deps.flagOn("agent_grants"), deps.Logger))
+		dr.With(act("POST /agents/{id}/renew")).Post("/agents/{id}/renew", handlers.HandleAgentRenew(deps.DB, deps.Logger))
+		dr.With(act("POST /agents/{id}/revoke")).Post("/agents/{id}/revoke", handlers.HandleAgentRevoke(deps.DB, deps.Auth, deps.Logger))
+		dr.With(act("POST /approvals/{id}/approve")).Post("/approvals/{id}/approve", handlers.HandleApprovalDecide(deps.DB, deps.Auth, deps.MFA, "approved", deps.Logger))
+		dr.With(act("POST /approvals/{id}/deny")).Post("/approvals/{id}/deny", handlers.HandleApprovalDecide(deps.DB, deps.Auth, deps.MFA, "denied", deps.Logger))
+		appsTmpl := template.Must(baseTmpl.Clone())
+		template.Must(appsTmpl.ParseFS(Templates, "templates/customer/apps.html"))
+		appsPage := handlers.HandleAppsPage(appsTmpl, deps.DB, deps.flagOn("apps"), deps.Logger)
+		dr.Get("/apps", appsPage)
+		dr.With(act("POST /apps")).Post("/apps", appsPage)
+		dr.With(act("POST /apps/{id}/delete")).Post("/apps/{id}/delete", handlers.HandleAppDelete(deps.DB, deps.Logger))
+		claimTmpl := template.Must(baseTmpl.Clone())
+		template.Must(claimTmpl.ParseFS(Templates, "templates/customer/claim.html"))
+		claim := handlers.HandleClaim(claimTmpl, deps.DB, deps.Logger)
+		dr.Get("/claim/{token}", claim)
+		dr.With(act("POST /claim/{token}")).Post("/claim/{token}", claim)
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())

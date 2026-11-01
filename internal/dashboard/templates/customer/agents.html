@@ -1,0 +1,61 @@
+{{define "title"}}Agents, Stored{{end}}
+{{define "content"}}
+<div class="page-header"><div>
+    <h1>Agents</h1>
+    <p class="text-muted">AI agents you connected act for you on this account. What could lose or expose data, they ask you first.</p>
+</div></div>
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+
+<div class="card">
+    <div class="card-title">Waiting for you</div>
+    {{$any := false}}
+    <table class="table">
+        <thead><tr><th>Agent</th><th>Asks to</th><th>On</th><th>Asked</th><th></th></tr></thead>
+        <tbody>
+        {{range .Approvals}}{{if and (not .DecidedAt) (not .UsedAt)}}{{$any = true}}
+        <tr id="approval-{{.ID}}"{{if eq .ID $.Focus}} class="highlight"{{end}}>
+            <td>{{.AgentName}}</td><td>{{.Says}}</td><td><code>{{.Resource}}</code></td>
+            <td><time datetime="{{.RequestedAt.Format "2006-01-02T15:04:05Z"}}">{{.RequestedAt.Format "2006-01-02 15:04"}}</time></td>
+            <td>
+                <form method="post" action="/dashboard/approvals/{{.ID}}/approve" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    {{if .Destructive}}<input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="Authenticator code" required>{{end}}
+                    <button class="btn btn-sm" type="submit">Approve once</button>
+                </form>
+                <form method="post" action="/dashboard/approvals/{{.ID}}/deny" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <button class="btn btn-sm btn-danger" type="submit">Deny</button>
+                </form>
+            </td>
+        </tr>
+        {{end}}{{end}}
+        </tbody>
+    </table>
+    {{if not $any}}<p class="text-muted">Nothing is waiting.</p>{{end}}
+</div>
+
+<div class="card">
+    <div class="card-title">Connected agents</div>
+    {{if .Grants}}
+    <table class="table">
+        <thead><tr><th>Agent</th><th>For</th><th>Until</th><th>Last used</th>{{if .CanManage}}<th></th>{{end}}</tr></thead>
+        <tbody>
+        {{range .Grants}}
+        <tr>
+            <td>{{.AgentName}}</td><td>{{.GrantedByEmail}}</td>
+            <td>{{if .RevokedAt}}revoked{{else if .ExpiresAt}}{{.ExpiresAt.Format "2006-01-02"}}{{end}}</td>
+            <td>{{if .LastUsedAt}}{{.LastUsedAt.Format "2006-01-02 15:04"}}{{else}}never{{end}}</td>
+            {{if $.CanManage}}<td>{{if not .RevokedAt}}
+                <form method="post" action="/dashboard/agents/{{.ID}}/renew" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="btn btn-sm" type="submit">Renew 30 days</button></form>
+                <form method="post" action="/dashboard/agents/{{.ID}}/revoke" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="btn btn-sm btn-danger" type="submit">Revoke</button></form>
+            {{end}}</td>{{end}}
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}<p class="text-muted">No agent is connected. An MCP client (Claude, an IDE) connects at <code>https://mcp.{{host "domain"}}/mcp</code>; you consent here, with your authenticator code.</p>{{end}}
+</div>
+{{end}}
