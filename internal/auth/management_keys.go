@@ -46,6 +46,10 @@ const (
 	// ScopeApps: /api/v1/platform AS an app child — its own managed
 	// children only (depth 2 stays the deepest). Only an app's key.
 	ScopeApps = "apps"
+	// ScopePartner: /api/v1/partner of a partner tenant (an operator's
+	// grant, tenants.partner): provisional tenants and their claim links
+	// (WP-APP-1, F-42). Only a partner's key.
+	ScopePartner = "partner"
 )
 
 // The two prefixes: the tenant's livemode at mint (a sandbox is test mode).
@@ -160,6 +164,23 @@ type ManagementKey struct {
 	// live tenant): a test key (RP88-1) acts on the sandbox and its S3 keys
 	// are the account's test keys (RP88-5).
 	SandboxOf string `json:"-"`
+	// AgentGrantID / AgentGrantedBy: the key is an agent grant's (its live
+	// key or its sandbox test key, WP-AGENT-1) — the grant and the member
+	// it acts for. "" = a server's key.
+	AgentGrantID   string `json:"-"`
+	AgentGrantedBy string `json:"-"`
+}
+
+// IsAgent reports whether the key is an agent grant's.
+func (k *ManagementKey) IsAgent() bool { return k != nil && k.AgentGrantID != "" }
+
+// AuditPrincipal is the key's name in the audit trail: agent:<grant> for
+// an agent grant's key (on behalf of its member), else Principal().
+func (k *ManagementKey) AuditPrincipal() string {
+	if k.IsAgent() {
+		return "agent:" + k.AgentGrantID
+	}
+	return k.Principal()
 }
 
 // Principal is the key's name in the request log, the audit trail and the
@@ -231,12 +252,12 @@ func randomBase62() (string, error) {
 // validScopes checks the list is non-empty, known and without repeats.
 func validScopes(scopes []string) error {
 	if len(scopes) == 0 {
-		return fmt.Errorf("%w: at least one of manage:read, manage:write, platform, apps", ErrManagementKeyScope)
+		return fmt.Errorf("%w: at least one of manage:read, manage:write, platform, apps, partner", ErrManagementKeyScope)
 	}
 	seen := map[string]bool{}
 	for _, s := range scopes {
 		switch s {
-		case ScopeManageRead, ScopeManageWrite, ScopePlatform, ScopeApps:
+		case ScopeManageRead, ScopeManageWrite, ScopePlatform, ScopeApps, ScopePartner:
 		default:
 			return fmt.Errorf("%w: unknown scope %q", ErrManagementKeyScope, s)
 		}
@@ -264,8 +285,7 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 	if o.ExpiresAt != nil && !o.ExpiresAt.After(time.Now()) {
 		return nil, "", fmt.Errorf("%w: expires_at must be in the future", ErrManagementKeyExpiry)
 	}
-	name := strings.TrimSpace(o.Name)
-	if len([]rune(name)) > 200 {
+	if len([]rune(strings.TrimSpace(o.Name))) > 200 {
 		return nil, "", fmt.Errorf("%w: the name is longer than 200 characters", ErrManagementKeyScope)
 	}
 	tx, err := db.BeginTx(ctx, nil)
@@ -273,6 +293,22 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	k, secret, err := mintManagementKeyTx(ctx, tx, tenantID, o)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
+	}
+	return k, secret, nil
+}
+
+// mintManagementKeyTx is MintManagementKey inside the caller's transaction
+// (an agent grant mints its two keys and its row in one, WP-AGENT-1); the
+// options are validated by the caller.
+func mintManagementKeyTx(ctx context.Context, tx *sql.Tx, tenantID string, o ManagementKeyOptions) (*ManagementKey, string, error) {
+	name := strings.TrimSpace(o.Name)
+	var err error
 	if o.Test {
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`, tenantID).Scan(&exists); err != nil {
@@ -287,10 +323,10 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 		}
 		tenantID = sandbox
 	}
-	var platform bool
+	var platform, partner bool
 	var sandboxOf, kind sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT platform, sandbox_of, child_kind FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).
-		Scan(&platform, &sandboxOf, &kind)
+	err = tx.QueryRowContext(ctx, `SELECT platform, partner, sandbox_of, child_kind FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).
+		Scan(&platform, &partner, &sandboxOf, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrTenantNotFound
 	}
@@ -303,6 +339,8 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 			return nil, "", fmt.Errorf("%w: platform is a platform account's scope", ErrManagementKeyScope)
 		case s == ScopeApps && kind.String != string(ChildApp):
 			return nil, "", fmt.Errorf("%w: apps is an app's scope (minted by its platform)", ErrManagementKeyScope)
+		case s == ScopePartner && !partner:
+			return nil, "", fmt.Errorf("%w: partner is a partner account's scope (an operator's grant)", ErrManagementKeyScope)
 		}
 	}
 	var live int
@@ -345,9 +383,6 @@ func MintManagementKey(ctx context.Context, db *sql.DB, tenantID string, o Manag
 	}
 	if expires.Valid {
 		k.ExpiresAt = &expires.Time
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, "", fmt.Errorf("mint a management key of %s: %w", tenantID, err)
 	}
 	return k, secret, nil
 }
@@ -396,7 +431,7 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 	if !IsManagementKeySecret(secret) {
 		return nil, ErrManagementKeyInvalid
 	}
-	var actor, kind, parent, sandboxOf sql.NullString
+	var actor, kind, parent, sandboxOf, grant, grantedBy sql.NullString
 	k, err := scanManagementKey(db.QueryRowContext(ctx, `
 		SELECT `+managementKeyColumns+`,
 		       COALESCE(
@@ -411,10 +446,12 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 		         (SELECT m.user_id::text FROM tenant_members m WHERE m.tenant_id = t.parent_tenant_id AND m.role = 'owner'),
 		         (SELECT u.id::text FROM tenants p JOIN users u ON lower(u.email) = lower(p.email) WHERE p.id = t.parent_tenant_id ORDER BY u.created_at LIMIT 1),
 		         (SELECT m.user_id::text FROM tenants p JOIN tenant_members m ON m.tenant_id = p.parent_tenant_id AND m.role = 'owner' WHERE p.id = t.parent_tenant_id)),
-		       t.child_kind, t.parent_tenant_id, t.sandbox_of
+		       t.child_kind, t.parent_tenant_id, t.sandbox_of,
+		       g.id::text, g.granted_by::text
 		  FROM management_keys k JOIN tenants t ON t.id = k.tenant_id
+		  LEFT JOIN agent_grants g ON g.management_key_id = k.id OR g.test_management_key_id = k.id
 		 WHERE k.key_hash = $1 AND k.revoked_at IS NULL
-		   AND (k.expires_at IS NULL OR k.expires_at > NOW())`, hashManagementKey(secret)), &actor, &kind, &parent, &sandboxOf)
+		   AND (k.expires_at IS NULL OR k.expires_at > NOW())`, hashManagementKey(secret)), &actor, &kind, &parent, &sandboxOf, &grant, &grantedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrManagementKeyInvalid
 	}
@@ -422,6 +459,7 @@ func LookupManagementKey(ctx context.Context, db *sql.DB, secret string) (*Manag
 		return nil, fmt.Errorf("look up a management key: %w", err)
 	}
 	k.Actor, k.TenantKind, k.ParentTenantID, k.SandboxOf = actor.String, kind.String, parent.String, sandboxOf.String
+	k.AgentGrantID, k.AgentGrantedBy = grant.String, grantedBy.String
 	now := time.Now()
 	if k.LastUsedAt == nil || now.Sub(*k.LastUsedAt) >= managementKeyUseEvery {
 		if err := db.QueryRowContext(ctx, `

@@ -92,6 +92,8 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		s.registerMemberRoutes(r)
 		// WP-KEY-1: the management keys (management_keys.go).
 		s.registerManagementKeyRoutes(r)
+		// WP-AGENT-1: agent grants and their approvals (agents.go).
+		s.registerAgentRoutes(r)
 	}
 }
 
@@ -766,6 +768,14 @@ func (s *Server) handleMgmtCreateKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenantID, _ := r.Context().Value(tenantIDKey).(string)
+	// An agent's S3 key carries its grant's caps (WP-AGENT-1: an agent
+	// grant's caps are its S3 keys' caps).
+	if err := s.markAgentKey(r.Context(), key.TenantID, key.ID); err != nil {
+		s.logger.Error("agent key caps", zap.Error(err))
+		_ = s.auth.RevokeAPIKey(r.Context(), key.TenantID, key.ID)
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to cap the agent's key", "")
+		return
+	}
 	emitEvent(r.Context(), s.db, s.logger, "key.created", tenantID, map[string]interface{}{
 		"key_id": key.ID, "name": key.Name,
 	})

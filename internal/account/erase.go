@@ -213,6 +213,15 @@ var Deleted = []Rule{
 	// WP-KEY-1 (121): a management key is the TENANT's too (a platform's
 	// server key, an app's backend key): it goes with the tenant, never
 	// with the member who minted it (below: created_by is forgotten).
+	// WP-AGENT-1 (122): a tenant's agent grants, their approvals and the
+	// connect flow's pending codes go with it (before the keys they name).
+	{"approvals", `DELETE FROM approvals WHERE tenant_id = $1`, ByTenant},
+	{"agent_grants", `DELETE FROM agent_grants WHERE tenant_id = $1`, ByTenant},
+	{"agent_oauth_codes", `DELETE FROM agent_oauth_codes WHERE tenant_id = $1`, ByTenant},
+	// WP-APP-1 (122): the tenant's claim link (a provisional tenant's own);
+	// a partner's erasure forgets the partner on the links it issued.
+	{"claims", `DELETE FROM claims WHERE tenant_id = $1`, ByTenant},
+	{"claims", `UPDATE claims SET partner_tenant_id = '' WHERE partner_tenant_id = $1`, ByTenant},
 	{"management_keys", `DELETE FROM management_keys WHERE tenant_id = $1`, ByTenant},
 	{"admin_notifications", `DELETE FROM admin_notifications WHERE tenant_id = $1`, ByTenant},
 	{"admin_notes", `DELETE FROM admin_notes WHERE tenant_id = $1`, ByTenant},
@@ -235,6 +244,17 @@ var Deleted = []Rule{
 	// revoke the platform's server key); its maker is forgotten. It acts
 	// as the tenant's owner whoever minted it (auth.LookupManagementKey).
 	{"management_keys", `UPDATE management_keys SET created_by = NULL WHERE created_by::text = $1`, ByUser},
+	// WP-AGENT-1 (122): an agent acts FOR a person, who stays accountable
+	// (docs/ACCOUNTS.md § Agents): the person erased, their grants' keys are
+	// revoked (on every tenant: a team's too) and the grant forgets them; a
+	// decision they made keeps its row, the decider forgotten; their
+	// pending consents go.
+	{"management_keys", `UPDATE management_keys SET revoked_at = COALESCE(revoked_at, NOW())
+		 WHERE id IN (SELECT management_key_id FROM agent_grants WHERE granted_by::text = $1
+		              UNION SELECT test_management_key_id FROM agent_grants WHERE granted_by::text = $1)`, ByUser},
+	{"agent_grants", `UPDATE agent_grants SET granted_by = NULL WHERE granted_by::text = $1`, ByUser},
+	{"approvals", `UPDATE approvals SET decided_by = NULL WHERE decided_by::text = $1`, ByUser},
+	{"agent_oauth_codes", `DELETE FROM agent_oauth_codes WHERE user_id::text = $1`, ByUser},
 	// WP-TEAM-1 (118): the tenant's members and invitations go with the
 	// tenant; the user's memberships of tenants it does not own go with the
 	// user (a member's own users row is never erased with someone else's

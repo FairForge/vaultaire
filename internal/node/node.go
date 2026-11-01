@@ -363,7 +363,7 @@ var ReservedSegments = map[string]bool{
 	"abuse": true, "api": true, "auth": true, "cdn": true, "changelog": true, "compliance": true,
 	"dashboard": true, "docs": true, "favicon.ico": true, "forgot-password": true, "health": true,
 	"legal": true, "llms.txt": true, "login": true, "logout": true, "metrics": true, "og.png": true,
-	"openapi.json": true, "pricing": true, "ready": true, "register": true, "reset-password": true,
+	"oauth": true, "openapi.json": true, "pricing": true, "ready": true, "register": true, "reset-password": true,
 	"robots.txt": true, "signup": true, "sitemap.xml": true, "static": true, "status": true,
 	"translog": true, "verify": true, "version": true,
 	// Beyond it.

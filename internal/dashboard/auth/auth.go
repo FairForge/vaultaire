@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -353,11 +355,13 @@ func RequireSession(store SessionStore) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cookie, err := r.Cookie(cookieName)
 			if err != nil {
+				SetReturnTo(w, r)
 				http.Redirect(w, r, "/login", http.StatusSeeOther)
 				return
 			}
 			sd, err := store.Get(r.Context(), cookie.Value)
 			if err != nil || sd == nil {
+				SetReturnTo(w, r)
 				http.Redirect(w, r, "/login", http.StatusSeeOther)
 				return
 			}
@@ -449,4 +453,38 @@ func generateToken() (string, error) {
 		return "", fmt.Errorf("generate session token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ReturnToCookie carries the one page a sign-in returns to: an agent's
+// consent (WP-AGENT-1), which an MCP client opens in a browser that may not
+// be signed in. Only that page's path is ever stored or followed.
+const ReturnToCookie = "stored_return_to"
+
+// returnToAllowed: the consent page of the MCP authorization flow, only.
+func returnToAllowed(uri string) bool {
+	return uri == "/dashboard/agents/connect" || strings.HasPrefix(uri, "/dashboard/agents/connect?")
+}
+
+// SetReturnTo remembers r's page for after the sign-in when it is one a
+// sign-in may return to (15 minutes, this origin only).
+func SetReturnTo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || !returnToAllowed(r.URL.RequestURI()) {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: ReturnToCookie, Value: url.QueryEscape(r.URL.RequestURI()), Path: "/",
+		MaxAge: 900, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode}) // Secure as the session cookie is
+}
+
+// TakeReturnTo answers the remembered page ("" = none) and forgets it.
+func TakeReturnTo(w http.ResponseWriter, r *http.Request) string {
+	c, err := r.Cookie(ReturnToCookie)
+	if err != nil {
+		return ""
+	}
+	http.SetCookie(w, &http.Cookie{Name: ReturnToCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode})
+	uri, err := url.QueryUnescape(c.Value)
+	if err != nil || !returnToAllowed(uri) {
+		return ""
+	}
+	return uri
 }

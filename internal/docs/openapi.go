@@ -1138,6 +1138,38 @@ func generateManagementPaths() map[string]*PathItem {
 					"500": errResp("`internal_error`"),
 				})),
 		},
+		// WP-AGENT-1 (Stage 1a Prompt 55): agent grants (docs/API.md § Agents).
+		"/api/v1/manage/agents": {
+			Get: mgmt(jsonOp("Management", "List agent grants", "ManageListAgents",
+				"The AI agents connected to the account (the MCP authorization flow: OAuth 2.1 + PKCE at `/oauth/*`, the consent on the dashboard with TOTP). "+
+					"An agent grant IS a management key: `management_key_id` (its `sk_live_` key) and `test_management_key_id` (its sandbox `sk_test_` key), the member it acts for (`granted_by`), "+
+					"the caps every S3 key it mints carries and its expiry (30 days, renewable). Dark behind `agent_grants` (404).",
+				map[string]Response{
+					"200": jsonResp("Grants", listSchema("", agentGrantSchema())),
+					"404": errResp("`not_found` (agents are off for the account)"),
+					"500": errResp("`internal_error`"),
+				})),
+		},
+		"/api/v1/manage/agents/{id}/renew": {
+			Parameters: []Parameter{pathParam("id", "Agent grant id")},
+			Post: mut(jsonOp("Management", "Renew an agent grant", "ManageRenewAgent",
+				"A fresh 30 days on both keys of the grant; nothing else changes (a renewal never widens its scope, ceiling or caps). A person's (a management key is 403 `person_required`), with the role that mints a management key. Audited `agent.grant_renewed`.",
+				map[string]Response{
+					"200": jsonResp("The grant", agentGrantSchema()),
+					"403": errResp("`person_required` or `role_forbidden`"),
+					"404": errResp("`agent_grant_not_found` or `not_found`"),
+				})),
+		},
+		"/api/v1/manage/agents/{id}": {
+			Parameters: []Parameter{pathParam("id", "Agent grant id")},
+			Delete: mut(jsonOp("Management", "Revoke an agent grant", "ManageRevokeAgent",
+				"Revokes both keys of the grant at once, and every S3 key it minted. A person's. Audited `agent.grant_revoked`.",
+				map[string]Response{
+					"200": jsonResp("Revoked", objectPtr("", map[string]*Schema{"object": strEnum("", "agent_grant"), "id": str(""), "revoked": boolean("Always true"), "request_id": str("")})),
+					"403": errResp("`person_required` or `role_forbidden`"),
+					"404": errResp("`agent_grant_not_found` or `not_found`"),
+				})),
+		},
 		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
 		// (docs/API.md § Members).
 		"/api/v1/manage/members": {
@@ -2878,4 +2910,22 @@ func bulkRenewalsPath(resume bool) *PathItem {
 				"dry_run": {Type: "boolean", Default: true, Description: "List only (the default)"},
 			})))),
 	}
+}
+
+// agentGrantSchema is an agent grant as the management API answers it.
+func agentGrantSchema() *Schema {
+	return objectPtr("An agent grant (WP-AGENT-1)", map[string]*Schema{
+		"object":                 strEnum("", "agent_grant"),
+		"id":                     str("Grant id"),
+		"agent_name":             str("The agent (its OAuth client's name)"),
+		"client_id":              str("The OAuth client that connected it"),
+		"granted_by":             str("The member it acts for"),
+		"approved_scopes":        arrayOf(str("")),
+		"storage_limit_bytes":    nullable(integer("The cap every S3 key it mints carries")),
+		"egress_limit_bytes":     nullable(integer("The egress cap per UTC month every S3 key it mints carries")),
+		"management_key_id":      str("Its live key"),
+		"test_management_key_id": str("Its sandbox test key"),
+		"expires_at":             str("When its keys stop working"),
+		"revoked_at":             nullable(str("")),
+	})
 }

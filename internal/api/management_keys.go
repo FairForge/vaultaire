@@ -116,7 +116,22 @@ func (s *Server) requireCaller(surface callerSurface) func(http.Handler) http.Ha
 			ctx = context.WithValue(ctx, tenantIDKey, k.TenantID)
 			ctx = context.WithValue(ctx, roleKey, managementKeyRole(k, surface))
 			ctx = context.WithValue(ctx, jwtIDKey, k.Principal())
-			ctx = audit.WithPrincipal(ctx, k.Principal())
+			ctx = audit.WithPrincipal(ctx, k.AuditPrincipal())
+			if k.IsAgent() {
+				// An agent acts for the member who granted it (WP-AGENT-1):
+				// the audit names the grant and that member; the request
+				// log's key column stays the key's mk:<id> (jwtIDKey above).
+				account := k.TenantID
+				if k.SandboxOf != "" {
+					account = k.SandboxOf // the grant's test key: its account's flag
+				}
+				if !s.agentsEnabled(account) {
+					writeManagementError(w, ErrTypeAuthentication, "invalid_management_key", "the management key is unknown or revoked", "")
+					return
+				}
+				ctx = audit.WithOnBehalfOf(ctx, k.AgentGrantedBy)
+				ctx = context.WithValue(ctx, agentGrantCtxKey{}, k)
+			}
 			if ks := k.Ceiling.KeyScope(time.Now()); ks != nil {
 				ctx = auth.WithKeyScope(ctx, ks)
 			}

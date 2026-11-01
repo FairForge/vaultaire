@@ -58,6 +58,7 @@ const (
 	actorKey
 	tenantKey
 	principalKey
+	onBehalfKey
 )
 
 type requestInfo struct {
@@ -103,6 +104,17 @@ func WithPrincipal(ctx context.Context, principal string) context.Context {
 		return ctx
 	}
 	return context.WithValue(ctx, principalKey, principal)
+}
+
+// WithOnBehalfOf names the person a non-person principal acts FOR (an
+// agent grant, WP-AGENT-1: agent:<grant> on behalf of the member who
+// granted it): the row keeps the principal and records that member as
+// performed_by — the person accountable for the act (docs/ACCOUNTS.md).
+func WithOnBehalfOf(ctx context.Context, userID string) context.Context {
+	if userID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, onBehalfKey, userID)
 }
 
 // PrincipalFromContext returns the principal stashed by WithPrincipal.
@@ -201,7 +213,7 @@ func insert(ctx, info context.Context, q Execer, e Entry) error {
 	// the acting person's user id.
 	principal := PrincipalFromContext(info)
 	if principal != "" {
-		actor = ""
+		actor, _ = info.Value(onBehalfKey).(string) // "" unless an agent acts for a member
 	} else if nullUUID(actor).Valid {
 		principal = actor
 	}
