@@ -7,8 +7,11 @@ no secret and decides nothing: every call carries the **agent grant's own key**
 
 - `POST /mcp` — MCP over Streamable HTTP (JSON answers; no server stream).
   Without a bearer: `401` + `WWW-Authenticate: Bearer resource_metadata=…`.
-- `GET /.well-known/oauth-protected-resource` — RFC 9728; names the origin
-  (`STORED_API`) as the authorization server.
+- `GET /.well-known/oauth-protected-resource` — RFC 9728; names the origin's
+  authorization server by the `issuer` its own metadata publishes (the
+  canonical host — `stored.ge` on prod until WP-DOMAIN-1 moves it; a client
+  refuses an issuer that differs from the URL it fetched, RFC 8414 § 3.3).
+  `STORED_API` is only where the Worker reaches the origin.
 - The origin runs OAuth 2.1 + PKCE (S256) with dynamic client registration:
   `/.well-known/oauth-authorization-server`, `/oauth/register`,
   `/oauth/authorize` → the dashboard's consent (a person, TOTP) →
