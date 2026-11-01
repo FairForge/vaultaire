@@ -88,6 +88,14 @@ Webhooks and events: GET/POST /api/v1/webhooks, PATCH/DELETE /webhooks/{id},
   GET /webhooks/{id}/deliveries, POST /webhooks/{id}/test, GET /api/v1/events
 STS: POST /api/v1/sts/token {"duration_seconds","permissions","bucket_scope","parent_key_id"}
 
+AI agents (MCP): an MCP client connects to https://mcp.stored.cloud/mcp (OAuth 2.1 + PKCE with
+  dynamic registration; the account holder consents on the dashboard with their authenticator code).
+  The agent acts for that person: deleting a bucket asks them first (403 approval_required with an
+  approval_url to show them), its buckets are versioned, it never reads a Private bucket.
+  Local clients: "stored mcp" (STORED_TOKEN = the agent's key).
+Apps (/api/v1/manage/apps): an account makes app children for its own users; an app's key makes
+  its users at POST /api/v1/platform/tenants, inside the account's storage.
+
 Conventions: single object {"object": "...", ..., "request_id"}; lists
 {"object":"list","data":[...],"has_more":bool,"next_cursor":"..."} with ?limit=&starting_after=;
 errors {"error":{"type","code","message","request_id"}}; Idempotency-Key header on mutations (24 h);

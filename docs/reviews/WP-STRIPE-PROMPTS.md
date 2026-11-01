@@ -1066,6 +1066,56 @@ Done means:
 - the proofs have run on prod;
 - Prompt 56 is written here.
 
+## Stage 1a Prompt 56: WP-FAMILY-1 — family: a pool of personal tenants (Part 0: RP90's findings)
+
+**From 55** (`docs/reviews/WP-STRIPE-7.md`; the post-merge review is RP90):
+- A tenant is still the unit of disclosure; a pool pays. Prompt 55 added two kinds of child that are not a family member: an `app` (self-serve, D-STRIPE-80) and a provisional claimable (a managed child of its partner, D-STRIPE-82). A **sponsored** child is neither: its sponsor never mints its keys, reads it or erases it (`docs/ACCOUNTS.md`, the edges table).
+- The account tree's rules hold for sponsored children already (WP-ACCT-1): `account.DetachSponsored`, `TestTree_SponsoredNeverSuspendedOrErasedWithTheSponsor` on a row made by SQL. This WP makes the row through a real invitation.
+- Invitations are WP-TEAM-1's (`tenant_invitations.kind`, one-time token, 7 days); the dashboard's return-to after a sign-in exists now (`dashauth.ReturnToCookie`, Prompt 55) — extend its allow-list to the family invitation's page rather than adding a second mechanism.
+- Management keys and agents never act for a sponsored member's tenant from the organizer's: a family member's own agent connects on the member's own account.
+
+Read first: plan § WP-STRIPE, the **WP-FAMILY-1** row; `docs/ACCOUNTS.md` (§ The edges of the tree, § A family; F-40); `docs/reviews/WP-STRIPE-7.md` and its review `docs/reviews/WP-STRIPE-7-REVIEW.md` (RP90); `internal/auth/invitations.go`, `internal/account/` (`DetachSponsored`, `ScheduleTenant`), `internal/usage/pool.go` (`MovePoolTx`, the pool's lock order), `internal/api/tree_edges_test.go`; `internal/api/landing/prices.json` (the Family line, if any).
+
+Part 0 — RP90's findings, each test first, in the review's order. If RP90 is not on main when you start, STOP and say so: never guess a review.
+
+PR A — the family: the organizer's root is the pool; `POST /api/v1/manage/family/invitations {email}` (`tenant_invitations.kind = 'family'`, the organizer an owner, a person with TOTP); accepting attaches the invitee's own root as a **sponsored** child — only without a paid entitlement of its own (F-40; 409 `member_pays_own_plan`), at most 6 members (F-40's draft; a constant until the owner decides), its bytes moved into the pool with `usage.MovePoolTx`. Tests: `TestFamily_SixMembersMax`, `TestFamily_OrganizerCannotMintAMembersKey` (platform routes, management keys and an agent grant all 404/403 on the member), `TestFamily_OrganizerSeesUsageNeverNames` (`GET /api/v1/manage/family` = bytes per member, never a bucket, object or request).
+
+PR B — leaving: the organizer removes a member, or the member leaves, or the organizer is erased: the member DETACHES (a root again, free tier; over it = read-only, never deleted), its bytes moved back out of the pool. Tests: `TestFamily_RemovedMemberKeepsItsData`, `TestFamily_SponsorErasureDetachesNeverErases`, `TestFamily_MemberSuspendedOnlyForItsOwnAbuse`.
+
+PR C — the dashboard's Family page (members, usage totals, caps, remove, invite; the member's own "leave"), each write through `dashboardAction`. The optional shared family space (one more tenant in the pool with every member as a WP-TEAM-1 member) only if F-40 asks for it; else a residual.
+
+PR D — docs: `docs/reviews/WP-STRIPE-8.md`, STATUS, the plan row, CLAUDE.md, `docs/API.md` § Family, `llms.txt`, the ledger row; the next prompt (WP-POST-1) in both editions with Part 0 = RP92.
+
+Prod: the owner's family of two addresses, a member's upload counted in the pool, the organizer's view shows bytes only; and Prompt 55's owed proof if it has not run.
+
+## Stage 1a Prompt 56 — Opus edition
+
+**From 55:** see the chain edition's "From 55" block above.
+
+You are building plan § WP-STRIPE's WP-FAMILY-1 row in the Vaultaire repository: a family is a POOL of personal tenants — each member a `sponsored` child with their own login, keys, recovery and library; the organizer pays, sees usage totals, sets caps and removes members, and sees nothing else. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database (`make test-db TEST_DB=vaultaire_test_p56`); no migration expected — if a column is needed it goes in **123**, written whole in PR A.
+
+Read before editing: the chain edition's "Read first" list. If RP90 (`docs/reviews/WP-STRIPE-7-REVIEW.md`) is not on main, STOP and say so.
+
+PR 0 — Branch `stage1a-p56-part0`. RP90's findings in the review's order, each test first. Nothing else.
+
+PR A — Branch `stage1a-p56-family`.
+1. Test first: `TestFamily_SixMembersMax`, `TestFamily_OrganizerCannotMintAMembersKey`, `TestFamily_OrganizerSeesUsageNeverNames`. Red.
+2. `internal/auth/family.go`: `InviteFamilyMember` (WP-TEAM-1's invitation, `kind = 'family'`, an owner, ≤ 6 live members + pending invitations counted under the organizer's row `FOR UPDATE`), `AcceptFamilyInvitation` (ONE transaction: the invitee's root re-parented as `child_kind = 'sponsored'` under the organizer, `pool_root_id` the organizer's, `usage.MovePoolTx`; refused with `ErrMemberPaysOwnPlan` when the invitee has a live entitlement, F-40).
+3. `internal/api/family.go`: `POST /api/v1/manage/family/invitations` (`requirePerson`, owner, a fresh TOTP code as the approvals take it), `GET /api/v1/manage/family` (per member: label, `storage_used_bytes`, cap — never a bucket, an object or a request).
+4. Prove the sponsored edge stays closed: the platform routes' `DescendantT*` already exclude `sponsored` — the test calls each platform route on the member with the organizer's JWT, a platform key and an agent grant: 404 / 403.
+
+PR B — Branch `stage1a-p56-leave`.
+5. Test first: `TestFamily_RemovedMemberKeepsItsData`, `TestFamily_SponsorErasureDetachesNeverErases`, `TestFamily_MemberSuspendedOnlyForItsOwnAbuse`. Red.
+6. `RemoveFamilyMember` / `LeaveFamily`: ONE transaction — `parent_tenant_id` NULL, `child_kind` NULL, `pool_root_id` = itself, `usage.MovePoolTx` back, the free tier; over it: read-only (writes 403 `QuotaExceeded`), never deleted. The organizer's erasure calls the same through `account.DetachSponsored`.
+
+PR C — Branch `stage1a-p56-dashboard`: `/dashboard/family` (members, totals, caps, remove, invite) and the member's "leave"; every write in `dashboardWrites`.
+
+PR D — docs: `docs/reviews/WP-STRIPE-8.md`, STATUS, the plan row DONE, CLAUDE.md, `docs/API.md` § Family, `llms.txt`, the ledger row; the next prompt (WP-POST-1) in both editions with Part 0 = RP92.
+
+Prod: the owner's family of two addresses; a member's upload counted in the pool; the organizer's view shows bytes only.
+
+Done means: PRs 0 and A–D merged; the proof has run on prod; the next prompt is written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -1103,5 +1153,10 @@ Done means:
   - PR D: this closeout.
   - Prod proof owed (RB12-7: the owner's TOTP).
   - The post-merge review is **RP88 Part 2**.
-- **Prompt 55 — WP-AGENT-1 + WP-APP-1** — WRITTEN above by Prompt 54's closeout, both editions. Part 0 = RP88 Part 2 (the review fills it). Migration 122. The post-merge review is RP90.
-- **56 — WP-FAMILY-1**; then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — re-cut 2026-10-29 by `docs/ACCOUNTS.md`; each written by the closeout before it.
+- **Prompt 55 — WP-AGENT-1 + WP-APP-1 — BUILT 2026-10-31** (`docs/reviews/WP-STRIPE-7.md`; migration 122, landed whole with PR A). PRs:
+  - #1099: Part 0, RP88-6/7/8/9/11 + RB12-6/9.
+  - PR A agent grants (the MCP authorization flow, `edge/mcp`, `stored mcp`); PR B approvals; PR C apps; PR D claimable apps; PR E the dashboard; PR F this closeout.
+  - Prod proof owed: the owner's TOTP and the Worker's route (with RB12-7).
+  - The post-merge review is **RP90**.
+- **Prompt 56 — WP-FAMILY-1** — WRITTEN below by Prompt 55's closeout, both editions. Part 0 = RP90 (the review fills it). No migration expected (WP-ACCT-1's columns); if one is needed it is **123**, landed whole with PR A.
+- Then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — each written by the closeout before it.
