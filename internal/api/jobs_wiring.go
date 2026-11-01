@@ -133,6 +133,15 @@ func (s *Server) registerJobs() {
 				return jobReport{Rows: n}, err
 			}})
 	}
+	if s.db != nil {
+		// WP-APP-1 PR D: an unclaimed claimable past its 7 days is
+		// scheduled now (the deletion runner erases it).
+		s.jobs.Register(jobSpec{Name: "claimable_purge", Every: time.Hour, BootDelay: 45 * time.Second, MaxRunTime: 5 * time.Minute,
+			Run: func(ctx context.Context) (jobReport, error) {
+				n, err := s.purgeExpiredClaimables(ctx)
+				return jobReport{Rows: int64(n)}, err
+			}})
+	}
 	if ds, ok := s.sessionStore.(*dashauth.DBStore); ok {
 		s.jobs.Register(jobSpec{Name: "session_cleanup", Every: time.Hour, BootDelay: 30 * time.Second, MaxRunTime: 5 * time.Minute,
 			Run: func(ctx context.Context) (jobReport, error) {

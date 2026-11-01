@@ -340,3 +340,47 @@ func (m *QuotaManager) ReseedPoolUsed(ctx context.Context, root string) (int64, 
 	}
 	return counter - sum, tx.Commit()
 }
+
+// MovePoolTx moves tenantID's bytes from the pool of fromRoot to the pool
+// of toRoot inside the caller's transaction (WP-APP-1: a claimed tenant
+// re-parented under its claimer). The two roots' quota rows are locked in
+// id order, then the tenant's own (the pool's lock order, D-STRIPE-66),
+// and each root's pool counter moves by the tenant's counted bytes. The
+// tenant's own counter, and its keys' and buckets' (holders), stay as they
+// are: they are the tenant's. A floor the new root bought that the tenant
+// has no counting row for gets one, seeded from its head rows on that
+// floor (a retained version's or an upload's bytes there are the
+// reconcile's to correct: the drift gauge shows them).
+func MovePoolTx(ctx context.Context, tx *sql.Tx, tenantID, fromRoot, toRoot string) (int64, error) {
+	roots := []string{fromRoot, toRoot}
+	if toRoot < fromRoot {
+		roots = []string{toRoot, fromRoot}
+	}
+	for _, r := range roots {
+		if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, r); err != nil {
+			return 0, fmt.Errorf("move the pool of %s: lock %s: %w", tenantID, r, err)
+		}
+	}
+	var used int64
+	if err := tx.QueryRowContext(ctx, `SELECT storage_used_bytes FROM tenant_quotas WHERE tenant_id = $1 FOR UPDATE`, tenantID).Scan(&used); err != nil {
+		return 0, fmt.Errorf("move the pool of %s: %w", tenantID, err)
+	}
+	if fromRoot != toRoot && used != 0 {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE tenant_quotas
+			   SET pool_used_bytes = CASE WHEN tenant_id = $1 THEN GREATEST(0, pool_used_bytes - $3) ELSE pool_used_bytes + $3 END,
+			       updated_at = NOW()
+			 WHERE tenant_id IN ($1, $2)`, fromRoot, toRoot, used); err != nil {
+			return 0, fmt.Errorf("move the pool of %s: %w", tenantID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes)
+		SELECT $1, r.floor, 0, COALESCE((SELECT SUM(h.size_bytes) FROM object_head_cache h WHERE h.tenant_id = $1 AND h.floor = r.floor), 0)
+		  FROM tenant_floor_quotas r
+		 WHERE r.tenant_id = $2
+		   AND NOT EXISTS (SELECT 1 FROM tenant_floor_quotas c WHERE c.tenant_id = $1 AND c.floor = r.floor)`, tenantID, toRoot); err != nil {
+		return 0, fmt.Errorf("move the pool of %s: the floor rows: %w", tenantID, err)
+	}
+	return used, nil
+}

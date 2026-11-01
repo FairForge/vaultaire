@@ -60,6 +60,7 @@ func (s *Server) registerPlatformRoutes() {
 func (s *Server) registerAdminPlatformRoutes(r chi.Router) {
 	r.Put("/tenants/{tenant_id}/platform", s.requireAdmin(s.handleAdminSetPlatform))
 	r.Put("/tenants/{tenant_id}/residency", s.requireAdmin(s.handleAdminSetResidency)) // WP-ACCT-1
+	r.Put("/tenants/{tenant_id}/partner", s.requireAdmin(s.handleAdminSetPartner))     // WP-APP-1 PR D
 }
 
 // requirePlatform answers the unknown route's 404 unless the JWT's tenant

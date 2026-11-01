@@ -313,6 +313,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"idempotency_cleanup": "every 1h0m0s",
 		"sts_cleanup":         "every 1h0m0s",
 		"session_cleanup":     "every 1h0m0s",
+		"claimable_purge":     "every 1h0m0s",
 		"bandwidth_alerts":    "every 1h0m0s",
 		"access_log_delivery": "every 5m0s",
 		// WP-EDGE-1 Part A: expired edge admits released and retired.

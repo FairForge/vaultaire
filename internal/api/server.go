@@ -1154,6 +1154,7 @@ func (s *Server) setupRoutes() {
 	s.registerManagementRoutes()
 	s.registerPlatformRoutes()   // WP-PLAT-1: 404 for every tenant that is not a platform
 	s.registerAgentOAuthRoutes() // WP-AGENT-1: the MCP authorization flow (agent_oauth.go)
+	s.registerPartnerRoutes()    // WP-APP-1: claimable apps (claimable.go), 404 but to a partner's key
 
 	// POST /api/v1/edge/admit + /commit — the Worker's calls (WP-EDGE-1
 	// Part A, edge_ingest.go); mounted only with EDGE_SERVICE_TOKEN.
