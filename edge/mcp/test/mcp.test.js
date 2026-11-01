@@ -15,6 +15,9 @@ beforeEach(() => {
     calls.push({ method: init.method || "GET", url: u.origin + u.pathname + u.search, headers, body: init.body });
     const j = (status, b) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json" } });
     if (u.origin === env.STORED_API) {
+      // The origin's issuer is its CANONICAL host, which need not be the
+      // host the Worker reaches it on (prod: stored.ge until WP-DOMAIN-1).
+      if (u.pathname === "/.well-known/oauth-authorization-server") return j(200, { issuer: "https://issuer.test" });
       if (u.pathname === "/api/v1/manage/buckets" && init.method === "POST") return j(201, { name: JSON.parse(init.body).name, mode: "standard", versioning: "Enabled" });
       if (u.pathname === "/api/v1/manage/buckets") return j(200, { data: [{ name: "notes", mode: "standard" }] });
       if (u.pathname.startsWith("/api/v1/manage/buckets/") && init.method === "DELETE")
@@ -38,7 +41,7 @@ test("no grant: 401 naming the protected-resource metadata, which names the orig
   assert.equal(res.status, 401);
   assert.match(res.headers.get("www-authenticate"), /resource_metadata="https:\/\/mcp\.test\/\.well-known\/oauth-protected-resource"/);
   const meta = await (await worker.fetch(new Request("https://mcp.test/.well-known/oauth-protected-resource"), env)).json();
-  assert.deepEqual(meta.authorization_servers, ["https://origin.test"]);
+  assert.deepEqual(meta.authorization_servers, ["https://issuer.test"], "the AS is named by the issuer the origin publishes (RFC 8414 § 3.3)");
   assert.equal(meta.resource, "https://mcp.test/mcp");
 });
 

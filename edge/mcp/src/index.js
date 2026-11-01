@@ -45,12 +45,31 @@ async function rpc(env, token, msg) {
   }
 }
 
+// originIssuer is the issuer of the origin's authorization-server metadata,
+// or "" when the origin did not answer one.
+async function originIssuer(env) {
+  try {
+    const res = await fetch(env.STORED_API + "/.well-known/oauth-authorization-server");
+    if (!res.ok) return "";
+    const doc = await res.json();
+    return typeof doc.issuer === "string" && /^https:\/\/[^/]+$/.test(doc.issuer) ? doc.issuer : "";
+  } catch {
+    return "";
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === "/.well-known/oauth-protected-resource/mcp") {
-      return json(200, { resource: env.MCP_RESOURCE, authorization_servers: [env.STORED_API], bearer_methods_supported: ["header"],
-        scopes_supported: ["stored"], resource_documentation: env.STORED_API + "/docs/api#agents" }, { "cache-control": "public, max-age=3600" });
+      // The authorization server is named by the issuer the origin itself
+      // publishes: a client fetches <issuer>/.well-known/… and refuses a
+      // document whose issuer differs (RFC 8414 § 3.3), and the canonical
+      // host is the origin's setting, not this Worker's.
+      const issuer = await originIssuer(env);
+      return json(200, { resource: env.MCP_RESOURCE, authorization_servers: [issuer || env.STORED_API], bearer_methods_supported: ["header"],
+        scopes_supported: ["stored"], resource_documentation: (issuer || env.STORED_API) + "/docs/api#agents" },
+        { "cache-control": issuer ? "public, max-age=300" : "no-store" });
     }
     if (url.pathname === "/.well-known/oauth-authorization-server") {
       // Clients that look on the resource's host get the origin's document.
