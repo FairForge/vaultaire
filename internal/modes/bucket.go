@@ -30,6 +30,11 @@ var (
 	// ErrSandboxNeverPublic: a test-mode tenant's bucket is never Public
 	// (RP80-1) — 409 sandbox_never_public.
 	ErrSandboxNeverPublic = errors.New("sandbox_never_public")
+	// ErrUnverifiedNeverPublic: an app's bucket (an app child, or an app's
+	// end user) is never Public until the root of its pool is verified, and
+	// a provisional (claimable) tenant's never is (WP-APP-1, contract line
+	// 14's surface).
+	ErrUnverifiedNeverPublic = errors.New("unverified_never_public")
 )
 
 // FromColumns is migration 102's CASE in Go: public-read → public,
@@ -125,7 +130,8 @@ const ActionModeChanged = "bucket.mode_changed"
 // audit_logs in the same transaction (RP33-4). Returns the mode the row now
 // has (the generated column). ErrNoBucket, ErrPublicSSEC, ErrBadVisibility,
 // ErrReadableObjects, ErrSandboxNeverPublic (a test-mode tenant's bucket made
-// Public, RP80-1); nothing written on a refusal.
+// Public, RP80-1), ErrUnverifiedNeverPublic (an app's under an unverified
+// root, a provisional tenant's: WP-APP-1); nothing written on a refusal.
 //
 // The readable check is its own statement AFTER the lock: under READ
 // COMMITTED a statement's snapshot is taken when it starts, so a subquery
@@ -157,11 +163,17 @@ func SetBucket(ctx context.Context, q Querier, tenantID, bucket string, c Change
 		return "", fmt.Errorf("bucket %s: mode lock: %w", bucket, err)
 	}
 	var fromMode string
-	var fromSSEC, sandbox bool
+	var fromSSEC, sandbox, unverified bool
 	err := q.QueryRowContext(ctx, `SELECT b.mode, b.ssec_required,
-		       EXISTS (SELECT 1 FROM tenants t WHERE t.id = b.tenant_id AND t.sandbox_of IS NOT NULL)
+		       EXISTS (SELECT 1 FROM tenants t WHERE t.id = b.tenant_id AND t.sandbox_of IS NOT NULL),
+		       EXISTS (SELECT 1 FROM tenants t
+		                WHERE t.id = b.tenant_id
+		                  AND (t.provisional_until IS NOT NULL
+		                       OR ((t.child_kind = 'app' OR EXISTS (SELECT 1 FROM tenants a WHERE a.id = t.parent_tenant_id AND a.child_kind = 'app'))
+		                           AND NOT EXISTS (SELECT 1 FROM tenants r JOIN users u ON lower(u.email) = lower(r.email)
+		                                            WHERE r.id = t.pool_root_id AND COALESCE(u.email_verified, FALSE)))))
 		  FROM buckets b WHERE b.tenant_id = $1 AND b.name = $2`,
-		tenantID, bucket).Scan(&fromMode, &fromSSEC, &sandbox)
+		tenantID, bucket).Scan(&fromMode, &fromSSEC, &sandbox, &unverified)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("bucket %s: %w", bucket, ErrNoBucket)
 	}
@@ -171,6 +183,9 @@ func SetBucket(ctx context.Context, q Querier, tenantID, bucket string, c Change
 	if sandbox && c.Visibility != nil && *c.Visibility == VisibilityPublic {
 		// RP80-1: a test-mode tenant's data is never served to the world.
 		return "", fmt.Errorf("bucket %s: %w", bucket, ErrSandboxNeverPublic)
+	}
+	if unverified && c.Visibility != nil && *c.Visibility == VisibilityPublic {
+		return "", fmt.Errorf("bucket %s: %w", bucket, ErrUnverifiedNeverPublic)
 	}
 	if c.SSECRequired != nil && *c.SSECRequired && !fromSSEC {
 		r := &ReadableObjectsError{Bucket: bucket}
