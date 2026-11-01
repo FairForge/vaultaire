@@ -88,6 +88,16 @@ func TestAgentConnect_ConsentNeedsTOTPAndIssuesOneCode(t *testing.T) {
 		r.ServeHTTP(w, req)
 		return w
 	}
+	// A malformed request of a registered client is answered on this page,
+	// never redirected (RFC 9700 § 4.11.2: anyone may register a client).
+	malformed := url.Values{"response_type": {"token"}, "client_id": {client.ID}, "redirect_uri": {redirect}, "state": {"st-1"}}
+	req = httptest.NewRequest(http.MethodGet, "/dashboard/agents/connect?"+malformed.Encode(), nil)
+	req.AddCookie(session)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, w.Header().Get("Location"), "no automatic redirect to a self-registered address")
+
 	w = get()
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	body := w.Body.String()

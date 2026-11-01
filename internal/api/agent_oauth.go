@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"time"
 
 	"go.uber.org/zap"
@@ -87,9 +86,10 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOAuthAuthorize validates the request and sends the person to the
-// dashboard's consent page with it. A bad client or redirect is answered
-// here (the redirect cannot be trusted with the error); any other error
-// goes back to the client's redirect, as RFC 6749 § 4.1.2.1 says.
+// dashboard's consent page with it. Every error is answered here: a bad
+// client or redirect cannot be trusted with it (RFC 6749 § 4.1.2.1), and a
+// malformed request is not sent to a self-registered address without a
+// person's consent (RFC 9700 § 4.11.2).
 func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	a := auth.AuthorizationRequest{ClientID: q.Get("client_id"), RedirectURI: q.Get("redirect_uri"), State: q.Get("state"),
@@ -104,8 +104,11 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown client or unregistered redirect_uri", http.StatusBadRequest)
 		return
 	case errors.Is(err, auth.ErrOAuthInvalidRequest):
-		http.Redirect(w, r, oauthRedirect(a.RedirectURI, url.Values{"error": {"invalid_request"},
-			"error_description": {err.Error()}, "state": {a.State}}), http.StatusFound)
+		// Answered here, never at the client's redirect: registration is
+		// open, so that address is anyone's, and a redirect without a
+		// person's consent would make this host an open redirector
+		// (RFC 9700 § 4.11.2).
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	case err != nil:
 		s.logger.Error("oauth authorize", zap.Error(err))
@@ -113,22 +116,6 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/dashboard/agents/connect?"+r.URL.RawQuery, http.StatusFound) // #nosec G710 -- a fixed local path; the query only rides along (the consent re-validates it)
-}
-
-// oauthRedirect is redirect with v added to its query.
-func oauthRedirect(redirect string, v url.Values) string {
-	u, err := url.Parse(redirect)
-	if err != nil {
-		return redirect
-	}
-	q := u.Query()
-	for k, vs := range v {
-		if len(vs) > 0 && vs[0] != "" {
-			q.Set(k, vs[0])
-		}
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
 }
 
 // handleOAuthToken is the authorization_code grant: the code spent once,

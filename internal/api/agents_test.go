@@ -165,6 +165,13 @@ func TestAgent_ConsentMintsOneGrant(t *testing.T) {
 	w = httptest.NewRecorder()
 	f.s.router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+bad.Encode(), nil))
 	assert.Equal(t, http.StatusBadRequest, w.Code, "an unregistered redirect is never followed")
+	// RFC 9700 § 4.11.2: registration is open, so a client's redirect is
+	// anyone's — a malformed request is answered here, never sent there.
+	plain := url.Values{"response_type": {"token"}, "client_id": {clientID}, "redirect_uri": {redirect}, "state": {"st"}}
+	w = httptest.NewRecorder()
+	f.s.router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+plain.Encode(), nil))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "a malformed request is never redirected")
+	assert.Empty(t, w.Header().Get("Location"), "no automatic redirect to a self-registered address")
 
 	consent := func() string {
 		c, err := auth.IssueAgentCode(context.Background(), f.db, auth.AgentConsent{

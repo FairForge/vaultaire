@@ -112,7 +112,10 @@ func HandleAgentConnect(tmpl *template.Template, db *sql.DB, authSvc *auth.AuthS
 			render(http.StatusBadRequest)
 			return
 		case errors.Is(err, auth.ErrOAuthInvalidRequest):
-			http.Redirect(w, r, oauthRedirectWith(a.RedirectURI, url.Values{"error": {"invalid_request"}, "state": {a.State}}), http.StatusSeeOther)
+			// Never redirected: the address is self-registered, and nobody has
+			// consented to anything yet (RFC 9700 § 4.11.2).
+			data["Unavailable"] = "This request is malformed. Nothing was shared — start the connection from the app again."
+			render(http.StatusBadRequest)
 			return
 		case err != nil:
 			logger.Error("agent connect: validate", zap.Error(err))
