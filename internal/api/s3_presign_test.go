@@ -143,8 +143,8 @@ func expectTenantLookup(mock sqlmock.Sqlmock) {
 // primaryKeyRow is what LookupCredential scans for a live primary row.
 func primaryKeyRow(tenantID, secret string) *sqlmock.Rows {
 	return sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary",
-		"id", "egress_cap", "egress_used"}).
-		AddRow(tenantID, secret, nil, nil, []byte(`["*"]`), "{}", "{}", nil, nil, true, "00000000-0000-0000-0000-0000000000aa", 0, 0)
+		"id", "egress_cap", "egress_used", "agent_grant_id"}).
+		AddRow(tenantID, secret, nil, nil, []byte(`["*"]`), "{}", "{}", nil, nil, true, "00000000-0000-0000-0000-0000000000aa", 0, 0, "")
 }
 
 func TestIsPresignedRequest(t *testing.T) {
@@ -217,7 +217,7 @@ func TestVerifyPresignedURL_InvalidAccessKey(t *testing.T) {
 	mock.ExpectQuery(`FROM api_keys ak`).
 		WithArgs("NONEXISTENT000000000").
 		WillReturnRows(sqlmock.NewRows([]string{"tenant_id", "secret_key", "secret_wrapped", "secret_key_version", "permissions", "bucket_scope", "ip_allowlist", "expires_at", "revoked_at", "is_primary",
-			"id", "egress_cap", "egress_used"}))
+			"id", "egress_cap", "egress_used", "agent_grant_id"}))
 
 	now := time.Now().UTC()
 	q := signPresignedURL("GET", "/bucket/key", "localhost:8000", "NONEXISTENT000000000", testSecretKey, 3600, now)

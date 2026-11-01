@@ -35,6 +35,10 @@ type KeyScope struct {
 	// EgressUsed what the key has served this month, read with the key's row
 	// on every request (F-39 (a): refused when spent).
 	EgressCap, EgressUsed int64
+	// AgentGrantID: the key (an STS token: its parent) was minted by an
+	// agent grant (api_keys.agent_grant_id, WP-AGENT-1): it never reaches a
+	// Private bucket (contract line 8). "" = a person's or a server's.
+	AgentGrantID string
 }
 
 // PermBypassGovernanceRetention is the one entry of ValidPermissions that is

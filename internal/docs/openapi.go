@@ -1170,6 +1170,38 @@ func generateManagementPaths() map[string]*PathItem {
 					"404": errResp("`agent_grant_not_found` or `not_found`"),
 				})),
 		},
+		// WP-AGENT-1 PR B: approvals (docs/API.md § Agents).
+		"/api/v1/manage/approvals": {
+			Get: mgmt(jsonOp("Management", "List approvals", "ManageListApprovals",
+				"What the account's agents asked for in the last 30 days, the pending first (`?pending=1`: those only). An agent grant's key that reaches an act outside the default agent scope — deleting a bucket, revoking a key it did not mint — gets 403 `approval_required` with `approval_id` and `approval_url`. Dark behind `agent_grants` (404).",
+				map[string]Response{
+					"200": jsonResp("Approvals", listSchema("", approvalSchema())),
+					"404": errResp("`not_found` (agents are off for the account)"),
+				})),
+		},
+		"/api/v1/manage/approvals/{id}/approve": {
+			Parameters: []Parameter{pathParam("id", "Approval id")},
+			Post: mut(withBody(jsonOp("Management", "Approve an agent's request", "ManageApproveApproval",
+				"A person's (403 `person_required` for a management key), with the role the act itself needs; a destructive act needs `code`, the current TOTP code (403 `totp_required`). The approval names one action on one resource and is used once by the agent's next identical request, within 24 h of the request. Audited `agent.approval_approved`.",
+				map[string]Response{
+					"200": jsonResp("The approval", approvalSchema()),
+					"403": errResp("`person_required`, `role_forbidden` or `totp_required`"),
+					"404": errResp("`approval_not_found`"),
+					"409": errResp("`approval_decided` or `approval_expired`"),
+				}),
+				jsonBody("The TOTP code", objectPtr("", map[string]*Schema{"code": str("The current code of your authenticator app")})))),
+		},
+		"/api/v1/manage/approvals/{id}/deny": {
+			Parameters: []Parameter{pathParam("id", "Approval id")},
+			Post: mut(jsonOp("Management", "Deny an agent's request", "ManageDenyApproval",
+				"A person's. The agent's request stays refused; a denial is final. Audited `agent.approval_denied`.",
+				map[string]Response{
+					"200": jsonResp("The approval", approvalSchema()),
+					"403": errResp("`person_required`"),
+					"404": errResp("`approval_not_found`"),
+					"409": errResp("`approval_decided` or `approval_expired`"),
+				})),
+		},
 		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
 		// (docs/API.md § Members).
 		"/api/v1/manage/members": {
@@ -2927,5 +2959,23 @@ func agentGrantSchema() *Schema {
 		"test_management_key_id": str("Its sandbox test key"),
 		"expires_at":             str("When its keys stop working"),
 		"revoked_at":             nullable(str("")),
+	})
+}
+
+// approvalSchema is an approval as the management API answers it.
+func approvalSchema() *Schema {
+	return objectPtr("An agent's request for approval (WP-AGENT-1 PR B)", map[string]*Schema{
+		"object":       strEnum("", "approval"),
+		"id":           str("Approval id"),
+		"grant_id":     str("The agent grant that asked"),
+		"agent_name":   str(""),
+		"action":       strEnum("", "bucket.delete", "key.revoke"),
+		"resource":     str("`bucket:<name>`, `key:<id>` (a sandbox's prefixed `sandbox/`)"),
+		"says":         str("The act in words"),
+		"destructive":  boolean("Needs a TOTP code to approve"),
+		"requested_at": str(""),
+		"expires_at":   str("24 h after the request"),
+		"decision":     str("approved | denied | empty while pending"),
+		"used_at":      nullable(str("")),
 	})
 }

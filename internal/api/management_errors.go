@@ -48,6 +48,10 @@ type managementErrorBody struct {
 	// Readable is what a refused Private change counted (409
 	// bucket_has_readable_objects, RP33-1).
 	Readable *mgmtReadableCounts `json:"readable,omitempty"`
+	// ApprovalID / ApprovalURL: what an agent's refused act asks the person
+	// (403 approval_required, WP-AGENT-1 PR B).
+	ApprovalID  string `json:"approval_id,omitempty"`
+	ApprovalURL string `json:"approval_url,omitempty"`
 }
 
 // mgmtReadableCounts is what a bucket holds that we can read.

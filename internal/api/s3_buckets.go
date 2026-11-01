@@ -67,8 +67,13 @@ func (s *Server) ListBuckets(w http.ResponseWriter, r *http.Request) {
 	response.Owner.DisplayName = tenantID
 
 	if s.db != nil {
+		// An agent's key lists no Private bucket (WP-AGENT-1, line 8).
+		notPrivate := ""
+		if ks := auth.KeyScopeFromContext(ctx); ks != nil && ks.AgentGrantID != "" {
+			notPrivate = ` AND mode <> 'private'`
+		}
 		rows, dbErr := s.db.QueryContext(ctx,
-			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%' ORDER BY name`, tenantID)
+			`SELECT name, created_at FROM buckets WHERE tenant_id = $1 AND name NOT LIKE '\_%'`+notPrivate+` ORDER BY name`, tenantID)
 		if dbErr != nil {
 			s.logger.Error("list buckets from DB", zap.Error(dbErr))
 		} else {
