@@ -73,6 +73,8 @@ was emptied without a separate R2 key.
 
 ## Rules learned
 
+**`stored-mcp`** (`edge/mcp/`, WP-AGENT-1) on the route **`mcp.stored.cloud/*`** of the stored.cloud zone, PRODUCTION account, deployed 2026-11-01 (DNS: `AAAA mcp.stored.cloud 100::`, proxied, originless; the host never reaches SLC). Stored's MCP server: Streamable HTTP at `/mcp`, the RFC 9728 metadata naming the origin's own `issuer` (stored.ge until WP-DOMAIN-1) as the authorization server. No secrets, no bindings but three vars: every call carries the agent grant's own management key, and the origin decides. Deploy: `cd edge/mcp && npx -y wrangler@4.151.3 deploy` with `CLOUDFLARE_API_TOKEN` = the zone token and `CLOUDFLARE_ACCOUNT_ID` = the production account.
+
 A Worker cannot deliver a webhook to its own hostname. `Date.now()` is frozen during CPU work. Six subrequests may wait on headers at once. The 128 MB isolate bounds whole-block decodes (~64 MiB RS); stripe-interleaved shards decode at any size. A GET-presigned URL cannot be HEADed (probe with `bytes=0-0`). Account tokens never see zones. Workers for Platforms ($25/mo) adds customer-run Workers on top of Workers Paid; it does not raise your own Workers' limits.
 
 ## Findings 2026-10-29 (egress research + a Worker test against Wasabi, bench account)
