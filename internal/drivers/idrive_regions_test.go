@@ -1,6 +1,8 @@
 package drivers
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 
@@ -9,12 +11,12 @@ import (
 )
 
 // WP-R7-1: the region table must describe the reseller account (Review R7-01):
-// 13 regions on s3.<region>.idrivee2.com, one key pair per region, the primary
+// 14 regions on s3.<region>.idrivee2.com (Singapore-2 enabled 2026-11-02), one key pair per region, the primary
 // serving the default region, and no region accepted that no driver serves.
 
 func TestIDriveRegions_MatchTheAccount(t *testing.T) {
 	want := []string{
-		"ap-northeast-1", "eu-central-1", "eu-south-1", "eu-west-1", "eu-west-3", "eu-west-4",
+		"ap-northeast-1", "ap-southeast-2", "eu-central-1", "eu-south-1", "eu-west-1", "eu-west-3", "eu-west-4",
 		"us-central-1", "us-east-1", "us-midwest-1", "us-southeast-1", "us-southwest-1", "us-west-2", "us-west-4",
 	}
 	var got []string
@@ -26,13 +28,17 @@ func TestIDriveRegions_MatchTheAccount(t *testing.T) {
 	sort.Strings(got)
 	assert.Equal(t, want, got)
 
-	for _, gone := range []string{"us-west-1", "eu-central-2", "eu-west-2"} {
+	// Inactive on iDrive's side (GET /regions active: false, 2026-11-02):
+	// Montreal, Singapore (the first), the old Frankfurt.
+	for _, gone := range []string{"us-west-1", "eu-central-2", "eu-west-2", "ca-east-1", "ap-southeast-1"} {
 		assert.False(t, IsValidRegion(gone), "%s does not exist in the account", gone)
 	}
 	assert.True(t, IsEURegion("eu-west-1"))
 	assert.False(t, IsEURegion("eu-west-3"), "London is the UK (RP78-4)")
 	assert.False(t, IsEURegion("us-central-1"))
 	assert.False(t, IsEURegion("ap-northeast-1"))
+	assert.False(t, IsEURegion("ap-southeast-2"))
+	assert.Equal(t, "Asia Pacific (Singapore)", RegionDisplayName("ap-southeast-2"))
 }
 
 func TestIDriveDefaultRegion(t *testing.T) {
@@ -98,6 +104,12 @@ func TestIDriveRegionGroups_CoverEveryRegionOnce(t *testing.T) {
 		}
 	}
 	assert.Len(t, seen, len(IDriveRegions))
+	var apac []string
+	for _, r := range groups[3].Regions {
+		apac = append(apac, r.ID)
+	}
+	assert.Equal(t, []string{"ap-northeast-1", "ap-southeast-2"}, apac,
+		"Tokyo and Singapore share the Asia Pacific group though each is its own jurisdiction")
 	for id, n := range seen {
 		assert.Equal(t, 1, n, id)
 	}
@@ -131,6 +143,7 @@ func TestIsEURegion_London(t *testing.T) {
 	}
 	assert.Equal(t, "us", RegionJurisdiction("us-central-1"))
 	assert.Equal(t, "jp", RegionJurisdiction("ap-northeast-1"))
+	assert.Equal(t, "sg", RegionJurisdiction("ap-southeast-2"), "Singapore is its own jurisdiction, not Japan's")
 	assert.Equal(t, "us", RegionJurisdiction("us-west-1"), "a region outside the table (lyve): its first segment")
 	assert.Empty(t, RegionJurisdiction(""))
 	for r := range IDriveRegions {
@@ -139,4 +152,16 @@ func TestIsEURegion_London(t *testing.T) {
 	assert.Equal(t, "uk", DataResidency("eu-west-3"))
 	assert.Equal(t, "eu", DataResidency("eu-west-1"))
 	assert.Equal(t, "us", DataResidency("us-central-1"))
+}
+
+// The GDPR page's "Data location" table is what we tell customers about
+// where a bucket's data sits: every region of the table must be on it, so
+// a region added here cannot be sold before the page names it.
+func TestGDPRPage_ListsEveryRegion(t *testing.T) {
+	page, err := os.ReadFile(filepath.Join("..", "dashboard", "templates", "legal", "gdpr.html"))
+	require.NoError(t, err)
+	for id := range IDriveRegions {
+		assert.Contains(t, string(page), "<tr><td>"+id+"</td>", "the GDPR page lists %s", id)
+	}
+	assert.Contains(t, string(page), "<tr><td>ap-southeast-2</td><td>Singapore</td></tr>")
 }

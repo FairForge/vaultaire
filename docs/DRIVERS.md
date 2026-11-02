@@ -82,10 +82,11 @@ present; everything else is gated on environment variables.
 | `permafrost` | `onedrive.go` (`OneDriveDriver`) | `TENANT_1_ID` (fleet of `TENANT_N_*`, N = 1..15) | none | yes | `vaultaire/t-<tenant>/<container>/<artifact>` on the FNV-chosen home tenant | ctx |
 | `sync` | `webdav_multi.go` (`MultiWebDAVDriver`: one `WebDAVDriver` per bridge, a key per bridge by HRW — `webdav.go`, generic WebDAV — `webdav_README.md`) | `SYNC_WEBDAV_PASSWORD` or `SYNC_WEBDAV_URLS` + `SYNC_WEBDAV_PASSWORDS` (`SYNC_WEBDAV_URL` default `http://127.0.0.1:4918`, `SYNC_WEBDAV_USER` `sync`, `SYNC_WEBDAV_ROOT` `vaultaire`) | `SYNC` only: a bucket with `tier_preference = 'sync'` of a tenant with the `sync_backend` flag; `STORAGE_MODE=sync` is a boot Fatal | yes | `<root>/t-<tenant>/<container>/<artifact>` on Sync.com's local bridge; key segments `""`/`.`/`..`/`~…` mapped reversibly | ctx |
 
-The 13 iDrive regions are the ones the reseller account has
+The 14 iDrive regions are the ones the reseller account has
 (`internal/drivers/idrive_regions.go`): `us-central-1 us-west-2 us-west-4
 us-southwest-1 us-southeast-1 us-midwest-1 us-east-1 eu-west-1 eu-west-3
-eu-west-4 eu-central-1 eu-south-1 ap-northeast-1`, endpoint
+eu-west-4 eu-central-1 eu-south-1 ap-northeast-1 ap-southeast-2` (Singapore-2,
+enabled 2026-11-02), endpoint
 `https://s3.<region>.idrivee2.com`. The primary `idrive` serves the default
 region; the loop skips it and registers the others (sorted) only with their own
 key pair. `SetAvailableIDriveRegions` records the result and `CreateBucket`
