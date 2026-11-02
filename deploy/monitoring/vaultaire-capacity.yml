@@ -95,7 +95,7 @@ groups:
           severity: warning
         annotations:
           summary: "Backend {{ $labels.backend }} has used 80% of its free egress this month"
-          description: "The vendor's month-to-date downloads are at 80% of the free allowance (the plan row's egress_free_multiple x stored bytes; iDrive: 3x stored, then $0.01/GB). One benchmark run can spend it — keep benchmarks against iDrive small."
+          description: "The vendor's month-to-date downloads are at 80% of the free allowance (the strict reading: the plan row's egress_free_multiple x min(the plan's capacity, the bytes stored across the whole account — idrive and every idrive-<region>); iDrive: 3x, then $0.01/GB). One benchmark run can spend it — keep benchmarks against iDrive small."
 
       - alert: BackendPlanRenewal30d
         expr: (vaultaire_backend_plan_term_end_timestamp_seconds - time()) < 30 * 86400

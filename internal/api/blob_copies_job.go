@@ -585,7 +585,8 @@ func (j *BlobCopiesJob) unmirrorable(c blobCopy) bool {
 	return c.Source == rsBackendSentinel || c.Source == chunkedBackendSentinel || engine.IsStrictTarget(c.Source)
 }
 
-// egressLedger is the copy pass's egress budget per source for one run
+// egressLedger is the copy pass's egress budget per vendor account (a
+// source's planAccountOf: every iDrive region is the idrive account) for one run
 // (RP76-4): a source whose plan row (backend_plans) names an
 // egress_free_multiple may give the pass, this UTC month, at most that
 // multiple of what the last backend_capacity run counted stored on it,
@@ -623,22 +624,25 @@ func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult)
 	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.capacityJob).Scan(&raw); err == nil && len(raw) > 0 {
 		haveCap = json.Unmarshal(raw, &capRes) == nil
 	}
-	rows, err := j.s.db.QueryContext(ctx, `SELECT backend, egress_free_multiple FROM backend_plans WHERE egress_free_multiple IS NOT NULL`)
+	rows, err := j.s.db.QueryContext(ctx, `SELECT backend, capacity_bytes, egress_free_multiple FROM backend_plans WHERE egress_free_multiple IS NOT NULL`)
 	if err != nil {
 		res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
 		l.limit = nil // nil = every source refused (below)
 	} else {
 		for rows.Next() {
 			var backend string
+			var capacity int64
 			var mult float64
-			if rows.Scan(&backend, &mult) != nil {
+			if rows.Scan(&backend, &capacity, &mult) != nil {
 				continue
 			}
+			// The row is an ACCOUNT (egress_account.go): its pool is every
+			// backend of it (idrive + idrive-<region>), counted strictly —
+			// never more than the capacity bought — and the vendor's
+			// month-to-date is the account's.
 			var stored, used int64
 			if haveCap {
-				if b := capRes.Backends[backend]; b != nil {
-					stored = b.Total
-				}
+				stored = egressBase(capacity, accountStored(capRes.Backends, backend))
 				if v, ok := capRes.Vendor[backend]; ok && !v.EgressUnmetered {
 					used = v.EgressMonthBytes
 				}
@@ -662,27 +666,29 @@ func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult)
 	return l
 }
 
-// take reserves n bytes of source's budget; false = it would pass it.
+// take reserves n bytes of the budget of source's account (planAccountOf:
+// an iDrive region spends the iDrive account's); false = it would pass it.
 func (l *egressLedger) take(source string, n int64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	account := planAccountOf(source)
 	if l.limit == nil {
-		l.stopped[source] = true
+		l.stopped[account] = true
 		return false
 	}
-	rem, metered := l.limit[source]
-	if metered && l.took[source]+n > rem {
-		l.stopped[source] = true
+	rem, metered := l.limit[account]
+	if metered && l.took[account]+n > rem {
+		l.stopped[account] = true
 		return false
 	}
-	l.took[source] += n
+	l.took[account] += n
 	return true
 }
 
 // give returns a reservation whose copy did not happen.
 func (l *egressLedger) give(source string, n int64) {
 	l.mu.Lock()
-	l.took[source] -= n
+	l.took[planAccountOf(source)] -= n
 	l.mu.Unlock()
 }
 
@@ -707,7 +713,7 @@ func (l *egressLedger) note() string {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " ((backend_plans multiple − 1) × stored: one multiple is the customers'); the rest waits for next month"
+	return "the copy pass stopped at the month's free egress of " + strings.Join(names, ", ") + " ((backend_plans multiple − 1) × min(the plan, the account's stored): one multiple is the customers'); the rest waits for next month"
 }
 
 // errCopySkipped: a leg or the source cannot be asked now.
