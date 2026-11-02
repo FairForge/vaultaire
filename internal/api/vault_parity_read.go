@@ -49,6 +49,12 @@ var (
 		Name: "vaultaire_vault_parity_rebuild_bytes_per_second",
 		Help: "The rate of the last whole parity rebuild of at least 16 MiB: the bytes delivered over the time from the start of its read to its last byte.",
 	})
+	// HEAD's live restore lookup of an archive-class object (D-V3-7): its
+	// outcome — ok, error, or timeout past vaultHeadRestoreTimeout.
+	vaultHeadRestoreLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_vault_head_restore_lookups_total",
+		Help: "HEAD's live x-amz-restore lookup of an archive-class object (Architecture Decision 2's one exception), by outcome: ok, error (the header omitted), timeout (no answer within 3 s: the header omitted).",
+	}, []string{"outcome"})
 	vaultParityShardReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_shard_reads_total",
 		Help: "Parity shards read by a rebuild, by leg and kind: range (parallel ranged reads, D-V3-1) or whole (one read-ahead stream, D-V3-2). One per shard per rebuild.",
@@ -56,6 +62,9 @@ var (
 )
 
 func init() {
+	for _, o := range []string{"ok", "error", "timeout"} {
+		vaultHeadRestoreLookups.WithLabelValues(o)
+	}
 	for _, ph := range []string{"open", "first_stripe", "stream"} {
 		vaultParityRebuildSeconds.WithLabelValues(ph)
 	}
@@ -69,6 +78,10 @@ func init() {
 // vaultParityRateMinBytes: a rebuild shorter than this sets no rate (a sealed
 // header's window is one stripe; its rate is its latency).
 const vaultParityRateMinBytes = 16 << 20
+
+// vaultHeadRestoreTimeout bounds HEAD's live restore lookup (D-V3-7): on
+// 2026-11-02 the lookup of a blob Geyser no longer had took 2.76 s.
+const vaultHeadRestoreTimeout = 3 * time.Second
 
 // shardReader yields one parity shard stripe by stripe from the first stripe
 // of the read's window. The bytes Next returns are the caller's until the

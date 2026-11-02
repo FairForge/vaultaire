@@ -62,6 +62,19 @@ const (
 	// tenant in VaultParity.RunOnce and VaultParity.Open.
 	flagVaultParity = "vault_parity"
 
+	// flagVaultParityServe makes the parity copy the FIRST copy a GET reads
+	// (WP-VAULT-3 D-V3-6): with it ON for the tenant, a GET of a vault-floor
+	// object whose parity row is complete for its etag and whose shards'
+	// leg has a closed breaker is rebuilt from the parity, and its own
+	// backend (Geyser) is asked only when the parity cannot serve it — so an
+	// object on tape is served 200, never 403 InvalidObjectState, and no
+	// recall is started by a GET. OFF (the default): Geyser first, the
+	// parity on a failure, ErrArchived keeps the restore semantics. GET only:
+	// HEAD's x-amz-restore lookup, RestoreObject, the dashboard Restore and
+	// the parity job are unchanged. Per tenant first. Checked by
+	// VaultParity.ServeFirst (a nil flag service = OFF).
+	flagVaultParityServe = "vault_parity_serve"
+
 	// flagSyncBackend lets a tenant's buckets whose tier_preference is
 	// `sync` (set by an operator; no customer-facing control offers it)
 	// place their objects on the Sync.com WebDAV bridge ("sync" driver).
@@ -176,6 +189,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagHouseOverview, false)
 	fl.Register(flagEgressThrottle, false)
 	fl.Register(flagVaultParity, false)
+	fl.Register(flagVaultParityServe, false)
 	fl.Register(flagSyncBackend, false)
 	fl.Register(flagBlompBackend, false)
 	fl.Register(flagSiaBackend, false)

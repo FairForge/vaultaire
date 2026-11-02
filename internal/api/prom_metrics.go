@@ -191,7 +191,7 @@ func (s *Server) initMetrics() {
 		reg.MustRegister(vaultParityScrubShards, vaultParityScrubRows, vaultParityRebuilds, vaultParityRestores)
 		// The parity read (WP-VAULT-3): the rebuild's phases, the last
 		// whole rebuild's rate, shard reads by leg and kind.
-		reg.MustRegister(vaultParityRebuildSeconds, vaultParityRebuildRate, vaultParityShardReads)
+		reg.MustRegister(vaultParityRebuildSeconds, vaultParityRebuildRate, vaultParityShardReads, vaultHeadRestoreLookups)
 		if s.vaultParity != nil {
 			reg.MustRegister(newVaultParityScrubCollector(s.vaultParity))
 		}

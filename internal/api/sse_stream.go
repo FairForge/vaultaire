@@ -554,13 +554,6 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID,
 			return !errors.Is(err, engine.ErrAllBackendsUnavailable) || !engine.IsStrictTarget(backendName)
 		}
 	}
-	rc, err = openSealed(ctx, op, src, req)
-	if err == nil || errors.Is(err, errSealedUnreadable) || errors.Is(err, crypto.ErrSSECKeyMismatch) {
-		return rc, false, err // a blob that does not open is final: the parity copy holds the same bytes
-	}
-	if floor != usage.FloorVault || a.vaultParity == nil || errors.Is(err, engine.ErrArchived) {
-		return nil, false, err
-	}
 	pctx := engine.WithRecordedBackend(ctx, backendName) // shards: no expected size
 	psrc := sealedSource{
 		whole: func() (io.ReadCloser, error) {
@@ -569,6 +562,34 @@ func (a *S3ToEngine) openSealedGet(ctx context.Context, op blobOpener, tenantID,
 		ranged: func(off, n int64) (io.ReadCloser, error) {
 			return a.vaultParity.Open(pctx, tenantID, bucket, key, blob, etag, stored, off, n)
 		},
+	}
+	// The vault read order (WP-VAULT-3 D-V3-6): the parity first when the
+	// tenant's `vault_parity_serve` flag is on and the parity can serve the
+	// object as it is now. A wrong customer key is decided on the parity's
+	// bytes — they are the stored bytes — and is final; any other failure
+	// falls through to the object's own backend, and the parity is not
+	// tried a second time.
+	parityTried := false
+	if floor == usage.FloorVault && a.vaultParity.ServeFirst(tenantID) && a.vaultParity.CanServe(ctx, tenantID, bucket, key, etag, stored) {
+		parityTried = true
+		prc, perr := openSealed(ctx, op, psrc, req)
+		switch {
+		case perr == nil:
+			vaultParityFallbacks.WithLabelValues("served_first").Inc()
+			return prc, true, nil
+		case errors.Is(perr, crypto.ErrSSECKeyMismatch):
+			return nil, false, perr
+		}
+		a.logger.Warn("vault object: the parity copy could not serve it first; its backend is asked",
+			zap.String("bucket", bucket), zap.String("key", key), zap.NamedError("parity", perr))
+		vaultParityFallbacks.WithLabelValues("unavailable").Inc()
+	}
+	rc, err = openSealed(ctx, op, src, req)
+	if err == nil || errors.Is(err, errSealedUnreadable) || errors.Is(err, crypto.ErrSSECKeyMismatch) {
+		return rc, false, err // a blob that does not open is final: the parity copy holds the same bytes
+	}
+	if floor != usage.FloorVault || a.vaultParity == nil || parityTried || errors.Is(err, engine.ErrArchived) {
+		return nil, false, err
 	}
 	prc, perr := openSealed(ctx, op, psrc, req)
 	if perr != nil {
