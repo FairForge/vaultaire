@@ -934,7 +934,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	hostRouted := TrustHostRouter(s.hosts, s.newTrustRouter(),
 		DocsHostRouter(s.hosts, s.newDocsRouter(),
 			StatusHostRouter(s.hosts,
-				CDNHostRouter(s.hosts, cdnRouter, s.router))))
+				AppHostRouter(s.hosts, s.newAppRouter(),
+					CDNHostRouter(s.hosts, cdnRouter, s.router)))))
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           hostRouted,
@@ -1115,52 +1116,7 @@ func (s *Server) setupRoutes() {
 	// Dashboard routes must be registered BEFORE the S3 catch-all so that
 	// /login, /dashboard/*, /admin/*, and /static/* are matched first.
 	s.logger.Info("Registering dashboard routes")
-	dataPath := os.Getenv("DATA_PATH")
-	if dataPath == "" {
-		dataPath = "/tmp/vaultaire-data"
-	}
-	// The mode the dashboard shows is the one the engine places objects
-	// with (WP-R1-4; this used to re-derive it from a list without the
-	// iDrive branch, so prod's dashboard said "local").
-	storageMode := s.engine.GetPrimary()
-	if storageMode == "" {
-		storageMode = config.DetectStorageMode(os.Getenv)
-	}
-	dashboard.RegisterRoutes(s.router, dashboard.Deps{
-		DB:           s.db,
-		Auth:         s.auth,
-		MFA:          s.mfaService,
-		MFAPending:   s.mfaPendingStore,
-		Sessions:     s.sessionStore,
-		Logger:       s.logger,
-		DataPath:     dataPath,
-		CreateBucket: s.dashboardBucketCreator(),
-		// The region gate (Prompt 10 Part A): the picker shows a region
-		// whose driver is down by its probe or breaker as unavailable.
-		RegionAvailable: s.regionAvailableNow,
-		Payments:        s.payments,
-		// Admin pages that read customer metadata append their admin_read
-		// entry first (K4c-1, admin_reads.go).
-		AdminReads:    s,
-		AccessLog:     s.accessLog(),
-		Google:        s.googleOAuth,
-		GitHub:        s.githubOAuth,
-		StorageMode:   storageMode,
-		Email:         s.emailSender,
-		BaseURL:       s.baseURL,
-		Hosts:         s.hosts,
-		Engine:        s.engine,
-		HealthChecker: &healthCheckerAdapter{s.healthChecker},
-		Flags:         s.flags,
-		Account:       s.accountSvc,
-		Exports:       dashboardExports(s.accountExports),
-		Egress:        s.egress,
-		// JWT_SECRET is the one secret every deployment must set and it
-		// survives restarts: the CSRF key is derived from it under its own
-		// label, never the secret itself (WP-R12-5).
-		CSRFKey: dashboard.CSRFKeyFromSecret(os.Getenv("JWT_SECRET")),
-		Lockout: s.loginLockout,
-	})
+	dashboard.RegisterRoutes(s.router, s.dashboardDeps())
 
 	s.logger.Info("Registering management API routes")
 	s.registerManagementRoutes()
@@ -2133,4 +2089,60 @@ func (s *Server) requireJWT(next http.Handler) http.Handler {
 		ctx = audit.WithActor(ctx, claims.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// dashboardDeps is what the dashboard is mounted with — on the canonical
+// origin's router and on the app host's (app_host.go, WP-DOMAIN-1 part 3C):
+// one set of sessions, one account lockout, one pending-2FA store, so a
+// session, a lockout or a 2FA challenge is the same on both hosts.
+func (s *Server) dashboardDeps() dashboard.Deps {
+	dataPath := os.Getenv("DATA_PATH")
+	if dataPath == "" {
+		dataPath = "/tmp/vaultaire-data"
+	}
+	// The mode the dashboard shows is the one the engine places objects
+	// with (WP-R1-4; this used to re-derive it from a list without the
+	// iDrive branch, so prod's dashboard said "local").
+	storageMode := ""
+	if s.engine != nil {
+		storageMode = s.engine.GetPrimary()
+	}
+	if storageMode == "" {
+		storageMode = config.DetectStorageMode(os.Getenv)
+	}
+	return dashboard.Deps{
+		DB:           s.db,
+		Auth:         s.auth,
+		MFA:          s.mfaService,
+		MFAPending:   s.mfaPendingStore,
+		Sessions:     s.sessionStore,
+		Logger:       s.logger,
+		DataPath:     dataPath,
+		CreateBucket: s.dashboardBucketCreator(),
+		// The region gate (Prompt 10 Part A): the picker shows a region
+		// whose driver is down by its probe or breaker as unavailable.
+		RegionAvailable: s.regionAvailableNow,
+		Payments:        s.payments,
+		// Admin pages that read customer metadata append their admin_read
+		// entry first (K4c-1, admin_reads.go).
+		AdminReads:    s,
+		AccessLog:     s.accessLog(),
+		Google:        s.googleOAuth,
+		GitHub:        s.githubOAuth,
+		StorageMode:   storageMode,
+		Email:         s.emailSender,
+		BaseURL:       s.baseURL,
+		Hosts:         s.hosts,
+		Engine:        s.engine,
+		HealthChecker: &healthCheckerAdapter{s.healthChecker},
+		Flags:         s.flags,
+		Account:       s.accountSvc,
+		Exports:       dashboardExports(s.accountExports),
+		Egress:        s.egress,
+		// JWT_SECRET is the one secret every deployment must set and it
+		// survives restarts: the CSRF key is derived from it under its own
+		// label, never the secret itself (WP-R12-5).
+		CSRFKey: dashboard.CSRFKeyFromSecret(os.Getenv("JWT_SECRET")),
+		Lockout: s.loginLockout,
+	}
 }

@@ -49,6 +49,7 @@ type Hosts struct {
 	Trust     string   // the trust origin: the transparency log's read side (TRUST_PUBLIC_HOST)
 	Docs      string   // the docs origin: the guides and the API reference (DOCS_PUBLIC_HOST)
 	Status    string   // the status page's origin: a Worker the box pushes to (STATUS_PUBLIC_HOST)
+	App       string   // the dashboard's own origin (APP_PUBLIC_HOST)
 	BaseURL   string   // OAuth callbacks and e-mail links (VAULTAIRE_BASE_URL)
 	Aliases   []string // web names that 301 to Canonical (VAULTAIRE_ALIAS_HOSTS)
 }
@@ -56,10 +57,10 @@ type Hosts struct {
 // Defaults is the local development set: every origin http://localhost:port.
 func Defaults(port int) Hosts {
 	local := fmt.Sprintf("http://localhost:%d", port)
-	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, Docs: local, Status: local, BaseURL: local}
+	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, Docs: local, Status: local, App: local, BaseURL: local}
 }
 
-// FromEnv reads the eight variables. A malformed value is logged at Warn and
+// FromEnv reads the nine variables. A malformed value is logged at Warn and
 // the default kept (the repository's env convention); a malformed alias is
 // dropped on its own. Fallbacks, chosen so a deploy before the .env edit
 // behaves exactly as before: Canonical ← VAULTAIRE_BASE_URL ← localhost;
@@ -68,7 +69,8 @@ func Defaults(port int) Hosts {
 // Trust ← https://trust.<canonical host> the same way (K4b), else Canonical;
 // Docs ← https://docs.<canonical host> the same way (WP-DOMAIN-1 part 3A),
 // else Canonical (served under /docs); Status ← https://status.<canonical
-// host> the same way (part 3B), else Canonical (its /status page).
+// host> the same way (part 3B), else Canonical (its /status page); App ←
+// https://app.<canonical host> the same way (part 3C), else Canonical.
 func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -88,6 +90,7 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 	}
 	public, base, endpoint, cdn := origin("VAULTAIRE_PUBLIC_HOST"), origin("VAULTAIRE_BASE_URL"), origin("VAULTAIRE_ENDPOINT"), origin("CDN_PUBLIC_HOST")
 	trust, docs, status := origin("TRUST_PUBLIC_HOST"), origin("DOCS_PUBLIC_HOST"), origin("STATUS_PUBLIC_HOST")
+	app := origin("APP_PUBLIC_HOST")
 
 	switch {
 	case public != "":
@@ -125,6 +128,12 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		h.Status = status
 	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
 		h.Status = schemeOf(h.Canonical) + "://status." + ch
+	}
+	h.App = h.Canonical
+	if app != "" {
+		h.App = app
+	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
+		h.App = schemeOf(h.Canonical) + "://app." + ch
 	}
 
 	for _, a := range strings.Split(getenv("VAULTAIRE_ALIAS_HOSTS"), ",") {
@@ -360,6 +369,40 @@ func (h Hosts) IsStatusOrigin(host string) bool {
 	return host != "" && host == h.StatusHost()
 }
 
+// AppHost is the dashboard's own host name.
+func (h Hosts) AppHost() string { return hostOf(h.App) }
+
+// AppPublic reports whether the dashboard has a host of its own (part 3C):
+// the canonical origin is a public name. On a development origin the
+// dashboard answers on that one origin, as before.
+func (h Hosts) AppPublic() bool { return isPublicName(hostOf(h.Canonical)) }
+
+// IsAppHost reports whether host is an app host: the APP_PUBLIC_HOST host,
+// app.<canonical host>, app.<an alias>, and app.<brand or legacy domain>
+// whatever the env — IsTrustHost's rule. It serves the dashboard and nothing
+// else (internal/api/app_host.go).
+func (h Hosts) IsAppHost(host string) bool {
+	host = normHost(host)
+	if host == "" {
+		return false
+	}
+	if a := h.AppHost(); a != "" && a != hostOf(h.Canonical) && a != hostOf(h.S3) && host == a {
+		return true
+	}
+	rest, ok := strings.CutPrefix(host, "app.")
+	if !ok {
+		return false
+	}
+	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
+}
+
+// AppBase is the origin every printed dashboard link (/login, /dashboard/…)
+// is to be built on, DocsBase's role. While the app host is dark (part 3C-1:
+// no link, hint or e-mail names it before the owner's proof) it is the
+// canonical origin, whose dashboard answers for ever; part 3C-2 returns h.App
+// here — one line.
+func (h Hosts) AppBase() string { return h.Canonical }
+
 // DocsBase is the prefix every printed docs link is built on, CDNBase's
 // role: DocsBase() is the hub, DocsBase() + "/rclone" a guide. While the docs
 // host is dark (WP-DOMAIN-1 part 3A: no link, hint or e-mail names a new
@@ -373,10 +416,10 @@ func (h Hosts) DocsBase() string { return h.Canonical + "/docs" }
 // Prompt 39): the canonical host, an alias, the brand and legacy domains and
 // www.<each>, whatever the environment says (prod's canonical origin is
 // stored.ge today and stored.cloud answers too). Never an S3, CDN or trust
-// host, nor a docs or a status host.
+// host, nor a docs, status or app host.
 func (h Hosts) IsWebHost(host string) bool {
 	host = normHost(host)
-	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) || h.IsDocsHost(host) || h.IsStatusHost(host) {
+	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) || h.IsDocsHost(host) || h.IsStatusHost(host) || h.IsAppHost(host) {
 		return false
 	}
 	if host == hostOf(h.Canonical) || h.IsAlias(host) {
@@ -445,7 +488,7 @@ func (h Hosts) IsOwn(host string) bool {
 	}
 	own := append([]string{"localhost", BrandDomain}, LegacyDomains...)
 	own = append(own, h.Aliases...)
-	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.Docs, h.Status, h.BaseURL} {
+	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.Docs, h.Status, h.App, h.BaseURL} {
 		if hh := hostOf(o); hh != "" {
 			own = append(own, hh)
 		}
