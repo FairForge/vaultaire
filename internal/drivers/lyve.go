@@ -104,7 +104,7 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 	}
 
 	d := &LyveDriver{
-		client:   s3.NewFromConfig(cfg, func(o *s3.Options) { o.BaseEndpoint = aws.String(endpoint); o.UsePathStyle = true }),
+		client:   newLyveS3Client(cfg, endpoint),
 		tenantID: tenantID,
 		region:   region,
 		logger:   logger,
@@ -117,6 +117,18 @@ func NewLyveDriver(accessKey, secretKey, tenantID, region string, logger *zap.Lo
 	d.setPutTimeout(fixedBucketPutTimeoutFromEnv(logger))
 	d.hedge = newS3Hedger("lyve", driverHedgeAfterFromEnv(logger), d.putClient.(*deadlinePutClient).fresh)
 	return d, nil
+}
+
+// newLyveS3Client is the driver's S3 client for one regional endpoint,
+// path-style, with Content-MD5 on every PutObject and UploadPart (Lyve
+// verifies no CRC or trailer, content_md5.go). The deadline client's retry
+// on a fresh connection goes through this client's stack too.
+func newLyveS3Client(cfg aws.Config, endpoint string) *s3.Client {
+	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+		o.APIOptions = append(o.APIOptions, withContentMD5)
+	})
 }
 
 // getTenantID is the tenant the call is made for: the context's, else the
