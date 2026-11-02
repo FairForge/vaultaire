@@ -31,11 +31,16 @@ var IDriveRegions = map[string]string{
 	"eu-central-1":   "https://s3.eu-central-1.idrivee2.com",
 	"eu-south-1":     "https://s3.eu-south-1.idrivee2.com",
 	"ap-northeast-1": "https://s3.ap-northeast-1.idrivee2.com",
+	// Singapore-2 (key SG2): active on iDrive's side since late October 2026
+	// and enabled for the account on 2026-11-02. Singapore (ap-southeast-1),
+	// Montreal (ca-east-1) and the old Frankfurt (eu-central-2) stay
+	// inactive (GET /regions active: false) and are not in this table.
+	"ap-southeast-2": "https://s3.ap-southeast-2.idrivee2.com",
 }
 
 // Display names follow the reseller console's city per region (matched
 // through the per-region key prefixes minted 2026-09-20: DA, LA, OR2, PH, MI,
-// CH, VA, IE, LDN2, PAR, FRA2, MIL, TYO).
+// CH, VA, IE, LDN2, PAR, FRA2, MIL, TYO; SG2 on 2026-11-02).
 var regionDisplayNames = map[string]string{
 	"us-central-1":   "US Central (Dallas)",
 	"us-west-2":      "US West (Los Angeles)",
@@ -50,6 +55,7 @@ var regionDisplayNames = map[string]string{
 	"eu-central-1":   "EU Central (Frankfurt)",
 	"eu-south-1":     "EU South (Milan)",
 	"ap-northeast-1": "Asia Pacific (Tokyo)",
+	"ap-southeast-2": "Asia Pacific (Singapore)",
 }
 
 // IDriveFallbackRegion is the primary's region when IDRIVE_REGION is unset:
@@ -88,9 +94,10 @@ var regionJurisdictions = map[string]string{
 	"eu-central-1":   "eu", // Frankfurt
 	"eu-south-1":     "eu", // Milan
 	"ap-northeast-1": "jp", // Tokyo
+	"ap-southeast-2": "sg", // Singapore
 }
 
-// RegionJurisdiction is a region's jurisdiction (us, eu, uk, jp): the
+// RegionJurisdiction is a region's jurisdiction (us, eu, uk, jp, sg): the
 // table's for an iDrive region, else the id's first segment (Lyve's
 // us-west-1 = us); "" for no region.
 func RegionJurisdiction(region string) string {
@@ -135,15 +142,28 @@ type IDriveRegionGroup struct {
 	Regions []IDriveRegionOption
 }
 
-// IDriveRegionGroups returns every region grouped by jurisdiction — United
+// regionGroupKey is the picker group a region is shown in: its
+// jurisdiction, except that Japan and Singapore — two jurisdictions — share
+// one "Asia Pacific" group (each keeps its own jurisdiction everywhere else).
+func regionGroupKey(region string) string {
+	switch j := RegionJurisdiction(region); j {
+	case "jp", "sg":
+		return "apac"
+	default:
+		return j
+	}
+}
+
+// IDriveRegionGroups returns every region grouped for display — United
 // States / European Union / United Kingdom / Asia Pacific (RP78-4: London is
-// the UK's group, not the EU's) — each group sorted by id: the single source
-// for region pickers so the HTML cannot drift from the table again.
+// the UK's group, not the EU's; Tokyo and Singapore share Asia Pacific) —
+// each group sorted by id: the single source for region pickers so the HTML
+// cannot drift from the table again.
 func IDriveRegionGroups() []IDriveRegionGroup {
-	labels := map[string]string{"us": "United States", "eu": "European Union", "uk": "United Kingdom", "jp": "Asia Pacific"}
+	labels := map[string]string{"us": "United States", "eu": "European Union", "uk": "United Kingdom", "apac": "Asia Pacific"}
 	groups := map[string]*IDriveRegionGroup{}
 	for id := range IDriveRegions {
-		key := RegionJurisdiction(id)
+		key := regionGroupKey(id)
 		g, ok := groups[key]
 		if !ok {
 			label := labels[key]
@@ -155,7 +175,7 @@ func IDriveRegionGroups() []IDriveRegionGroup {
 		}
 		g.Regions = append(g.Regions, IDriveRegionOption{ID: id, Name: RegionDisplayName(id)})
 	}
-	order := []string{"us", "eu", "uk", "jp"}
+	order := []string{"us", "eu", "uk", "apac"}
 	var out []IDriveRegionGroup
 	for _, key := range order {
 		if g := groups[key]; g != nil && len(g.Regions) > 0 {

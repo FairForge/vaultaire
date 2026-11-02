@@ -249,7 +249,7 @@ Things that make people switch or tell their friends:
 ## Phase 7: Storage Intelligence Features
 
 ### Data Residency Picker — SHIPPED (per-bucket region)
-**What:** A bucket's region is chosen at creation (`LocationConstraint` / dashboard selector) from the 13 iDrive regions the deployment has key pairs for (`us-*`, `eu-west-1/3/4`, `eu-central-1`, `eu-south-1`, `ap-northeast-1`) and is immutable. Exceptions stated in the GDPR page: Vault objects go to the tape backend (Los Angeles) and public-read objects to the CDN origin.
+**What:** A bucket's region is chosen at creation (`LocationConstraint` / dashboard selector) from the 14 iDrive regions the deployment has key pairs for (`us-*`, `eu-west-1/3/4`, `eu-central-1`, `eu-south-1`, `ap-northeast-1`, `ap-southeast-2`) and is immutable. Exceptions stated in the GDPR page: Vault objects go to the tape backend (Los Angeles) and public-read objects to the CDN origin.
 **Where:** `internal/api/s3_buckets.go`, `bucketRegionDriver` in `s3_engine_adapter.go`, `internal/drivers/idrive_regions.go` (`internal/engine/routing.go` is not the region path)
 **Phase:** 5.14.7 + WP-R7-1 shipped
 
