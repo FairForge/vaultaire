@@ -135,4 +135,52 @@ func TestHosts_DocsStatusApp_Defaults(t *testing.T) {
 		assert.False(t, h.IsStatusHost("localhost"))
 		assert.Equal(t, "http://localhost:8000", Defaults(8000).Status)
 	})
+
+	t.Run("app: app.<canonical>, its own origin; app.<brand or legacy domain> whatever the env", func(t *testing.T) {
+		h := FromEnv(env(prodEnv), 8000, nil)
+		assert.Equal(t, "https://app.stored.cloud", h.App)
+		assert.Equal(t, "app.stored.cloud", h.AppHost())
+		assert.True(t, h.AppPublic())
+		for _, host := range []string{"app.stored.cloud", "app.stored.ge", "APP.STORED.CLOUD:443", "app.www.stored.ge", "app.stored.pics"} {
+			assert.True(t, h.IsAppHost(host), host)
+			assert.False(t, h.IsWebHost(host), "an app host is never a web host: %s", host)
+			assert.False(t, h.IsS3Host(host), host)
+			assert.False(t, h.IsCDNHost(host), host)
+			assert.False(t, h.IsTrustHost(host), host)
+			assert.False(t, h.IsDocsHost(host), host)
+			assert.False(t, h.IsStatusHost(host), host)
+			assert.True(t, h.IsOwn(host), host)
+		}
+		for _, host := range []string{"stored.cloud", "stored.ge", "s3.stored.cloud", "docs.stored.cloud", "status.stored.cloud", "dashboard.stored.cloud", "app.example.com", ""} {
+			assert.False(t, h.IsAppHost(host), host)
+		}
+		// Dark (part 3C-1): every printed dashboard link stays on the
+		// canonical origin until the owner's proof.
+		assert.Equal(t, "https://stored.cloud", h.AppBase())
+
+		e := map[string]string{"VAULTAIRE_PUBLIC_HOST": "https://stored.cloud", "APP_PUBLIC_HOST": "https://console.example.org"}
+		h = FromEnv(env(e), 8000, nil)
+		assert.Equal(t, "https://console.example.org", h.App)
+		assert.True(t, h.IsAppHost("console.example.org"))
+		assert.True(t, h.IsAppHost("app.stored.ge"), "a legacy domain's app name always routes")
+
+		core, logs := observer.New(zapcore.WarnLevel)
+		e["APP_PUBLIC_HOST"] = "console.example.org/x"
+		h = FromEnv(env(e), 8000, zap.New(core))
+		assert.Equal(t, "https://app.stored.cloud", h.App)
+		assert.Equal(t, 1, logs.FilterField(zap.String("var", "APP_PUBLIC_HOST")).Len())
+
+		h = FromEnv(env(map[string]string{"VAULTAIRE_PUBLIC_HOST": "https://stored.cloud", "APP_PUBLIC_HOST": "https://stored.cloud"}), 8000, nil)
+		assert.False(t, h.IsAppHost("stored.cloud"), "an APP_PUBLIC_HOST naming the canonical host routes nothing wholesale")
+		assert.True(t, h.IsWebHost("stored.cloud"))
+	})
+
+	t.Run("app, development: the canonical origin, no app router", func(t *testing.T) {
+		h := FromEnv(env(nil), 8000, nil)
+		assert.Equal(t, "http://localhost:8000", h.App)
+		assert.False(t, h.AppPublic())
+		assert.False(t, h.IsAppHost("localhost"))
+		assert.Equal(t, "http://localhost:8000", h.AppBase())
+		assert.Equal(t, "http://localhost:8000", Defaults(8000).App)
+	})
 }
