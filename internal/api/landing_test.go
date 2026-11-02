@@ -60,6 +60,7 @@ func TestHandleRoot_SignupsClosed_ShowsWaitlist(t *testing.T) {
 	assert.Contains(t, body, "/api/waitlist", "closed variant posts to the waitlist")
 	assert.Contains(t, body, "October 31", "closed variant announces the launch date")
 	assert.NotContains(t, body, `href="/register"`, "closed variant must not link a gated register page")
+	assert.NotContains(t, body, `href="`+s.hostSet().AppBase()+`/register"`, "closed variant must not link a gated register page")
 }
 
 func TestHandleRoot_SignupsOpen_ShowsRegisterCTA(t *testing.T) {
@@ -71,7 +72,7 @@ func TestHandleRoot_SignupsOpen_ShowsRegisterCTA(t *testing.T) {
 
 	body := w.Body.String()
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
-	assert.Contains(t, body, `href="/register"`, "open variant links the register page")
+	assert.Contains(t, body, `href="`+s.hostSet().AppBase()+`/register"`, "open variant links the register page (on the dashboard's origin, hosts.AppBase)")
 	assert.NotContains(t, body, "/api/waitlist", "open variant drops the waitlist form")
 }
 
