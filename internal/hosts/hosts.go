@@ -404,12 +404,22 @@ func (h Hosts) IsAppHost(host string) bool {
 func (h Hosts) AppBase() string { return h.Canonical }
 
 // DocsBase is the prefix every printed docs link is built on, CDNBase's
-// role: DocsBase() is the hub, DocsBase() + "/rclone" a guide. While the docs
-// host is dark (WP-DOMAIN-1 part 3A: no link, hint or e-mail names a new
-// host before the owner's proof) it is the canonical origin's /docs, which
-// answers for ever; the part after the proof returns h.Docs here when the
-// docs host is a host of its own — one line, every link follows.
-func (h Hosts) DocsBase() string { return h.Canonical + "/docs" }
+// role: DocsBase() is the hub, DocsBase() + "/rclone" a guide, DocsBase() +
+// "/api" the API reference. Since the owner's proof (WP-DOMAIN-1 part 3,
+// 2026-11-02) it is the docs host when that is a host of its own (DocsPublic
+// and a name other than the canonical's); otherwise — a development origin, a
+// DOCS_PUBLIC_HOST naming the canonical host — the canonical origin's /docs,
+// which answers for ever on every origin.
+func (h Hosts) DocsBase() string {
+	if h.DocsPublic() && h.DocsHost() != "" && h.DocsHost() != hostOf(h.Canonical) {
+		return h.Docs
+	}
+	return h.Canonical + "/docs"
+}
+
+// DocsFlipped reports whether printed docs links name the docs host
+// (DocsBase is not the canonical origin's /docs).
+func (h Hosts) DocsFlipped() bool { return h.DocsBase() != h.Canonical+"/docs" }
 
 // IsWebHost reports whether host is a web name — where a browser's page view
 // is answered as a website (the HTML 404 of internal/api/web_host.go, Stage 1a

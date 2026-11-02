@@ -150,9 +150,14 @@ func TestWebFiles_TheSitemapListsLivePagesOnly(t *testing.T) {
 				assert.Equal(t, http.StatusOK, page.Code, "%s is listed, so it must be live", pu.Path)
 				assert.True(t, strings.HasPrefix(page.Header().Get("Content-Type"), "text/html"), "%s: a page", pu.Path)
 			}
-			for _, want := range []string{"/", "/docs", "/docs/getting-started", "/docs/rclone", "/docs/faq", "/docs/api", "/status", "/changelog",
+			for _, want := range []string{"/", "/pricing", "/status", "/changelog",
 				"/legal/privacy", "/legal/terms", "/legal/aup"} {
 				assert.Contains(t, paths, want)
+			}
+			// The guides are the docs host's pages (its own sitemap) since the
+			// docs links name it; the canonical /docs/* still answers.
+			for _, p := range paths {
+				assert.False(t, strings.HasPrefix(p, "/docs"), "the canonical sitemap lists no guide: %s", p)
 			}
 			for _, p := range tc.absent {
 				assert.NotContains(t, paths, p, "a dark page is never in the sitemap")

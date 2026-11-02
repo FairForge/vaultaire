@@ -32,10 +32,11 @@ func TestHosts_DocsStatusApp_Defaults(t *testing.T) {
 		for _, host := range []string{"stored.cloud", "stored.ge", "s3.stored.cloud", "cdn.stored.cloud", "trust.stored.cloud", "docs.example.com", ""} {
 			assert.False(t, h.IsDocsHost(host), host)
 		}
-		// Dark (part 3A): every printed docs link stays on the canonical
-		// origin's /docs until the owner's proof.
-		assert.Equal(t, "https://stored.cloud/docs", h.DocsBase())
-		assert.Equal(t, "https://stored.cloud/docs/rclone", h.Expand("__HOST_DOCS_BASE__/rclone"))
+		// Since the owner's proof (2026-11-02) every printed docs link names
+		// the docs host; the canonical /docs answers for ever.
+		assert.Equal(t, "https://docs.stored.cloud", h.DocsBase())
+		assert.True(t, h.DocsFlipped())
+		assert.Equal(t, "https://docs.stored.cloud/rclone", h.Expand("__HOST_DOCS_BASE__/rclone"))
 	})
 
 	t.Run("the hosts that existed before are unchanged", func(t *testing.T) {
@@ -80,6 +81,8 @@ func TestHosts_DocsStatusApp_Defaults(t *testing.T) {
 		h := FromEnv(env(map[string]string{"VAULTAIRE_PUBLIC_HOST": "https://stored.cloud", "DOCS_PUBLIC_HOST": "https://stored.cloud"}), 8000, nil)
 		assert.False(t, h.IsDocsHost("stored.cloud"))
 		assert.True(t, h.IsWebHost("stored.cloud"))
+		assert.Equal(t, "https://stored.cloud/docs", h.DocsBase(), "and its links stay on the canonical /docs")
+		assert.False(t, h.DocsFlipped())
 	})
 
 	t.Run("development: the canonical origin, no docs router", func(t *testing.T) {
@@ -88,6 +91,7 @@ func TestHosts_DocsStatusApp_Defaults(t *testing.T) {
 		assert.False(t, h.DocsPublic(), "a lab serves the guides under /docs on its one origin")
 		assert.False(t, h.IsDocsHost("localhost"))
 		assert.Equal(t, "http://localhost:8000/docs", h.DocsBase())
+		assert.False(t, h.DocsFlipped())
 		assert.Equal(t, "http://localhost:8000", Defaults(8000).Docs)
 	})
 
