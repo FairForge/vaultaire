@@ -37,7 +37,7 @@
 # deferred tenant is the failure on purpose (AccountDeletionDeferred).
 #
 # Triage:
-#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/jobs | jq .
+#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.cloud/api/v1/admin/jobs | jq .
 #   journalctl -u 'vaultaire@*' | grep -E '"job run (failed|interrupted|completed)"'
 #   POST /api/v1/admin/jobs/<job>/run     start one run now (202; 409 while one is running)
 groups:

@@ -28,7 +28,7 @@
 # a key is set, the flag is on and the prices do not verify for 15 min (or Stripe's verification is never reached).
 #
 # Triage:
-#   curl -s https://stored.ge/metrics | grep -E 'vaultaire_payment_|vaultaire_entitlement|vaultaire_stripe_house'
+#   curl -s http://127.0.0.1:8010/metrics | grep -E 'vaultaire_payment_|vaultaire_entitlement|vaultaire_stripe_house'
 #   journalctl -u 'vaultaire@*' | grep -E 'house prices|stripe webhook|payment reminder|entitlement lapse'
 #   GET /api/v1/admin/jobs → entitlement_lapse.result, payment_reminders.result
 groups:

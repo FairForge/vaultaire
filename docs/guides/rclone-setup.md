@@ -2,7 +2,7 @@
 
 Connect rclone to Stored for file syncing, mounting, and serving — works on Linux, macOS, and Windows.
 
-> The customer copy of this guide is the served page at https://stored.ge/docs/rclone (`internal/api/docs_rclone.md`); keep the two in step.
+> The customer copy of this guide is the served page at https://stored.cloud/docs/rclone (`internal/api/docs_rclone.md`); keep the two in step.
 
 ## What is rclone
 
@@ -45,7 +45,7 @@ env_auth> false
 access_key_id> VKxxxxxxxxxxxxxxxx
 secret_access_key> SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 region> us-east-1
-endpoint> https://stored.ge
+endpoint> https://s3.stored.cloud
 location_constraint> (leave blank, press Enter)
 acl> private
 Edit advanced config?> n
@@ -60,7 +60,7 @@ provider = Other
 access_key_id = VKxxxxxxxxxxxxxxxx
 secret_access_key = SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 region = us-east-1
-endpoint = https://stored.ge
+endpoint = https://s3.stored.cloud
 acl = private
 ```
 

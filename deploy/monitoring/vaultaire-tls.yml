@@ -12,7 +12,8 @@
 # are the safety net — the cert expires 2026-10-29, two days before launch.
 #
 # Manual fix if either alert fires:
-#   sudo certbot renew --cert-name stored.ge --force-renewal   (hook reloads haproxy)
+#   sudo certbot renew --cert-name stored.cloud --force-renewal   (hook reloads haproxy; the stored.cloud lineage
+#   carries the apex, www., s3., cdn., trust. and api. SANs since 2026-11-02 — stored.ge is its own lineage)
 groups:
   - name: vaultaire-tls
     rules:

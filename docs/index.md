@@ -1,6 +1,6 @@
 # Vaultaire documentation
 
-Vaultaire is the storage engine behind stored.ge: one Go binary, one PostgreSQL, an S3-compatible API in front of several storage backends. Root `CLAUDE.md` is the operational summary; these files go deeper.
+Vaultaire is the storage engine behind Stored (stored.cloud; stored.ge is a permanent alias): one Go binary, one PostgreSQL, an S3-compatible API in front of several storage backends. Root `CLAUDE.md` is the operational summary; these files go deeper.
 
 | File | What it is |
 |------|------------|
@@ -15,7 +15,7 @@ Vaultaire is the storage engine behind stored.ge: one Go binary, one PostgreSQL,
 | [DESIGN.md](DESIGN.md) | The visual and product language of the site and dashboard |
 | [PAYMENTS.md](PAYMENTS.md) | Payments design of record (WP-PAY, 2026-10-18): the entitlement record (`paid_through` + grace), Stripe as one provider, BTCPay as the second, switching, tax questions |
 | [DASHBOARD_PLAN.md](DASHBOARD_PLAN.md) | The dashboard plan (house checkout and overview), phases and status |
-| [guides/](guides/) | Customer how-tos: rclone, JuiceFS mount, JuiceFS use cases (the served copies live under `/docs` on stored.ge) |
+| [guides/](guides/) | Customer how-tos: rclone, JuiceFS mount, JuiceFS use cases (the served copies live under `/docs` on stored.cloud) |
 | [reviews/](reviews/) | The code-review sessions R0–R14 (`CODE_REVIEW_PLAN.md` is the schedule); each names its work packages by id |
 
 Quick start: `make build` → `JWT_SECRET=dev ./bin/vaultaire` (local disk backend on `:8000`, no database needed to serve S3). Before running DB-backed tests: `make test-db` once (creates and migrates `vaultaire_test`), then `make test`. `docs/archive/` is history, `docs/references/` vendor PDFs.
