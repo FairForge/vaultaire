@@ -504,7 +504,7 @@ below (2026-07-29) — it *is* now tested, safely.
 | Bucket CORS | Set/get/delete |
 | SSE-S3 | On by default account-wide (AES256 on every response) |
 | SSE-C | Correct enforcement — GET without the key is rejected |
-| Checksums | `--checksum-algorithm SHA256` honored, ChecksumSHA256 returned |
+| Checksums | `--checksum-algorithm SHA256` honored, ChecksumSHA256 returned. **2026-11-02: a wrong `x-amz-checksum-sha256` HEADER and a wrong Content-MD5 are refused (400 BadDigest), a signed payload hash is checked; a wrong CRC32 / CRC64NVME header and ANY wrong aws-chunked trailer (CRC32 or SHA-256 — the Go SDK's default PutObject shape) are stored.** The driver therefore sends Content-MD5 on every PutObject and UploadPart (`content_md5.go`); iDrive refuses all of them |
 | Conditional GET | `If-None-Match` → 304 |
 | IAM sub-users | Default-deny until policy attached; CreateUser/CreateAccessKey/Delete* all work (delete keys before user or DeleteConflict) |
 | `GET /<bucket>?rs-info` | `{bucketSize, replicationPolicy, versionStatus, isPublic}` |
