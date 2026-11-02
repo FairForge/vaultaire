@@ -115,7 +115,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the authorization server failed", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/dashboard/agents/connect?"+r.URL.RawQuery, http.StatusFound) // #nosec G710 -- a fixed local path; the query only rides along (the consent re-validates it)
+	http.Redirect(w, r, consentURL(s.hostSet(), r), http.StatusFound) // #nosec G710 -- a fixed path on the configured VAULTAIRE_BASE_URL; the query only rides along (the consent re-validates it)
 }
 
 // handleOAuthToken is the authorization_code grant: the code spent once,

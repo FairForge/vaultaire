@@ -396,12 +396,26 @@ func (h Hosts) IsAppHost(host string) bool {
 	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
 }
 
-// AppBase is the origin every printed dashboard link (/login, /dashboard/…)
-// is to be built on, DocsBase's role. While the app host is dark (part 3C-1:
-// no link, hint or e-mail names it before the owner's proof) it is the
-// canonical origin, whose dashboard answers for ever; part 3C-2 returns h.App
-// here — one line.
-func (h Hosts) AppBase() string { return h.Canonical }
+// AppBase is the origin every printed dashboard link (/login, /register,
+// /dashboard/…) is built on, DocsBase's role: VAULTAIRE_BASE_URL, the origin
+// the OAuth callbacks and the e-mail links have used since part 1 (part 3C-2).
+// With it on the canonical origin (the .env before the flip) nothing names
+// app.; `VAULTAIRE_BASE_URL=https://app.stored.cloud` + one restart moves
+// every link, and the same line back undoes it. The canonical dashboard
+// answers for ever either way.
+func (h Hosts) AppBase() string {
+	if h.BaseURL != "" {
+		return h.BaseURL
+	}
+	return h.Canonical
+}
+
+// IsAppBaseHost reports whether host is AppBase's own host: the one a
+// dashboard session set by a printed link lives on.
+func (h Hosts) IsAppBaseHost(host string) bool {
+	host = normHost(host)
+	return host != "" && host == hostOf(h.AppBase())
+}
 
 // DocsBase is the prefix every printed docs link is built on, CDNBase's
 // role: DocsBase() is the hub, DocsBase() + "/rclone" a guide, DocsBase() +

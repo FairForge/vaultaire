@@ -293,7 +293,11 @@
             // the plan rides into sign-up once the visitor has made it theirs
             var cta = receipt.querySelector('.r-actions a.btn-primary');
             if (cta && receipt.getAttribute('data-open') === '1') {
-                cta.setAttribute('href', state.touched ? '/register?std_tb=' + state.std + '&vault_tb=' + state.vault : '/register');
+                // the sign-up page on the dashboard's origin (hosts.AppBase),
+                // from the template (html/template escapes it as a JS string),
+                // never read back from the page: only the plan is added
+                var base = '{{.App}}/register';
+                cta.setAttribute('href', state.touched ? base + '?std_tb=' + Number(state.std) + '&vault_tb=' + Number(state.vault) : base);
             }
             if (live && state.touched) live.textContent = 'Standard ' + state.std + ' TB, Vault ' + state.vault + ' TB, ' + money(total) + ' a month';
         }

@@ -79,18 +79,35 @@ func (s *Server) newAppRouter() http.Handler {
 
 // appGate runs before every app-host route: a request carrying S3
 // credentials is the pixel 404 (never a page, never the S3 API), and a social
-// sign-in's start goes to the canonical origin (303, no-store).
+// sign-in starts where its callback lands (socialSignInHome).
 func appGate(h hosts.Hosts) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
+		home := socialSignInHome(h)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if signedS3Request(r) {
 				docsNotFound(w, r)
 				return
 			}
-			if socialSignInStarts[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			home.ServeHTTP(w, r)
+		})
+	}
+}
+
+// socialSignInHome sends a social sign-in's START (/auth/google,
+// /auth/github, GET or HEAD) to AppBase's host when it arrives on another
+// dashboard host (303, no-store): its callback is VAULTAIRE_BASE_URL's and the
+// flow's state cookie is host-only, so a start anywhere else could never
+// finish. Mounted on the app router and, for the web hosts, on the canonical
+// router (part 3C-2: with VAULTAIRE_BASE_URL on app., stored.cloud's start
+// goes there).
+func socialSignInHome(h hosts.Hosts) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if socialSignInStarts[r.URL.Path] && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+				!h.IsAppBaseHost(r.Host) && (h.IsWebHost(r.Host) || h.IsAppHost(r.Host)) {
 				w.Header().Set("Cache-Control", "no-store")
-				// #nosec G710 -- not an open redirect: scheme and host are the configured canonical origin; the path is one of two fixed paths
-				http.Redirect(w, r, canonicalWithQuery(h, r), http.StatusSeeOther)
+				// #nosec G710 -- not an open redirect: scheme and host are the configured VAULTAIRE_BASE_URL; the path is one of two fixed paths
+				http.Redirect(w, r, appBaseWithQuery(h, r), http.StatusSeeOther)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -98,12 +115,26 @@ func appGate(h hosts.Hosts) func(http.Handler) http.Handler {
 	}
 }
 
-func canonicalWithQuery(h hosts.Hosts, r *http.Request) string {
-	u, err := url.Parse(h.Canonical)
+func appBaseWithQuery(h hosts.Hosts, r *http.Request) string {
+	base := h.AppBase()
+	u, err := url.Parse(base)
 	if err != nil {
-		return h.Canonical + r.URL.Path
+		return base + r.URL.Path
 	}
 	u.Path = r.URL.Path
 	u.RawQuery = r.URL.RawQuery
 	return u.String()
+}
+
+// consentURL is where /oauth/authorize sends the person: the dashboard's
+// consent page, on AppBase's host when the request came to another of our
+// dashboard hosts (the canonical origin, an alias, an app host) so it runs
+// where their session lives; relative otherwise (already there, or a host
+// that is none of ours — a lab, a test).
+func consentURL(h hosts.Hosts, r *http.Request) string {
+	target := "/dashboard/agents/connect?" + r.URL.RawQuery
+	if h.IsAppBaseHost(r.Host) || !(h.IsWebHost(r.Host) || h.IsAppHost(r.Host)) {
+		return target
+	}
+	return h.AppBase() + target
 }
