@@ -464,11 +464,12 @@ func TestVaultParity_OpenUsesTheDataRangesThatAreReadableWhenAShardIsGone(t *tes
 	l := parityLayout{k: 4, m: 4, stripe: f.stripe, size: int64(size)}
 	assert.Equal(t, int32(l.stripes()), f.geyser.rangeGets.Load(), "one data range per stripe replaced the missing parity piece")
 
-	// Ranges down too: the read fails, it does not serve zeros.
+	// Ranges down too: the read fails, it does not serve zeros — and since
+	// WP-VAULT-3 (D-V3-4) Open decodes the first stripe, so it fails there,
+	// before any status line.
 	f.geyser.failRange.Store(true)
 	rc, err = f.svc.Open(context.Background(), f.tenantID, f.bucket, "films/seven.mkv", "", etag, int64(size), 0, int64(size))
-	require.NoError(t, err, "Open plans; the shortfall shows on read")
-	_, err = io.ReadAll(rc)
+	assert.Nil(t, rc)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errParityUnavailable), "got %v", err)
 }

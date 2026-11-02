@@ -724,6 +724,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 		}
 	}
 	s.largeGet = largeGetConfigFromEnv(os.Getenv, logger)
+	if s.vaultParity != nil {
+		// A parity read's shard ranges share the large-GET knobs and the ONE
+		// process budget (WP-VAULT-3 D-V3-1).
+		s.vaultParity.LargeGet = s.largeGet
+	}
 	s.chunkPutBudget = newChunkPutBudget(chunkPutBudgetFromEnv(os.Getenv, debug.SetMemoryLimit(-1), logger))
 	s.mirrorLegs = mirrorLegsFromEnv(os.Getenv, logger)
 	if s.chunkOrphans != nil {

@@ -59,7 +59,7 @@ func TestParityCodec_ParityAloneRebuildsTheObject(t *testing.T) {
 	// Every data piece unreadable (Geyser gone): the four parity streams
 	// are enough — RS(4,4) rebuilds from ANY four of the eight.
 	noData := func(context.Context, int64, int) ([]byte, error) { return nil, errors.New("geyser: unavailable") }
-	r := newParityRebuilder(context.Background(), l, parityStreams(parity), noData, 0, l.size)
+	r := newParityRebuilder(context.Background(), l, paritySources(l, parity, 0), noData, 0, l.size)
 	got, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
@@ -78,7 +78,7 @@ func TestParityCodec_MissingParityUsesTheDataRangesThatAreReadable(t *testing.T)
 
 	// Two parity shards gone: two data pieces per stripe come from the
 	// object's own backend (a Geyser range each).
-	streams := parityStreams(parity)
+	streams := paritySources(l, parity, 0)
 	streams[1], streams[3] = nil, nil
 	r := newParityRebuilder(context.Background(), l, streams, dataPiece, 0, l.size)
 	got, err := io.ReadAll(r)
@@ -88,7 +88,7 @@ func TestParityCodec_MissingParityUsesTheDataRangesThatAreReadable(t *testing.T)
 
 	// Three parity shards gone and the data unreadable: not rebuildable —
 	// an error naming the shortfall, never silent zeros.
-	streams = parityStreams(parity)
+	streams = paritySources(l, parity, 0)
 	streams[0], streams[1], streams[2] = nil, nil, nil
 	r = newParityRebuilder(context.Background(), l, streams,
 		func(context.Context, int64, int) ([]byte, error) { return nil, errors.New("geyser: 503") }, 0, l.size)
@@ -104,7 +104,7 @@ func TestParityCodec_WindowedReadDecodesOnlyTheStripesItNeeds(t *testing.T) {
 	block := int64(l.k * l.stripe)
 
 	for _, w := range []struct{ off, n int64 }{{0, 10}, {block - 5, 10}, {3*block + 7, 2*block + 1}, {l.size - 1, 1}, {block, block}} {
-		r := newParityRebuilder(context.Background(), l, parityStreams(parity),
+		r := newParityRebuilder(context.Background(), l, paritySources(l, parity, w.off),
 			func(context.Context, int64, int) ([]byte, error) { return nil, errors.New("no data") }, w.off, w.n)
 		got, err := io.ReadAll(r)
 		require.NoError(t, err, "window %+v", w)
@@ -118,17 +118,21 @@ func TestParityCodec_ACorruptParityStreamIsAnError(t *testing.T) {
 	obj := parityTestObject(t, int(l.size))
 	parity := encodeToBuffers(t, l, obj)
 	parity[2] = parity[2][:len(parity[2])-1000] // a shard that ends short
-	r := newParityRebuilder(context.Background(), l, parityStreams(parity),
+	r := newParityRebuilder(context.Background(), l, paritySources(l, parity, 0),
 		func(context.Context, int64, int) ([]byte, error) { return nil, errors.New("no data") }, 0, l.size)
 	_, err := io.ReadAll(r)
 	require.Error(t, err)
 }
 
-// parityStreams wraps shard buffers as the readers the rebuilder takes.
-func parityStreams(shards [][]byte) []io.ReadCloser {
-	out := make([]io.ReadCloser, len(shards))
+// paritySources wraps shard buffers as the sources the rebuilder takes,
+// positioned at the first stripe of a window starting at off (the opener's
+// job on a real leg): whole-stream read-ahead sources, no budget.
+func paritySources(l parityLayout, shards [][]byte, off int64) []*parityShardSource {
+	first := off / int64(l.k*l.stripe)
+	out := make([]*parityShardSource, len(shards))
 	for j, s := range shards {
-		out[j] = io.NopCloser(bytes.NewReader(s))
+		r := newAheadShardReader(io.NopCloser(bytes.NewReader(s)), l.stripe, first*int64(l.stripe), l.stripes()-first, nil)
+		out[j] = &parityShardSource{leg: "test", index: j, kind: "whole", r: r}
 	}
 	return out
 }

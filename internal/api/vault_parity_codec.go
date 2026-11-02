@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/klauspost/reedsolomon"
 )
@@ -117,28 +118,40 @@ func encodeParity(l parityLayout, src io.Reader, out []io.Writer) error {
 type dataPieceFunc func(ctx context.Context, stripe int64, shard int) ([]byte, error)
 
 // parityRebuilder streams a window of the object rebuilt stripe by stripe
-// from the parity streams (nil = that shard is unavailable) and, when fewer
-// than k parity pieces are present, data pieces from dataPiece. It is pull
-// based: one stripe is decoded per refill, no goroutines.
+// from the parity shard sources (nil = that shard is unavailable) and, when
+// fewer than k parity pieces are present, data pieces from dataPiece. The
+// sources start at the window's first stripe and read ahead on their own
+// (vault_parity_read.go); the rebuilder decodes one stripe per refill into
+// ONE reused buffer of k stripes (WP-VAULT-3: it allocated a stripe per
+// shard per stripe, 315 MB per 100 MiB rebuilt).
 type parityRebuilder struct {
 	ctx       context.Context
 	l         parityLayout
 	enc       reedsolomon.Encoder
-	parity    []io.ReadCloser
+	parity    []*parityShardSource // nil = absent from here on
+	all       []*parityShardSource // every source, for Close
+	set       *parityShardSet      // the opener's set: settled at Close (nil in the codec's own tests)
 	dataPiece dataPieceFunc
-	pieces    [][]byte // k + m slots, nil = absent for the current stripe
+	pieces    [][]byte // k + m slots
+	out       []byte   // the decoded stripe: k × stripe, reused
 	stripe    int64    // next stripe to decode
 	endStripe int64    // one past the last stripe of the window
 	skip      int64    // bytes of the first decoded stripe to drop (window offset)
+	want      int64    // the window's length
 	left      int64    // bytes of the window still to deliver
 	cur       []byte   // decoded bytes of the current stripe not yet delivered
 	err       error
 	closed    bool
+	start     time.Time // the read's start (the opener's), for the phases
+	firstAt   time.Time // the first stripe decoded
 }
 
-// newParityRebuilder reads [off, off+n) of the object.
-func newParityRebuilder(ctx context.Context, l parityLayout, parity []io.ReadCloser, dataPiece dataPieceFunc, off, n int64) *parityRebuilder {
-	r := &parityRebuilder{ctx: ctx, l: l, parity: parity, dataPiece: dataPiece, left: n}
+// newParityRebuilder reads [off, off+n) of the object from srcs, which start
+// at the window's first stripe.
+func newParityRebuilder(ctx context.Context, l parityLayout, srcs []*parityShardSource, dataPiece dataPieceFunc, off, n int64) *parityRebuilder {
+	r := &parityRebuilder{ctx: ctx, l: l, dataPiece: dataPiece, want: n, left: n, start: time.Now()}
+	r.parity = append([]*parityShardSource(nil), srcs...)
+	r.all = append([]*parityShardSource(nil), srcs...)
 	block := int64(l.k * l.stripe)
 	r.stripe = off / block
 	r.skip = off - r.stripe*block
@@ -147,40 +160,54 @@ func newParityRebuilder(ctx context.Context, l parityLayout, parity []io.ReadClo
 		r.endStripe = r.stripe
 	}
 	r.pieces = make([][]byte, l.k+l.m)
+	r.out = make([]byte, block)
 	var err error
 	if r.enc, err = l.encoder(); err != nil {
 		r.err = err
 	}
-	if len(parity) != l.m {
-		r.err = fmt.Errorf("parity rebuild: %d streams for %d parity shards", len(parity), l.m)
-	}
-	// The parity streams start at the first stripe of the window.
-	if r.err == nil && r.stripe > 0 {
-		for j, s := range parity {
-			if s == nil {
-				continue
-			}
-			if _, err := io.CopyN(io.Discard, s, r.stripe*int64(l.stripe)); err != nil {
-				r.parity[j] = nil // from here on this shard counts as absent
-				_ = s.Close()
-			}
-		}
+	if len(srcs) != l.m {
+		r.err = fmt.Errorf("parity rebuild: %d sources for %d parity shards", len(srcs), l.m)
 	}
 	return r
 }
 
-func (r *parityRebuilder) Read(p []byte) (int, error) {
+// prime decodes the first stripe of the window now (D-V3-4: a wrong SSE-C
+// key, a shard that does not match, is decided before the status line).
+func (r *parityRebuilder) prime() error {
 	if r.err != nil {
-		return 0, r.err
+		return r.err
+	}
+	if r.left > 0 && r.stripe < r.endStripe {
+		if err := r.decodeNext(); err != nil {
+			r.err = err
+			return err
+		}
+	}
+	r.firstAt = time.Now()
+	vaultParityRebuildSeconds.WithLabelValues("first_stripe").Observe(r.firstAt.Sub(r.start).Seconds())
+	return nil
+}
+
+// fill makes r.cur non-empty, or returns io.EOF at the window's end.
+func (r *parityRebuilder) fill() error {
+	if r.err != nil {
+		return r.err
 	}
 	for len(r.cur) == 0 {
 		if r.left <= 0 || r.stripe >= r.endStripe {
-			return 0, io.EOF
+			return io.EOF
 		}
 		if err := r.decodeNext(); err != nil {
 			r.err = err
-			return 0, err
+			return err
 		}
+	}
+	return nil
+}
+
+func (r *parityRebuilder) Read(p []byte) (int, error) {
+	if err := r.fill(); err != nil {
+		return 0, err
 	}
 	n := copy(p, r.cur)
 	r.cur = r.cur[n:]
@@ -188,29 +215,63 @@ func (r *parityRebuilder) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// WriteTo hands each decoded stripe to w in one Write (io.Copy uses it).
+func (r *parityRebuilder) WriteTo(w io.Writer) (int64, error) {
+	var total int64
+	for {
+		if err := r.fill(); err != nil {
+			if errors.Is(err, io.EOF) {
+				return total, nil
+			}
+			return total, err
+		}
+		n, err := w.Write(r.cur)
+		total += int64(n)
+		r.cur = r.cur[n:]
+		r.left -= int64(n)
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
 // decodeNext rebuilds stripe r.stripe into r.cur (window-trimmed).
 func (r *parityRebuilder) decodeNext() error {
 	s := r.stripe
+	S := r.l.stripe
 	present := 0
 	for j := 0; j < r.l.m; j++ {
 		r.pieces[r.l.k+j] = nil
-		stream := r.parity[j]
-		if stream == nil {
+		src := r.parity[j]
+		if src == nil {
 			continue
 		}
-		buf := make([]byte, r.l.stripe)
-		if _, err := io.ReadFull(stream, buf); err != nil {
+		b, err := src.Next()
+		if err == nil && len(b) != S {
+			err = fmt.Errorf("parity shard p%d stripe %d is %d bytes, want %d", j, s, len(b), S)
+			if src.err == nil {
+				src.err = err
+			}
+		}
+		if err != nil {
+			if errors.Is(err, errRangeIdentity) {
+				// The shard changed under the read: the whole read fails —
+				// never a stripe of one object beside a stripe of another.
+				return fmt.Errorf("parity rebuild: stripe %d shard p%d: %w", s, j, err)
+			}
 			// A shard that ends short or errors is gone for the rest of
 			// the read, not silently zero.
 			r.parity[j] = nil
-			_ = stream.Close()
+			src.Close()
 			continue
 		}
-		r.pieces[r.l.k+j] = buf
+		r.pieces[r.l.k+j] = b
 		present++
 	}
+	// The data pieces decode into r.out in place (reedsolomon reuses a
+	// zero-length slice with the capacity: out[i*S:i*S] has it).
 	for i := 0; i < r.l.k; i++ {
-		r.pieces[i] = nil
+		r.pieces[i] = r.out[i*S : i*S]
 	}
 	var dataErr error
 	for i := 0; i < r.l.k && present < r.l.k; i++ {
@@ -222,25 +283,23 @@ func (r *parityRebuilder) decodeNext() error {
 			dataErr = err
 			continue
 		}
-		if len(piece) != r.l.stripe {
-			dataErr = fmt.Errorf("data piece %d of stripe %d is %d bytes, want %d", i, s, len(piece), r.l.stripe)
+		if len(piece) != S {
+			dataErr = fmt.Errorf("data piece %d of stripe %d is %d bytes, want %d", i, s, len(piece), S)
 			continue
 		}
-		r.pieces[i] = piece
+		r.pieces[i] = r.out[i*S : (i+1)*S]
+		copy(r.pieces[i], piece)
 		present++
 	}
 	if present < r.l.k {
 		return fmt.Errorf("parity rebuild: stripe %d has %d of %d pieces (parity streams and data ranges both short): %w",
 			s, present, r.l.k, errors.Join(dataErr, errParityUnavailable))
 	}
-	if err := r.enc.Reconstruct(r.pieces); err != nil {
+	if err := r.enc.ReconstructData(r.pieces); err != nil {
 		return fmt.Errorf("parity rebuild: stripe %d: %w", s, err)
 	}
-	block := int64(r.l.k * r.l.stripe)
-	out := make([]byte, 0, block)
-	for i := 0; i < r.l.k; i++ {
-		out = append(out, r.pieces[i]...)
-	}
+	block := int64(r.l.k * S)
+	out := r.out[:block]
 	// Trim the padding of the last stripe and the window's edges.
 	if end := r.l.size - s*block; end < int64(len(out)) {
 		out = out[:end]
@@ -261,16 +320,25 @@ func (r *parityRebuilder) decodeNext() error {
 	return nil
 }
 
-// Close closes every parity stream.
+// Close ends every shard read and settles the legs' breakers once (D-V3-5):
+// a success when the whole window was delivered.
 func (r *parityRebuilder) Close() error {
 	if r.closed {
 		return nil
 	}
 	r.closed = true
-	for j, s := range r.parity {
-		if s != nil {
-			_ = s.Close()
-			r.parity[j] = nil
+	for _, src := range r.all {
+		if src != nil {
+			src.Close()
+		}
+	}
+	done := r.left == 0 && r.want > 0 && (r.err == nil || errors.Is(r.err, io.EOF))
+	r.set.settle(done)
+	if done && r.want >= vaultParityRateMinBytes && !r.firstAt.IsZero() {
+		now := time.Now()
+		vaultParityRebuildSeconds.WithLabelValues("stream").Observe(now.Sub(r.firstAt).Seconds())
+		if d := now.Sub(r.start).Seconds(); d > 0 {
+			vaultParityRebuildRate.Set(float64(r.want) / d)
 		}
 	}
 	return nil

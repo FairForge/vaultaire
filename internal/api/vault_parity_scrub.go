@@ -341,48 +341,9 @@ walk:
 		}
 	}
 	res.ScrubBytes += spent
-	rebuild := p.rebuildCheck(ctx, res, st.Rebuild, status)
+	rebuild := p.rebuildCheck(ctx, res, st.Rebuild)
 	p.scrubMem = scrubState{At: p.now(), Cursor: cur, Rebuild: rebuild}
 	res.ScrubAt, res.ScrubCursor, res.RebuildCursor = p.scrubMem.At, cur, rebuild
-}
-
-// shardVerdict is one shard's read: its verdict, its SHA-256, the bytes read.
-type shardVerdict struct {
-	outcome string // ok | unreadable | missing | corrupt | "" (cut by the deadline: no verdict)
-	sum     string
-	read    int64
-	err     error
-}
-
-// readShard reads one shard end to end and judges it.
-func (p *VaultParity) readShard(ctx context.Context, drv engine.Driver, container, artifact string, want int64, digest string) shardVerdict {
-	rc, err := drv.Get(ctx, container, artifact)
-	if err != nil {
-		if ctx.Err() != nil {
-			return shardVerdict{}
-		}
-		if isObjectMissingErr(err) {
-			return shardVerdict{outcome: "missing", err: err}
-		}
-		return shardVerdict{outcome: "unreadable", err: err}
-	}
-	defer func() { _ = rc.Close() }()
-	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(rc, want+1))
-	switch {
-	case ctx.Err() != nil:
-		return shardVerdict{read: n}
-	case err != nil:
-		return shardVerdict{outcome: "unreadable", read: n, err: err}
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	if n != want {
-		return shardVerdict{outcome: "corrupt", sum: sum, read: n, err: fmt.Errorf("%d bytes, the row says %d", n, want)}
-	}
-	if digest != "" && sum != digest {
-		return shardVerdict{outcome: "corrupt", sum: sum, read: n, err: errors.New("SHA-256 is not the one protect recorded")}
-	}
-	return shardVerdict{outcome: "ok", sum: sum, read: n}
 }
 
 // scrubRow reads a row's shards and records the outcome. It returns the
@@ -511,7 +472,7 @@ func (p *VaultParity) reprotect(ctx context.Context, res *VaultParityResult, r s
 // etag, an estimate that fits what is left of the slice) from its four
 // parity shards alone, hashing the result against object_sha256. It returns
 // the cursor for the next pass.
-func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, after scrubCursor, status map[string]string) scrubCursor {
+func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, after scrubCursor) scrubCursor {
 	res.Rebuild = "none"
 	if ctx.Err() != nil {
 		return after
@@ -543,7 +504,7 @@ func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, 
 		return after
 	}
 	r := *pick
-	outcome, err := p.rebuild(ctx, r, status)
+	outcome, err := p.rebuild(ctx, r)
 	res.Rebuild = outcome
 	vaultParityRebuilds.WithLabelValues(outcome).Inc()
 	switch outcome {
@@ -571,27 +532,20 @@ func (p *VaultParity) rebuildCheck(ctx context.Context, res *VaultParityResult, 
 var errParityAloneOnly = errors.New("the rebuild check reads the parity alone")
 
 // rebuild decodes the whole stored object from the four parity shards and
-// compares its SHA-256 (ok | mismatch | error).
-func (p *VaultParity) rebuild(ctx context.Context, r scrubRowData, status map[string]string) (string, error) {
+// compares its SHA-256 (ok | mismatch | error). The shards are opened and
+// read by the GET's own opener and reader (D-V3-3, newParityRead), which
+// read the breakers once.
+func (p *VaultParity) rebuild(ctx context.Context, r scrubRowData) (string, error) {
 	l := parityLayout{k: r.k, m: r.m, stripe: r.stripe, size: r.size}
-	tctx := common.WithTenantID(ctx, r.tenantID)
-	container := parityContainer(r.tenantID)
-	streams := make([]io.ReadCloser, l.m)
-	for j := 0; j < l.m; j++ {
-		drv, ok := p.eng.GetDriver(r.legs[j])
-		if !ok || status[r.legs[j]] == engine.StateOpen.String() {
-			closeAll(streams)
-			return "error", fmt.Errorf("shard p%d: leg %s unavailable", j, r.legs[j])
-		}
-		rc, err := drv.Get(tctx, container, shardArtifact(r.prefix, j))
-		if err != nil {
-			closeAll(streams)
-			return "error", fmt.Errorf("shard p%d: %w", j, err)
-		}
-		streams[j] = rc
-	}
 	none := func(context.Context, int64, int) ([]byte, error) { return nil, errParityAloneOnly }
-	rb := newParityRebuilder(tctx, l, streams, none, 0, l.size)
+	// The one opener the GET uses (D-V3-3): every shard must open (all).
+	rb, err := p.newParityRead(ctx, r.parityRow, none, 0, l.size, true)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "error", ctx.Err()
+		}
+		return "error", err
+	}
 	defer func() { _ = rb.Close() }()
 	h := sha256.New()
 	n, err := io.Copy(h, rb)
@@ -605,14 +559,6 @@ func (p *VaultParity) rebuild(ctx context.Context, r scrubRowData, status map[st
 		return "mismatch", fmt.Errorf("%d bytes with SHA-256 %s, the object's stored bytes are %d with %s", n, sum, l.size, r.objectSHA)
 	}
 	return "ok", nil
-}
-
-func closeAll(rcs []io.ReadCloser) {
-	for _, rc := range rcs {
-		if rc != nil {
-			_ = rc.Close()
-		}
-	}
 }
 
 // awaitRestore is protect's answer to an object on tape (A3): it asks the

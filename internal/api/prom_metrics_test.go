@@ -191,3 +191,25 @@ func TestMetricsEndpoint_ExportsEgressThrottleSeries(t *testing.T) {
 		}
 	}
 }
+
+func TestMetrics_VaultParityRebuildRegistered(t *testing.T) {
+	// WP-VAULT-3 D-V3-8: the rebuild's series reach /metrics of a fresh
+	// server (declared is not registered — the be9d044d lesson). Presence
+	// only: the vecs are process globals other tests bump.
+	s := &Server{startTime: time.Now(), healthChecker: NewBackendHealthChecker(), logger: zap.NewNop()}
+	s.initMetrics()
+	rr := httptest.NewRecorder()
+	s.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	for _, want := range []string{
+		`vaultaire_vault_parity_rebuild_seconds_bucket{phase="open"`,
+		`vaultaire_vault_parity_rebuild_seconds_bucket{phase="first_stripe"`,
+		`vaultaire_vault_parity_rebuild_seconds_bucket{phase="stream"`,
+		"# TYPE vaultaire_vault_parity_rebuild_bytes_per_second gauge",
+		`vaultaire_vault_parity_shard_reads_total{kind="range",leg="lyve"}`,
+		`vaultaire_vault_parity_shard_reads_total{kind="whole",leg="sync"}`,
+	} {
+		assert.Contains(t, body, want)
+	}
+}
