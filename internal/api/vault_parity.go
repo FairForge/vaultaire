@@ -115,7 +115,7 @@ var (
 	})
 	vaultParityFallbacks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_fallback_reads_total",
-		Help: "Reads of a vault object whose backend failed: served (rebuilt from the parity copy) or unavailable (no usable parity either).",
+		Help: "Vault object reads the parity copy served or could not: served (its backend failed, rebuilt from the parity), served_first (read from the parity first, the tenant's vault_parity_serve flag — WP-VAULT-3), unavailable (the parity could not serve: after a backend failure, or tried first and fell through to the backend).",
 	}, []string{"outcome"})
 	// Set by every run (Prompt 2b.2 C4): what the parity does not cover.
 	vaultParityUnprotectedBytes = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -136,7 +136,7 @@ func init() {
 	for _, o := range []string{"complete", "partial", "failed", "erased"} {
 		vaultParityObjects.WithLabelValues(o)
 	}
-	for _, o := range []string{"served", "unavailable"} {
+	for _, o := range []string{"served", "served_first", "unavailable"} {
 		vaultParityFallbacks.WithLabelValues(o)
 	}
 	for _, o := range []string{"found", "erased", "failed"} {
@@ -404,6 +404,36 @@ func (p *VaultParity) LegFor(residency string) (string, engine.Driver, bool) {
 
 func (p *VaultParity) enabled(tenantID string) bool {
 	return p.flags != nil && p.flags.Enabled(flagVaultParity, tenantID)
+}
+
+// ServeFirst: the tenant's vault GETs read the parity copy first
+// (`vault_parity_serve`, WP-VAULT-3 D-V3-6). Nil-safe; a nil flag service is
+// OFF (unlike chunking's nil-is-ON: this flag widens what a GET may read
+// from, so it is on only where it was turned on).
+func (p *VaultParity) ServeFirst(tenantID string) bool {
+	return p != nil && p.flags != nil && p.flags.Enabled(flagVaultParityServe, tenantID)
+}
+
+// CanServe: the parity copy can serve this object as it is now — the
+// tenant's vault_parity flag on, the row complete for this etag and size
+// (a sealed object's STORED size), and every shard's leg registered with a
+// closed breaker. One row read, no shard read: a GET that asks it and gets
+// false goes to the object's own backend without having touched the leg.
+func (p *VaultParity) CanServe(ctx context.Context, tenantID, bucket, key, etag string, size int64) bool {
+	if p == nil || !p.enabled(tenantID) {
+		return false
+	}
+	r, err := p.loadRow(ctx, tenantID, bucket, key)
+	if err != nil || r.state != "complete" || r.etag != etag || r.size != size || len(r.legs) < r.m {
+		return false
+	}
+	status := p.eng.GetFailoverStatus()
+	for _, leg := range r.legs[:r.m] {
+		if _, ok := p.eng.GetDriver(leg); !ok || leg == "" || status[leg] == engine.StateOpen.String() {
+			return false
+		}
+	}
+	return true
 }
 
 // spec is the job as the scheduler runs it (WP-R13-3 rules): an interval

@@ -124,6 +124,12 @@ Behaviour worth knowing before writing code against it:
   as the bucket's own tier (`STANDARD` on a plain bucket): we do not sell a
   single-copy or an infrequent-access class, and nothing is ever placed on the
   server's own disk.
+- **`x-vaultaire-served-from: parity`** on a GetObject response means the bytes
+  were rebuilt from the Vault object's second copy (Reed-Solomon parity on
+  another provider) instead of read from tape: the same bytes, the same ETag.
+  When the operator has enabled it for the account, a Vault object is served
+  from that copy first, so a GET answers 200 even while the tape copy is
+  archived; `?restore` and HEAD's `x-amz-restore` are unchanged.
 - **Quota, not overage.** A PUT past the tenant's quota (per floor when the
   tenant bought a house, else the total) answers 403 `QuotaExceeded`; the free
   tier is 5 GB, 1 bucket, 1 scoped key. Nothing is ever billed per request or

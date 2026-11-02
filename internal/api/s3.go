@@ -1000,8 +1000,11 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	if engine.IsArchiveClass(storageClass) && s.engine != nil {
 		if drv, exists := s.engine.GetDriver(backendName); exists {
 			if restorer, isRestorer := drv.(engine.Restorer); isRestorer {
-				// The restore state of the blob the row addresses (WP-R2-1).
-				if st, stErr := restorer.RestoreStatus(r.Context(), t.NamespaceContainer(req.Bucket), blobArtifact(req.Object, storageKey)); stErr == nil {
+				// The restore state of the blob the row addresses (WP-R2-1),
+				// bounded (WP-VAULT-3 D-V3-7): past vaultHeadRestoreTimeout
+				// the header is omitted, as on any failure.
+				st, stErr := headRestoreStatus(r.Context(), restorer, t.NamespaceContainer(req.Bucket), blobArtifact(req.Object, storageKey))
+				if stErr == nil {
 					if st.Restore != "" {
 						w.Header().Set("x-amz-restore", st.Restore)
 					}
@@ -1013,6 +1016,44 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	// HEAD must not write a body.
 	w.WriteHeader(headStatus(mode))
+}
+
+// headRestoreStatus is HEAD's live restore lookup, bounded to
+// vaultHeadRestoreTimeout whatever the driver does with its context: the
+// call runs on its own goroutine and HEAD stops waiting at the bound (the
+// call is left to end on its own — the driver's own request bounds end it).
+// blob is the row's resolved address (blobArtifact, WP-R2-1).
+// Counted in vaultaire_vault_head_restore_lookups_total{outcome}.
+func headRestoreStatus(ctx context.Context, restorer engine.Restorer, container, blob string) (*engine.RestoreStatus, error) {
+	ctx, cancel := context.WithTimeout(ctx, vaultHeadRestoreTimeout)
+	defer cancel()
+	type answer struct {
+		st  *engine.RestoreStatus
+		err error
+	}
+	ch := make(chan answer, 1)
+	go func() {
+		st, err := restorer.RestoreStatus(ctx, container, blob) // the row's resolved address (blobArtifact)
+		ch <- answer{st, err}
+	}()
+	select {
+	case a := <-ch:
+		switch {
+		case a.err == nil && a.st != nil:
+			vaultHeadRestoreLookups.WithLabelValues("ok").Inc()
+		case errors.Is(a.err, context.DeadlineExceeded) && ctx.Err() != nil:
+			vaultHeadRestoreLookups.WithLabelValues("timeout").Inc()
+		default:
+			vaultHeadRestoreLookups.WithLabelValues("error").Inc()
+			if a.err == nil {
+				a.err = errors.New("restore status: no answer")
+			}
+		}
+		return a.st, a.err
+	case <-ctx.Done():
+		vaultHeadRestoreLookups.WithLabelValues("timeout").Inc()
+		return nil, fmt.Errorf("restore status: %w", ctx.Err())
+	}
 }
 
 // headRange reads a HEAD's Range against an object of size bytes: the mode

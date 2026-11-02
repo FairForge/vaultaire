@@ -867,7 +867,40 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 		}
 	}
 	parallelRead := false // the bytes come from the parallel ranged reader
-	if rh := r.Header.Get("Range"); rh != "" && cacheHit && cachedEncAlgo == "" &&
+	// The vault read order (WP-VAULT-3 D-V3-6): with the tenant's
+	// `vault_parity_serve` flag on, a vault object the parity copy can serve
+	// as it is now is read from the parity FIRST — its own backend (tape) is
+	// asked only when the parity cannot serve it, so an object on tape is a
+	// 200, never 403 InvalidObjectState, and a GET starts no recall. A parity
+	// that fails before the status line falls through to today's order and
+	// is not tried again (parityTried).
+	parityTried, parityServed := false, false
+	if !sealed && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity.ServeFirst(t.ID) {
+		off, n := int64(0), cachedSize
+		var prng *httpRange
+		if rh := r.Header.Get("Range"); rh != "" && !errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
+			rng, parseErr := parseRangeHeader(rh, cachedSize)
+			if parseErr != nil {
+				writeRangeNotSatisfiable(w, cachedSize)
+				return
+			}
+			prng, off, n = rng, rng.start, rng.length
+		}
+		if a.vaultParity.CanServe(r.Context(), t.ID, bucket, artifact, cachedETag, cachedSize) {
+			parityTried = true
+			pr, perr := a.vaultParity.Open(engine.WithRecordedBackend(r.Context(), cachedBackendName), t.ID, bucket, artifact, blob, cachedETag, cachedSize, off, n)
+			if perr == nil {
+				vaultParityFallbacks.WithLabelValues("served_first").Inc()
+				reader, nativeRange, wantRange, parityServed = pr, prng, prng, true
+				w.Header().Set("x-vaultaire-served-from", "parity")
+			} else {
+				a.logger.Warn("vault object: the parity copy could not serve it first; its backend is asked",
+					zap.String("bucket", bucket), zap.String("key", artifact), zap.NamedError("parity", perr))
+				vaultParityFallbacks.WithLabelValues("unavailable").Inc()
+			}
+		}
+	}
+	if rh := r.Header.Get("Range"); !parityServed && rh != "" && cacheHit && cachedEncAlgo == "" &&
 		!errors.Is(rangeParseErr(rh, cachedSize), errMultiRange) {
 		rng, parseErr := parseRangeHeader(rh, cachedSize)
 		if parseErr != nil {
@@ -915,7 +948,7 @@ func (a *S3ToEngine) HandleGet(w http.ResponseWriter, r *http.Request, bucket, o
 	// failover chain, an open breaker — is rebuilt from its parity copy when
 	// there is one (WP-VAULT-1). On tape (ErrArchived) is the object's state,
 	// not a failure: the restore semantics stay.
-	if err != nil && !sealed && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity != nil && !errors.Is(err, engine.ErrArchived) {
+	if err != nil && !sealed && !parityTried && cacheHit && cachedFloor == usage.FloorVault && a.vaultParity != nil && !errors.Is(err, engine.ErrArchived) {
 		off, n := int64(0), cachedSize
 		if wantRange != nil {
 			off, n = wantRange.start, wantRange.length
