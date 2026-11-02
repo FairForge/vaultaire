@@ -44,7 +44,7 @@ func (s *Server) handleOAuthMetadata(w http.ResponseWriter, _ *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{"stored"},
-		"service_documentation":                 h.URL("/docs/api#agents"),
+		"service_documentation":                 h.DocsBase() + "/api#agents",
 	})
 }
 

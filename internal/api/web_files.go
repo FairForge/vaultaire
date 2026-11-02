@@ -78,11 +78,15 @@ func (s *Server) handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
 // commit time is when the BINARY changed, not the page).
 func (s *Server) sitemapPaths() []string {
 	docs := make([]string, 0, len(docsPages)+1)
-	for _, p := range docsPages {
-		docs = append(docs, p)
+	// Once the docs links name the docs host, the guides are ITS pages (its
+	// own sitemap, docs_host.go); the canonical /docs/* still answers.
+	if !s.hostSet().DocsFlipped() {
+		for _, p := range docsPages {
+			docs = append(docs, p)
+		}
+		docs = append(docs, "/docs/api")
+		sort.Strings(docs)
 	}
-	docs = append(docs, "/docs/api")
-	sort.Strings(docs)
 	out := append([]string{"/", "/pricing"}, docs...)
 	out = append(out, "/status", "/changelog")
 	return append(out, dashboard.LiveLegalPaths(s.flags)...)

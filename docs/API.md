@@ -4,7 +4,7 @@ The customer-facing surface of Stored as served today. The maintained
 short form is `GET https://stored.cloud/llms.txt` (`internal/api/llms_txt.go`);
 the machine-readable route list is `GET https://stored.cloud/openapi.json`
 (`internal/docs/openapi.go`, guarded by `openapi_drift_test.go` so a route
-cannot ship undocumented), browsable at `https://stored.cloud/docs/api`. Prices
+cannot ship undocumented), browsable at `https://docs.stored.cloud/api` (and `https://stored.cloud/docs/api`, for ever). Prices
 quoted here come from `internal/api/landing/prices.json`; if the two disagree,
 prices.json wins.
 
@@ -742,9 +742,9 @@ _, err := client.PutObject(ctx, &s3.PutObjectInput{
 ```
 
 **rclone** (`~/.config/rclone/rclone.conf`; the full guide is
-`https://stored.cloud/docs/rclone`, source `docs/guides/rclone-setup.md`; rclone crypt —
+`https://docs.stored.cloud/rclone`, source `docs/guides/rclone-setup.md`; rclone crypt —
 what it hides and what it leaves visible — and restic and Kopia are
-`https://stored.cloud/docs/encryption`, source `docs/guides/client-side-encryption.md`)
+`https://docs.stored.cloud/encryption`, source `docs/guides/client-side-encryption.md`)
 
 ```ini
 [storedge]

@@ -158,10 +158,18 @@ func TestDocsHost_ServesTheSameBytesAsTheCanonicalDocs(t *testing.T) {
 		assert.Empty(t, head.Body.Bytes(), docsPath)
 		assert.Equal(t, "public, max-age=300", head.Header().Get("Cache-Control"), docsPath)
 	}
-	// The pages name no docs host while it is dark (hosts.DocsBase).
+	// Since the owner's proof the pages link the docs host (hosts.DocsBase),
+	// never the canonical /docs.
 	d := serve(h, hostRequest(http.MethodGet, "docs.stored.cloud", "/", false, true))
-	assert.NotContains(t, d.Body.String(), "docs.stored.cloud")
-	assert.Contains(t, d.Body.String(), `href="https://stored.cloud/docs/rclone"`)
+	assert.Contains(t, d.Body.String(), `href="https://docs.stored.cloud/rclone"`)
+	assert.NotContains(t, d.Body.String(), "https://stored.cloud/docs")
+	for _, p := range []string{"/", "/pricing"} {
+		body := serve(h, hostRequest(http.MethodGet, "stored.cloud", p, false, true)).Body.String()
+		assert.Contains(t, body, `href="https://docs.stored.cloud`, "%s links the docs host", p)
+		assert.NotContains(t, body, `href="https://stored.cloud/docs`, "%s never the canonical /docs", p)
+	}
+	md := serve(h, hostRequest(http.MethodGet, "stored.cloud", "/.well-known/oauth-authorization-server", false, false)).Body.String()
+	assert.Contains(t, md, `"service_documentation":"https://docs.stored.cloud/api#agents"`)
 
 	// Its own robots.txt and sitemap.
 	r := serve(h, hostRequest(http.MethodGet, "docs.stored.cloud", "/robots.txt", false, false))
