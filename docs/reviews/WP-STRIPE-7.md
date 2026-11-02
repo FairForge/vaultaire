@@ -75,4 +75,4 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 
 ## Post-merge review
 
-**RP90** reads PRs 0 and A–F against D-STRIPE-74…83, RB13-1…9 and the two plan rows.
+**RP90 (2026-11-02, `docs/reviews/WP-STRIPE-7-REVIEW.md`): HOLDS at P2.** Three P2s — RP90-1 the versioning promise is the management API's only (an agent's S3 key creates unversioned buckets; `?versionId` deletes are in the ceiling), RP90-2 agent-minted S3 keys outlive the grant on the erasure and member-removal paths (D-STRIPE-78 holds for the explicit revoke only), RP90-3 `/oauth/register` + `/oauth/token` are public and unlimited; seven P3s, nine P4s; D-STRIPE-84…86 for the owner. Correction to this note: `agent_grants` and `apps` are ON for tenant zero on prod (the connector proof's rows), so the surface is live for the owner, dark for everyone else. Prompt 56's Part 0 carries every item.

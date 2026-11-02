@@ -11,6 +11,8 @@ by the session that finished the Vault E2E proof). The measurements are in
 | #1114 (PR B) | `vault_parity_serve` (the vault read order), HEAD's restore lookup bounded to 3 s | `c6ad85f5` |
 | PR C | this note, the prod proof (§ 2 of the bench record), STATUS / plan / CLAUDE.md | — |
 
+**Reviewed by RP91 (2026-11-02, `docs/reviews/WP-VAULT-3-REVIEW.md`, with the Lyve primary switch and WP-DOMAIN-1 part 3): HOLDS at P3** — RP91-1 with `vault_parity_serve` on, HEAD still says GLACIER with no `x-amz-restore`, so aws-cli skips the download the flag makes possible; RP91-3 HEAD's restore lookup ignores the Geyser breaker; RP91-4/5/6/7 P4s; the stale-etag, budget and breaker attacks cleared.
+
 ## Step 0 answers (what PR 0 found)
 
 - **There is no failover chain.** The record's "7.5 s for the failover chain" was wrong: `engine.Get`
