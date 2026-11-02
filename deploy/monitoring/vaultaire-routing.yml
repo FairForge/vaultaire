@@ -41,7 +41,7 @@
 # with a finding is the plan in docs/reviews/WP-R7-5.md.
 #
 # Triage:
-#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.ge/api/v1/admin/routing-truth | jq .
+#   curl -s -H "Authorization: Bearer <admin JWT>" https://stored.cloud/api/v1/admin/routing-truth | jq .
 #   journalctl -u 'vaultaire@*' | grep 'routing truth'
 #   POST /api/v1/admin/jobs/routing_truth/run     one run now (202; 409 while one is running)
 groups:

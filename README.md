@@ -118,7 +118,7 @@ TDD is the standard workflow. Tests use [testify](https://github.com/stretchr/te
 
 ## Security
 
-Report vulnerabilities to security@stored.ge, see [/.well-known/security.txt](https://stored.ge/.well-known/security.txt).
+Report vulnerabilities to security@stored.cloud, see [/.well-known/security.txt](https://stored.cloud/.well-known/security.txt).
 
 ## License
 

@@ -1,10 +1,10 @@
 # API
 
 The customer-facing surface of Stored as served today. The maintained
-short form is `GET https://stored.ge/llms.txt` (`internal/api/llms_txt.go`);
-the machine-readable route list is `GET https://stored.ge/openapi.json`
+short form is `GET https://stored.cloud/llms.txt` (`internal/api/llms_txt.go`);
+the machine-readable route list is `GET https://stored.cloud/openapi.json`
 (`internal/docs/openapi.go`, guarded by `openapi_drift_test.go` so a route
-cannot ship undocumented), browsable at `https://stored.ge/docs/api`. Prices
+cannot ship undocumented), browsable at `https://stored.cloud/docs/api`. Prices
 quoted here come from `internal/api/landing/prices.json`; if the two disagree,
 prices.json wins.
 
@@ -12,11 +12,11 @@ prices.json wins.
 
 | | |
 |---|---|
-| S3 endpoint | `https://stored.ge`; **`https://s3.stored.cloud`** (the same API behind the edge mover, WP-EDGE-1: an admitted upload of a tenant with the `edge_ingest` flag is streamed from Cloudflare's edge straight to its backend — the response is the same; keep every single PUT and every part under 100 MB there, the zone's request limit answers an HTML 413 above it) |
-| Addressing | **path-style**: `https://stored.ge/<bucket>/<key>` (virtual-hosted `<bucket>.stored.ge` is not served) |
+| S3 endpoint | **`https://s3.stored.cloud`** (since 2026-11-01 the endpoint every registration, dashboard page and snippet prints; `https://stored.ge` and `https://s3.stored.ge` keep answering the same API forever — a signed host never moves under a client, and `s3.stored.ge` is the DNS-only direct origin with no 100 MB limit). `s3.stored.cloud` is the same API behind the edge mover (WP-EDGE-1: an admitted upload of a tenant with the `edge_ingest` flag is streamed from Cloudflare's edge straight to its backend — the response is the same; keep every single PUT and every part under 100 MB there, the zone's request limit answers an HTML 413 above it) |
+| Addressing | **path-style**: `https://s3.stored.cloud/<bucket>/<key>` (virtual-hosted `<bucket>.s3.stored.cloud` is not served) |
 | Region | `us-east-1` in the SigV4 credential scope, whatever region the bucket was created in |
-| CDN (public-read buckets only) | `https://cdn.stored.ge/<slug>/<bucket>/<key>` |
-| Dashboard / JSON API | `https://stored.ge/dashboard`, `https://stored.ge/api/v1/…` |
+| CDN (public-read buckets only) | `https://cdn.stored.cloud/<slug>/<bucket>/<key>` (`cdn.stored.ge` routes there too) |
+| Dashboard / JSON API | `https://stored.cloud/dashboard`, `https://stored.cloud/api/v1/…` |
 
 ## Authentication
 
@@ -29,7 +29,7 @@ is full (canonical request, signed headers, payload hash or
 works unmodified. With curl ≥ 7.75:
 
 ```bash
-curl --aws-sigv4 "aws:amz:us-east-1:s3" --user "KEY:SECRET" https://stored.ge/my-bucket/hello.txt
+curl --aws-sigv4 "aws:amz:us-east-1:s3" --user "KEY:SECRET" https://s3.stored.cloud/my-bucket/hello.txt
 ```
 
 Three classes of credential are accepted, looked up in this order:
@@ -76,7 +76,7 @@ A server uses a **management key** instead of a JWT on `/api/v1/manage` and
 
 ## S3 operations
 
-What `handleS3Request` implements (base `https://stored.ge`). `HEAD` is
+What `handleS3Request` implements (base `https://s3.stored.cloud`). `HEAD` is
 answered from `object_head_cache` in ~1 ms and never touches a backend (the one
 exception: `x-amz-restore` on GLACIER-class objects).
 
@@ -200,7 +200,7 @@ Behaviour worth knowing before writing code against it:
   Vault objects go to the tape backend and public-read objects to the CDN
   origin regardless of the bucket's region.
 - **Public buckets** (`?acl` public-read) are served unauthenticated from
-  `cdn.stored.ge` with Range, conditionals, per-bucket CORS and a
+  `cdn.stored.cloud` with Range, conditionals, per-bucket CORS and a
   `Cache-Control` from the bucket's cache TTL; HTML/SVG/XML are always
   attachments. Chunked objects (> 64 MiB) are served through the content
   index, Range included (since 2026-10-13); SSE-S3 objects are opened; an
@@ -227,8 +227,8 @@ Behaviour worth knowing before writing code against it:
   IP-refused key) carries `Access-Control-Allow-Origin` alone, when a rule of
   some bucket of that name allows the origin, so the page can read the error.
   Every S3 response to a request with an `Origin` carries `Vary: Origin`. Use
-  `s3.stored.ge` from a page for uploads above 100 MB (the `stored.ge` hostname
-  is proxied and capped).
+  `s3.stored.ge` from a page for uploads above 100 MB (`s3.stored.cloud` and
+  `stored.ge` are proxied and capped; `s3.stored.ge` is the direct origin).
   The `/cdn` path's CORS (`cors_origins`, default `*`) is separate and unchanged.
 - **`GET /api/v1/whoami`** (2026-10-06): signed with an S3 key pair (SigV4,
   header or presigned), not a JWT — answers the tenant the key belongs to, the
@@ -317,7 +317,7 @@ Behaviour worth knowing before writing code against it:
 
 ## JSON API
 
-Base `https://stored.ge/api/v1`, `Authorization: Bearer <jwt>`, JSON in and
+Base `https://stored.cloud/api/v1`, `Authorization: Bearer <jwt>`, JSON in and
 out. One token-bucket limiter of **100 requests/min per tenant** (burst 10)
 covers every group; responses carry `X-RateLimit-Limit`, `-Remaining`,
 `-Reset` and a 429 carries `Retry-After`.
@@ -697,9 +697,9 @@ drops in the same way.
 aws configure set aws_access_key_id VKxxxxxxxxxxxxxxxx
 aws configure set aws_secret_access_key SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 aws configure set region us-east-1
-aws --endpoint-url https://stored.ge s3 mb s3://my-bucket
-aws --endpoint-url https://stored.ge s3 cp ./photo.jpg s3://my-bucket/photo.jpg
-aws --endpoint-url https://stored.ge s3api put-object --bucket my-bucket --key archive.tar --body archive.tar --storage-class GLACIER
+aws --endpoint-url https://s3.stored.cloud s3 mb s3://my-bucket
+aws --endpoint-url https://s3.stored.cloud s3 cp ./photo.jpg s3://my-bucket/photo.jpg
+aws --endpoint-url https://s3.stored.cloud s3api put-object --bucket my-bucket --key archive.tar --body archive.tar --storage-class GLACIER
 ```
 
 **boto3**
@@ -708,7 +708,7 @@ aws --endpoint-url https://stored.ge s3api put-object --bucket my-bucket --key a
 import boto3
 s3 = boto3.client(
     "s3",
-    endpoint_url="https://stored.ge",
+    endpoint_url="https://s3.stored.cloud",
     aws_access_key_id="VKxxxxxxxxxxxxxxxx",
     aws_secret_access_key="SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     region_name="us-east-1",
@@ -727,7 +727,7 @@ cfg, _ := config.LoadDefaultConfig(ctx,
         "VKxxxxxxxxxxxxxxxx", "SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "")),
 )
 client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-    o.BaseEndpoint = aws.String("https://stored.ge")
+    o.BaseEndpoint = aws.String("https://s3.stored.cloud")
     o.UsePathStyle = true
 })
 _, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -736,7 +736,7 @@ _, err := client.PutObject(ctx, &s3.PutObjectInput{
 ```
 
 **rclone** (`~/.config/rclone/rclone.conf`; the full guide is
-`https://stored.ge/docs/rclone`, source `docs/guides/rclone-setup.md`)
+`https://stored.cloud/docs/rclone`, source `docs/guides/rclone-setup.md`)
 
 ```ini
 [storedge]
@@ -745,7 +745,7 @@ provider = Other
 access_key_id = VKxxxxxxxxxxxxxxxx
 secret_access_key = SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 region = us-east-1
-endpoint = https://stored.ge
+endpoint = https://s3.stored.cloud
 acl = private
 ```
 
@@ -774,20 +774,20 @@ parts in flight sets the rest (see "Fast uploads and downloads" below).
 Integrity through the edge is the backend's
 own plus your `Content-MD5` when you send one (signed into the link the
 backend enforces); a hex `x-amz-content-sha256` is verified on the
-`stored.ge` path only.
+origin path only (a request the edge passes through, or one on `stored.ge`).
 
 Reads go the same way (WP-EDGE-1 Part B): a `GetObject` — whole, or one
 `Range` — of an object of at least 4 MiB that is a whole unsealed object on
 iDrive or Lyve is streamed to you from the backend by the edge, under the
-same response headers `stored.ge` sends (ETag, Content-Type, Content-Length,
+same response headers the origin sends (ETag, Content-Type, Content-Length,
 Content-Range, `x-amz-storage-class`, `x-amz-meta-*`, the version id, the
 Object Lock headers); `aws s3 cp`'s `If-Match` + `Range: bytes=0-` download
 shape is served that way too. Everything else — HEAD, a presigned URL,
 `?versionId`, a public bucket, a sealed (SSE-S3 / SSE-C) or chunked object,
 an object on tape, a multi-range or unsatisfiable `Range`, `If-None-Match`
 and the `If-*-Since` headers, a read while your account is past its egress
-allowance with the throttle on — is answered by the origin as on
-`stored.ge`, and so is any read the backend does not answer as expected
+allowance with the throttle on — is answered by the origin exactly as a
+request on `stored.ge` is, and so is any read the backend does not answer as expected
 (the origin keeps the failover path). A read of 64 MiB or more is read
 by the edge as 16 MiB ranges, six at a time, and written to you in order
 (about twice one stream in the 2026-10-27 bench); a range that fails after

@@ -67,7 +67,10 @@ rows) and `RoutingUnknownBackendRows` pending (2,613 + 3 `onedrive` rows, 62
 NULL). That is the known WP-R7-5 backlog, not a new fault; installed, it is a
 warning in ntfy forever. Install it after the owner's routing-truth backfill
 (`docs/reviews/WP-R7-5.md`, bench tenants → erase). `vaultaire-synthetic.yml`
-stays out until `SYNTHETIC_CHECK_URL` is set (its absent-series rule fires).
+is live since 2026-11-02 03:46 UTC: the synthetic tenant `synthetic-check@stored.cloud`
+(`tenant-6cf6b63b58b95ca5`, bucket `synthetic-check`) and `SYNTHETIC_CHECK_URL=https://s3.stored.cloud`
+are in the prod `.env` (backup `.env.bak-synthetic-20261102T0345Z`), `vaultaire_synthetic_check_success` 1
+on the first run; the file on the box is the repo's (sha256 `572959e4…`).
 
 `pg-backup.sh` runs as user1 (cron 03:00 UTC) and writes its `.prom` files —
 `vaultaire_backup_{,offbox_,offbox2_,run_}last_success_timestamp_seconds.prom` and,

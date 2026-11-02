@@ -9,7 +9,7 @@ JuiceFS is an open-source, high-performance POSIX filesystem that splits storage
 ## Prerequisites
 
 - Any Linux VPS (Ubuntu 20.04+, Debian 11+, or similar) with at least 512MB RAM
-- A Stored account with your access key and secret key (find them in your dashboard at stored.ge)
+- A Stored account with your access key and secret key (find them in your dashboard at stored.cloud)
 - A bucket created on Stored (you'll do this below if you haven't already)
 
 ## Step 1: Install JuiceFS
@@ -30,7 +30,7 @@ If you haven't already, create a bucket using the AWS CLI:
 
 ```bash
 aws s3 mb s3://my-jfs-data \
-  --endpoint-url https://stored.ge \
+  --endpoint-url https://s3.stored.cloud \
   --region us-east-1
 ```
 
@@ -45,7 +45,7 @@ sudo mkdir -p /var/jfs
 
 juicefs format \
   --storage s3 \
-  --bucket https://stored.ge/my-jfs-data \
+  --bucket https://s3.stored.cloud/my-jfs-data \
   --access-key VKxxxxxxxxxxxxxxxx \
   --secret-key SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   sqlite3:///var/jfs/meta.db \
@@ -140,7 +140,7 @@ juicefs mount -d \
 ```bash
 juicefs format \
   --storage s3 \
-  --bucket https://stored.ge/my-jfs-data \
+  --bucket https://s3.stored.cloud/my-jfs-data \
   --access-key VKxxxxxxxxxxxxxxxx \
   --secret-key SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   redis://localhost:6379/0 \

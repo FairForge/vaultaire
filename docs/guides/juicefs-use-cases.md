@@ -49,7 +49,7 @@ Add to your Nextcloud `config.php`:
         'bucket' => 'nextcloud-data',
         'key'    => 'VKxxxxxxxxxxxxxxxx',   // or a scoped VLT_ key
         'secret' => 'SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-        'hostname' => 'stored.ge',
+        'hostname' => 's3.stored.cloud',
         'port'   => 443,
         'use_ssl' => true,
         'use_path_style' => true,
@@ -83,7 +83,7 @@ UPLOAD_LOCATION=/mnt/storedge/immich-uploads
 # Or use S3 directly:
 # IMMICH_S3_ENABLED=true
 # IMMICH_S3_BUCKET=immich-photos
-# IMMICH_S3_ENDPOINT=https://stored.ge
+# IMMICH_S3_ENDPOINT=https://s3.stored.cloud
 # IMMICH_S3_ACCESS_KEY=VKxxxxxxxxxxxxxxxx
 # IMMICH_S3_SECRET_KEY=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 # IMMICH_S3_REGION=us-east-1
@@ -101,11 +101,11 @@ Configure your `.lfsconfig`:
 
 ```ini
 [lfs]
-  url = "https://stored.ge"
+  url = "https://s3.stored.cloud"
 
 [lfs "storage"]
   s3.bucket = git-lfs-artifacts
-  s3.endpoint = https://stored.ge
+  s3.endpoint = https://s3.stored.cloud
   s3.access_key_id = VKxxxxxxxxxxxxxxxx
   s3.secret_access_key = SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
