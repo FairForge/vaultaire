@@ -1,0 +1,12 @@
+# Every minute: the status page shows its red banner after 5 min without a
+# stored push (edge/status STALE_AFTER_SECONDS), so a missed run or two is no news.
+[Unit]
+Description=Push the service's state to status.stored.cloud, every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

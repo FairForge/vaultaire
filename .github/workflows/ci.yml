@@ -138,6 +138,7 @@ jobs:
           sudo bash deploy/scripts/age-install.sh /usr/local/bin
           bash deploy/scripts/pg-backup_test.sh
           bash deploy/scripts/pg-pitr_test.sh
+          bash deploy/scripts/status-push_test.sh
           bash deploy/scripts/vaultaire-switch_test.sh
           bash deploy/scripts/vaultaire-maint_test.sh
           bash deploy/scripts/vaultaire-user-install_test.sh

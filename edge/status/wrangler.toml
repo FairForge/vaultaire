@@ -1,0 +1,31 @@
+# stored-status — Stored's status page (WP-DOMAIN-1 part 3B).
+# Deployed on the PRODUCTION Cloudflare account to the stored.cloud zone's
+# route status.stored.cloud/* — edge/mcp's shape: DNS `AAAA status 100::`,
+# proxied, originless; the host never reaches SLC and the Worker never
+# fetches it. One file, no bundling.
+#
+# Secret (wrangler secret put STATUS_PUSH_TOKEN): the bearer the box's
+# status-push timer presents on POST /push (≥ 32 characters; unset = every
+# push 503). Var STALE_AFTER_SECONDS: a report older than this is shown under
+# the red banner (10–3600, default 300).
+#
+# State: one Durable Object (SQLite storage), not KV: a report is read back
+# exactly as written, at once, from every colo, and the deploy token (the
+# zone token) may upload a script but not create a KV namespace.
+name = "stored-status"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+no_bundle = true
+workers_dev = false
+routes = [{ pattern = "status.stored.cloud/*", zone_name = "stored.cloud" }]
+
+[[durable_objects.bindings]]
+name = "STATE"
+class_name = "StatusState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StatusState"]
+
+[vars]
+STALE_AFTER_SECONDS = "300"

@@ -48,6 +48,7 @@ type Hosts struct {
 	CDN       string   // public-content origin (CDN_PUBLIC_HOST)
 	Trust     string   // the trust origin: the transparency log's read side (TRUST_PUBLIC_HOST)
 	Docs      string   // the docs origin: the guides and the API reference (DOCS_PUBLIC_HOST)
+	Status    string   // the status page's origin: a Worker the box pushes to (STATUS_PUBLIC_HOST)
 	BaseURL   string   // OAuth callbacks and e-mail links (VAULTAIRE_BASE_URL)
 	Aliases   []string // web names that 301 to Canonical (VAULTAIRE_ALIAS_HOSTS)
 }
@@ -55,10 +56,10 @@ type Hosts struct {
 // Defaults is the local development set: every origin http://localhost:port.
 func Defaults(port int) Hosts {
 	local := fmt.Sprintf("http://localhost:%d", port)
-	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, Docs: local, BaseURL: local}
+	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, Docs: local, Status: local, BaseURL: local}
 }
 
-// FromEnv reads the seven variables. A malformed value is logged at Warn and
+// FromEnv reads the eight variables. A malformed value is logged at Warn and
 // the default kept (the repository's env convention); a malformed alias is
 // dropped on its own. Fallbacks, chosen so a deploy before the .env edit
 // behaves exactly as before: Canonical ← VAULTAIRE_BASE_URL ← localhost;
@@ -66,7 +67,8 @@ func Defaults(port int) Hosts {
 // canonical host is a public name, else Canonical (served under /cdn/);
 // Trust ← https://trust.<canonical host> the same way (K4b), else Canonical;
 // Docs ← https://docs.<canonical host> the same way (WP-DOMAIN-1 part 3A),
-// else Canonical (served under /docs).
+// else Canonical (served under /docs); Status ← https://status.<canonical
+// host> the same way (part 3B), else Canonical (its /status page).
 func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -85,7 +87,7 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		return o
 	}
 	public, base, endpoint, cdn := origin("VAULTAIRE_PUBLIC_HOST"), origin("VAULTAIRE_BASE_URL"), origin("VAULTAIRE_ENDPOINT"), origin("CDN_PUBLIC_HOST")
-	trust, docs := origin("TRUST_PUBLIC_HOST"), origin("DOCS_PUBLIC_HOST")
+	trust, docs, status := origin("TRUST_PUBLIC_HOST"), origin("DOCS_PUBLIC_HOST"), origin("STATUS_PUBLIC_HOST")
 
 	switch {
 	case public != "":
@@ -117,6 +119,12 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		h.Docs = docs
 	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
 		h.Docs = schemeOf(h.Canonical) + "://docs." + ch
+	}
+	h.Status = h.Canonical
+	if status != "" {
+		h.Status = status
+	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
+		h.Status = schemeOf(h.Canonical) + "://status." + ch
 	}
 
 	for _, a := range strings.Split(getenv("VAULTAIRE_ALIAS_HOSTS"), ",") {
@@ -317,6 +325,41 @@ func (h Hosts) IsDocsHost(host string) bool {
 	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
 }
 
+// StatusHost is the status page's host name.
+func (h Hosts) StatusHost() string { return hostOf(h.Status) }
+
+// StatusPublic reports whether the status page is a host of its own (the
+// Worker on status.<canonical>, WP-DOMAIN-1 part 3B): the canonical origin is
+// a public name. On a development origin /status is the only status page.
+func (h Hosts) StatusPublic() bool { return isPublicName(hostOf(h.Canonical)) }
+
+// IsStatusHost reports whether host is a status host: the STATUS_PUBLIC_HOST
+// host, status.<canonical host>, status.<an alias>, and status.<brand or
+// legacy domain> whatever the env — IsTrustHost's rule. The status page itself
+// is a Worker that never reaches the origin; a status host that does reach it
+// (status.stored.ge, status.<alias>) is answered by StatusHostRouter.
+func (h Hosts) IsStatusHost(host string) bool {
+	host = normHost(host)
+	if host == "" {
+		return false
+	}
+	if st := h.StatusHost(); st != "" && st != hostOf(h.Canonical) && st != hostOf(h.S3) && host == st {
+		return true
+	}
+	rest, ok := strings.CutPrefix(host, "status.")
+	if !ok {
+		return false
+	}
+	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
+}
+
+// IsStatusOrigin reports whether host is the status origin's own name (the
+// Worker's host), which a redirect must never point back at.
+func (h Hosts) IsStatusOrigin(host string) bool {
+	host = normHost(host)
+	return host != "" && host == h.StatusHost()
+}
+
 // DocsBase is the prefix every printed docs link is built on, CDNBase's
 // role: DocsBase() is the hub, DocsBase() + "/rclone" a guide. While the docs
 // host is dark (WP-DOMAIN-1 part 3A: no link, hint or e-mail names a new
@@ -330,10 +373,10 @@ func (h Hosts) DocsBase() string { return h.Canonical + "/docs" }
 // Prompt 39): the canonical host, an alias, the brand and legacy domains and
 // www.<each>, whatever the environment says (prod's canonical origin is
 // stored.ge today and stored.cloud answers too). Never an S3, CDN or trust
-// host, nor a docs host.
+// host, nor a docs or a status host.
 func (h Hosts) IsWebHost(host string) bool {
 	host = normHost(host)
-	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) || h.IsDocsHost(host) {
+	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) || h.IsDocsHost(host) || h.IsStatusHost(host) {
 		return false
 	}
 	if host == hostOf(h.Canonical) || h.IsAlias(host) {
@@ -402,7 +445,7 @@ func (h Hosts) IsOwn(host string) bool {
 	}
 	own := append([]string{"localhost", BrandDomain}, LegacyDomains...)
 	own = append(own, h.Aliases...)
-	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.Docs, h.BaseURL} {
+	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.Docs, h.Status, h.BaseURL} {
 		if hh := hostOf(o); hh != "" {
 			own = append(own, hh)
 		}

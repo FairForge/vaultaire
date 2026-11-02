@@ -1,0 +1,11 @@
+{
+  "name": "stored-status",
+  "private": true,
+  "type": "module",
+  "description": "Stored's status page: a Cloudflare Worker on status.stored.cloud that renders the last state the box pushed to it and never fetches the origin (WP-DOMAIN-1 part 3B).",
+  "scripts": {
+    "test": "node --test",
+    "deploy": "npx -y wrangler@4.151.3 deploy",
+    "dev": "npx -y wrangler@4.151.3 dev --local"
+  }
+}
