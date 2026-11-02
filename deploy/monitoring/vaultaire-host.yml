@@ -50,3 +50,23 @@ groups:
         annotations:
           summary: "node_exporter's apt collector exports nothing"
           description: "apt_package_cache_timestamp_seconds or node_reboot_required is missing, so the other host rules cannot fire. systemctl status prometheus-node-exporter-apt.timer; cat /var/lib/prometheus/node-exporter/apt.prom."
+
+  # The status page's pusher (WP-DOMAIN-1 part 3B; deploy/scripts/status-push.sh, every
+  # 60 s by vaultaire-status-push.timer → /var/lib/vaultaire-status/vaultaire_status_push.prom):
+  #   vaultaire_status_push_last_success_seconds  unix time of the last push the page stored
+  #   vaultaire_status_push_success               the last run's outcome
+  #   vaultaire_status_push_timestamp_seconds     the last run
+  # status.stored.cloud shows a public red banner ("No recent report") once its last stored
+  # push is 5 min old. This box going down entirely takes Prometheus with it — the page's
+  # banner is then the only alarm, by design. This rule is for the rest: a wrong or missing
+  # token, the Worker refusing, the network to Cloudflare, the timer stopped.
+  - name: vaultaire-status
+    rules:
+      - alert: StatusPushStale
+        expr: (time() - vaultaire_status_push_last_success_seconds > 300) or absent(vaultaire_status_push_last_success_seconds)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "status.stored.cloud has stored no push for 5 minutes: the public page shows its red banner"
+          description: "The status page claims nothing once its last report is 5 min old, so customers see 'No recent report'. journalctl -u vaultaire-status-push.service -n 20 (a 401 = the token in /opt/vaultaire/configs/status-push.env differs from the Worker's STATUS_PUSH_TOKEN secret; 503 = the secret is unset; 000 = no answer from Cloudflare); systemctl status vaultaire-status-push.timer; cat /var/lib/vaultaire-status/vaultaire_status_push.prom. docs/DEPLOY.md § Status page."

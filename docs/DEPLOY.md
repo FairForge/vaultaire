@@ -1007,6 +1007,37 @@ and `vaultaire_blob_copies_total{outcome}`, `vaultaire_blob_copies_pending`, `va
 
 **The catalogue** (plan 10.3): seed a public artefact with `cmd/tools/catalogue-seed` (operator-run; `DATABASE_URL` and the blob backend's S3 pair in the environment, never a flag); the daily `catalogue_filter` job publishes the filter on `r2` (`t-_catalogue/catalogue/catalogue/<version>.bloom`, `…/latest`); the Worker reads `CATALOGUE_URL` (a `[vars]` entry: the public URL that serves those two files) — unset on prod until a public URL and the first artefacts are chosen.
 
+## Status page
+
+`status.stored.cloud` is the Worker `stored-status` (`edge/status/`, WP-DOMAIN-1 part 3B). It never asks the origin anything: this box pushes its state to it every minute, and when the pushes stop the page shows a red banner ("No recent report") instead of claiming health. That is the point: an SLC outage, or an outage of Cloudflare → SLC, is visible there.
+
+- **Pusher:** `deploy/scripts/status-push.sh`, installed to `/usr/local/lib/vaultaire-status/`, run as root by `vaultaire-status-push.timer` (every 60 s; units in `deploy/systemd/`). It reads `127.0.0.1:8010/health` (the active slot), the synthetic check's series on `127.0.0.1:8010/metrics`, `https://stored.ge/health` and `https://stored.cloud/login` (both through Cloudflare), `/version` and Prometheus' firing alerts (names only, severity `critical`/`page`; `STATUS_ALERT_SEVERITIES` widens it), and POSTs one report. It never retries: the next minute is the retry. A failed push is one journal line; `vaultaire_status_push_{success,last_success_seconds,timestamp_seconds}` go to `/var/lib/vaultaire-status/vaultaire_status_push.prom`, which node_exporter reads through a symlink. Rule `StatusPushStale` (`vaultaire-host.yml`, critical) fires after 5 min without a stored push.
+- **Token:** `STATUS_PUSH_TOKEN=<64 hex>` in `/opt/vaultaire/configs/status-push.env` (root 0600), the same value as the Worker secret `STATUS_PUSH_TOKEN`, and the owner's Keychain `vaultaire-status-push-token`. Rotate all three together: the Worker secret first, then the file. Pushes answer 401 in between, and within 5 min the banner shows.
+
+Install (once):
+
+```bash
+# On the Mac: the token, kept in the Keychain, set as the Worker's secret.
+security add-generic-password -s vaultaire-status-push-token -a stored -w "$(openssl rand -hex 32)"
+security find-generic-password -s vaultaire-status-push-token -w | \
+  (cd edge/status && CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… npx -y wrangler@4.151.3 secret put STATUS_PUSH_TOKEN)
+# The box's copy: the token travels as a file, never in an ssh command line or heredoc.
+f=$(mktemp); printf 'STATUS_PUSH_TOKEN=%s\n' "$(security find-generic-password -s vaultaire-status-push-token -w)" > "$f"
+scp "$f" vaultaire-slc:/tmp/status-push.env; rm -f "$f"
+scp deploy/scripts/status-push.sh deploy/systemd/vaultaire-status-push.{service,timer} deploy/monitoring/vaultaire-host.yml vaultaire-slc:/tmp/
+# On the box (sudo):
+install -d -m 0755 /usr/local/lib/vaultaire-status /var/lib/vaultaire-status
+install -m 0755 /tmp/status-push.sh /usr/local/lib/vaultaire-status/status-push.sh
+install -m 0600 -o root -g root /tmp/status-push.env /opt/vaultaire/configs/status-push.env && shred -u /tmp/status-push.env
+install -m 0644 /tmp/vaultaire-status-push.service /tmp/vaultaire-status-push.timer /etc/systemd/system/
+ln -sfn /var/lib/vaultaire-status/vaultaire_status_push.prom /var/lib/prometheus/node-exporter/vaultaire_status_push.prom
+install -m 0644 /tmp/vaultaire-host.yml /etc/prometheus/rules/ && promtool check rules /etc/prometheus/rules/vaultaire-host.yml && systemctl reload prometheus
+systemctl daemon-reload && systemctl enable --now vaultaire-status-push.timer
+journalctl -u vaultaire-status-push.service -n 5; cat /var/lib/vaultaire-status/vaultaire_status_push.prom
+```
+
+Proof: `curl -s https://status.stored.cloud/state.json | jq '{verdict, stale, age_seconds, build}'` reports `stale: false` and the live build. Stop the timer for 6 min and the page shows the banner; start it again and the banner goes within a minute.
+
 ## Monitoring
 
 ```

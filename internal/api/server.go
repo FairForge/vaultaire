@@ -928,7 +928,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// belong in the handlers via context, not on the whole server.
 	hostRouted := TrustHostRouter(s.hosts, s.newTrustRouter(),
 		DocsHostRouter(s.hosts, s.newDocsRouter(),
-			CDNHostRouter(s.hosts, cdnRouter, s.router)))
+			StatusHostRouter(s.hosts,
+				CDNHostRouter(s.hosts, cdnRouter, s.router))))
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:           hostRouted,
@@ -1763,7 +1764,7 @@ func (s *Server) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, BuildSHA, uptime, healthy, total)
+	_, _ = fmt.Fprintf(w, statusPageHTML, statusClass, statusLabel, BuildSHA, uptime, healthy, total, s.statusPageLink())
 }
 
 const statusPageHTML = `<!DOCTYPE html>
@@ -1793,6 +1794,7 @@ a:hover{text-decoration:underline}
 <p class="detail">Version: %s</p>
 <p class="detail">Uptime: %s</p>
 <p class="detail">Backends: %d / %d healthy</p>
+%s
 <p class="detail" style="margin-top:1.5rem"><a href="/health">JSON health endpoint</a></p>
 </div>
 </body>

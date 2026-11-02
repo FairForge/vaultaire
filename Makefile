@@ -59,6 +59,7 @@ test-db:
 test-edge: edge-wasm
 	cd edge/s3-ingest && node --test
 	cd edge/mcp && node --test
+	cd edge/status && node --test
 	EDGE_CODEC_NODE_SEALED=$(CURDIR)/edge/s3-ingest/test/out/node_sealed_chunk.sealed \
 		go test -count=1 -run 'TestEdgeCodec_ExportVectorForNode|TestEdgeCodec_NodeSealedChunkOpens' ./internal/crypto/
 

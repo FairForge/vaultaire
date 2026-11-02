@@ -1,0 +1,19 @@
+# The status page's pusher (WP-DOMAIN-1 part 3B): deploy/scripts/status-push.sh,
+# installed to /usr/local/lib/vaultaire-status/. Root, because the token file
+# (/opt/vaultaire/configs/status-push.env) is root 0600. Install: docs/DEPLOY.md
+# § Status page.
+[Unit]
+Description=Push the service's state to status.stored.cloud (status-push.sh)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/vaultaire-status/status-push.sh
+TimeoutStartSec=50
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/vaultaire-status

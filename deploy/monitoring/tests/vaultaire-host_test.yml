@@ -105,3 +105,46 @@ tests:
             exp_annotations:
               summary: "node_exporter's apt collector exports nothing"
               description: "apt_package_cache_timestamp_seconds or node_reboot_required is missing, so the other host rules cannot fire. systemctl status prometheus-node-exporter-apt.timer; cat /var/lib/prometheus/node-exporter/apt.prom."
+
+  # The pusher keeps up (its last success follows the clock): StatusPushStale stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_status_push_last_success_seconds{instance="localhost:9100",job="node"}'
+        values: '0+60x180'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StatusPushStale
+        exp_alerts: []
+
+  # The pushes stopped being stored at t=0 (the run still writes the file, the time stays):
+  # fires after 5 min past the 5 min threshold, i.e. by the next hourly evaluation.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_status_push_last_success_seconds{instance="localhost:9100",job="node"}'
+        values: '0x180'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StatusPushStale
+        exp_alerts:
+          - exp_labels:
+              instance: localhost:9100
+              job: node
+              severity: critical
+            exp_annotations:
+              summary: "status.stored.cloud has stored no push for 5 minutes: the public page shows its red banner"
+              description: "The status page claims nothing once its last report is 5 min old, so customers see 'No recent report'. journalctl -u vaultaire-status-push.service -n 20 (a 401 = the token in /opt/vaultaire/configs/status-push.env differs from the Worker's STATUS_PUSH_TOKEN secret; 503 = the secret is unset; 000 = no answer from Cloudflare); systemctl status vaultaire-status-push.timer; cat /var/lib/vaultaire-status/vaultaire_status_push.prom. docs/DEPLOY.md § Status page."
+
+  # Never installed, or the file gone: absent fires too.
+  - interval: 1m
+    input_series:
+      - series: 'up{instance="localhost:9100",job="node"}'
+        values: '1x180'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: StatusPushStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "status.stored.cloud has stored no push for 5 minutes: the public page shows its red banner"
+              description: "The status page claims nothing once its last report is 5 min old, so customers see 'No recent report'. journalctl -u vaultaire-status-push.service -n 20 (a 401 = the token in /opt/vaultaire/configs/status-push.env differs from the Worker's STATUS_PUSH_TOKEN secret; 503 = the secret is unset; 000 = no answer from Cloudflare); systemctl status vaultaire-status-push.timer; cat /var/lib/vaultaire-status/vaultaire_status_push.prom. docs/DEPLOY.md § Status page."
