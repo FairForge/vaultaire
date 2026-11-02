@@ -32,7 +32,7 @@
                     <p class="r-fine">No API fees. Downloads are free up to __EGRESS_STD__× your Standard space each month, __EGRESS_PAST__.</p>
                     <p class="r-save" id="r-save">the same 7 TB on AWS S3: $161.00/mo</p>
                     <div class="r-actions">
-                        {{if .SignupsOpen}}<a class="btn btn-primary" href="/register">Start free</a>{{else}}<a class="btn btn-primary" href="#waitlist">Join waitlist</a>{{end}}
+                        {{if .SignupsOpen}}<a class="btn btn-primary" href="{{.App}}/register">Start free</a>{{else}}<a class="btn btn-primary" href="#waitlist">Join waitlist</a>{{end}}
                     </div>
                 </div>
                 <p class="sr-only" aria-live="polite" id="b-live"></p>

@@ -38,21 +38,30 @@
         }, { threshold: 0.25 });
         Object.keys(reached).forEach(function (id) { var el = document.getElementById(id); if (el) io.observe(el); });
     })();
-    document.querySelectorAll('a[href^="/register"]').forEach(function (a) {
-        a.addEventListener('click', function () { ping('cta.register'); });
+    // A sign-up link by its path: the dashboard's origin (hosts.AppBase) may
+    // be another host than this page's.
+    function registerURL(a) {
+        try {
+            var u = new URL(a.getAttribute('href'), location.href);
+            return u.pathname === '/register' ? u : null;
+        } catch (e) { return null; }
+    }
+    document.querySelectorAll('a[href]').forEach(function (a) {
+        if (registerURL(a)) a.addEventListener('click', function () { ping('cta.register'); });
     });
 
     (function () {
         var a = attribution();
         if (!a.utm_source && !a.utm_medium && !a.utm_campaign && !a.referrer) return;
         document.querySelectorAll('a.btn').forEach(function (link) {
-            if (link.getAttribute('href') !== '/register') return;
+            var u = registerURL(link);
+            if (!u || u.search !== '') return;
             var p = new URLSearchParams();
             if (a.utm_source) p.set('utm_source', a.utm_source);
             if (a.utm_medium) p.set('utm_medium', a.utm_medium);
             if (a.utm_campaign) p.set('utm_campaign', a.utm_campaign);
             if (a.referrer) p.set('ref', a.referrer);
-            link.setAttribute('href', '/register?' + p.toString());
+            link.setAttribute('href', link.getAttribute('href') + '?' + p.toString());
         });
     })();
 

@@ -264,7 +264,13 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		// at CreateUserWithTenant.
 		pub.Get("/register", func(w http.ResponseWriter, r *http.Request) {
 			if deps.Auth != nil && !deps.Auth.SignupsEnabled() {
-				http.Redirect(w, r, "/#waitlist", http.StatusSeeOther)
+				// The landing's anchor. On an app host "/" is the dashboard,
+				// so it names the canonical origin there (part 3C-2).
+				target := "/#waitlist"
+				if h := deps.hostSet(); h.IsAppHost(r.Host) {
+					target = h.URL(target)
+				}
+				http.Redirect(w, r, target, http.StatusSeeOther)
 				return
 			}
 			renderAuthPage(baseTmpl, "register", deps)(w, r)

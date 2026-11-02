@@ -894,6 +894,8 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// A request carrying S3 credentials is the S3 API's, on every host,
 	// before any route matches (RP56-1).
 	s.router.Use(s.s3CredentialGate)
+	// A social sign-in starts where its callback lands (app_host.go).
+	s.router.Use(socialSignInHome(s.hosts))
 	s.router.Use(s.siteStatsMiddleware)
 
 	// Every background job is registered with the one scheduler (WP-R13-3);

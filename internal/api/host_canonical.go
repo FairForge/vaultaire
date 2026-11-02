@@ -67,8 +67,8 @@ func (s *Server) hostSet() hosts.Hosts {
 }
 
 // billingURL is where the S3 errors and the egress e-mail send a customer to
-// raise a quota: the canonical origin's billing page.
-func billingURL() string { return hosts.Get().URL("/dashboard/billing") }
+// raise a quota: the dashboard's billing page (hosts.AppBase, part 3C-2).
+func billingURL() string { return hosts.Get().AppBase() + "/dashboard/billing" }
 
 // noRedirectPrefixes are served on every name, alias or not.
 var noRedirectPrefixes = []string{"/.well-known/", "/webhook/", "/api/", "/cdn/", "/auth/"}

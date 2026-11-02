@@ -88,7 +88,7 @@ func TestLanding_NoDeadProduct(t *testing.T) {
 // B1 requires the footer to finally link the built-but-orphaned pages.
 func TestLanding_FooterLinks(t *testing.T) {
 	for _, link := range []string{
-		`href="/login"`, `href="/status"`, `href="/changelog"`, `href="/abuse"`,
+		`href="https://stored.cloud/login"`, `href="/status"`, `href="/changelog"`, `href="/abuse"`,
 		`href="/legal/terms"`, `href="/legal/privacy"`, `href="/legal/aup"`,
 		`href="/legal/cookies"`, `href="/legal/dpa"`, `href="/legal/gdpr"`,
 		`href="/legal/baa"`, `href="/legal/data-act"`,

@@ -81,10 +81,12 @@ function run() {
         // ---- the open variant: the plan rides into /register once edited
         var hd = document.getElementById('h').contentDocument;
         var cta = hd.querySelector('.r-actions a.btn-primary');
-        ok(cta.getAttribute('href') === '/register', 'untouched open variant links plain /register', cta.getAttribute('href'));
+        // the sign-up links name the dashboard's origin (hosts.AppBase): compare by path
+        var reg = function (h) { var u = new URL(h, 'http://x.invalid/'); return u.pathname + u.search; };
+        ok(reg(cta.getAttribute('href')) === '/register', 'untouched open variant links plain /register', cta.getAttribute('href'));
         hd.querySelector('[data-step="std"][data-by="1"]').click();
-        ok(cta.getAttribute('href') === '/register?std_tb=3&vault_tb=5', 'receipt button carries the TB into /register', cta.getAttribute('href'));
-        ok(hd.querySelector('a[href="/register"]') !== null, 'open variant links /register');
+        ok(reg(cta.getAttribute('href')) === '/register?std_tb=3&vault_tb=5', 'receipt button carries the TB into /register', cta.getAttribute('href'));
+        ok(Array.prototype.some.call(hd.querySelectorAll('a[href]'), function (a) { return reg(a.getAttribute('href')) === '/register'; }), 'open variant links /register');
 
         // ---- the picker's room is a scene too: a box can be picked up and put down
         ok(d.querySelector('#pick-scene .scene-shadows') !== null, 'the picker room casts shadows');
