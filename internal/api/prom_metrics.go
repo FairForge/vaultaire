@@ -189,6 +189,9 @@ func (s *Server) initMetrics() {
 		// from the parity alone, restores asked of tape; the standing
 		// gauges are read from the table.
 		reg.MustRegister(vaultParityScrubShards, vaultParityScrubRows, vaultParityRebuilds, vaultParityRestores)
+		// The parity read (WP-VAULT-3): the rebuild's phases, the last
+		// whole rebuild's rate, shard reads by leg and kind.
+		reg.MustRegister(vaultParityRebuildSeconds, vaultParityRebuildRate, vaultParityShardReads)
 		if s.vaultParity != nil {
 			reg.MustRegister(newVaultParityScrubCollector(s.vaultParity))
 		}

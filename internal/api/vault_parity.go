@@ -68,6 +68,10 @@ const (
 	// times is left for an operator (it stays 'partial' and in the admin
 	// result), not retried every two minutes forever.
 	vaultParityMaxAttempts = 20
+	// vaultParityReadAhead: stripes a shard without ranged reads is read
+	// ahead into (D-V3-2: m × 4 × 1 MiB = 16 MiB per rebuild, from the GET
+	// budget).
+	vaultParityReadAhead = 4
 )
 
 // vaultParityLegs is the default preference order of the parity legs: the
@@ -267,6 +271,10 @@ type VaultParity struct {
 	eng    *engine.CoreEngine
 	flags  flagChecker
 	logger *zap.Logger
+	// LargeGet shapes a parity read's shard reads (WP-VAULT-3 D-V3-1): the
+	// part size, the parts in flight, the hedge and the process-wide GET
+	// budget the large-GET paths share (LARGE_GET_*; the server's own).
+	LargeGet largeGetConfig
 	// SSE is this process's SSE-S3 service (nil: no master key): a sealed
 	// object's parity covers its STORED bytes, whose length it gives
 	// (storedBlobLength, WP-R8-5).
@@ -348,7 +356,8 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 		logger = zap.NewNop()
 	}
 	return &VaultParity{db: db, eng: ce, flags: fl, logger: logger,
-		JobName: "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
+		LargeGet: defaultLargeGetConfig(),
+		JobName:  "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
 		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
 		ProtectRate: protectRateFromEnv(os.Getenv, logger), ProtectOverhead: defaultProtectOverhead,
 		Legs:        parityLegsFromEnv(os.Getenv),
@@ -1382,46 +1391,6 @@ func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, blob, eta
 		return nil, fmt.Errorf("%w: window %d+%d outside %d bytes", errParityUnavailable, off, n, size)
 	}
 	l := parityLayout{k: r.k, m: r.m, stripe: r.stripe, size: r.size}
-	tctx := common.WithTenantID(ctx, tenantID)
-	container := parityContainer(tenantID)
-	block := int64(l.k * l.stripe)
-	firstStripe := off / block
-	lastStripe := (off + n + block - 1) / block
-	if n == 0 {
-		lastStripe = firstStripe
-	}
-	status := p.eng.GetFailoverStatus()
-	streams := make([]io.ReadCloser, l.m)
-	opened := 0
-	for j := 0; j < l.m; j++ {
-		legName := r.legs[j]
-		if legName == "" {
-			continue
-		}
-		drv, ok := p.eng.GetDriver(legName)
-		if !ok || status[legName] == engine.StateOpen.String() {
-			continue
-		}
-		shard := shardArtifact(r.prefix, j)
-		var rc io.ReadCloser
-		var oerr error
-		if rg, isRange := drv.(engine.RangeGetter); isRange && (firstStripe > 0 || lastStripe < l.stripes()) {
-			rc, oerr = rg.GetRange(tctx, container, shard, firstStripe*int64(l.stripe), (lastStripe-firstStripe)*int64(l.stripe))
-			if oerr == nil {
-				// The rebuilder skips to the first stripe itself; a ranged
-				// stream already starts there.
-				rc = &offsetAdjusted{ReadCloser: rc, pad: firstStripe * int64(l.stripe)}
-			}
-		} else {
-			rc, oerr = drv.Get(tctx, container, shard)
-		}
-		if oerr != nil {
-			p.logger.Warn("vault parity: shard unreadable", zap.Int("shard", j), zap.String("leg", legName), zap.Error(oerr))
-			continue
-		}
-		streams[j] = rc
-		opened++
-	}
 	objContainer := (&tenant.Tenant{ID: tenantID}).NamespaceContainer(bucket)
 	if blob == "" {
 		blob = key
@@ -1442,31 +1411,52 @@ func (p *VaultParity) Open(ctx context.Context, tenantID, bucket, key, blob, eta
 		}
 		return piece, nil
 	}
-	if opened == 0 {
-		return nil, fmt.Errorf("%w: no parity shard is readable", errParityUnavailable)
+	rb, err := p.newParityRead(ctx, *r, dataPiece, off, n, false)
+	if err != nil {
+		return nil, err // never a typed nil in the interface
 	}
-	return newParityRebuilder(ctx, l, streams, dataPiece, off, n), nil
+	return rb, nil
 }
 
-// offsetAdjusted makes a ranged shard stream look like a whole one to the
-// rebuilder's initial skip: the first `pad` bytes are served as zeros it
-// discards, then the real stream.
-type offsetAdjusted struct {
-	io.ReadCloser
-	pad int64
-}
-
-func (o *offsetAdjusted) Read(p []byte) (int, error) {
-	if o.pad > 0 {
-		n := int64(len(p))
-		if n > o.pad {
-			n = o.pad
-		}
-		for i := int64(0); i < n; i++ {
-			p[i] = 0
-		}
-		o.pad -= n
-		return int(n), nil
+// newParityRead is the one way a parity read starts (Open and the scrub's
+// rebuild, D-V3-3): the shards opened concurrently (openParityShards), the
+// rebuilder over them, and its first stripe decoded before it is returned
+// (D-V3-4). all = every shard must be readable (the scrub).
+func (p *VaultParity) newParityRead(ctx context.Context, r parityRow, dataPiece dataPieceFunc, off, n int64, all bool) (*parityRebuilder, error) {
+	l := parityLayout{k: r.k, m: r.m, stripe: r.stripe, size: r.size}
+	block := int64(l.k * l.stripe)
+	firstStripe := off / block
+	lastStripe := (off + n + block - 1) / block
+	if n == 0 {
+		lastStripe = firstStripe
 	}
-	return o.ReadCloser.Read(p)
+	set, err := p.openParityShards(ctx, r, l, firstStripe, lastStripe, all)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errParityUnavailable, err)
+	}
+	if set.readable() == 0 {
+		var first error
+		for _, src := range set.srcs {
+			if src != nil && src.err != nil {
+				first = src.err
+				p.logger.Warn("vault parity: shard unreadable", zap.Int("shard", src.index), zap.String("leg", src.leg), zap.Error(src.err))
+			}
+		}
+		set.settle(false)
+		set.close()
+		if first == nil {
+			return nil, fmt.Errorf("%w: no parity shard is readable (no leg registered with a closed breaker)", errParityUnavailable)
+		}
+		return nil, fmt.Errorf("%w: no parity shard is readable: %w", errParityUnavailable, first)
+	}
+	rb := newParityRebuilder(common.WithTenantID(ctx, r.tenantID), l, set.srcs, dataPiece, off, n)
+	rb.set, rb.start = set, set.start
+	if err := rb.prime(); err != nil {
+		_ = rb.Close()
+		if !errors.Is(err, errParityUnavailable) {
+			err = fmt.Errorf("%w: first stripe: %w", errParityUnavailable, err)
+		}
+		return nil, err
+	}
+	return rb, nil
 }

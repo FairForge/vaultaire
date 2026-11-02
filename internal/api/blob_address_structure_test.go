@@ -50,8 +50,10 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 		"edge_rs.go": {
 			"one.GetOn(tctx, leg, container, key)": "an RS shard read at <row's storage_key>.s<i> on its recorded leg (blob_copies, WP-EDGE-4 PR B)",
 		},
-		"vault_parity_scrub.go": {
-			"drv.Get(ctx, container, artifact)": "a parity shard read by the scrub at parityContainer + shardArtifact on its recorded leg, never a customer object's address (WP-VAULT-2)",
+		"vault_parity_read.go": {
+			"drv.Get(ctx, container, artifact)":                                        "a parity shard read at parityContainer + shardArtifact on its recorded leg, never a customer object's address (the scrub's digest read, WP-VAULT-2, and a whole-stream rebuild, WP-VAULT-3)",
+			"rg.GetRange(ctx, container, artifact, first*stripe, (last-first)*stripe)": "a window of a parity shard (shardArtifact) on its recorded leg (WP-VAULT-3 D-V3-2)",
+			"rg.GetRangeInfo(fctx, container, artifact, off, want)":                    "a range of a parity shard (shardArtifact) on its recorded leg (WP-VAULT-3 D-V3-1)",
 		},
 		"backend_canary.go": {
 			"drv.Exists(cctx, probeCanaryContainer, key)":                                                                 "the probe canary, not a customer object",

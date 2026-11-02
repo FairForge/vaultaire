@@ -34,11 +34,11 @@ func BenchmarkParityRebuild(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		streams := make([]io.ReadCloser, l.m)
-		for j := range streams {
-			streams[j] = io.NopCloser(bytes.NewReader(shards[j].Bytes()))
+		raw := make([][]byte, l.m)
+		for j := range raw {
+			raw[j] = shards[j].Bytes()
 		}
-		rb := newParityRebuilder(context.Background(), l, streams, none, 0, size)
+		rb := newParityRebuilder(context.Background(), l, paritySources(l, raw, 0), none, 0, size)
 		n, err := io.Copy(io.Discard, rb)
 		if err != nil || n != size {
 			b.Fatalf("rebuilt %d of %d bytes: %v", n, size, err)

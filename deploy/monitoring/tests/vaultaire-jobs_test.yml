@@ -72,3 +72,47 @@ tests:
       - eval_time: 4h1m
         alertname: AccountDeletionRealmRefusing
         exp_alerts: []
+
+  # WP-VAULT-3 D-V3-8: rebuilds slower than 20 MB/s, three or more an hour,
+  # for an hour: VaultParityRebuildSlow. One rebuild every 10 min at 5 MB/s.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_vault_parity_rebuild_bytes_per_second'
+        values: '5e6x240'
+      - series: 'vaultaire_vault_parity_rebuild_seconds_count{phase="stream"}'
+        values: '0+0.1x240'
+    alert_rule_test:
+      # three rebuilds are in the window from ~30 min; then the hour of `for:`
+      - eval_time: 1h20m
+        alertname: VaultParityRebuildSlow
+        exp_alerts: []
+      - eval_time: 1h45m
+        alertname: VaultParityRebuildSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Parity rebuilds run at 5MB/s"
+              description: "The last whole rebuild from the Vault parity copy ran under 20 MB/s, with at least three rebuilds in the hour, for an hour: a customer GET served from the parity (x-vaultaire-served-from: parity) is that slow. vaultaire_vault_parity_rebuild_seconds{phase} splits it (open, first_stripe, stream); vaultaire_vault_parity_shard_reads_total{leg,kind} says whether the shards were read by ranges. Check the leg's backend; bench with cmd/tools/parity-read-bench -fresh -cold-conns (bench-results/VAULT-PARITY-SERVE-2026-11.md)."
+
+  # Slow but rare (one rebuild in the hour), and fast and busy: silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_vault_parity_rebuild_bytes_per_second'
+        values: '5e6x240'
+      - series: 'vaultaire_vault_parity_rebuild_seconds_count{phase="stream"}'
+        values: '0+0.01x240'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: VaultParityRebuildSlow
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_vault_parity_rebuild_bytes_per_second'
+        values: '150e6x240'
+      - series: 'vaultaire_vault_parity_rebuild_seconds_count{phase="stream"}'
+        values: '0+1x240'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: VaultParityRebuildSlow
+        exp_alerts: []

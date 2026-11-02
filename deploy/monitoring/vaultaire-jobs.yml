@@ -147,6 +147,20 @@ groups:
         annotations:
           summary: "A Vault object did not rebuild from its parity alone"
           description: "The scrub rebuilt an object from its four parity shards and the bytes did not hash to what protect read from tape: that parity was never a copy. The row is re-protected. If it recurs, the encoder or the leg is at fault — stop trusting the second copy until it is understood. The log line 'vault parity scrub: the parity does not rebuild the object' names the object."
+      # The parity read (WP-VAULT-3): a GET served from the parity copy and the
+      # scrub's rebuild check read the shards in parallel ranges since PR A —
+      # ~100 MB/s from Lyve on cold connections, where the lockstep reader of
+      # 2026-11-02 ran at 4.7 MB/s. The gauge is the last whole rebuild of at
+      # least 16 MiB; a few slow ones in an hour is the leg (or a regression),
+      # not one unlucky read.
+      - alert: VaultParityRebuildSlow
+        expr: vaultaire_vault_parity_rebuild_bytes_per_second < 20e6 and ignoring(phase) increase(vaultaire_vault_parity_rebuild_seconds_count{phase="stream"}[1h]) >= 3
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Parity rebuilds run at {{ $value | humanize }}B/s"
+          description: "The last whole rebuild from the Vault parity copy ran under 20 MB/s, with at least three rebuilds in the hour, for an hour: a customer GET served from the parity (x-vaultaire-served-from: parity) is that slow. vaultaire_vault_parity_rebuild_seconds{phase} splits it (open, first_stripe, stream); vaultaire_vault_parity_shard_reads_total{leg,kind} says whether the shards were read by ranges. Check the leg's backend; bench with cmd/tools/parity-read-bench -fresh -cold-conns (bench-results/VAULT-PARITY-SERVE-2026-11.md)."
       - alert: VaultParityScrubStale
         expr: vaultaire_vault_parity_complete_rows > 0 and (time() - vaultaire_vault_parity_scrub_last_timestamp_seconds) > 24 * 3600
         for: 1h
