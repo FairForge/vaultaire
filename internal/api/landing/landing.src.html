@@ -33,7 +33,7 @@ __SPRITES__
         <nav aria-label="Main">
             <ul class="topnav">
                 <li class="hide-sm"><a href="/pricing">Pricing</a></li>
-                <li class="hide-sm"><a href="/docs">Docs</a></li>
+                <li class="hide-sm"><a href="{{.Docs}}">Docs</a></li>
                 <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
                 <li><a href="/login">Sign in</a></li>
                 {{if .SignupsOpen}}
@@ -152,7 +152,7 @@ __BUILDER__
         <div class="uc-panel active" data-panel="rclone">
             <div>
                 <h3>Copy, sync, mount</h3>
-                <p class="uc-desc">Sync a folder, mount a bucket as a drive, or move everything over from another provider in one command. Walkthrough in the <a href="/docs/rclone">rclone guide</a>.</p>
+                <p class="uc-desc">Sync a folder, mount a bucket as a drive, or move everything over from another provider in one command. Walkthrough in the <a href="{{.Docs}}/rclone">rclone guide</a>.</p>
             </div>
             <div class="snippet">
                 <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-rclone-snip">copy</button></div>
@@ -169,7 +169,7 @@ rclone sync b2:old-bucket stored:photos    # leave your old provider</pre>
         <div class="uc-panel" data-panel="restic">
             <div>
                 <h3>Encrypted backups</h3>
-                <p class="uc-desc">Encrypted on your machine before upload, deduplicated, incremental. Your password never leaves your computer, so we store bytes we cannot read.</p>
+                <p class="uc-desc">Encrypted on your machine before upload, deduplicated, incremental. Your password never leaves your computer, so we store bytes we cannot read. What restic, Kopia and rclone crypt each hide: the <a href="{{.Docs}}/encryption">client-side encryption guide</a>.</p>
             </div>
             <div class="snippet">
                 <div class="snippet-head"><span>shell</span><button class="copy-btn" data-copy="res-restic-snip">copy</button></div>
@@ -230,7 +230,7 @@ s3.upload_file("report.pdf", "my-bucket", "2026/report.pdf")</pre>
             </div>
         </div>
 
-        <p class="includes">Also built in: version history, Object Lock (WORM), presigned links, scoped keys, webhooks and public buckets. <a href="/docs">Read the docs</a>.</p>
+        <p class="includes">Also built in: version history, Object Lock (WORM), presigned links, scoped keys, webhooks and public buckets. <a href="{{.Docs}}">Read the docs</a>.</p>
     </div>
 </section>
 
@@ -264,7 +264,7 @@ s3.upload_file("report.pdf", "my-bucket", "2026/report.pdf")</pre>
         <div class="section-head">
             <p class="kicker"><b>05</b>Straight answers</p>
             <h2>Questions, answered plainly.</h2>
-            <p class="lede">More in the <a href="/docs/faq">full FAQ</a>.</p>
+            <p class="lede">More in the <a href="{{.Docs}}/faq">full FAQ</a>.</p>
         </div>
         <div class="answers">
             <div class="answer">
@@ -325,7 +325,7 @@ s3.upload_file("report.pdf", "my-bucket", "2026/report.pdf")</pre>
                 <h3>Product</h3>
                 <ul class="footer-links">
                     <li><a href="/pricing">Pricing</a></li>
-                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="{{.Docs}}">Docs</a></li>
                     <li><a href="/changelog">Changelog</a></li>
                     <li><a href="/status">Status</a></li>
                     <li><a href="https://github.com/FairForge/vaultaire">GitHub</a></li>

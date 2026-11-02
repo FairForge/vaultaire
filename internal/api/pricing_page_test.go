@@ -137,5 +137,5 @@ func TestLanding_LinksThePricingPage(t *testing.T) {
 	assert.Contains(t, landingTemplateSrc, `href="/pricing"`)
 	faq, err := os.ReadFile("docs_faq.md")
 	require.NoError(t, err)
-	assert.Contains(t, string(faq), "(/pricing)")
+	assert.Contains(t, string(faq), "(__HOST_WEB__/pricing)")
 }

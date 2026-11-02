@@ -23,9 +23,14 @@ func TestDocsHub_LinksGuidesAndReference(t *testing.T) {
 	w := docsGet(t, "")
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+	// Absolute through hosts.DocsBase (WP-DOMAIN-1 part 3A): the same bytes
+	// serve the canonical /docs and the docs host; dark, they name the
+	// canonical origin's /docs.
 	for _, link := range []string{
-		`href="/docs/getting-started"`, `href="/docs/rclone"`,
-		`href="/docs/faq"`, `href="/docs/api"`, "support@stored.cloud",
+		`href="https://stored.cloud/docs/getting-started"`, `href="https://stored.cloud/docs/rclone"`,
+		`href="https://stored.cloud/docs/encryption"`,
+		`href="https://stored.cloud/docs/faq"`, `href="https://stored.cloud/docs/api"`, "support@stored.cloud",
+		`class="brand" href="https://stored.cloud/"`, `class="crumb" href="https://stored.cloud/docs"`,
 	} {
 		assert.Contains(t, w.Body.String(), link)
 	}

@@ -63,7 +63,9 @@ rclone config create secret crypt remote=stored:backups \
   password=YOUR_PASSWORD
 ```
 
-Now use `secret:` instead of `stored:backups`. Note: client-side encryption
+Now use `secret:` instead of `stored:backups`. What crypt hides and what it
+leaves visible (sizes, modification times, the folder tree) is in the
+[client-side encryption guide](__HOST_DOCS_BASE__/encryption). Note: client-side encryption
 disables our server-side deduplication for that data (we can't dedupe bytes we
 can't read) — everything else works normally.
 
@@ -76,4 +78,4 @@ can't read) — everything else works normally.
   the allowance it only takes longer. No lock-in by design.
 - While you are rate-limited, keep `--transfers` (times `--multi-thread-streams`) at 16
   or fewer: parallel downloads beyond that are answered `503 SlowDown` and retried.
-- Questions? [FAQ](/docs/faq) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)
+- Questions? [FAQ](__HOST_DOCS_BASE__/faq) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)

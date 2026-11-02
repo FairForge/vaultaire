@@ -62,14 +62,14 @@ s3 = boto3.client(
 s3.upload_file("hello.txt", "my-first-bucket", "hello.txt")
 ```
 
-**Backup tools:** see the one-page [rclone guide](/docs/rclone). restic works
+**Backup tools:** see the one-page [rclone guide](__HOST_DOCS_BASE__/rclone). restic works
 out of the box: `restic -r s3:__HOST_S3__/my-bucket init`.
 
 ## 5. What happens to your data
 
 - **Encrypted in transit** (TLS 1.2+). Want encryption at rest under your own keys?
   Use SSE-C (`--sse-c AES256 --sse-c-key …`) or client-side encryption (restic,
-  `rclone crypt`). Server-managed encryption at rest (SSE-S3) is built and will be
+  Kopia, `rclone crypt` — the [client-side encryption guide](__HOST_DOCS_BASE__/encryption)). Server-managed encryption at rest (SSE-S3) is built and will be
   switched on for every bucket once it is enabled in production — it is not on today.
 - **Placed for you**: Standard objects land on fast enterprise S3; `GLACIER` /
   `DEEP_ARCHIVE` (or a Vault bucket) go to tape. The Smart schedule — about 15 % of
@@ -83,6 +83,6 @@ out of the box: `restic -r s3:__HOST_S3__/my-bucket init`.
 
 ## Next steps
 
-- [rclone setup](/docs/rclone) — sync, mount, and migrate
-- [FAQ](/docs/faq) — pricing, trust, and technical details
-- [Pricing](/#pricing) · [Status](/status) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)
+- [rclone setup](__HOST_DOCS_BASE__/rclone) — sync, mount, and migrate
+- [FAQ](__HOST_DOCS_BASE__/faq) — pricing, trust, and technical details
+- [Pricing](__HOST_WEB__/#pricing) · [Status](__HOST_WEB__/status) · [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__)

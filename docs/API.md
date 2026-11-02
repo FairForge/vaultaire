@@ -736,7 +736,9 @@ _, err := client.PutObject(ctx, &s3.PutObjectInput{
 ```
 
 **rclone** (`~/.config/rclone/rclone.conf`; the full guide is
-`https://stored.cloud/docs/rclone`, source `docs/guides/rclone-setup.md`)
+`https://stored.cloud/docs/rclone`, source `docs/guides/rclone-setup.md`; rclone crypt —
+what it hides and what it leaves visible — and restic and Kopia are
+`https://stored.cloud/docs/encryption`, source `docs/guides/client-side-encryption.md`)
 
 ```ini
 [storedge]
@@ -860,7 +862,7 @@ The second copy satisfies the bucket:
 GET /health          JSON service health with per-backend probe state
 GET /health/live     process liveness        GET /health/ready   readiness
 GET /status          HTML status page        GET /version        build version
-GET /docs            guides hub (getting started, rclone, FAQ)
+GET /docs            guides hub (getting started, rclone, client-side encryption, FAQ)
 GET /docs/api        Swagger UI              GET /openapi.json   OpenAPI 3.0
 GET /changelog       dated changes           GET /llms.txt       the plain-text summary of this file
 GET /.well-known/security.txt

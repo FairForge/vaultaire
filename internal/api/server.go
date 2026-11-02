@@ -900,7 +900,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 
 	// Trust host router (RP42-2): on a public canonical origin the trust
 	// hosts (internal/hosts.IsTrustHost) serve the transparency log only
-	// (trust_host.go); then the CDN hosts; everything else → normal router.
+	// (trust_host.go); then the docs hosts (their closed list, docs_host.go,
+	// WP-DOMAIN-1 part 3A); then the CDN hosts; everything else → normal
+	// router.
 	// CDN host-based router: the CDN hosts (internal/hosts.IsCDNHost —
 	// CDN_PUBLIC_HOST, cdn.<canonical>, cdn.<alias>, cdn.stored.ge forever)
 	// → CDN handler, everything else → normal router.
@@ -924,9 +926,12 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// which is where that attack lives, and leaves body streaming untimed.
 	// IdleTimeout reaps idle keep-alive connections. Per-operation deadlines
 	// belong in the handlers via context, not on the whole server.
+	hostRouted := TrustHostRouter(s.hosts, s.newTrustRouter(),
+		DocsHostRouter(s.hosts, s.newDocsRouter(),
+			CDNHostRouter(s.hosts, cdnRouter, s.router)))
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:           TrustHostRouter(s.hosts, s.newTrustRouter(), CDNHostRouter(s.hosts, cdnRouter, s.router)),
+		Handler:           hostRouted,
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MB
@@ -1040,6 +1045,7 @@ func (s *Server) runBackendHealthLoop(ctx context.Context, b backendCheck) {
 var docsPages = map[string]string{
 	"": "/docs", "getting-started": "/docs/getting-started",
 	"rclone": "/docs/rclone", "faq": "/docs/faq",
+	"encryption": "/docs/encryption",
 }
 
 func (s *Server) setupRoutes() {

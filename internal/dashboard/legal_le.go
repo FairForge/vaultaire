@@ -168,3 +168,12 @@ func (l *LegalLE) data() map[string]any {
 		"Caveat":      f.Caveat,
 	}
 }
+
+// LayoutAssetsHandler serves LegalLEAssets — the files the legal layout, and
+// so the pixel 404 page (WebNotFound), loads — from the embedded static tree,
+// unconditionally. The docs host mounts it (WP-DOMAIN-1 part 3A): its 404 is
+// that page, and a host with no /static/ would render it unstyled.
+func LayoutAssetsHandler() http.Handler {
+	staticFS, _ := fs.Sub(Static, "static")
+	return http.StripPrefix("/static/", staticHandler(http.FS(staticFS)))
+}

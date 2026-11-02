@@ -40,7 +40,7 @@ __SPRITES__
         <nav aria-label="Main">
             <ul class="topnav">
                 <li class="hide-sm"><a href="/pricing" aria-current="page">Pricing</a></li>
-                <li class="hide-sm"><a href="/docs">Docs</a></li>
+                <li class="hide-sm"><a href="{{.Docs}}">Docs</a></li>
                 <li><button class="theme-toggle" type="button" aria-label="Switch to dark mode"><svg class="i-moon" viewBox="0 0 8 8" aria-hidden="true"><path fill="currentColor" d="M3 0h3v1h-3zM1 1h3v1h-3zM1 2h2v1h-2zM0 3h2v1h-2zM0 4h2v1h-2zM1 5h2v1h-2zM1 6h3v1h-3zM3 7h3v1h-3z"/></svg><svg class="i-sun" viewBox="0 0 9 9" aria-hidden="true"><path fill="currentColor" d="M4 0h1v1h-1zM1 1h1v1h-1zM7 1h1v1h-1zM3 2h3v1h-3zM2 3h5v1h-5zM0 4h1v1h-1zM2 4h5v1h-5zM8 4h1v1h-1zM2 5h5v1h-5zM3 6h3v1h-3zM1 7h1v1h-1zM7 7h1v1h-1zM4 8h1v1h-1z"/></svg></button></li>
                 <li><a href="/login">Sign in</a></li>
                 {{if .SignupsOpen}}
@@ -161,7 +161,7 @@ __SPRITES__
             </div>
             <div>
                 <h3>Uploads through the edge</h3>
-                <p>A single upload request is limited to 100 MB: that is Cloudflare's request limit, and a larger one is answered with an HTML 413 before it reaches us. Every S3 tool sends a large file as a multipart upload; keep the part size under 95 MB (64 MB is a good choice). <a href="/docs/faq">The FAQ</a> has the settings.</p>
+                <p>A single upload request is limited to 100 MB: that is Cloudflare's request limit, and a larger one is answered with an HTML 413 before it reaches us. Every S3 tool sends a large file as a multipart upload; keep the part size under 95 MB (64 MB is a good choice). <a href="{{.Docs}}/faq">The FAQ</a> has the settings.</p>
             </div>
         </div>
     </div>
@@ -236,7 +236,7 @@ __SPRITES__
                 <h3>Product</h3>
                 <ul class="footer-links">
                     <li><a href="/pricing">Pricing</a></li>
-                    <li><a href="/docs">Docs</a></li>
+                    <li><a href="{{.Docs}}">Docs</a></li>
                     <li><a href="/changelog">Changelog</a></li>
                     <li><a href="/status">Status</a></li>
                     <li><a href="https://github.com/FairForge/vaultaire">GitHub</a></li>
