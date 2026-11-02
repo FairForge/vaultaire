@@ -27,6 +27,7 @@ var pricingTemplateSrc string
 type pricingData struct {
 	SignupsOpen     bool
 	Web, Support    string
+	Docs            string // the docs hub (hosts.DocsBase)
 	FreeGB          int64
 	FreeEgressGB    string
 	FreeRatio       string
@@ -40,7 +41,7 @@ func mustRenderPricing(signupsOpen bool, h hosts.Hosts) []byte {
 	ratio := p.Egress.StandardFreeRatio
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, pricingData{
-		SignupsOpen: signupsOpen, Web: h.Canonical, Support: h.SupportEmail(),
+		SignupsOpen: signupsOpen, Web: h.Canonical, Support: h.SupportEmail(), Docs: h.DocsBase(),
 		FreeGB: freeGB, FreeEgressGB: trimRatio(float64(freeGB) * ratio), FreeRatio: trimRatio(ratio),
 		EgressPastShort: p.Egress.PastAllowanceShort,
 	}); err != nil {

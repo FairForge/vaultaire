@@ -29,6 +29,7 @@ type landingData struct {
 	CDN         string // public-object URL prefix
 	Domain      string // canonical domain (the house image caption)
 	Support     string // support address
+	Docs        string // the docs hub (hosts.DocsBase); a guide is {{.Docs}}/<slug>
 }
 
 func mustRenderLanding(signupsOpen bool, h hosts.Hosts) []byte {
@@ -40,7 +41,7 @@ func mustRenderLanding(signupsOpen bool, h hosts.Hosts) []byte {
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, landingData{
 		SignupsOpen: signupsOpen, Web: h.Canonical, S3: h.S3, S3Host: s3Host,
-		CDN: h.CDNBase(), Domain: h.Domain(), Support: h.SupportEmail(),
+		CDN: h.CDNBase(), Domain: h.Domain(), Support: h.SupportEmail(), Docs: h.DocsBase(),
 	}); err != nil {
 		panic("render landing page: " + err.Error())
 	}

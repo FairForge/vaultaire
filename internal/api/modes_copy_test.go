@@ -58,7 +58,7 @@ func modeCopySources(t *testing.T) map[string]string {
 	}))
 	for _, p := range []string{
 		"landing/landing.src.html", "landing/builder.html", "landing/builder.js", "landing/page.js",
-		"docs_getting_started.md", "docs_rclone.md", "docs_faq.md", "llms_txt.go", "../docs/openapi.go", "../docs/openapi_modes.go",
+		"docs_getting_started.md", "docs_rclone.md", "docs_faq.md", "docs_encryption.md", "llms_txt.go", "../docs/openapi.go", "../docs/openapi_modes.go",
 	} {
 		b, err := os.ReadFile(filepath.FromSlash(p))
 		require.NoError(t, err)

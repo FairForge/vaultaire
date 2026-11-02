@@ -108,7 +108,7 @@ GET /status          HTML status page    GET /version       build version
 
 ## Docs
 GET /pricing         every price and period, what is never charged, a calculator
-GET /docs            guides hub (getting started, rclone, FAQ)
+GET /docs            guides hub (getting started, rclone, client-side encryption, FAQ)
 GET /docs/api        interactive API reference (Swagger UI)
 GET /openapi.json    OpenAPI 3.0 specification (the authoritative route list)
 GET /changelog       what changed, dated

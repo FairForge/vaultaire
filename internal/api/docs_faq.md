@@ -9,7 +9,7 @@ Anything that speaks S3 works: aws-cli, rclone, restic, boto3, JuiceFS, Cyberduc
 
 **What's the endpoint and region?**
 Endpoint `__HOST_S3__`, region `us-east-1`, path-style addressing. See
-[Getting Started](/docs/getting-started).
+[Getting Started](__HOST_DOCS_BASE__/getting-started).
 
 **Is there a free tier?**
 Yes — 5 GB free, no credit card. Enough to test every feature end to end.
@@ -28,7 +28,7 @@ the secret is shown once; copy it then.
 | Performance | $6.99/TB/mo — launches after Oct 31, not for sale on day one | Always-hot, ~24 ms reads |
 | Vault (archive) | **$2.00/TB/mo** (annual, prepaid) / $2.55 (monthly) | Tape-backed archive, any size |
 
-Every price, period and add-on, the calculator and a dated comparison: [the pricing page](/pricing).
+Every price, period and add-on, the calculator and a dated comparison: [the pricing page](__HOST_WEB__/pricing).
 
 **Every tier is sold as a quota.** You pick a size in whole TB (any size), pay the
 flat per-TB rate, and resize up or down whenever you like (prorated). The quota is a
@@ -87,7 +87,7 @@ No renewal-price roulette. The rate you sign up at is the rate you pay.
 
 **Do you have an SLA?**
 Not a contractual one yet — we won't sell one we can't back. Target is 99.5%+, there's
-a public [status page](/status), and incident reports are written by a human.
+a public [status page](__HOST_WEB__/status), and incident reports are written by a human.
 Contractual SLA credits ship when the second site comes online.
 
 **Isn't a single server a single point of failure?**
@@ -120,8 +120,9 @@ passthrough for video seeking and partial restores.
 **How does encryption work?**
 Everything is encrypted in transit (TLS 1.2+, HSTS). At rest you have two options
 today: SSE-C (you send the key with each request; we encrypt with it and keep
-nothing) or client-side encryption (rclone crypt, restic — we store ciphertext and
-can't read a byte). Server-managed encryption at rest (SSE-S3, AES-256-GCM) is built
+nothing) or client-side encryption (rclone crypt, restic, Kopia — we store ciphertext and
+can't read a byte; the [client-side encryption guide](__HOST_DOCS_BASE__/encryption)
+says what each tool hides and what we still see). Server-managed encryption at rest (SSE-S3, AES-256-GCM) is built
 and tested but **not yet enabled in production**; when it is, it will be on by default
 for every bucket and this answer will say so. Client-side encryption disables dedup on
 that data — everything else still works.
@@ -155,4 +156,4 @@ The full list is the [OpenAPI spec](/openapi.json).
 
 **How do I get help?**
 Email [__SUPPORT_EMAIL__](mailto:__SUPPORT_EMAIL__) — founder-direct, target
-response under 4 hours. For abuse reports, see [/abuse](/abuse).
+response under 4 hours. For abuse reports, see [/abuse](__HOST_WEB__/abuse).

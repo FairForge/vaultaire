@@ -1,8 +1,8 @@
 // Package hosts is the ONE source of every host name the product prints or
 // matches (WP-DOMAIN-1, decision F-17): the canonical web origin, the S3
 // endpoint, the public-content origin, the trust origin (the transparency
-// log's read side), the OAuth/e-mail base and the web aliases that 301 to the
-// canonical origin. Nothing else in the repository
+// log's read side), the docs origin, the OAuth/e-mail base and the web aliases
+// that 301 to the canonical origin. Nothing else in the repository
 // types a domain into code or copy; it asks this package. It is a leaf
 // package (zap only) because internal/api, internal/dashboard, internal/docs,
 // internal/email and internal/sitestats all read it.
@@ -47,6 +47,7 @@ type Hosts struct {
 	S3        string   // S3 endpoint (VAULTAIRE_ENDPOINT)
 	CDN       string   // public-content origin (CDN_PUBLIC_HOST)
 	Trust     string   // the trust origin: the transparency log's read side (TRUST_PUBLIC_HOST)
+	Docs      string   // the docs origin: the guides and the API reference (DOCS_PUBLIC_HOST)
 	BaseURL   string   // OAuth callbacks and e-mail links (VAULTAIRE_BASE_URL)
 	Aliases   []string // web names that 301 to Canonical (VAULTAIRE_ALIAS_HOSTS)
 }
@@ -54,16 +55,18 @@ type Hosts struct {
 // Defaults is the local development set: every origin http://localhost:port.
 func Defaults(port int) Hosts {
 	local := fmt.Sprintf("http://localhost:%d", port)
-	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, BaseURL: local}
+	return Hosts{Canonical: local, S3: local, CDN: local, Trust: local, Docs: local, BaseURL: local}
 }
 
-// FromEnv reads the six variables. A malformed value is logged at Warn and
+// FromEnv reads the seven variables. A malformed value is logged at Warn and
 // the default kept (the repository's env convention); a malformed alias is
 // dropped on its own. Fallbacks, chosen so a deploy before the .env edit
 // behaves exactly as before: Canonical ← VAULTAIRE_BASE_URL ← localhost;
 // S3 and BaseURL ← Canonical; CDN ← https://cdn.<canonical host> when the
 // canonical host is a public name, else Canonical (served under /cdn/);
-// Trust ← https://trust.<canonical host> the same way (K4b), else Canonical.
+// Trust ← https://trust.<canonical host> the same way (K4b), else Canonical;
+// Docs ← https://docs.<canonical host> the same way (WP-DOMAIN-1 part 3A),
+// else Canonical (served under /docs).
 func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -82,7 +85,7 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		return o
 	}
 	public, base, endpoint, cdn := origin("VAULTAIRE_PUBLIC_HOST"), origin("VAULTAIRE_BASE_URL"), origin("VAULTAIRE_ENDPOINT"), origin("CDN_PUBLIC_HOST")
-	trust := origin("TRUST_PUBLIC_HOST")
+	trust, docs := origin("TRUST_PUBLIC_HOST"), origin("DOCS_PUBLIC_HOST")
 
 	switch {
 	case public != "":
@@ -108,6 +111,12 @@ func FromEnv(getenv func(string) string, port int, logger *zap.Logger) Hosts {
 		h.Trust = trust
 	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
 		h.Trust = schemeOf(h.Canonical) + "://trust." + ch
+	}
+	h.Docs = h.Canonical
+	if docs != "" {
+		h.Docs = docs
+	} else if ch := hostOf(h.Canonical); isPublicName(ch) {
+		h.Docs = schemeOf(h.Canonical) + "://docs." + ch
 	}
 
 	for _, a := range strings.Split(getenv("VAULTAIRE_ALIAS_HOSTS"), ",") {
@@ -159,6 +168,14 @@ func hostOf(origin string) string {
 		return strings.ToLower(u.Hostname())
 	}
 	return ""
+}
+
+// hostPort is an origin's host[:port], as a client that takes no scheme wants it.
+func hostPort(origin string) string {
+	if u, err := url.Parse(origin); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return origin
 }
 
 func schemeOf(origin string) string {
@@ -273,15 +290,50 @@ func (h Hosts) IsTrustHost(host string) bool {
 	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
 }
 
+// DocsHost is the docs origin's host name.
+func (h Hosts) DocsHost() string { return hostOf(h.Docs) }
+
+// DocsPublic reports whether the docs hosts have a router of their own: the
+// canonical origin is a public name (TrustPublic's rule). On a development
+// origin the guides answer under /docs on that one origin, as before.
+func (h Hosts) DocsPublic() bool { return isPublicName(hostOf(h.Canonical)) }
+
+// IsDocsHost reports whether host is a docs host: the DOCS_PUBLIC_HOST host,
+// docs.<canonical host>, docs.<an alias>, and docs.<brand or legacy domain>
+// (docs.stored.cloud and docs.stored.ge route whatever the env) — IsTrustHost's
+// rule.
+func (h Hosts) IsDocsHost(host string) bool {
+	host = normHost(host)
+	if host == "" {
+		return false
+	}
+	if d := h.DocsHost(); d != "" && d != hostOf(h.Canonical) && d != hostOf(h.S3) && host == d {
+		return true
+	}
+	rest, ok := strings.CutPrefix(host, "docs.")
+	if !ok {
+		return false
+	}
+	return rest == hostOf(h.Canonical) || h.IsAlias(rest) || rest == BrandDomain || isLegacy(rest)
+}
+
+// DocsBase is the prefix every printed docs link is built on, CDNBase's
+// role: DocsBase() is the hub, DocsBase() + "/rclone" a guide. While the docs
+// host is dark (WP-DOMAIN-1 part 3A: no link, hint or e-mail names a new
+// host before the owner's proof) it is the canonical origin's /docs, which
+// answers for ever; the part after the proof returns h.Docs here when the
+// docs host is a host of its own — one line, every link follows.
+func (h Hosts) DocsBase() string { return h.Canonical + "/docs" }
+
 // IsWebHost reports whether host is a web name — where a browser's page view
 // is answered as a website (the HTML 404 of internal/api/web_host.go, Stage 1a
 // Prompt 39): the canonical host, an alias, the brand and legacy domains and
 // www.<each>, whatever the environment says (prod's canonical origin is
 // stored.ge today and stored.cloud answers too). Never an S3, CDN or trust
-// host.
+// host, nor a docs host.
 func (h Hosts) IsWebHost(host string) bool {
 	host = normHost(host)
-	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) {
+	if host == "" || h.IsS3Host(host) || h.IsCDNHost(host) || h.IsTrustHost(host) || h.IsDocsHost(host) {
 		return false
 	}
 	if host == hostOf(h.Canonical) || h.IsAlias(host) {
@@ -350,7 +402,7 @@ func (h Hosts) IsOwn(host string) bool {
 	}
 	own := append([]string{"localhost", BrandDomain}, LegacyDomains...)
 	own = append(own, h.Aliases...)
-	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.BaseURL} {
+	for _, o := range []string{h.Canonical, h.S3, h.CDN, h.Trust, h.Docs, h.BaseURL} {
 		if hh := hostOf(o); hh != "" {
 			own = append(own, hh)
 		}
@@ -367,18 +419,22 @@ func (h Hosts) IsOwn(host string) bool {
 // bodies) carries instead of a typed host, in the landing.EgressTokens style.
 func (h Hosts) Tokens() map[string]string {
 	return map[string]string{
-		"__HOST_WEB__":      h.Canonical,
-		"__HOST_S3__":       h.S3,
+		"__HOST_WEB__": h.Canonical,
+		"__HOST_S3__":  h.S3,
+		// The S3 endpoint's bare host (Kopia's --endpoint takes no scheme).
+		"__HOST_S3_HOST__":  hostPort(h.S3),
 		"__HOST_CDN_BASE__": h.CDNBase(),
-		"__HOST_DOMAIN__":   h.Domain(),
-		"__SUPPORT_EMAIL__": h.SupportEmail(),
-		"__ABUSE_EMAIL__":   h.AbuseEmail(),
+		// The docs hub; a guide is __HOST_DOCS_BASE__/<slug> (DocsBase).
+		"__HOST_DOCS_BASE__": h.DocsBase(),
+		"__HOST_DOMAIN__":    h.Domain(),
+		"__SUPPORT_EMAIL__":  h.SupportEmail(),
+		"__ABUSE_EMAIL__":    h.AbuseEmail(),
 	}
 }
 
 // Expand replaces every token of Tokens in s.
 func (h Hosts) Expand(s string) string {
-	pairs := make([]string, 0, 12)
+	pairs := make([]string, 0, 16)
 	for k, v := range h.Tokens() {
 		pairs = append(pairs, k, v)
 	}
