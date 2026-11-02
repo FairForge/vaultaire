@@ -42,7 +42,7 @@ var (
 		"1 while the backend's plan row says a payment method is on file, else 0 (BackendPlanNoPayment pages near term_end without one — the 2026-08-27 shape).",
 		[]string{"backend"}, nil)
 	backendEgressFreeDesc = prometheus.NewDesc("vaultaire_backend_egress_free_bytes",
-		"Free egress this month: the plan row's egress_free_multiple × the stored total of the last backend_capacity run. No series while the vendor does not meter egress (NULL multiple) or before the first run.",
+		"Free egress this month, the strict reading: the plan row's egress_free_multiple × min(its capacity_bytes, the stored total of the last backend_capacity run over every backend of the account — idrive and every idrive-<region>). No series while the vendor does not meter egress (NULL multiple) or before the first run.",
 		[]string{"backend"}, nil)
 )
 
@@ -107,12 +107,8 @@ func (c *capacityCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(backendPlanPaymentDesc, prometheus.GaugeValue, pay, p.Backend)
 		if p.EgressFreeMultiple != nil && snap.hasRunResult {
-			var total int64
-			if b := snap.stored[p.Backend]; b != nil {
-				total = b.Total
-			}
 			ch <- prometheus.MustNewConstMetric(backendEgressFreeDesc, prometheus.GaugeValue,
-				*p.EgressFreeMultiple*float64(total), p.Backend)
+				float64(egressFreeBytes(p, snap.stored)), p.Backend)
 		}
 	}
 }
