@@ -125,6 +125,14 @@ func HandleAgentConnect(tmpl *template.Template, db *sql.DB, authSvc *auth.AuthS
 			return
 		}
 		data["Client"] = client
+		// The consent grants on the ACTIVE tenant: it says which (RP90-14 — a
+		// member of several tenants is told which one the agent acts on).
+		var tenantName string
+		_ = db.QueryRowContext(r.Context(), `SELECT COALESCE(NULLIF(name, ''), id) FROM tenants WHERE id = $1`, sd.TenantID).Scan(&tenantName)
+		if tenantName == "" {
+			tenantName = sd.TenantID
+		}
+		data["TenantName"] = tenantName
 		if u, err := url.Parse(a.RedirectURI); err == nil {
 			data["ReturnsTo"] = u.Scheme + "://" + u.Host
 		}

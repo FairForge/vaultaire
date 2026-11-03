@@ -364,3 +364,16 @@ func agentGrantOf(ctx context.Context) string {
 	}
 	return ""
 }
+
+// accountOf is the account a tenant's flags are read on: a sandbox's is
+// its account's (RP88-1), every other tenant's its own.
+func (s *Server) accountOf(ctx context.Context, tenantID string) string {
+	if s.db == nil || tenantID == "" {
+		return tenantID
+	}
+	var account string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(sandbox_of, id) FROM tenants WHERE id = $1`, tenantID).Scan(&account); err != nil {
+		return tenantID
+	}
+	return account
+}

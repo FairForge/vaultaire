@@ -102,6 +102,7 @@ func TestAgentConnect_ConsentNeedsTOTPAndIssuesOneCode(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	body := w.Body.String()
 	assert.Contains(t, body, "Claude")
+	assert.Contains(t, body, "act on the account <strong>", "the consent names the tenant it grants on (RP90-14)")
 	assert.Contains(t, body, "https://claude.ai")
 	assert.Contains(t, body, "delete a bucket")
 	csrf := regexp.MustCompile(`name="csrf_token" value="([0-9a-f]{64})"`).FindStringSubmatch(body)

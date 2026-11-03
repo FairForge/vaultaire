@@ -193,17 +193,21 @@ func ClaimProvisional(ctx context.Context, db *sql.DB, token, claimerID, userID 
 	if err != nil {
 		return nil, fmt.Errorf("claim: %w", err)
 	}
-	var verified, root bool
+	var verified, root, suspended bool
 	var claimerRoot string
 	err = tx.QueryRowContext(ctx, `
 		SELECT t.parent_tenant_id IS NULL AND t.sandbox_of IS NULL AND t.provisional_until IS NULL, COALESCE(t.pool_root_id, t.id),
-		       EXISTS (SELECT 1 FROM users u WHERE u.id::text = $2 AND COALESCE(u.email_verified, FALSE))
-		  FROM tenants t WHERE t.id = $1 FOR SHARE`, claimerID, userID).Scan(&root, &claimerRoot, &verified)
+		       EXISTS (SELECT 1 FROM users u WHERE u.id::text = $2 AND COALESCE(u.email_verified, FALSE)),
+		       t.suspended_at IS NOT NULL
+		  FROM tenants t WHERE t.id = $1 FOR SHARE`, claimerID, userID).Scan(&root, &claimerRoot, &verified, &suspended)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrTenantNotFound
 	case err != nil:
 		return nil, fmt.Errorf("claim: the claimer: %w", err)
+	case suspended:
+		// A suspended account takes nothing new on (RP90-17).
+		return nil, ErrTenantSuspended
 	case !root:
 		return nil, ErrChildOfChild
 	case !verified:

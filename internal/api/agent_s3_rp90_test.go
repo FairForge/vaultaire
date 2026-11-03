@@ -39,6 +39,9 @@ func (f *edgeFixture) agentS3Key() (grant *auth.AgentGrant, ak, sk string) {
 	f.t.Helper()
 	g, _, err := auth.MintAgentGrant(context.Background(), f.db, f.tenantID, auth.AgentGrantOptions{AgentName: "Claude", GrantedBy: f.userID})
 	require.NoError(f.t, err)
+	// An agent's S3 key works only while the account's flag is on (RP90-13).
+	require.NoError(f.t, f.fl.Set(context.Background(), flagAgentGrants, f.tenantID, true, "test"))
+	require.NoError(f.t, f.fl.Refresh(context.Background()))
 	f.t.Cleanup(func() {
 		_, _ = f.db.Exec(`DELETE FROM api_keys WHERE agent_grant_id = $1::uuid`, g.ID)
 		_, _ = f.db.Exec(`DELETE FROM agent_grants WHERE id = $1::uuid`, g.ID)

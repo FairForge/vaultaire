@@ -150,6 +150,9 @@ func (s *Server) handleMgmtClaim(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, auth.ErrChildOfChild):
 		writeManagementError(w, ErrTypeInvalidRequest, "child_of_child", "claim it on your own account, not an app, a sandbox or a child account", "")
 		return
+	case errors.Is(err, auth.ErrTenantSuspended):
+		writeManagementError(w, ErrTypePermission, "account_suspended", "the account is suspended: it cannot claim an app", "")
+		return
 	case err != nil:
 		s.logger.Error("claim", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to claim the app", "")
