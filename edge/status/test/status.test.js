@@ -209,3 +209,39 @@ test("the Worker never fetches anything: no origin dependency", async () => {
     globalThis.fetch = real;
   }
 });
+
+// RP91-8 (Architecture Decision 8): a request carrying S3 credentials never
+// gets a page as its bytes — the same shapes as the origin's gate
+// (auth.IsAWSAuthorization: the scheme token before the first space, any
+// case; and the presigned query parameters) answer 404 on every path.
+test("a request carrying S3 credentials is a 404, never the page", async () => {
+  const env = makeEnv();
+  assert.equal((await push(env, good())).status, 204);
+  const headers = [
+    "AWS4-HMAC-SHA256 Credential=AKIA/20261102/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc",
+    "aws4-hmac-sha256 Credential=x",
+    "AWS4-ECDSA-P256-SHA256 Credential=x",
+    "AWS AKIAEXAMPLE:c2lnbmF0dXJl",
+  ];
+  for (const path of ["/", "/state.json", "/some-bucket/key"]) {
+    for (const method of ["GET", "HEAD"]) {
+      for (const h of headers) {
+        const res = await worker.fetch(new Request(ORIGIN + path, { method, headers: { authorization: h } }), env);
+        assert.equal(res.status, 404, `${method} ${path} ${h}`);
+        assertQuiet(res);
+      }
+    }
+    for (const q of ["X-Amz-Signature=abc", "X-Amz-Credential=AKIA%2F20261102", "X-Amz-Algorithm=AWS4-HMAC-SHA256", "AWSAccessKeyId=AKIA&Signature=x&Expires=1"]) {
+      const res = await get(env, path + "?" + q);
+      assert.equal(res.status, 404, `${path}?${q}`);
+    }
+  }
+  // A signed POST /push is no push either.
+  const res = await worker.fetch(new Request(ORIGIN + "/push", { method: "POST", headers: { authorization: headers[0] }, body: JSON.stringify(good()) }), env);
+  assert.equal(res.status, 404);
+  // Not an AWS scheme: the page as before.
+  for (const h of ["Bearer abc", "Basic dXNlcjpwYXNz", "AWS4-HMAC-SHA256", "AWSX foo"]) {
+    const ok = await worker.fetch(new Request(ORIGIN + "/", { headers: { authorization: h } }), env);
+    assert.equal(ok.status, 200, h);
+  }
+});
