@@ -1,0 +1,18 @@
+{{define "title"}}Join a family, Stored{{end}}
+{{define "content"}}
+<div class="page-header"><div><h1>Join a family</h1></div></div>
+{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+{{if .Gone}}
+<div class="card"><p>This link was used already, has expired, or is unknown. Ask for a new invitation.</p></div>
+{{else}}
+<div class="card">
+    <p><strong>{{.From}}</strong> invites <strong>{{.Invitation.Email}}</strong> to their family. Their plan then pays for this account's storage.</p>
+    <p>This account stays yours: your sign-in, keys and files. They see how much you store and may set a cap or remove you — never your files, buckets, keys or requests. Leave whenever you like; your files stay yours.</p>
+    <p class="text-muted">Until {{.Invitation.ExpiresAt.Format "2006-01-02 15:04"}} UTC.</p>
+    <form method="post" action="/dashboard/family/join/{{.Token}}">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="btn btn-primary" type="submit">Join with this account</button>
+    </form>
+</div>
+{{end}}
+{{end}}

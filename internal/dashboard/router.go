@@ -144,6 +144,11 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /apps":                            auth.ActionChildWrite, // WP-APP-1
 	"POST /apps/{id}/delete":                auth.ActionChildWrite,
 	"POST /claim/{token}":                   auth.ActionChildWrite,
+	"POST /family/invite":                   auth.ActionBilling, // WP-FAMILY-1: the pool is paid for — the owner's
+	"POST /family/members/{id}/cap":         auth.ActionBilling,
+	"POST /family/members/{id}/remove":      auth.ActionBilling,
+	"POST /family/leave":                    auth.ActionBilling,
+	"POST /family/join/{token}":             auth.ActionBilling,
 	"POST /settings/profile":                personalWrite,
 	"POST /settings/password":               personalWrite,
 	"POST /settings/notifications":          personalWrite,
@@ -428,6 +433,22 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		claim := handlers.HandleClaim(claimTmpl, deps.DB, deps.flagOn("apps"), deps.Logger)
 		dr.Get("/claim/{token}", claim)
 		dr.With(act("POST /claim/{token}")).Post("/claim/{token}", claim)
+
+		// WP-FAMILY-1 PR C: the Family page and the join link.
+		familyTmpl := template.Must(baseTmpl.Clone())
+		template.Must(familyTmpl.ParseFS(Templates, "templates/customer/family.html"))
+		familyJoinTmpl := template.Must(baseTmpl.Clone())
+		template.Must(familyJoinTmpl.ParseFS(Templates, "templates/customer/family_join.html"))
+		fam := handlers.FamilyDeps{DB: deps.DB, Auth: deps.Auth, MFA: deps.MFA, Email: deps.Email, BaseURL: deps.BaseURL,
+			Enabled: deps.flagOn("family"), Logger: deps.Logger}
+		dr.Get("/family", handlers.HandleFamilyPage(familyTmpl, fam))
+		dr.With(act("POST /family/invite")).Post("/family/invite", handlers.HandleFamilyInvite(fam))
+		dr.With(act("POST /family/members/{id}/cap")).Post("/family/members/{id}/cap", handlers.HandleFamilyCap(fam))
+		dr.With(act("POST /family/members/{id}/remove")).Post("/family/members/{id}/remove", handlers.HandleFamilyRemove(fam))
+		dr.With(act("POST /family/leave")).Post("/family/leave", handlers.HandleFamilyLeave(fam))
+		familyJoin := handlers.HandleFamilyJoin(familyJoinTmpl, fam)
+		dr.Get("/family/join/{token}", familyJoin)
+		dr.With(act("POST /family/join/{token}")).Post("/family/join/{token}", familyJoin)
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())

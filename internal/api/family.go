@@ -262,16 +262,14 @@ func (s *Server) handleMgmtFamilyCap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	member := chi.URLParam(r, "id")
-	res, err := s.db.ExecContext(r.Context(), `UPDATE tenant_quotas q SET storage_limit_bytes = $3, updated_at = NOW()
-		  FROM tenants t
-		 WHERE t.id = q.tenant_id AND t.id = $2 AND t.parent_tenant_id = $1 AND t.child_kind = 'sponsored'`, organizer, member, limit)
+	err := account.NewService(s.db, s.logger).SetFamilyMemberCap(r.Context(), organizer, member, limit)
+	if errors.Is(err, account.ErrNotAFamilyMember) {
+		writeManagementError(w, ErrTypeNotFound, "family_member_not_found", "no member of this family has that id", "id")
+		return
+	}
 	if err != nil {
 		s.logger.Error("family: cap", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to set the cap", "")
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeManagementError(w, ErrTypeNotFound, "family_member_not_found", "no member of this family has that id", "id")
 		return
 	}
 	audit.Record(r.Context(), s.db, audit.Entry{TenantID: organizer, Action: "family.member_capped", Resource: "tenant:" + member,

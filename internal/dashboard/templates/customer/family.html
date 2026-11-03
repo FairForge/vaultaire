@@ -1,0 +1,77 @@
+{{define "title"}}Family, Stored{{end}}
+{{define "content"}}
+<div class="page-header">
+    <div>
+        <h1>Family</h1>
+        {{if eq .Role "member"}}<p class="text-muted">You are in <strong>{{.Organizer}}</strong>'s family: their plan pays for your storage. Your account, sign-in, keys and files are yours; they see how much you store, nothing else.</p>
+        {{else}}<p class="text-muted">Up to {{.MaxPeople}} people share your plan. Each keeps their own account, sign-in, keys and files: you see how much each stores, and set caps — never their files, buckets, keys or requests.</p>{{end}}
+    </div>
+</div>
+{{if eq .Role "member"}}
+<div class="card">
+    <div class="card-title">Leave the family</div>
+    <p>Your account and files stay yours, on the free tier. Above the free tier your files stay readable and nothing new can be stored until you choose a plan; nothing is ever deleted.</p>
+    {{if .Owner}}
+    <form method="post" action="/dashboard/family/leave">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <button class="btn btn-danger" type="submit">Leave the family</button>
+    </form>
+    {{end}}
+</div>
+{{else}}
+<div class="card">
+    <div class="card-title">Shared storage</div>
+    <p><strong>{{.PoolUsed}}</strong> used of <strong>{{.PoolLimit}}</strong>, everyone together. {{.People}} of {{.MaxPeople}} people, pending invitations included.</p>
+</div>
+<div class="card">
+    <div class="card-title">Members</div>
+    {{if .Members}}
+    <table class="table">
+        <thead><tr><th>Member</th><th>Stores</th><th>Cap</th><th></th></tr></thead>
+        <tbody>
+        {{range .Members}}
+        <tr>
+            <td>{{.Label}}</td>
+            <td>{{.Used}}</td>
+            <td>
+                {{if $.Owner}}
+                <form method="post" action="/dashboard/family/members/{{.ID}}/cap" class="inline-form">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <input type="number" name="cap_gib" min="0" step="any" value="{{.CapGiB}}" placeholder="none" aria-label="Cap in GiB"> GiB
+                    <button class="btn btn-secondary btn-sm" type="submit">Save</button>
+                </form>
+                {{else}}{{.Cap}}{{end}}
+            </td>
+            <td>
+                {{if $.Owner}}
+                <form method="post" action="/dashboard/family/members/{{.ID}}/remove">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                    <button class="btn btn-danger btn-sm" type="submit">Remove</button>
+                </form>
+                {{end}}
+            </td>
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    <p class="text-muted">A removed member keeps their account and files, on the free tier.</p>
+    {{else}}<p>No one yet.</p>{{end}}
+</div>
+{{if .Invitations}}
+<div class="card">
+    <div class="card-title">Waiting to join</div>
+    <ul>{{range .Invitations}}<li>{{.Email}}, until {{.ExpiresAt.Format "2006-01-02"}}</li>{{end}}</ul>
+</div>
+{{end}}
+{{if .Owner}}
+<form method="post" action="/dashboard/family/invite" class="card">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="card-title">Invite someone</div>
+    <p class="text-muted">They join with their own account (or make one). An account that pays for its own plan joins after cancelling it.</p>
+    <label>E-mail address <input type="email" name="email" required autocomplete="off"></label>
+    <label>Code from your authenticator app <input type="text" name="totp_code" inputmode="numeric" autocomplete="one-time-code" required></label>
+    <button class="btn btn-primary" type="submit">Invite</button>
+</form>
+{{end}}
+{{end}}
+{{end}}

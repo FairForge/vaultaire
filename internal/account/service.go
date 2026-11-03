@@ -615,3 +615,25 @@ func (s *Service) LeaveFamily(ctx context.Context, member string, freeLimit int6
 	}
 	return parent.String, s.detachOne(ctx, member, parent.String, freeLimit, detachReasonLeft)
 }
+
+// SetFamilyMemberCap sets organizer's member's cap inside the pool (0 = the
+// pool decides; docs/ACCOUNTS.md "caps inside the pool"). ErrNotAFamilyMember
+// when the tenant is no sponsored member of organizer.
+func (s *Service) SetFamilyMemberCap(ctx context.Context, organizer, member string, limit int64) error {
+	if s.db == nil {
+		return ErrNoDatabase
+	}
+	if limit < 0 {
+		return fmt.Errorf("a cap is a number of bytes, 0 for none")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE tenant_quotas q SET storage_limit_bytes = $3, updated_at = NOW()
+		  FROM tenants t
+		 WHERE t.id = q.tenant_id AND t.id = $2 AND t.parent_tenant_id = $1 AND t.child_kind = 'sponsored'`, organizer, member, limit)
+	if err != nil {
+		return fmt.Errorf("cap family member %s: %w", member, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotAFamilyMember
+	}
+	return nil
+}
