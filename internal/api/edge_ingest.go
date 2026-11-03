@@ -77,6 +77,9 @@ const (
 	edgeOpPut  = "put"
 	edgeOpPart = "part"
 	edgeOpGet  = "get"
+	// edgeOpPost is a browser's POST policy form (WP-POST-1 PR B): admitted
+	// as a PUT of its file part (the row's op is put, attrs.via post).
+	edgeOpPost = "post"
 	// edgeReasonSmall is the pass-through of a body under EDGE_MIN_BYTES.
 	edgeReasonSmall = "small"
 	// edgeReasonSandbox: a test-mode (sandbox) tenant's request is the
@@ -98,7 +101,7 @@ var (
 )
 
 func init() {
-	for _, op := range []string{edgeOpPut, edgeOpPart, edgeOpGet} {
+	for _, op := range []string{edgeOpPut, edgeOpPart, edgeOpGet, edgeOpPost} {
 		for _, outcome := range []string{"admitted", "admitted_unverified", "pass_through", "pass_through_small", "refused", "error"} {
 			dataPlaneAdmits.WithLabelValues(edgeHost, op, outcome)
 		}
@@ -177,6 +180,14 @@ type edgeAdmitAttrs struct {
 	// RS (WP-EDGE-4 PR B, edge_rs): the stripe geometry and each shard's
 	// leg of an RS write — the commit records the shard rows from it.
 	RS *edgeRSAttrs `json:"rs,omitempty"`
+	// Via is "post" for a browser's POST policy form (WP-POST-1 PR B): the
+	// commit answers as the origin's POST — PostStatus (204/200/201),
+	// Location under PostLocation (the client's scheme and host), the
+	// x-amz-meta-* fields echoed — and the access log names PostObject.
+	Via          string            `json:"via,omitempty"`
+	PostStatus   int               `json:"post_status,omitempty"`
+	PostLocation string            `json:"post_location,omitempty"`
+	PostMeta     map[string]string `json:"post_meta,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -299,7 +310,7 @@ func (s *Server) handleEdgeAdmit(w http.ResponseWriter, r *http.Request) {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})
 		return
 	}
-	if req.Op != edgeOpPut && req.Op != edgeOpPart && req.Op != edgeOpGet {
+	if req.Op != edgeOpPut && req.Op != edgeOpPart && req.Op != edgeOpGet && req.Op != edgeOpPost {
 		writeEdgeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_op"})
 		return
 	}
@@ -358,11 +369,21 @@ type edgePrelude struct {
 	scope    *auth.KeyScope
 	bucket   string
 	key      string
+	post     *edgePost // a POST policy form's file part (WP-POST-1 PR B)
+}
+
+// edgePost is what an admitted form carries to the write and the commit.
+type edgePost struct {
+	admission *postAdmission
+	base      string // the client's scheme and host (the Location)
 }
 
 // edgeAdmit is the decision. status is the HTTP status of the admit call
 // itself (200 for every decision; 5xx when the control plane failed).
 func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmitResponse, int) {
+	if req.Op == edgeOpPost {
+		return s.edgeAdmitPost(ctx, req)
+	}
 	p, resp, status, decided := s.edgeAdmitPrelude(ctx, req)
 	if decided {
 		return resp, status
@@ -436,6 +457,16 @@ func (s *Server) edgeAdmitPrelude(ctx context.Context, req edgeAdmitRequest) (p 
 		reason, known := authFailureReason(err)
 		recordAuthFailure(sr, reason, known)
 		return decide(refusalOf(rec))
+	}
+	return s.edgeAdmitAuthed(ctx, op, d, sr, rec, tenantID, scope)
+}
+
+// edgeAdmitAuthed is the prelude after authentication — shared by the
+// SigV4 entrance and a POST policy form's (edgeAdmitPost).
+func (s *Server) edgeAdmitAuthed(ctx context.Context, op string, d auth.RequestDescriptor, sr *http.Request, rec *relayRecorder,
+	tenantID string, scope *auth.KeyScope) (p edgePrelude, resp edgeAdmitResponse, status int, decided bool) {
+	decide := func(r edgeAdmitResponse, st int) (edgePrelude, edgeAdmitResponse, int, bool) {
+		return edgePrelude{}, r, st, true
 	}
 	if tenantID == "" || engine.IsReservedTenantID(tenantID) {
 		WriteS3Error(rec, ErrAccessDenied, sr.URL.Path, generateRequestID())
@@ -635,7 +666,12 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 	// one extra decision, only with the flag on), so a 4–64 MiB PUT the
 	// origin would store whole is chunked here when the bucket allows it.
 	codecPlacement := placement
-	if req.Op == edgeOpPut && placement.Kind != placeChunked && s.edgeCodecFor(tenantID) {
+	if p.post != nil && placement.Kind != placeWhole {
+		// A form's file part is moved whole by the host: a chunked or sealed
+		// placement is the origin's POST (WP-POST-1).
+		return passThrough("post_placement_" + placement.Kind.String())
+	}
+	if req.Op == edgeOpPut && p.post == nil && placement.Kind != placeChunked && s.edgeCodecFor(tenantID) {
 		codecPlacement = adapter.decidePlacement(sctx, placementRequest{
 			TenantID: tenantID, Bucket: bucket, Class: storageClass, Size: placeSize,
 			SSEC: false, SSERequested: sseRequested, EdgeCodec: true,
@@ -730,6 +766,16 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 			ActingKey: writerKeyOf(sctx)},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	row.Attrs.CheckLength = stream != nil && !streamProps.EnforcesDecodedLength
+	if p.post != nil {
+		a := p.post.admission
+		row.Attrs.Via, row.Attrs.PostStatus, row.Attrs.PostLocation, row.Attrs.KeyID = "post", a.upload.status, p.post.base, a.keyID
+		for k, v := range a.upload.meta {
+			if row.Attrs.PostMeta == nil {
+				row.Attrs.PostMeta = map[string]string{}
+			}
+			row.Attrs.PostMeta[k] = v[0]
+		}
+	}
 	container := tenantID + "_" + bucket
 	var presigned string
 	var signed []string
@@ -896,7 +942,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 
 	resp := edgeAdmitResponse{Edge: true, URL: presigned, Method: http.MethodPut,
 		SendHeaders: sendHeaders, Backend: backend, Expect: &edgeExpect{MD5: contentMD5 != ""}}
-	if req.Op == edgeOpPut {
+	if req.Op == edgeOpPut && p.post == nil {
 		// WP-EDGE-4 PR B: RS k+m for a host that stripes (edge_rs, dark).
 		if grant, rsAttrs := s.edgeRSGrantFor(sctx, req, tenantID, bucket, backend, container, row.StorageKey, size); grant != nil {
 			row.Attrs.RS = rsAttrs
@@ -1576,8 +1622,19 @@ func (s *Server) commitEdgePut(ctx context.Context, row edgeAdmitRow, req edgeCo
 	if flip.VersionID != "" {
 		rec.Header().Set("x-amz-version-id", flip.VersionID)
 	}
-	rec.WriteHeader(http.StatusOK)
-	s.recordEdgeAccess(row, http.StatusOK, row.ContentLength, 0)
+	status := http.StatusOK
+	if row.Attrs.Via == "post" {
+		meta := http.Header{}
+		for k, v := range row.Attrs.PostMeta {
+			meta.Set(k, v)
+		}
+		writePostSuccess(rec, row.Attrs.PostLocation, row.Bucket, row.Key, fmt.Sprintf(`"%s"`, etag),
+			&postPolicyUpload{status: row.Attrs.PostStatus, meta: meta})
+		status = rec.status
+	} else {
+		rec.WriteHeader(http.StatusOK)
+	}
+	s.recordEdgeAccess(row, status, row.ContentLength, 0)
 	s.logger.Info("artifact stored", zap.String("tenant_id", row.TenantID), zap.String("s3.bucket", row.Bucket), zap.String("s3.object", row.Key),
 		zap.String("backend", row.Backend), zap.String("etag", etag), zap.String("version_id", flip.VersionID),
 		zap.Int64("size", row.ContentLength), zap.String("host", row.Host))
@@ -1639,6 +1696,9 @@ func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOu
 		return
 	}
 	op := auth.OpPutObject
+	if row.Attrs.Via == "post" {
+		op = auth.OpPostObject
+	}
 	switch row.Op {
 	case edgeOpPart:
 		op = auth.OpUploadPart
