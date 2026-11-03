@@ -116,3 +116,30 @@ tests:
       - eval_time: 3h
         alertname: VaultParityRebuildSlow
         exp_alerts: []
+
+  # HEAD's restore lookup (RP91-3): Geyser leaving a lookup unanswered for
+  # 3 s, again and again for 15 min, warns; one timeout in a quiet hour does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_vault_head_restore_lookups_total{outcome="timeout"}'
+        values: '0+1x60'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: VaultHeadRestoreLookupsTimingOut
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: VaultHeadRestoreLookupsTimingOut
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "HEAD's restore lookups time out"
+              description: "HEAD of an archive-class object asks Geyser for its x-amz-restore state (Architecture Decision 2's one exception) and Geyser has not answered within 3 s, repeatedly, for 15 min: those HEADs omit the header, so a restore poller (rclone, aws-cli s3api head-object) sees no restore state. While Geyser's breaker is open no lookup is made (outcome breaker_open). Check Geyser: the probe in /health, the driver's latency (vaultaire_driver_op_seconds{driver=\"geyser\"}), the Geyser console."
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_vault_head_restore_lookups_total{outcome="timeout"}'
+        values: '0 1 1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: VaultHeadRestoreLookupsTimingOut
+        exp_alerts: []

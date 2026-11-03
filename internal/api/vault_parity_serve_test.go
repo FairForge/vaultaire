@@ -352,3 +352,31 @@ func TestVaultHead_RestoreLookupUnchangedByTheFlag(t *testing.T) {
 	}
 	assert.Equal(t, oks+2, promtest.ToFloat64(vaultHeadRestoreLookups.WithLabelValues("ok")))
 }
+
+// RP91-3: while Geyser's breaker is open, HEAD makes no restore lookup —
+// during an outage every archive-class HEAD used to cost a goroutine and a
+// connection for up to the driver's bound. The header is omitted, as on any
+// failure, and the skip is counted (outcome breaker_open).
+func TestVaultHead_RestoreLookupSkippedWhileTheBreakerIsOpen(t *testing.T) {
+	f, stub, s := restoreFixture(t)
+	putArchiveObject(t, f, "cold3.bin", generateTestData(512))
+	stub.archived = true
+	stub.restoreState = `ongoing-request="true"`
+	for i := 0; i < 10 && f.eng.GetFailoverStatus()["geyser"] != engine.StateOpen.String(); i++ {
+		f.eng.RecordReadOutcome("geyser", errors.New("connection reset by peer"))
+	}
+	require.Equal(t, engine.StateOpen.String(), f.eng.GetFailoverStatus()["geyser"])
+	skipped := promtest.ToFloat64(vaultHeadRestoreLookups.WithLabelValues("breaker_open"))
+
+	req := httptest.NewRequest("HEAD", "/test-bucket/cold3.bin", nil)
+	req = req.WithContext(s3Ctx(req.Context(), f.tenant))
+	w := httptest.NewRecorder()
+	before := stub.statusCalls
+	s.handleHeadObject(w, req, &S3Request{Bucket: "test-bucket", Object: "cold3.bin", TenantID: f.tenantID})
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "GLACIER", w.Header().Get("x-amz-storage-class"))
+	assert.Empty(t, w.Header().Get("x-amz-restore"), "no lookup: the header is omitted")
+	assert.Equal(t, before, stub.statusCalls, "Geyser was not asked")
+	assert.Equal(t, skipped+1, promtest.ToFloat64(vaultHeadRestoreLookups.WithLabelValues("breaker_open")))
+}

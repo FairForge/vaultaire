@@ -999,7 +999,15 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	// stay reliable).
 	if engine.IsArchiveClass(storageClass) && s.engine != nil {
 		if drv, exists := s.engine.GetDriver(backendName); exists {
-			if restorer, isRestorer := drv.(engine.Restorer); isRestorer {
+			restorer, isRestorer := drv.(engine.Restorer)
+			// RP91-3: never while the backend's breaker is open — during a
+			// Geyser outage each HEAD would hold a goroutine and a connection
+			// for the whole bound. The header is omitted, as on any failure.
+			if isRestorer && s.engine.GetFailoverStatus()[backendName] == engine.StateOpen.String() {
+				vaultHeadRestoreLookups.WithLabelValues("breaker_open").Inc()
+				isRestorer = false
+			}
+			if isRestorer {
 				// The restore state of the blob the row addresses (WP-R2-1),
 				// bounded (WP-VAULT-3 D-V3-7): past vaultHeadRestoreTimeout
 				// the header is omitted, as on any failure.

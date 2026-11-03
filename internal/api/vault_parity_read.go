@@ -53,7 +53,7 @@ var (
 	// outcome — ok, error, or timeout past vaultHeadRestoreTimeout.
 	vaultHeadRestoreLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_head_restore_lookups_total",
-		Help: "HEAD's live x-amz-restore lookup of an archive-class object (Architecture Decision 2's one exception), by outcome: ok, error (the header omitted), timeout (no answer within 3 s: the header omitted).",
+		Help: "HEAD's live x-amz-restore lookup of an archive-class object (Architecture Decision 2's one exception), by outcome: ok, error (the header omitted), timeout (no answer within 3 s: the header omitted), breaker_open (no lookup made: the backend's breaker is open, the header omitted).",
 	}, []string{"outcome"})
 	vaultParityShardReads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_shard_reads_total",
@@ -62,7 +62,7 @@ var (
 )
 
 func init() {
-	for _, o := range []string{"ok", "error", "timeout"} {
+	for _, o := range []string{"ok", "error", "timeout", "breaker_open"} {
 		vaultHeadRestoreLookups.WithLabelValues(o)
 	}
 	for _, ph := range []string{"open", "first_stripe", "stream"} {
