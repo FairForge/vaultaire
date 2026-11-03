@@ -48,10 +48,10 @@ type FamilyDeps struct {
 
 // rootOf is the pool root of tenantID ("" when unknown).
 func (d FamilyDeps) rootOf(ctx context.Context, tenantID string) string {
-	var root string
-	if d.DB != nil {
-		_ = d.DB.QueryRowContext(ctx, `SELECT pool_root_id FROM tenants WHERE id = $1`, tenantID).Scan(&root)
+	if d.DB == nil {
+		return ""
 	}
+	root, _ := usage.PoolRoot(ctx, d.DB, tenantID)
 	return root
 }
 
