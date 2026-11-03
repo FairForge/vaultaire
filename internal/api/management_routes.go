@@ -101,6 +101,8 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		s.registerAgentRoutes(r)
 		// WP-APP-1: self-serve apps (apps.go).
 		s.registerAppRoutes(r)
+		// WP-FAMILY-1: the family (family.go).
+		s.registerFamilyRoutes(r)
 	}
 }
 

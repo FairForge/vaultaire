@@ -1258,6 +1258,41 @@ func generateManagementPaths() map[string]*PathItem {
 					"404": errResp("`app_not_found`"),
 				})),
 		},
+		// WP-FAMILY-1 (Stage 1a Prompt 56): the family — a pool of personal
+		// accounts (docs/API.md § Family). Dark behind `family` (404).
+		"/api/v1/manage/family": {
+			Get: mgmt(jsonOp("Management", "Read the family", "ManageFamily",
+				"The organizer: its `members` (`id`, `label` = the member's own address, `storage_used_bytes`, `storage_limit_bytes` — null = the pool decides —, `joined_at`), pending `invitations`, `pool_used_bytes`, `pool_limit_bytes`. Usage and caps only: never a member's bucket, object, key or request. A member: `role: member` and its `organizer`.",
+				map[string]Response{
+					"200": jsonResp("The family", objectPtr("", map[string]*Schema{"object": strEnum("", "family"), "role": strEnum("", "organizer", "member"),
+						"members":         arrayOf(objectPtr("A member", map[string]*Schema{"id": str(""), "label": str(""), "storage_used_bytes": integer(""), "storage_limit_bytes": integer("null = the pool decides")})),
+						"pool_used_bytes": integer(""), "pool_limit_bytes": integer(""), "organizer": str("A member's organizer")})),
+					"404": errResp("`not_found` (the family is off for the account)"),
+				})),
+		},
+		"/api/v1/manage/family/invitations": {
+			Post: mut(withBody(jsonOp("Management", "Invite into the family", "ManageFamilyInvite",
+				"The organizer — a person, the account's owner, with the current code of their authenticator app — invites an address: a link (`/dashboard/family/join/{token}`) that works once for 7 days. Six people, the organizer included; pending invitations count. Re-inviting is the resend. Audited `family.invited`.",
+				map[string]Response{
+					"201": jsonResp("Invitation sent", objectPtr("", map[string]*Schema{"object": strEnum("", "family_invitation"), "id": str(""), "email": str(""), "expires_at": str("")})),
+					"403": errResp("`totp_required`, `person_required` or `role_forbidden`"),
+					"409": errResp("`family_full`, `already_in_family` or `not_family_organizer`"),
+					"429": errResp("`invitation_rate_limited` or `mfa_locked`"),
+				}),
+				jsonBody("Who", objectPtr("", map[string]*Schema{"email": str("The address"), "code": str("The current TOTP code")}, "email", "code")))),
+		},
+		"/api/v1/manage/family/join/{token}": {
+			Parameters: []Parameter{pathParam("token", "The invitation link's token")},
+			Post: mut(jsonOp("Management", "Join a family", "ManageFamilyJoin",
+				"The invited person, signed in to their OWN account (its owner, the invited address), attaches it to the family: a sponsored member whose storage counts in the organizer's plan, its sign-in, keys and files its own. Refused while the account pays for its own plan (F-40). Audited `family.joined` and `family.member_joined`.",
+				map[string]Response{
+					"200": jsonResp("Joined", objectPtr("", map[string]*Schema{"object": strEnum("", "family_membership"), "tenant_id": str(""), "organizer_id": str("")})),
+					"403": errResp("`invitation_other_address`, `person_required` or `role_forbidden`"),
+					"404": errResp("`invitation_not_found` or `not_found`"),
+					"409": errResp("`member_pays_own_plan`, `cannot_join_family`, `family_full` or `not_family_organizer`"),
+					"410": errResp("`invitation_used` or `invitation_expired`"),
+				})),
+		},
 		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
 		// (docs/API.md § Members).
 		"/api/v1/manage/members": {

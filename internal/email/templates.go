@@ -63,6 +63,16 @@ func RenderInvitation(baseURL, token, email, account, inviter, role string) (str
 		Account: account, Inviter: inviter, Role: role})
 }
 
+type familyInvitationData struct {
+	BaseURL, Token, Email, Inviter string
+}
+
+// RenderFamilyInvitation renders a family invitation (WP-FAMILY-1): the
+// link is <baseURL>/dashboard/family/join/<token>, single use, 7 days.
+func RenderFamilyInvitation(baseURL, token, email, inviter string) (string, string, error) {
+	return render("family_invitation.html", familyInvitationData{BaseURL: baseURL, Token: token, Email: email, Inviter: inviter})
+}
+
 type passwordResetData struct {
 	BaseURL string
 	Token   string

@@ -24,6 +24,7 @@ var poolRootReaders = map[string]string{
 	"internal/auth/platform.go":   "CreateChildTenant writes a child's pool_root_id (its parent's root)",
 	"internal/account/service.go": "a sponsored child's detach resets its pool_root_id to itself (PR C)",
 	"internal/auth/claimable.go":  "a provisional tenant takes its partner's pool root, and a claim writes the claimer's (WP-APP-1 PR D; the bytes move through usage.MovePoolTx)",
+	"internal/auth/family.go":     "a family join writes the member's pool_root_id (the organizer's); the bytes move through usage.MovePoolTx (WP-FAMILY-1)",
 	"internal/modes/bucket.go":    "the door refuses Public for an app whose pool root is unverified (WP-APP-1 PR C): reads the root's owner, never resolves it",
 }
 
