@@ -825,6 +825,108 @@ egress is metered once, for the bytes you received.
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.
 
+## Browser uploads
+
+A web page can let its visitors upload straight into your bucket, with no
+server of yours in the byte path and no key in the page: your server signs
+an S3 **POST policy** (what an SDK's `generate_presigned_post` /
+`createPresignedPost` makes), the page puts the policy's fields in a
+`<form>` (or a `FormData`), and the browser POSTs it with the file to
+`https://s3.stored.cloud/<bucket>`. The upload is checked and written
+exactly as a PUT of the same bytes would be — the same key lookup (a
+revoked, expired, IP-restricted or agent key is refused as for a PUT), the
+same bucket rules (Private, the free tier's buckets, Object Lock), the same
+quota, the same ETag (the file's MD5).
+
+**The policy** (base64 JSON, signed with SigV4 over the base64 itself):
+`expiration` and `conditions`. Every form field except `x-amz-signature`,
+`policy`, `file` and `x-ignore-*` must be named by a condition, and the
+policy must name its bucket. Conditions: `{"field": "value"}` /
+`["eq", "$field", "value"]`, `["starts-with", "$field", "prefix"]` (for
+`Content-Type`, each comma-separated type must match), and
+`["content-length-range", min, max]` — the file's size in bytes. An unknown
+operator is 400 `InvalidPolicyDocument`.
+
+**The form**: every field before `file` (fields after it are ignored, as at
+AWS). `key` is required; `${filename}` in it is replaced by the file's own
+name (a base name only: a name with `/`, `\` or `..` is 400). Object fields:
+`Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`,
+`Content-Language`, `Expires`, `x-amz-meta-*`, `x-amz-storage-class`,
+`x-amz-server-side-encryption` (and the SSE-C trio). The answer is
+`success_action_status`: `204` (the default, no body), `200`, or `201` with
+the XML `PostResponse` (`Location`, `Bucket`, `Key`, `ETag`); every success
+carries `ETag` and `Location`, and echoes the `x-amz-meta-*` fields.
+
+**Not supported** (400): `success_action_redirect` (an open redirect —
+answer with a status and redirect in your page), `acl` other than `private`
+(a bucket's mode decides who reads it), `tagging`, SigV2 policies.
+
+**Errors**: a file over the policy's `content-length-range` is 400
+`EntityTooLarge` (under it `EntityTooSmall`) and nothing is written or
+reserved; an expired policy is 403 `AccessDenied` ("Policy expired"); a
+field outside a condition 403 `AccessDenied` ("Policy Condition failed: …");
+a wrong signature 403 `SignatureDoesNotMatch`; a revoked key 403
+`InvalidAccessKeyId`; a body that is not a well-formed form with the file
+last 400 `MalformedPOSTRequest`.
+
+**Size**: Cloudflare carries at most **100 MB per request**, the form's
+fields included — a larger body is answered 413 (an HTML page) before it
+reaches us. For larger files, use a multipart upload (an SDK in the
+browser with a temporary key — `POST /api/v1/sts/token` — or presigned
+`UploadPart` URLs). Through `s3.stored.cloud` a form whose policy's
+`content-length-range` max fits that limit is moved by the edge straight to
+the storage backend (the file part only); any other form is written by the
+origin. Both answer the same.
+
+**CORS**: a `multipart/form-data` POST is a simple request — no preflight —
+but a page that reads the answer (`fetch`) needs the bucket's CORS rule to
+allow its origin (`PutBucketCors`): `AllowedMethods: ["POST"]`,
+`AllowedOrigins: ["https://your.site"]`, `ExposeHeaders: ["ETag",
+"Location"]`.
+
+```python
+# Your server: sign a policy (boto3; any SDK's presigned POST works).
+import boto3
+s3 = boto3.client("s3", endpoint_url="https://s3.stored.cloud",
+                  aws_access_key_id=KEY, aws_secret_access_key=SECRET, region_name="us-east-1")
+post = s3.generate_presigned_post(
+    "my-bucket", "uploads/${filename}",
+    Fields={"Content-Type": "image/png", "success_action_status": "201"},
+    Conditions=[["starts-with", "$Content-Type", "image/"],
+                {"success_action_status": "201"},
+                ["content-length-range", 1, 50 * 1024 * 1024]],
+    ExpiresIn=600)
+# → post["url"], post["fields"]: hand both to the page.
+```
+
+```html
+<!-- The page: the fields first, the file last. -->
+<form action="https://s3.stored.cloud/my-bucket" method="post" enctype="multipart/form-data">
+  <input type="hidden" name="key" value="uploads/${filename}">
+  <input type="hidden" name="Content-Type" value="image/png">
+  <input type="hidden" name="success_action_status" value="201">
+  <input type="hidden" name="x-amz-algorithm" value="AWS4-HMAC-SHA256">
+  <input type="hidden" name="x-amz-credential" value="…">
+  <input type="hidden" name="x-amz-date" value="…">
+  <input type="hidden" name="policy" value="…">
+  <input type="hidden" name="x-amz-signature" value="…">
+  <input type="file" name="file" accept="image/png">
+  <button>Upload</button>
+</form>
+```
+
+```js
+// Or from script, reading the answer (the bucket's CORS rule allows the page).
+async function upload(post, file) {
+  const body = new FormData();
+  for (const [k, v] of Object.entries(post.fields)) body.append(k, v);
+  body.append("file", file); // last
+  const r = await fetch(post.url, { method: "POST", body });
+  if (!r.ok) throw new Error(await r.text()); // the S3 error document
+  return r.headers.get("ETag"); // the file's MD5, quoted
+}
+```
+
 ## Fast uploads and downloads
 
 Measured 2026-10-27 (`bench-results/SPEED-2026-10-27.md`), from a 10 Gbps

@@ -62,6 +62,8 @@ Sub-resources: ?versioning ?object-lock ?retention ?legal-hold ?tagging ?cors ?n
 
 ### S3 features
 - Presigned URLs (GET and PUT, SigV4 query auth)
+- Browser uploads: S3 presigned POST policies (a <form> or FormData POST to /<bucket>; any SDK's
+  generate_presigned_post; the file last; at most 100 MB per request through Cloudflare)
 - Object Lock: GOVERNANCE and COMPLIANCE retention, legal hold (WORM)
 - Versioning: every version keeps its own bytes — GET/HEAD ?versionId=<old>
   serve that version, DELETE ?versionId removes it — and retained versions

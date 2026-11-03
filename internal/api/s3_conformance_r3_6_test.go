@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -220,4 +221,43 @@ func TestMultipartConformance(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		assert.Equal(t, fmt.Sprint(w.Body.Len()), w.Header().Get("Content-Length"))
 	})
+}
+
+// WP-POST-1: a POST policy upload is an object like a PUT's — read back
+// whole by a signed GET (the bytes, the ETag = the file's MD5, the form's
+// Content-Type and x-amz-meta-*), HEAD from the head row, listed, and
+// overwritten by a second form as a PUT overwrites.
+func TestPostObjectConformance(t *testing.T) {
+	f := setupEdgeFixture(t)
+	conds := []any{map[string]any{"bucket": f.bucket}, []any{"starts-with", "$key", "form/"}, []any{"starts-with", "$Content-Type", "text/"},
+		map[string]any{"x-amz-meta-origin": "browser"}, []any{"content-length-range", 0, 1 << 20}}
+	upload := func(content []byte) *httptest.ResponseRecorder {
+		fields := f.policyFields(time.Now().Add(time.Hour), conds, formField{"key", "form/${filename}"}, formField{"Content-Type", "text/plain"},
+			formField{"x-amz-meta-origin", "browser"})
+		body, ct := buildPostForm(t, fields, "note.txt", content)
+		return f.post(f.bucket, body, ct)
+	}
+	first := []byte("the first note")
+	require.Equal(t, http.StatusNoContent, upload(first).Code)
+
+	w := f.serve(f.signedAs(f.ak, f.sk, http.MethodGet, "/"+f.bucket+"/form/note.txt", nil, nil, nil))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, first, w.Body.Bytes())
+	assert.Equal(t, `"`+postMD5(first)+`"`, w.Header().Get("ETag"))
+	assert.Equal(t, "text/plain", w.Header().Get("Content-Type"))
+	assert.Equal(t, "browser", w.Header().Get("x-amz-meta-origin"))
+
+	w = f.serve(f.signedAs(f.ak, f.sk, http.MethodHead, "/"+f.bucket+"/form/note.txt", nil, nil, nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, fmt.Sprint(len(first)), w.Header().Get("Content-Length"))
+
+	w = f.serve(f.signedAs(f.ak, f.sk, http.MethodGet, "/"+f.bucket, map[string][]string{"list-type": {"2"}, "prefix": {"form/"}}, nil, nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "<Key>form/note.txt</Key>")
+
+	second := []byte("the second note, longer")
+	require.Equal(t, http.StatusNoContent, upload(second).Code)
+	w = f.serve(f.signedAs(f.ak, f.sk, http.MethodGet, "/"+f.bucket+"/form/note.txt", nil, nil, nil))
+	assert.Equal(t, second, w.Body.Bytes(), "a second form overwrites, as a PUT does")
+	assert.EqualValues(t, len(second), f.storageUsed(), "the first object's bytes released")
 }
