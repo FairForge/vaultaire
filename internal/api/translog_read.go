@@ -244,11 +244,19 @@ func (s *Server) s3Handler() http.HandlerFunc {
 // "AWS" scheme (case-insensitive, RFC 9110 § 11.1), or a presigned query —
 // X-Amz-Algorithm=AWS4-HMAC-SHA256, X-Amz-Signature, X-Amz-Credential, or
 // SigV2's AWSAccessKeyId with Signature. Any other Authorization (a Bearer
-// JWT, Basic) is never S3: it was, before RP56-1, here.
+// JWT, Basic) is never S3: it was, before RP56-1, here. And a POST policy
+// form (WP-POST-1): POST, multipart/form-data, a bucket's path (one
+// segment) — its credential is inside the body, so its SHAPE is the S3
+// API's, decided without reading it. No web page posts multipart (a
+// curl -F to /login, which FormValue used to parse, is now the S3 API's —
+// D-POST-5), and a one-segment web path is a reserved bucket name.
 func signedS3Request(r *http.Request) bool {
 	// The header half is auth's one predicate (SigV4, SigV4A, SigV2 — a
 	// superset of what the verifier attempts, RP58-1 / RP58-8 c).
 	if auth.IsAWSAuthorization(r.Header.Get("Authorization")) {
+		return true
+	}
+	if postPolicyShape(r) {
 		return true
 	}
 	q := r.URL.Query()

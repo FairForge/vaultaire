@@ -367,6 +367,25 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				recordAuthFailure(r, reason, known)
 				return
 			}
+		} else if isPostPolicyRequest(r) {
+			// A browser's upload form (WP-POST-1): the policy is the
+			// credential, verified by the one verifier's fourth entrance;
+			// its file part becomes the body of the request the rest of
+			// this function serves — BEFORE the no-credentials path below,
+			// which hands a browser the web 404 page.
+			var inner *http.Request
+			var refused *postRefusal
+			tenantID, scope, inner, refused = s.authorizePostPolicy(r)
+			if refused != nil {
+				s.logger.Info("POST policy refused", zap.String("code", refused.code), zap.String("path", r.URL.Path))
+				s.applyS3CORSPreAuth(w, r)
+				refused.write(w, r)
+				if refused.reason != "" {
+					recordAuthFailure(r, refused.reason, refused.keyKnown)
+				}
+				return
+			}
+			r = inner
 		} else {
 			tenantID, scope, err = s.s3Auth().ValidateRequest(r)
 			if err != nil && r.Header.Get("Authorization") == "" && s.serveWebNotFound(w, r) {
@@ -533,7 +552,13 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce permission and bucket scope now that we know the operation.
 	if scope != nil {
-		if !auth.OperationAllowed(scope.Permissions, s3Req.Operation) {
+		// A policy upload is AWS's s3:PutObject: a key that may PutObject
+		// may serve a form (D-POST-4).
+		permOp := s3Req.Operation
+		if permOp == auth.OpPostObject && postPolicyOf(r.Context()) != nil {
+			permOp = auth.OpPutObject
+		}
+		if !auth.OperationAllowed(scope.Permissions, permOp) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
 				WithSuggestion(fmt.Sprintf("This key does not have %s access.", s3Req.Operation)))
 			return
@@ -638,7 +663,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(noteCtx)
 
 	// Track ingress bytes from PUT/UploadPart request bodies.
-	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" {
+	if s3Req.Operation == "PutObject" || s3Req.Operation == "UploadPart" || s3Req.Operation == auth.OpPostObject {
 		ingressBytes = r.ContentLength
 		if ingressBytes < 0 {
 			ingressBytes = 0
@@ -656,6 +681,14 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 		} else if !s.slcWrite(cw, r, t.ID) {
 			s.handlePutObject(cw, r, s3Req)
 		}
+	case auth.OpPostObject:
+		if postPolicyOf(r.Context()) == nil {
+			// A POST to an object with no subresource and no form: not an
+			// S3 operation.
+			WriteS3Error(cw, ErrNotImplemented, r.URL.Path, generateRequestID())
+			return
+		}
+		s.handlePostObject(cw, r, s3Req)
 	case "DeleteObject":
 		s.handleDeleteObject(cw, r, s3Req)
 	case "DeleteObjects":

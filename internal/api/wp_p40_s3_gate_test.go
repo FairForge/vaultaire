@@ -141,6 +141,16 @@ func TestS3Gate_ASignedRequestToEveryRouteIsTheS3APIs(t *testing.T) {
 						v2q.Host = host
 						reqs["sigv2 presigned"] = v2q
 					}
+					// A browser's POST policy form (WP-POST-1): no header, no
+					// query — its credential is inside the body — so its
+					// SHAPE is the S3 API's: POST multipart/form-data to a
+					// bucket's path (one segment).
+					if method == http.MethodPost && postPolicyBucket(path) != "" {
+						form := httptest.NewRequest(method, path, strings.NewReader("--b\r\nContent-Disposition: form-data; name=\"key\"\r\n\r\nk\r\n--b--\r\n"))
+						form.Host = host
+						form.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+						reqs["post policy form"] = form
+					}
 					for kind, req := range reqs {
 						*hits = nil
 						w := serve(h, req)
@@ -462,5 +472,35 @@ func TestS3Gate_ARealRoundTripOnWebPathBuckets(t *testing.T) {
 				assert.Equal(t, http.StatusNoContent, resp.StatusCode, "DeleteBucket %s: %s", bk, b)
 			}
 		})
+	}
+}
+
+// WP-POST-1: the form's shape is the S3 API's on every host before any
+// route — and only that shape: a form POST to a deeper path, a urlencoded
+// POST to a bucket's path, and a JSON POST stay the routes'.
+func TestS3Gate_APostPolicyFormIsTheS3APIs(t *testing.T) {
+	srv, hits := gateServer(t, prodTargetHosts)
+	h := srv.httpServer.Handler
+	form := func(host, path, ctype string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("x"))
+		r.Host = host
+		r.Header.Set("Content-Type", ctype)
+		return r
+	}
+	for _, host := range []string{"s3.stored.cloud", "stored.cloud", "stored.ge"} {
+		for _, p := range []string{"/my-bucket", "/my-bucket/", "/login", "/register"} {
+			*hits = nil
+			serve(h, form(host, p, "multipart/form-data; boundary=x"))
+			assert.Len(t, *hits, 1, "POST %s%s multipart: the S3 API's", host, p)
+		}
+	}
+	for _, tc := range []struct{ path, ctype string }{
+		{"/dashboard/settings", "multipart/form-data; boundary=x"},
+		{"/login", "application/x-www-form-urlencoded"},
+		{"/api/v1/edge/admit", "application/json"},
+	} {
+		*hits = nil
+		serve(h, form("stored.cloud", tc.path, tc.ctype))
+		assert.Empty(t, *hits, "POST %s (%s) is the route's", tc.path, tc.ctype)
 	}
 }
