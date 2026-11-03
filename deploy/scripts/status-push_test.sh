@@ -65,7 +65,7 @@ chmod +x "$BIN/curl"
 key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
 fixture() { printf '%s\n%s\n' "$2" "$3" > "$FIX/$(key "$1")"; }
 
-ORIGIN=http://origin.test PROM=http://prom.test WEB=https://web.test LEGACY=https://legacy.test PUSH_URL=https://status.test/push
+ORIGIN=http://origin.test PROM=http://prom.test APP=https://app.test LEGACY=https://legacy.test PUSH_URL=https://status.test/push
 export PUSH_KEY FIX
 PUSH_KEY=$(key "$PUSH_URL")
 TOKEN=$(printf 'a%.0s' $(seq 1 64))
@@ -78,7 +78,7 @@ healthy_all() {
   fixture "$ORIGIN/version" 200 '{"version":"6c03823f3964","build":"x"}'
   fixture "$ORIGIN/metrics" 200 "$(printf '# HELP x\nvaultaire_synthetic_check_success 1\nvaultaire_synthetic_check_last_success_timestamp_seconds %s\n' "$((NOW - 60))")"
   fixture "$LEGACY/health" 200 '{"status":"healthy"}'
-  fixture "$WEB/login" 200 '<html>sign in</html>'
+  fixture "$APP/login" 200 '<html>sign in</html>'
   fixture "$PROM/api/v1/alerts" 200 '{"status":"success","data":{"alerts":[
     {"labels":{"alertname":"BackupDumpPlaintext","severity":"warning"},"state":"firing","annotations":{"description":"secret detail"}},
     {"labels":{"alertname":"PrimaryBackendDown","severity":"critical"},"state":"firing"},
@@ -90,12 +90,13 @@ healthy_all() {
 
 run() {
   PATH="$BIN:$PATH" STATUS_PUSH_ENV="$TMP/status-push.env" STATUS_METRICS_DIR="$OUT" STATUS_PUSH_URL="$PUSH_URL" \
-    STATUS_ORIGIN="$ORIGIN" STATUS_PROMETHEUS="$PROM" STATUS_WEB_URL="$WEB" STATUS_LEGACY_URL="$LEGACY" \
-    bash "$PUSH" 2> "$TMP/stderr"
+    STATUS_ORIGIN="$ORIGIN" STATUS_PROMETHEUS="$PROM" STATUS_APP_URL="$APP" STATUS_LEGACY_URL="$LEGACY" \
+    STATUS_APP_ENV="$TMP/app.env" bash "$PUSH" 2> "$TMP/stderr"
 }
 prom() { awk -v n="$1" '$1 == n {print $2}' "$OUT/vaultaire_status_push.prom"; }
 state_of() { jq -r --arg id "$1" '.components[] | select(.id == $id) | .state' "$FIX/push.body"; }
 detail_of() { jq -r --arg id "$1" '.components[] | select(.id == $id) | .detail' "$FIX/push.body"; }
+name_of() { jq -r --arg id "$1" '.components[] | select(.id == $id) | .name' "$FIX/push.body"; }
 
 # --- 2. everything healthy -----------------------------------------------------------
 healthy_all
@@ -111,6 +112,33 @@ check "the token goes on stdin, never on the command line" bash -c 'grep -qx "Au
 check "metrics: success 1" test "$(prom vaultaire_status_push_success)" = 1
 check "metrics: last success is now" bash -c '[ $(( $1 - $0 )) -lt 5 ]' "$NOW" "$(prom vaultaire_status_push_last_success_seconds)"
 check "metrics file 0644" test "$(stat -c%a "$OUT/vaultaire_status_push.prom" 2>/dev/null || stat -f%Lp "$OUT/vaultaire_status_push.prom")" = 644
+
+# --- 2b. what each component names (RP91-2) -------------------------------------------
+check "web is the origin's own health: named Origin (SLC)" test "$(name_of web)" = "Origin (SLC)"
+check "dashboard is the app host's sign-in" test "$(name_of dashboard)" = "Dashboard sign-in"
+
+# The sign-in is probed at STATUS_APP_URL, else VAULTAIRE_BASE_URL (the env, then the
+# app's .env, parsed — never sourced), else https://app.stored.cloud: the host every
+# printed dashboard link names, through the public path.
+run_app() { # run_app [VAR=value ...] — run without STATUS_APP_URL
+  env -u STATUS_APP_URL "$@" PATH="$BIN:$PATH" STATUS_PUSH_ENV="$TMP/status-push.env" STATUS_METRICS_DIR="$OUT" \
+    STATUS_PUSH_URL="$PUSH_URL" STATUS_ORIGIN="$ORIGIN" STATUS_PROMETHEUS="$PROM" STATUS_LEGACY_URL="$LEGACY" \
+    STATUS_APP_ENV="$TMP/app.env" bash "$PUSH" 2> "$TMP/stderr"
+}
+healthy_all
+rm -f "$FIX/$(key "$APP/login")"
+fixture "https://base.test/login" 200 '<html>sign in</html>'
+run_app VAULTAIRE_BASE_URL=https://base.test
+check "no STATUS_APP_URL: VAULTAIRE_BASE_URL's /login" test "$(state_of dashboard)" = up
+printf 'JWT_SECRET=x\nVAULTAIRE_BASE_URL="https://base.test"\n' > "$TMP/app.env"
+run_app
+check "no STATUS_APP_URL: VAULTAIRE_BASE_URL from the app's .env" test "$(state_of dashboard)" = up
+rm -f "$TMP/app.env"
+run_app
+check "nothing set: https://app.stored.cloud (no fixture: down)" test "$(state_of dashboard)/$(detail_of dashboard)" = "down/no answer"
+fixture "https://app.stored.cloud/login" 200 '<html>sign in</html>'
+run_app
+check "nothing set: https://app.stored.cloud/login" test "$(state_of dashboard)" = up
 
 # --- 3. STATUS_ALERT_SEVERITIES widens the list ----------------------------------------
 healthy_all
@@ -143,7 +171,7 @@ check "synthetic last success 20 min ago: s3 down" test "$(state_of s3)/$(detail
 
 healthy_all
 fixture "$LEGACY/health" 502 'bad gateway'
-fixture "$WEB/login" 503 'nope'
+fixture "$APP/login" 503 'nope'
 run
 check "legacy 502: down" test "$(state_of legacy)/$(detail_of legacy)" = "down/HTTP 502"
 check "dashboard 503: down" test "$(state_of dashboard)/$(detail_of dashboard)" = "down/HTTP 503"
