@@ -182,6 +182,11 @@ func GrantRecorded(ctx context.Context, tx *sql.Tx, tenantID string, o Order, pa
 	if err := Lock(ctx, tx, tenantID); err != nil {
 		return g, err
 	}
+	// A sponsored member's house is the organizer's pool (RP92-1): refused
+	// before the entitlement row is written.
+	if err := usage.RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
+		return g, err
+	}
 	prev, err := Get(ctx, tx, tenantID)
 	switch {
 	case errors.Is(err, ErrNoEntitlement):
@@ -258,6 +263,9 @@ func Extend(ctx context.Context, tx *sql.Tx, tenantID string, by Period) (time.T
 		return time.Time{}, fmt.Errorf("extend tenant %s: unknown period %q", tenantID, by)
 	}
 	if err := Lock(ctx, tx, tenantID); err != nil {
+		return time.Time{}, err
+	}
+	if err := usage.RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
 		return time.Time{}, err
 	}
 	var e Entitlement
@@ -420,6 +428,9 @@ func EndByStatusOf(ctx context.Context, tx *sql.Tx, tenantID, provider, ref stri
 // the same items). A tenant with no granted row gets its floors only.
 func Resize(ctx context.Context, tx *sql.Tx, tenantID string, h usage.House) error {
 	if err := Lock(ctx, tx, tenantID); err != nil {
+		return err
+	}
+	if err := usage.RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `

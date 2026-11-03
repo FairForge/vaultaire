@@ -52,7 +52,7 @@ func TestConsent_TOTPAttemptsAreLimited(t *testing.T) {
 	require.NoError(t, fl.Set(ctx, "agent_grants", u.TenantID, true, "test"))
 	require.NoError(t, fl.Refresh(ctx))
 	const redirect = "https://claude.ai/api/mcp/auth_callback"
-	client, err := auth.RegisterOAuthClient(ctx, db, "Claude", []string{redirect})
+	client, err := auth.RegisterOAuthClient(ctx, db, "Claude", []string{redirect}, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM agent_oauth_clients WHERE client_id = $1`, client.ID) })
 

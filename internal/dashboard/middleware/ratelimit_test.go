@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -132,4 +134,27 @@ func TestLoginRateLimit_MapIsSweptInline(t *testing.T) {
 	if rl.Len() >= before {
 		t.Fatalf("expected idle entries to be swept: before=%d after=%d", before, rl.Len())
 	}
+}
+
+// RP92-5: an IPv6 /64 is one key, and a map past its cap evicts its OLDEST
+// entries — it used to be replaced whole, so 20,001 addresses zeroed every
+// counter, a per-day cap included.
+func TestRateLimiter_IPv6BySlash64AndEvictsOldest(t *testing.T) {
+	rl := NewRateLimiter(24*time.Hour, 2)
+	assert.True(t, rl.Allow("2001:db8:1:2::1"))
+	assert.True(t, rl.Allow("2001:db8:1:2:ffff::7"))
+	assert.False(t, rl.Allow("2001:db8:1:2:abcd::9"), "a third address of the same /64 is over the network's limit")
+	assert.True(t, rl.Allow("2001:db8:1:3::1"), "another /64 is another key")
+
+	// A flood of distinct networks past the cap.
+	for i := 0; i <= rateLimitMaxEntries; i++ {
+		rl.Allow(fmt.Sprintf("2001:db8:ffff:%x::1", i))
+		if i == rateLimitMaxEntries-50 {
+			// The spent network is seen again late in the flood: it is
+			// not among the oldest, so it is not evicted.
+			assert.False(t, rl.Allow("2001:db8:1:2::1"))
+		}
+	}
+	assert.LessOrEqual(t, rl.Len(), rateLimitMaxEntries+1, "bounded")
+	assert.False(t, rl.Allow("2001:db8:1:2::1"), "the spent network's counter survived the flood")
 }

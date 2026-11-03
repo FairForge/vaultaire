@@ -22,6 +22,7 @@ package clientip
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 )
 
@@ -155,4 +156,28 @@ func TrustedPeer(r *http.Request) string {
 // token is refused, whatever headers it sends.
 func PeerIsCloudflare(r *http.Request) bool {
 	return IsCloudflare(net.ParseIP(trustedPeer(r)))
+}
+
+// Network is the key a limit counts an address under (RP92-5): an IPv6
+// peer's /64 — one residential customer holds a whole /64, so counting by
+// address is free to evade — and an IPv4 peer (or an IPv4-mapped IPv6
+// one) as its /32, both in CIDR form ("2001:db8:1:2::/64",
+// "198.51.100.7/32") so the same string is a Postgres CIDR for
+// `created_ip <<= $1`. A zone is dropped. A key that is no address is
+// returned unchanged (a limiter's own key).
+func Network(ip string) string {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap().WithZone("")
+	bits := 32
+	if addr.Is6() {
+		bits = 64
+	}
+	p, err := addr.Prefix(bits)
+	if err != nil {
+		return ip
+	}
+	return p.String()
 }

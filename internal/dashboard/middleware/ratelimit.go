@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -79,6 +80,9 @@ func (rl *LoginRateLimiter) Limit(next http.Handler) http.Handler {
 }
 
 func (rl *LoginRateLimiter) getLimiter(ip string) *rate.Limiter {
+	// An IPv6 peer is counted by its /64, an IPv4 one by its address
+	// (RP92-5: one customer's /64 was 2^64 fresh counters).
+	ip = clientip.Network(ip)
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -106,13 +110,12 @@ func (rl *LoginRateLimiter) Cleanup() {
 	rl.cleanupLocked(time.Now())
 }
 
-// cleanupLocked drops idle entries; a runaway map is reset outright. Caller
-// holds mu.
+// cleanupLocked drops idle entries; a map still past rateLimitMaxEntries
+// loses its OLDEST entries (least recently seen) down to nine tenths of the
+// cap. It used to be replaced whole, which zeroed every counter — a
+// per-day cap included — for whoever sent 20,001 addresses (RP92-5).
+// Caller holds mu.
 func (rl *LoginRateLimiter) cleanupLocked(now time.Time) {
-	if len(rl.limiters) > rateLimitMaxEntries {
-		rl.limiters = make(map[string]*visitorLimiter)
-		return
-	}
 	idle := rl.idle
 	if idle < rateLimitIdle {
 		idle = rateLimitIdle
@@ -122,6 +125,21 @@ func (rl *LoginRateLimiter) cleanupLocked(now time.Time) {
 		if v.lastSeen.Before(cutoff) {
 			delete(rl.limiters, ip)
 		}
+	}
+	if len(rl.limiters) <= rateLimitMaxEntries {
+		return
+	}
+	type seen struct {
+		key  string
+		last time.Time
+	}
+	all := make([]seen, 0, len(rl.limiters))
+	for k, v := range rl.limiters {
+		all = append(all, seen{k, v.lastSeen})
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].last.Before(all[j].last) })
+	for _, e := range all[:len(all)-rateLimitMaxEntries*9/10] {
+		delete(rl.limiters, e.key)
 	}
 }
 

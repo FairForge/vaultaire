@@ -611,6 +611,14 @@ func (h *WebhookHandler) applyHouse(ctx context.Context, tenantID string, sub *s
 		}); errors.Is(err, payments.ErrInvalidOrder) {
 			h.houseInvalid(ctx, tenantID, sub, order, err)
 			return true, nil
+		} else if errors.Is(err, payments.ErrInAFamily) {
+			// A sponsored family member holds no house of its own (RP92-1):
+			// the event is recorded and skipped, never a 500 — Stripe
+			// would retry it for three days. The subscription stays
+			// Stripe's to cancel (an operator's, D-STRIPE-96).
+			h.logger.Warn("stripe webhook: house skipped — the tenant is a sponsored family member (the organizer's pool pays)",
+				zap.String("tenant", tenantID), zap.String("subscription", sub.ID), zap.String("status", string(sub.Status)))
+			return true, nil
 		} else if err != nil {
 			return true, fmt.Errorf("grant house for tenant %s: %w", tenantID, err)
 		}

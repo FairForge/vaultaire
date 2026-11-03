@@ -251,6 +251,13 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {
+		if p.Table == "agent_oauth_clients" && p.Action == retentionScrubColumns {
+			// The registering address (RP92-5): "its internet address
+			// 2 days" — the client row is the delete policy's.
+			assert.Equal(t, 2*24*time.Hour, p.MaxAge)
+			assert.Equal(t, []string{"created_ip"}, p.ScrubColumns)
+			continue
+		}
 		got[p.Table] = p.MaxAge
 		if p.Table == "waitlist_signups" {
 			assert.Equal(t, retentionScrubColumns, p.Action)

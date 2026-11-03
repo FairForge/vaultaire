@@ -162,3 +162,39 @@ func TestFamily_MemberSuspendedOnlyForItsOwnAbuse(t *testing.T) {
 	assert.False(t, isTenantSuspended(ctx, f.db, b.user.TenantID), "never its family")
 	assert.False(t, isTenantSuspended(ctx, f.db, f.user.TenantID), "nor its organizer")
 }
+
+// RP92-1: a member that holds a paid house of its own (one granted before
+// the house writers refused a sponsored member, or by an operator) keeps it
+// when it detaches — never the free tier over what it paid for.
+func TestFamily_DetachKeepsAPaidHouse(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement().withFamily()
+	m := f.familyOf(4096)
+	_, err := f.db.Exec(`INSERT INTO entitlements (tenant_id, std_tb, vault_tb, period, paid_through, renewal, provider)
+		VALUES ($1, 2, 1, 'monthly', NOW() + interval '20 days', 'auto', 'manual')`, m.user.TenantID)
+	require.NoError(t, err)
+	_, err = f.db.Exec(`INSERT INTO tenant_floor_quotas (tenant_id, floor, storage_limit_bytes, storage_used_bytes)
+		VALUES ($1, 'standard', $2, 4096), ($1, 'vault', $3, 0)
+		ON CONFLICT (tenant_id, floor) DO UPDATE SET storage_limit_bytes = EXCLUDED.storage_limit_bytes`,
+		m.user.TenantID, 2*usage.TB, usage.TB)
+	require.NoError(t, err)
+
+	code, out := f.call(http.MethodDelete, "/api/v1/manage/family/members/"+m.user.TenantID, f.jwt, nil)
+	require.Equal(t, http.StatusOK, code, out)
+
+	var limit int64
+	var tier string
+	require.NoError(t, f.db.QueryRow(`SELECT storage_limit_bytes, tier FROM tenant_quotas WHERE tenant_id = $1`, m.user.TenantID).Scan(&limit, &tier))
+	assert.Equal(t, 3*usage.TB, limit, "the house it paid for, not the free tier")
+	assert.Equal(t, "standard", tier)
+	assert.EqualValues(t, 2*usage.TB, countRows(t, f.db, `SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = $1 AND floor = 'standard'`, m.user.TenantID))
+	assert.EqualValues(t, usage.TB, countRows(t, f.db, `SELECT storage_limit_bytes FROM tenant_floor_quotas WHERE tenant_id = $1 AND floor = 'vault'`, m.user.TenantID))
+
+	// A LAPSED entitlement is no house: the free tier, as before.
+	m2 := f.familyOf(4096)
+	_, err = f.db.Exec(`INSERT INTO entitlements (tenant_id, std_tb, period, paid_through, renewal, provider, lapsed_at)
+		VALUES ($1, 1, 'monthly', NOW() - interval '20 days', 'prepaid', 'manual', NOW() - interval '1 day')`, m2.user.TenantID)
+	require.NoError(t, err)
+	code, out = f.call(http.MethodPost, "/api/v1/manage/family/leave", m2.jwt, nil)
+	require.Equal(t, http.StatusOK, code, out)
+	f.assertDetached(m2.user.TenantID, 4096)
+}

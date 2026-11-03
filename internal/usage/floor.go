@@ -20,8 +20,15 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
+
+// ErrInAFamily: the tenant is a sponsored family member (child_kind =
+// 'sponsored') — the organizer's pool pays for it, so it never holds a
+// house of its own (RP92-1, D-STRIPE-96: "leave the family first"; 409
+// in_a_family wherever a person asked for one).
+var ErrInAFamily = errors.New("in_a_family")
 
 // Floors. The internal ids stay standard/vault; customers read
 // "downstairs" and "attic" (docs/DESIGN.md §1).
@@ -105,6 +112,9 @@ func (m *QuotaManager) SetHouse(ctx context.Context, tenantID string, h House) e
 // payments.Grant writes the entitlement and the floors in one). The total
 // is locked before the floors, as every writer takes them (ledger_tx.go).
 func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error {
+	if err := RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE tenant_quotas
 		    SET storage_limit_bytes = $1, tier = $2, pin_hot_bytes = $3, updated_at = NOW()
@@ -149,6 +159,28 @@ func SetHouseTx(ctx context.Context, tx *sql.Tx, tenantID string, h House) error
 		         WHERE c.pool_root_id = $1 AND c.id <> $1) f
 		ON CONFLICT (tenant_id, floor) DO NOTHING`, tenantID); err != nil {
 		return fmt.Errorf("set house for tenant %s: children's floors: %w", tenantID, err)
+	}
+	return nil
+}
+
+// RefuseSponsoredTx is ErrInAFamily when the tenant is a sponsored family
+// member (RP92-1). It takes the tenant row FOR SHARE — the row the join
+// (auth.AcceptFamilyInvitation) and the detach lock FOR UPDATE before any
+// quota row — so a house write and a join of the same tenant run one after
+// the other: either the join sees the live entitlement and refuses, or the
+// write sees 'sponsored' and refuses. Called before any quota row is
+// touched (the join's order: tenants, then tenant_quotas). A tenant with
+// no tenants row (a bare quota row of a test) is not refused.
+func RefuseSponsoredTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	var kind sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT child_kind FROM tenants WHERE id = $1 FOR SHARE`, tenantID).Scan(&kind)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("house for tenant %s: read the tree: %w", tenantID, err)
+	case kind.String == "sponsored":
+		return fmt.Errorf("house for tenant %s: %w", tenantID, ErrInAFamily)
 	}
 	return nil
 }

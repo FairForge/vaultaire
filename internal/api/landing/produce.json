@@ -546,6 +546,18 @@
       "what": "An AI agent's registration with our sign-in service (its name and return addresses), deleted once no one has used it for 30 days and no live agent connection names it."
     },
     {
+      "table": "agent_oauth_clients",
+      "days": 2,
+      "action": "scrub",
+      "scrub": [
+        "created_ip"
+      ],
+      "holds": [
+        "created_ip"
+      ],
+      "what": "The internet address an AI agent's registration came from (what limits how many one network may register a day) is blanked two days later; the registration itself is kept."
+    },
+    {
       "table": "agent_oauth_codes",
       "days": 1,
       "action": "delete",

@@ -12,6 +12,8 @@ import (
 
 	"github.com/lib/pq"
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/usage"
 )
 
 // The provider interface (WP-PAY-2, docs/PAYMENTS.md § 2): a provider is one
@@ -215,6 +217,11 @@ var (
 	// ErrLiveSubscription: the provider already bills this tenant (Stripe's
 	// HasLiveSubscription — R10-05).
 	ErrLiveSubscription = errors.New("live_subscription")
+	// ErrInAFamily: the tenant is a sponsored family member — its house is
+	// the organizer's pool (409 in_a_family, RP92-1). The same error as
+	// usage's, so a grant refused at the floors and a checkout refused here
+	// are one errors.Is.
+	ErrInAFamily = usage.ErrInAFamily
 )
 
 // FlagPrefix + a provider's name is its flag (pay_stripe, pay_btcpay).
@@ -385,6 +392,11 @@ func StartCheckout(ctx context.Context, r *Registry, tenantID, provider string, 
 			if lockTimedOut(err) {
 				return fmt.Errorf("tenant %s: the entitlement lock was not free within %s: %w", tenantID, checkoutLockTimeout, ErrProviderUnavailable)
 			}
+			return err
+		}
+		// A sponsored family member buys nothing (RP92-1): refused under
+		// the lock, before the provider is called.
+		if err := usage.RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
 			return err
 		}
 		var other, renewal string
