@@ -39,6 +39,7 @@ var appExtras = []string{
 	"GET /oauth/authorize", "HEAD /oauth/authorize",
 	"GET /.well-known/oauth-authorization-server", "HEAD /.well-known/oauth-authorization-server",
 	"GET /.well-known/security.txt", "HEAD /.well-known/security.txt",
+	"GET /robots.txt", "HEAD /robots.txt", // RP91-9: Disallow: /
 }
 
 func walk(t *testing.T, h http.Handler) []string {
@@ -115,7 +116,7 @@ func TestAppHost_ServesOnlyTheDashboard(t *testing.T) {
 			{http.MethodGet, "/status"}, {http.MethodGet, "/my-bucket/key"}, {http.MethodGet, "/metrics"},
 			{http.MethodGet, "/health"}, {http.MethodGet, "/version"}, {http.MethodGet, "/api/v1/manage/buckets"},
 			{http.MethodGet, "/translog/checkpoint"}, {http.MethodGet, "/cdn/x/y/z"}, {http.MethodGet, "/llms.txt"},
-			{http.MethodGet, "/openapi.json"}, {http.MethodGet, "/robots.txt"}, {http.MethodGet, "/sitemap.xml"},
+			{http.MethodGet, "/openapi.json"}, {http.MethodGet, "/sitemap.xml"},
 			{http.MethodPost, "/auth/login"}, {http.MethodPost, "/auth/register"}, {http.MethodPost, "/oauth/token"},
 			{http.MethodPost, "/oauth/register"}, {http.MethodPut, "/my-bucket/key"}, {http.MethodDelete, "/my-bucket"},
 			{http.MethodPost, "/webhook/stripe"},
@@ -150,6 +151,33 @@ func TestAppHost_ServesOnlyTheDashboard(t *testing.T) {
 			assert.NotContains(t, body, "app.stored.cloud", p)
 		}
 	})
+}
+
+// TestAppHost_NeverIndexed (RP91-9): the app host is no page to index —
+// /login, /verify, /reset-password and its copy of /legal/privacy were
+// indexable. Its robots.txt disallows everything, and every answer (a page, a
+// redirect, the pixel 404, a signed request's 404) says noindex.
+func TestAppHost_NeverIndexed(t *testing.T) {
+	h := fullServer(t)
+	for _, host := range appHostNames {
+		for _, m := range []string{http.MethodGet, http.MethodHead} {
+			w := serve(h, hostRequest(m, host, "/robots.txt", false, false))
+			require.Equal(t, http.StatusOK, w.Code, m+" "+host)
+			assert.True(t, strings.HasPrefix(w.Header().Get("Content-Type"), "text/plain"), w.Header().Get("Content-Type"))
+			if m == http.MethodGet {
+				assert.Equal(t, "User-agent: *\nDisallow: /\n", w.Body.String())
+			}
+		}
+		for _, p := range []string{"/", "/login", "/forgot-password", "/legal/privacy", "/dashboard", "/robots.txt", "/no-such-page", "/.well-known/security.txt"} {
+			w := serve(h, hostRequest(http.MethodGet, host, p, false, true))
+			assert.Equal(t, "noindex", w.Header().Get("X-Robots-Tag"), "%s%s (%d)", host, p, w.Code)
+		}
+		for name, req := range credentialShapes(http.MethodGet, host, "/login") {
+			assert.Equal(t, "noindex", serve(h, req).Header().Get("X-Robots-Tag"), name)
+		}
+	}
+	// The canonical origin's pages are indexable as before.
+	assert.Empty(t, serve(h, hostRequest(http.MethodGet, "stored.cloud", "/login", false, true)).Header().Get("X-Robots-Tag"))
 }
 
 // TestAppHost_SessionIsHostOnly signs in on app.stored.cloud for real (the

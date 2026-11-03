@@ -15,7 +15,9 @@ import (
 // dashboard.RegisterRoutes mounts — on a fresh router, with the canonical
 // origin's sessions, lockout and pending-2FA store (dashboardDeps) — plus the
 // agent consent's /oauth/authorize, the authorization-server metadata (its
-// issuer stays the canonical origin, RFC 8414 § 3.3) and security.txt. `/`
+// issuer stays the canonical origin, RFC 8414 § 3.3), security.txt and a
+// robots.txt that disallows everything; every answer says X-Robots-Tag:
+// noindex (RP91-9). `/`
 // sends to /dashboard. Everything else — the landing, the docs, the
 // management and auth JSON APIs, the S3 API — is the pixel 404, never cached,
 // and a request carrying S3 credentials is a 404 on every path (Architecture
@@ -54,7 +56,7 @@ var socialSignInStarts = map[string]bool{"/auth/google": true, "/auth/github": t
 func (s *Server) newAppRouter() http.Handler {
 	h := s.hostSet()
 	r := chi.NewRouter()
-	r.Use(s.requestIDMiddleware, s.requestLimitsMiddleware, s.versionMiddleware, s.loggingMiddleware, appGate(h))
+	r.Use(appNoindex, s.requestIDMiddleware, s.requestLimitsMiddleware, s.versionMiddleware, s.loggingMiddleware, appGate(h))
 	r.NotFound(docsNotFound)
 	r.MethodNotAllowed(docsNotFound)
 
@@ -70,11 +72,35 @@ func (s *Server) newAppRouter() http.Handler {
 		"/oauth/authorize":                        s.handleOAuthAuthorize,
 		"/.well-known/oauth-authorization-server": s.handleOAuthMetadata,
 		"/.well-known/security.txt":               s.handleSecurityTxt,
+		"/robots.txt":                             appRobotsTxt,
 	} {
 		r.Get(path, fn)
 		r.Head(path, fn)
 	}
 	return r
+}
+
+// appRobotsBody is the app host's robots.txt (RP91-9): nothing on it is a
+// page to index — the sign-in, the reset and verify links, its copy of the
+// legal pages (the canonical origin's are the indexed ones).
+const appRobotsBody = "User-agent: *\nDisallow: /\n"
+
+func appRobotsTxt(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write([]byte(appRobotsBody))
+}
+
+// appNoindex marks every app-host answer noindex (RP91-9), whatever route —
+// or 404 — answers it.
+func appNoindex(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // appGate runs before every app-host route: a request carrying S3
