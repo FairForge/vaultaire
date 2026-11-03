@@ -478,6 +478,10 @@ type MemberRemoval struct {
 	KeysMade    []MadeKey
 	KeysRevoked bool
 	STSTokens   int64
+	// AgentKeys: the S3 keys of the member's agent grants, revoked with the
+	// grants whatever revokeKeys says (RP90-2/RP90-4) — the caller drops
+	// them from its key cache.
+	AgentKeys []RevokedAgentKey
 }
 
 // RemoveMember removes a member's row — never a tenant, never the user's
@@ -538,6 +542,11 @@ func RemoveMember(ctx context.Context, db *sql.DB, tenantID, userID string, revo
 		}
 		res.KeysRevoked = true
 	}
+	// An agent acts FOR a person: the person left, every grant they gave on
+	// this tenant stops — its keys and the S3 keys it minted (RP90-2/4).
+	if res.AgentKeys, err = revokeMembersAgentGrantsTx(ctx, tx, tenantID, userID); err != nil {
+		return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tenant_members WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
 		return res, fmt.Errorf("remove %s from %s: %w", userID, tenantID, err)
 	}
@@ -557,6 +566,19 @@ func (a *AuthService) ForgetRevokedKeys(tenantID string, keys []MadeKey) {
 	defer a.cacheMu.Unlock()
 	for _, k := range keys {
 		if live := a.findOwnedKeyLocked(tenantID, k.ID); live != nil && live.RevokedAt == nil {
+			a.markRevokedLocked(live, now)
+		}
+	}
+}
+
+// ForgetAgentKeys marks the S3 keys a grant's revoke revoked (rows already
+// revoked by its transaction, RP90-2) in this process's key cache.
+func (a *AuthService) ForgetAgentKeys(keys []RevokedAgentKey) {
+	now := time.Now()
+	a.cacheMu.Lock()
+	defer a.cacheMu.Unlock()
+	for _, k := range keys {
+		if live := a.findOwnedKeyLocked(k.TenantID, k.ID); live != nil && live.RevokedAt == nil {
 			a.markRevokedLocked(live, now)
 		}
 	}

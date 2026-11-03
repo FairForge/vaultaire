@@ -255,41 +255,103 @@ func RenewAgentGrant(ctx context.Context, db *sql.DB, tenantID, id string) (*Age
 	return GetAgentGrant(ctx, db, tenantID, id)
 }
 
-// RevokeAgentGrant revokes the tenant's grant: both its keys, at once. It
-// answers the live S3 keys the grant minted, for the caller to revoke
-// through AuthService.RevokeAPIKey (the hot index, their STS tokens, the
-// audit row) — they die with the grant, as a token dies with its parent.
-func RevokeAgentGrant(ctx context.Context, db *sql.DB, tenantID, id string) ([]string, error) {
+// RevokeAgentGrant revokes the tenant's grant in ONE transaction: both its
+// management keys, every S3 key it minted (on the account and on its
+// sandbox) and their STS tokens — they die with the grant, as a token dies
+// with its parent (D-STRIPE-78, RP90-2: they used to be revoked by the
+// caller key by key after the commit, and a failed call left one live).
+// It answers the S3 keys it revoked, for the caller to drop from its key
+// cache (AuthService.ForgetAgentKeys).
+func RevokeAgentGrant(ctx context.Context, db *sql.DB, tenantID, id string) ([]RevokedAgentKey, error) {
 	if !isUUID(id) {
 		return nil, ErrAgentGrantNotFound
 	}
-	res, err := db.ExecContext(ctx, `UPDATE management_keys k SET revoked_at = NOW()
-		  FROM agent_grants g
-		 WHERE g.tenant_id = $1 AND g.id = $2::uuid AND k.revoked_at IS NULL
-		   AND (k.id = g.management_key_id OR k.id = g.test_management_key_id)`, tenantID, id)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("revoke agent grant %s: %w", id, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		if _, err := GetAgentGrant(ctx, db, tenantID, id); err != nil {
-			return nil, err
-		}
+	defer func() { _ = tx.Rollback() }()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM agent_grants WHERE tenant_id = $1 AND id = $2::uuid)`, tenantID, id).
+		Scan(&exists); err != nil {
+		return nil, fmt.Errorf("revoke agent grant %s: %w", id, err)
 	}
-	rows, err := db.QueryContext(ctx, `SELECT id::text, tenant_id FROM api_keys
-		 WHERE agent_grant_id = $1::uuid AND revoked_at IS NULL AND NOT is_primary ORDER BY created_at`, id)
+	if !exists {
+		return nil, ErrAgentGrantNotFound
+	}
+	keys, err := revokeAgentGrantsTx(ctx, tx, []string{id})
 	if err != nil {
-		return nil, fmt.Errorf("the keys of agent grant %s: %w", id, err)
+		return nil, fmt.Errorf("revoke agent grant %s: %w", id, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("revoke agent grant %s: %w", id, err)
+	}
+	return keys, nil
+}
+
+// RevokedAgentKey is one S3 key a grant's revoke revoked.
+type RevokedAgentKey struct{ TenantID, ID string }
+
+// revokeAgentGrantsTx is the ONE revoke of grants (RP90-2): their live and
+// test management keys, then every S3 key they minted and those keys' STS
+// tokens, in tx. Used by RevokeAgentGrant and RemoveMember; the erasure's
+// rule (internal/account/erase.go) is the same statements by granted_by.
+func revokeAgentGrantsTx(ctx context.Context, tx *sql.Tx, grantIDs []string) ([]RevokedAgentKey, error) {
+	if len(grantIDs) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE management_keys k SET revoked_at = NOW()
+		  FROM agent_grants g
+		 WHERE g.id = ANY($1::uuid[]) AND k.revoked_at IS NULL
+		   AND (k.id = g.management_key_id OR k.id = g.test_management_key_id)`, pq.Array(grantIDs)); err != nil {
+		return nil, fmt.Errorf("revoke the grants' management keys: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sts_tokens
+		 WHERE parent_key_id IN (SELECT key_id FROM api_keys WHERE agent_grant_id = ANY($1::uuid[]))`, pq.Array(grantIDs)); err != nil {
+		return nil, fmt.Errorf("delete the grants' STS tokens: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `UPDATE api_keys SET revoked_at = NOW()
+		 WHERE agent_grant_id = ANY($1::uuid[]) AND revoked_at IS NULL AND NOT is_primary
+		RETURNING COALESCE(tenant_id, ''), id::text`, pq.Array(grantIDs))
+	if err != nil {
+		return nil, fmt.Errorf("revoke the grants' S3 keys: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var keys []string
+	var out []RevokedAgentKey
 	for rows.Next() {
-		var k, t string
-		if err := rows.Scan(&k, &t); err != nil {
-			return nil, fmt.Errorf("the keys of agent grant %s: %w", id, err)
+		var k RevokedAgentKey
+		if err := rows.Scan(&k.TenantID, &k.ID); err != nil {
+			return nil, fmt.Errorf("revoke the grants' S3 keys: %w", err)
 		}
-		keys = append(keys, t+"/"+k)
+		out = append(out, k)
 	}
-	return keys, rows.Err()
+	return out, rows.Err()
+}
+
+// revokeMembersAgentGrantsTx revokes, in tx, every grant on tenantID that
+// acts for userID (granted_by), whatever else the removal does (RP90-4: an
+// agent acts FOR a person; the person left). It answers the S3 keys.
+func revokeMembersAgentGrantsTx(ctx context.Context, tx *sql.Tx, tenantID, userID string) ([]RevokedAgentKey, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id::text FROM agent_grants WHERE tenant_id = $1 AND granted_by::text = $2`, tenantID, userID)
+	if err != nil {
+		return nil, fmt.Errorf("the agent grants of %s on %s: %w", userID, tenantID, err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("the agent grants of %s on %s: %w", userID, tenantID, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("the agent grants of %s on %s: %w", userID, tenantID, err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("the agent grants of %s on %s: %w", userID, tenantID, err)
+	}
+	return revokeAgentGrantsTx(ctx, tx, ids)
 }
 
 // AgentGrantCaps are the caps an agent grant's minted S3 keys carry (nil,

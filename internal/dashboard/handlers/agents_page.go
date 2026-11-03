@@ -95,11 +95,9 @@ func HandleAgentRevoke(db *sql.DB, authSvc *auth.AuthService, logger *zap.Logger
 			http.Redirect(w, r, "/dashboard/agents", http.StatusSeeOther)
 			return
 		}
-		for _, tk := range minted {
-			t, k, _ := strings.Cut(tk, "/")
-			if err := authSvc.RevokeAPIKey(r.Context(), t, k); err != nil && !errors.Is(err, auth.ErrKeyRevoked) {
-				logger.Warn("revoke an agent's S3 key", zap.Error(err))
-			}
+		// Revoked in the grant's own transaction (RP90-2); the cache forgets them.
+		if authSvc != nil {
+			authSvc.ForgetAgentKeys(minted)
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "agent.grant_revoked", Resource: "agent:" + id})
 		middleware.SetFlash(w, "success", "Revoked: the agent's keys stopped working.")

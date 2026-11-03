@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -126,11 +125,10 @@ func (s *Server) handleMgmtRevokeAgent(w http.ResponseWriter, r *http.Request) {
 		s.writeAgentError(w, err, "revoke the agent grant")
 		return
 	}
-	for _, tk := range minted { // "<tenant>/<key id>": a sandbox's keys are the sandbox's
-		t, k, _ := strings.Cut(tk, "/")
-		if err := s.auth.RevokeAPIKey(r.Context(), t, k); err != nil && !errors.Is(err, auth.ErrKeyRevoked) {
-			s.logger.Warn("revoke an agent's S3 key", zap.String("key_id", k), zap.Error(err))
-		}
+	// The grant's revoke revoked its S3 keys in its own transaction (RP90-2);
+	// this process's key cache forgets them.
+	if s.auth != nil {
+		s.auth.ForgetAgentKeys(minted)
 	}
 	audit.Record(r.Context(), s.db, audit.Entry{TenantID: tenantID, Action: "agent.grant_revoked", Resource: "agent:" + id})
 	writeJSON(w, http.StatusOK, map[string]any{"object": "agent_grant", "id": id, "revoked": true, "request_id": getRequestID(w)})
