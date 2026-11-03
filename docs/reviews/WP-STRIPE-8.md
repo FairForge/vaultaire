@@ -52,6 +52,7 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 - **RB14-5** — `agentMayCap` passes a key or bucket that does not exist on to the handler, which answers its own 404. An agent learns nothing new from that 404 that the list routes don't already tell it.
 - **RB14-6** — the shared family space (one more tenant in the pool with every member as a WP-TEAM-1 member) is not built. F-40 does not ask for it.
 - **RB14-7** — `edge/mcp`'s `delete_object` tool description doesn't state RP90-1's rule. The server refuses and the tool relays the refusal; the wording changes with the next Worker deploy.
+- **RB14-8** — RP90-1 closes the agent's deletes, not its overwrites. An agent key's PutObject or CopyObject onto an existing key in an UNVERSIONED bucket replaces the old bytes for good, the same loss F-41 names. The fix has the same shape: refuse an agent's write over an existing key unless the bucket is Enabled (one head-row read), or make it part of D-STRIPE-85.
 - **[OPS]** reinstall `deploy/scripts/status-push.sh` on the box (RP91-2; prod's `.env` already has `VAULTAIRE_BASE_URL`), reinstall `vaultaire-jobs.yml` (RP91-3's rule), `wrangler deploy` `edge/status` and `edge/mcp` (RP91-8/12).
 
 ## Open questions
