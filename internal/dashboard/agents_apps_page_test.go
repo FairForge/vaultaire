@@ -92,7 +92,7 @@ func TestDashboard_AgentsAndAppsPages(t *testing.T) {
 	// Agents: a grant and its pending approval.
 	g, _, err := auth.MintAgentGrant(ctx, db, u.TenantID, auth.AgentGrantOptions{AgentName: "Claude", GrantedBy: u.ID})
 	require.NoError(t, err)
-	ap, err := auth.RequestApproval(ctx, db, u.TenantID, g.ID, "bucket.delete", "bucket:photos")
+	ap, err := auth.RequestApproval(ctx, db, u.TenantID, g.ID, "bucket.delete", "bucket:photos", "")
 	require.NoError(t, err)
 	w := get("/dashboard/agents?approval=" + ap.ID)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())

@@ -82,19 +82,29 @@ func scanApproval(sc interface{ Scan(...any) error }) (*Approval, error) {
 	return &a, nil
 }
 
+// MaxPendingApprovals is the most undecided, unexpired asks one grant holds
+// (RP90-6): an agent cannot fill the person's list.
+const MaxPendingApprovals = 20
+
+// ErrTooManyApprovals: the grant already holds MaxPendingApprovals asks.
+var ErrTooManyApprovals = errors.New("too many pending approvals")
+
 // ConsumeApproval spends the grant's approved, unused, unexpired approval
 // of action on resource (true), in ONE statement: two requests never both
-// spend it.
-func ConsumeApproval(ctx context.Context, db *sql.DB, grantID, action, resource string) (string, bool, error) {
+// spend it. ref is the resource's identity as it is NOW (RP90-6: a
+// bucket's creation, a key's id): an approval asked of another identity of
+// the same name is never spent (one asked before 123 has none: by name).
+func ConsumeApproval(ctx context.Context, db *sql.DB, grantID, action, resource, ref string) (string, bool, error) {
 	var id string
 	err := db.QueryRowContext(ctx, `
 		UPDATE approvals SET used_at = NOW()
 		 WHERE id = (SELECT id FROM approvals
 		              WHERE grant_id = $1::uuid AND action = $2 AND resource = $3 AND decision = 'approved'
+		                AND (resource_ref IS NULL OR resource_ref = $4)
 		                AND used_at IS NULL AND expires_at > NOW()
 		              ORDER BY decided_at LIMIT 1 FOR UPDATE SKIP LOCKED)
 		   AND used_at IS NULL
-		RETURNING id::text`, grantID, action, resource).Scan(&id)
+		RETURNING id::text`, grantID, action, resource, ref).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -104,19 +114,28 @@ func ConsumeApproval(ctx context.Context, db *sql.DB, grantID, action, resource 
 	return id, true, nil
 }
 
-// RequestApproval is the grant's pending approval of action on resource:
-// the one already asked (and still within its 24 h), else a new one.
-func RequestApproval(ctx context.Context, db *sql.DB, tenantID, grantID, action, resource string) (*Approval, error) {
+// RequestApproval is the grant's pending approval of action on resource as
+// it is now (ref, its identity): the one already asked (and still within
+// its 24 h), else a new one — refused with ErrTooManyApprovals once the
+// grant holds MaxPendingApprovals (counted in the insert's own statement).
+func RequestApproval(ctx context.Context, db *sql.DB, tenantID, grantID, action, resource, ref string) (*Approval, error) {
 	if _, ok := ApprovalActions[action]; !ok {
 		return nil, fmt.Errorf("request an approval: unknown action %q", action)
 	}
 	var id string
 	err := db.QueryRowContext(ctx, `SELECT id::text FROM approvals
-		 WHERE grant_id = $1::uuid AND action = $2 AND resource = $3 AND decided_at IS NULL AND expires_at > NOW()
-		 ORDER BY requested_at DESC LIMIT 1`, grantID, action, resource).Scan(&id)
+		 WHERE grant_id = $1::uuid AND action = $2 AND resource = $3 AND resource_ref IS NOT DISTINCT FROM NULLIF($4, '')
+		   AND decided_at IS NULL AND expires_at > NOW()
+		 ORDER BY requested_at DESC LIMIT 1`, grantID, action, resource, ref).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		err = db.QueryRowContext(ctx, `INSERT INTO approvals (tenant_id, grant_id, action, resource) VALUES ($1, $2::uuid, $3, $4)
-			RETURNING id::text`, tenantID, grantID, action, resource).Scan(&id)
+		err = db.QueryRowContext(ctx, `INSERT INTO approvals (tenant_id, grant_id, action, resource, resource_ref)
+			SELECT $1, $2::uuid, $3, $4, NULLIF($5, '')
+			 WHERE (SELECT COUNT(*) FROM approvals
+			         WHERE grant_id = $2::uuid AND decided_at IS NULL AND expires_at > NOW()) < $6
+			RETURNING id::text`, tenantID, grantID, action, resource, ref, MaxPendingApprovals).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrTooManyApprovals
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("request an approval of %s: %w", action, err)

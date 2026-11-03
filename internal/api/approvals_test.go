@@ -148,9 +148,11 @@ func TestAgent_ApprovalGrantsOnce(t *testing.T) {
 	var used bool
 	require.NoError(t, f.db.QueryRow(`SELECT used_at IS NOT NULL FROM approvals WHERE id = $1`, id).Scan(&used))
 	assert.True(t, used)
+	// Used once; and the bucket is gone, so asking again is a 404 with no
+	// new row (RP90-6/18: an ask names a resource that exists).
 	code, out = f.call(http.MethodDelete, "/api/v1/manage/buckets/"+a, sec.Live, nil)
-	assert.Equal(t, http.StatusForbidden, code)
-	assert.Equal(t, "approval_required", errCode(out), "an approval is used once (asked again before the handler)")
+	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, "bucket_not_found", errCode(out), "an approval is used once, and an ask for nothing is a 404")
 
 	// Expired after 24 h, approved or not.
 	idB := func() string {

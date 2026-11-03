@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -54,10 +55,22 @@ func approvalResource(a *auth.ManagementKey, resource string) string {
 	return resource
 }
 
-// askApproval spends an approval of action on resource when the request is
-// an agent's (true = go on), else answers 403 approval_required naming the
-// pending approval (false).
-func (s *Server) askApproval(w http.ResponseWriter, r *http.Request, action, resource string) bool {
+// maxPendingApprovalsPerGrant is auth.MaxPendingApprovals (RP90-6).
+const maxPendingApprovalsPerGrant = auth.MaxPendingApprovals
+
+// approvalTarget is the resource an act names, as it is now: its name for
+// the person (resource), its identity (ref: a bucket's creation, a key's
+// id), and whether it exists — an ask for nothing is a 404 and no row
+// (RP90-6, RP90-18).
+type approvalTarget struct {
+	resource, ref string
+	found         bool
+}
+
+// askApproval spends an approval of the act on its target when the request
+// is an agent's (true = go on), else answers 403 approval_required naming
+// the pending approval (false) — or 404 when the target does not exist.
+func (s *Server) askApproval(w http.ResponseWriter, r *http.Request, action string, target func(*http.Request) (approvalTarget, error)) bool {
 	a := agentOf(r.Context())
 	if a == nil {
 		return true
@@ -66,8 +79,19 @@ func (s *Server) askApproval(w http.ResponseWriter, r *http.Request, action, res
 		writeManagementError(w, ErrTypeAPI, "no_database", "approvals need the database", "")
 		return false
 	}
-	res := approvalResource(a, resource)
-	id, ok, err := auth.ConsumeApproval(r.Context(), s.db, a.AgentGrantID, action, res)
+	t, err := target(r)
+	if err != nil {
+		s.logger.Error("approval: read the resource", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "the approval could not be read", "")
+		return false
+	}
+	if !t.found {
+		kind, _, _ := strings.Cut(t.resource, ":")
+		writeManagementError(w, ErrTypeNotFound, kind+"_not_found", kind+" not found", "")
+		return false
+	}
+	res := approvalResource(a, t.resource)
+	id, ok, err := auth.ConsumeApproval(r.Context(), s.db, a.AgentGrantID, action, res, t.ref)
 	if err != nil {
 		s.logger.Error("spend an approval", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "the approval could not be read", "")
@@ -78,7 +102,12 @@ func (s *Server) askApproval(w http.ResponseWriter, r *http.Request, action, res
 			Metadata: map[string]any{"approval_id": id, "action": action}})
 		return true
 	}
-	ap, err := auth.RequestApproval(r.Context(), s.db, approvalTenant(a), a.AgentGrantID, action, res)
+	ap, err := auth.RequestApproval(r.Context(), s.db, approvalTenant(a), a.AgentGrantID, action, res, t.ref)
+	if errors.Is(err, auth.ErrTooManyApprovals) {
+		writeManagementError(w, ErrTypeRateLimit, "too_many_pending_approvals",
+			"this agent already has 20 approvals waiting for the account holder: they decide those first", "")
+		return false
+	}
 	if err != nil {
 		s.logger.Error("request an approval", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "the approval could not be asked for", "")
@@ -95,22 +124,38 @@ func (s *Server) askApproval(w http.ResponseWriter, r *http.Request, action, res
 	return false
 }
 
-// requireApproval gates a route by an approval of action on the resource
-// resource(r) names.
-func (s *Server) requireApproval(action string, resource func(*http.Request) string) func(http.Handler) http.Handler {
+// requireApproval gates a route by an approval of action on the target
+// target(r) names.
+func (s *Server) requireApproval(action string, target func(*http.Request) (approvalTarget, error)) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if s.askApproval(w, r, action, resource(r)) {
+			if s.askApproval(w, r, action, target) {
 				next.ServeHTTP(w, r)
 			}
 		})
 	}
 }
 
-func bucketResource(r *http.Request) string { return "bucket:" + chi.URLParam(r, "name") }
+// bucketTarget is the {name} bucket of the active tenant: its identity is
+// its creation (a re-created bucket of the same name is another one).
+func (s *Server) bucketTarget(r *http.Request) (approvalTarget, error) {
+	name := chi.URLParam(r, "name")
+	t := approvalTarget{resource: "bucket:" + name}
+	var created time.Time
+	err := s.db.QueryRowContext(r.Context(), `SELECT created_at FROM buckets WHERE tenant_id = $1 AND name = $2`, activeTenant(r), name).Scan(&created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return t, nil
+	}
+	if err != nil {
+		return t, err
+	}
+	t.ref, t.found = created.UTC().Format(time.RFC3339Nano), true
+	return t, nil
+}
 
 // agentKeyRevoke lets an agent revoke an S3 key its grant minted; any
-// other key asks for approval.
+// other key asks for approval. A key that does not exist is a 404 before
+// any row (RP90-18).
 func (s *Server) agentKeyRevoke(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a := agentOf(r.Context())
@@ -120,12 +165,18 @@ func (s *Server) agentKeyRevoke(next http.Handler) http.Handler {
 		}
 		id := chi.URLParam(r, "id")
 		var own bool
+		target := approvalTarget{resource: "key:" + id, ref: id}
 		err := s.db.QueryRowContext(r.Context(), `SELECT agent_grant_id IS NOT DISTINCT FROM $2::uuid FROM api_keys
 			 WHERE id::text = $1 AND tenant_id = $3`, id, a.AgentGrantID, activeTenant(r)).Scan(&own)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		switch {
+		case err == nil:
+			target.found = true
+		case !errors.Is(err, sql.ErrNoRows):
 			s.logger.Error("agent key revoke: read the key", zap.Error(err))
+			writeManagementError(w, ErrTypeAPI, "internal_error", "the key could not be read", "")
+			return
 		}
-		if own || s.askApproval(w, r, "key.revoke", "key:"+id) {
+		if own || s.askApproval(w, r, "key.revoke", func(*http.Request) (approvalTarget, error) { return target, nil }) {
 			next.ServeHTTP(w, r)
 		}
 	})

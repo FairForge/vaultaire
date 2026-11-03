@@ -65,7 +65,7 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 			r.Use(s.agentNeverPrivate)
 			r.Get("/buckets/{name}", s.handleMgmtGetBucket)
 			r.With(s.requireRole(auth.ActionBucketWrite)).Patch("/buckets/{name}", s.handleMgmtPatchBucket)
-			r.With(s.requireRole(auth.ActionBucketWrite), s.requireApproval("bucket.delete", bucketResource)).Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
+			r.With(s.requireRole(auth.ActionBucketWrite), s.requireApproval("bucket.delete", s.bucketTarget)).Delete("/buckets/{name}", s.handleMgmtDeleteBucket)
 
 			r.Get("/buckets/{name}/objects", s.handleMgmtListObjects)
 			r.With(s.requireRole(auth.ActionBucketWrite)).Put("/buckets/{name}/tier", s.handleMgmtSetBucketTier)
