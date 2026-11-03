@@ -58,6 +58,8 @@ var requestSuggestions = map[string]string{
 	ErrBadDigest:                         "The Content-MD5 does not match the body: the body changed in transit, or the MD5 was computed over other bytes.",
 	ErrInvalidDigest:                     "The Content-MD5 header is not a valid base64 MD5.",
 	ErrEntityTooLarge:                    "The object or part is larger than allowed: upload it as a multipart upload, parts under 95 MB through the edge.",
+	ErrMalformedPOSTRequest:              "A browser upload is a multipart/form-data POST to /<bucket> with every field before the file (docs/API.md § Browser uploads).",
+	ErrInvalidPolicyDocument:             "The POST policy is not base64 JSON with an ISO 8601 expiration and eq / starts-with / content-length-range conditions: regenerate it with your SDK's presigned POST.",
 	ErrMalformedXML:                      "The XML body does not parse or does not match the operation's schema.",
 	ErrMethodNotAllowed:                  "This HTTP method is not allowed on this resource.",
 	ErrSignatureDoesNotMatch:             "Check the secret key, the region (us-east-1) and that nothing rewrites the request (a proxy changing headers or the path).",

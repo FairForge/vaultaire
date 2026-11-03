@@ -96,6 +96,10 @@ const (
 	ErrInvalidPart             = "InvalidPart"
 	ErrInvalidPartOrder        = "InvalidPartOrder"
 	ErrEntityTooSmall          = "EntityTooSmall"
+	// A POST policy form (WP-POST-1): a body that is no well-formed form,
+	// and a policy that does not parse — AWS's codes.
+	ErrMalformedPOSTRequest  = "MalformedPOSTRequest"
+	ErrInvalidPolicyDocument = "InvalidPolicyDocument"
 	// ErrXAmzContentChecksumMismatch: an aws-chunked body whose trailer
 	// checksum is not the body's (the edge codec verifies it, D-EDGE-31).
 	ErrXAmzContentChecksumMismatch = "XAmzContentChecksumMismatch"
@@ -139,6 +143,8 @@ var errorMessages = map[string]string{
 	ErrBadDigest:                         "The Content-MD5 you specified did not match what we received",
 	ErrInvalidDigest:                     "The Content-MD5 you specified is not valid",
 	ErrEntityTooLarge:                    "Your proposed upload exceeds the maximum allowed size",
+	ErrMalformedPOSTRequest:              "The body of your POST request is not well-formed multipart/form-data.",
+	ErrInvalidPolicyDocument:             "The content of the form does not meet the conditions specified in the policy document.",
 	ErrMalformedXML:                      "The XML you provided was not well-formed or did not validate against our published schema",
 	ErrMethodNotAllowed:                  "The specified method is not allowed against this resource",
 	ErrSignatureDoesNotMatch:             "The request signature we calculated does not match the signature you provided",
@@ -192,6 +198,8 @@ var errorStatusCodes = map[string]int{
 	ErrBadDigest:                         http.StatusBadRequest,
 	ErrInvalidDigest:                     http.StatusBadRequest,
 	ErrEntityTooLarge:                    http.StatusRequestEntityTooLarge,
+	ErrMalformedPOSTRequest:              http.StatusBadRequest,
+	ErrInvalidPolicyDocument:             http.StatusBadRequest,
 	ErrMalformedXML:                      http.StatusBadRequest,
 	ErrMethodNotAllowed:                  http.StatusMethodNotAllowed,
 	ErrSignatureDoesNotMatch:             http.StatusForbidden,
@@ -299,6 +307,7 @@ func setS3ErrorHeaders(w http.ResponseWriter) {
 type ErrorContext struct {
 	Suggestion string
 	Message    string
+	Status     int // 0 = the code's
 }
 
 // ErrorOption configures an ErrorContext.
@@ -315,6 +324,13 @@ func WithSuggestion(s string) ErrorOption {
 // is not that).
 func WithMessage(m string) ErrorOption {
 	return func(ec *ErrorContext) { ec.Message = m }
+}
+
+// WithStatus answers the code with another HTTP status — AWS's own pairing
+// where one code has two (EntityTooLarge is 413 to a PUT, 400 to a POST
+// form over its policy's content-length-range).
+func WithStatus(code int) ErrorOption {
+	return func(ec *ErrorContext) { ec.Status = code }
 }
 
 // WriteS3ErrorWithContext writes an S3-compatible error response with optional
@@ -345,6 +361,9 @@ func WriteS3ErrorWithContext(w http.ResponseWriter, code string, resource string
 	statusCode, exists := errorStatusCodes[code]
 	if !exists {
 		statusCode = http.StatusInternalServerError
+	}
+	if ec.Status != 0 {
+		statusCode = ec.Status
 	}
 
 	requestID = s3RequestIDOf(w, requestID) // the request's one id (RP78-3)
