@@ -1606,6 +1606,11 @@ func (s *Server) loginSecondFactor(ctx context.Context, userID, code string) (vi
 	if code == "" {
 		return "api:totp", "code_required"
 	}
+	// One per-user counter of wrong codes for every verifier site (RP90-7):
+	// locked, no code is tried.
+	if s.auth.TOTPLocked(userID) {
+		return "api:totp", "locked"
+	}
 	secret, err := s.auth.GetMFASecret(ctx, userID)
 	if err == nil && s.mfaService != nil && s.mfaService.ValidateCode(secret, code) {
 		if !s.auth.ConsumeTOTPCode(userID, code) {
@@ -1617,8 +1622,10 @@ func (s *Server) loginSecondFactor(ctx context.Context, userID, code string) (vi
 		return "api:backup_code", ""
 	}
 	if looksLikeTOTP(code) {
+		s.auth.NoteTOTPFailure(ctx, userID, "api_login")
 		return "api:totp", "bad_code"
 	}
+	s.auth.NoteTOTPFailure(ctx, userID, "api_login")
 	return "api:backup_code", "bad_code"
 }
 

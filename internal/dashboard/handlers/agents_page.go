@@ -128,9 +128,16 @@ func HandleApprovalDecide(db *sql.DB, authSvc *auth.AuthService, mfa *auth.MFASe
 			}
 			if act.Destructive {
 				code := strings.TrimSpace(r.FormValue("totp_code"))
-				secret, err := authSvc.GetMFASecret(r.Context(), sd.UserID)
-				if code == "" || err != nil || secret == "" || mfa == nil || !mfa.ValidateCode(secret, code) || !authSvc.ConsumeTOTPCode(sd.UserID, code) {
-					middleware.SetFlash(w, "error", "Enter the current code of your authenticator app to approve this.")
+				var v auth.TOTPValidator
+				if mfa != nil {
+					v = mfa
+				}
+				if err := authSvc.CheckFreshTOTP(r.Context(), v, sd.UserID, code, "approval"); err != nil {
+					msg := "Enter the current code of your authenticator app to approve this."
+					if errors.Is(err, auth.ErrTOTPLocked) {
+						msg = "Too many wrong codes: wait 15 minutes, then try again."
+					}
+					middleware.SetFlash(w, "error", msg)
 					http.Redirect(w, r, back, http.StatusSeeOther) // #nosec G710 -- a fixed local path, the id a validated uuid
 					return
 				}

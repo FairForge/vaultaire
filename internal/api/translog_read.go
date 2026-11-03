@@ -362,13 +362,16 @@ func (s *Server) handleTranslogCeremony(w http.ResponseWriter, r *http.Request) 
 		fail(http.StatusForbidden, "enrol MFA on this admin account first: a ceremony entry needs a fresh code", nil)
 		return
 	}
-	secret, err := s.auth.GetMFASecret(r.Context(), actor)
-	if err != nil {
+	if _, err := s.auth.GetMFASecret(r.Context(), actor); err != nil {
 		fail(http.StatusServiceUnavailable, "the MFA state cannot be read", err)
 		return
 	}
 	code := strings.TrimSpace(req.MFACode)
-	if code == "" || !s.mfaService.ValidateCode(secret, code) || !s.auth.ConsumeTOTPCode(actor, code) {
+	if err := s.auth.CheckFreshTOTP(r.Context(), s.mfaService, actor, code, "translog_ceremony"); err != nil {
+		if errors.Is(err, auth.ErrTOTPLocked) {
+			fail(http.StatusTooManyRequests, "mfa_code: too many wrong codes, try again in 15 minutes", nil)
+			return
+		}
 		fail(http.StatusUnauthorized, "mfa_code: wrong, expired or already used", nil)
 		return
 	}

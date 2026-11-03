@@ -271,10 +271,16 @@ func (s *Server) handleMgmtDecideApproval(decision string) http.HandlerFunc {
 				writeManagementError(w, ErrTypePermission, "role_forbidden", "your role may not "+act.Says+" yourself, so it may not approve an agent doing it", "")
 				return
 			}
-			if act.Destructive && !s.freshTOTP(r, userID) {
-				writeManagementError(w, ErrTypePermission, "totp_required",
-					"approving a destructive act needs the current code of your authenticator app: {\"code\": \"123456\"}", "code")
-				return
+			if act.Destructive {
+				if err := s.freshTOTP(r, userID); errors.Is(err, auth.ErrTOTPLocked) {
+					w.Header().Set("Retry-After", "900")
+					writeManagementError(w, ErrTypeRateLimit, "mfa_locked", "too many wrong authenticator codes: try again in 15 minutes", "code")
+					return
+				} else if err != nil {
+					writeManagementError(w, ErrTypePermission, "totp_required",
+						"approving a destructive act needs the current code of your authenticator app: {\"code\": \"123456\"}", "code")
+					return
+				}
 			}
 		}
 		ap, err = auth.DecideApproval(r.Context(), s.db, tenantID, id, userID, decision)
@@ -298,19 +304,17 @@ func (s *Server) handleMgmtDecideApproval(decision string) http.HandlerFunc {
 	}
 }
 
-// freshTOTP reports whether the body's "code" is the person's current
-// TOTP code, accepted once.
-func (s *Server) freshTOTP(r *http.Request, userID string) bool {
+// freshTOTP checks the body's "code" as the person's current TOTP code,
+// accepted once, through the one per-user failure counter (RP90-7).
+func (s *Server) freshTOTP(r *http.Request, userID string) error {
 	var body struct {
 		Code string `json:"code"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10)).Decode(&body)
-	code := strings.TrimSpace(body.Code)
-	if code == "" || s.auth == nil || s.mfaService == nil || userID == "" {
-		return false
+	if s.auth == nil || s.mfaService == nil {
+		return auth.ErrTOTPInvalid
 	}
-	secret, err := s.auth.GetMFASecret(r.Context(), userID)
-	return err == nil && secret != "" && s.mfaService.ValidateCode(secret, code) && s.auth.ConsumeTOTPCode(userID, code)
+	return s.auth.CheckFreshTOTP(r.Context(), s.mfaService, userID, strings.TrimSpace(body.Code), "approval")
 }
 
 // agentS3PrivateRefused: the request's bucket, or its copy source's, is

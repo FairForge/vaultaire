@@ -1120,6 +1120,13 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 			renderErr("Invalid code. Please try again.")
 		}
 
+		// One per-user counter of wrong codes for every verifier site
+		// (RP90-7): locked, no code is tried.
+		if deps.Auth.TOTPLocked(pending.UserID) {
+			fail("locked")
+			return
+		}
+
 		// Try TOTP code first.
 		secret, sErr := deps.Auth.GetMFASecret(r.Context(), pending.UserID)
 		if sErr != nil {
@@ -1144,6 +1151,7 @@ func handleVerify2FA(baseTmpl *template.Template, deps Deps, lockout *middleware
 		}
 
 		if !valid {
+			deps.Auth.NoteTOTPFailure(r.Context(), pending.UserID, "dashboard_login")
 			fail("bad_code")
 			return
 		}

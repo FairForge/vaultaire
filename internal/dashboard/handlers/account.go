@@ -103,8 +103,10 @@ func confirmDeletionIdentity(r *http.Request, authSvc *auth.AuthService, mfa *au
 		if code == "" {
 			return "Enter the 6-digit code from your authenticator app to delete your account."
 		}
-		secret, err := authSvc.GetMFASecret(r.Context(), userID)
-		if err != nil || !mfa.ValidateCode(secret, code) || !authSvc.ConsumeTOTPCode(userID, code) {
+		if err := authSvc.CheckFreshTOTP(r.Context(), mfa, userID, code, "account_deletion"); err != nil {
+			if errors.Is(err, auth.ErrTOTPLocked) {
+				return "Too many wrong codes: wait 15 minutes, then try again."
+			}
 			return "Incorrect authenticator code."
 		}
 		return ""

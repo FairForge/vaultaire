@@ -81,6 +81,7 @@ type AuthService struct {
 	// guard against Evict (WP-R10-3) with most readers unlocked.
 	cacheMu        sync.RWMutex
 	totpUsed       map[string]map[string]time.Time // userID -> accepted TOTP codes inside the replay window (R5-15c, R12-38)
+	totpFails      map[string]*totpFailures        // userID -> wrong codes in the window, and the lock (RP90-7)
 	mfaMu          sync.RWMutex
 	verifySecret   []byte // HMAC key for email verification tokens
 	resetRates     map[string][]time.Time

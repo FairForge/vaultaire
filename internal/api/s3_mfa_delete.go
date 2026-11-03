@@ -79,20 +79,16 @@ func validateMFAHeader(ctx context.Context, authSvc *auth.AuthService,
 		return &mfaNotConfiguredError{}
 	}
 
-	secret, err := authSvc.GetMFASecret(ctx, userID)
-	if err != nil {
+	if _, err := authSvc.GetMFASecret(ctx, userID); err != nil {
 		// Enabled a moment ago: a failure here is the read, not the state.
 		return &mfaDeleteUnknownError{err: fmt.Errorf("read MFA secret of the tenant's user: %w", err)}
-	}
-
-	if !mfaSvc.ValidateCode(secret, code) {
-		return errMFARequired
 	}
 	// A code is accepted once (RFC 6238 §5.2; WP-R4-2 A.4): the dashboard's
 	// guard, shared — keyed by the tenant's user, every code accepted inside
 	// the validator's window remembered (R12-38: a guard that kept only the
-	// latest let an adjacent step's code be replayed).
-	if !authSvc.ConsumeTOTPCode(userID, code) {
+	// latest let an adjacent step's code be replayed) — and a wrong one is
+	// counted by the one per-user counter of every verifier site (RP90-7).
+	if err := authSvc.CheckFreshTOTP(ctx, mfaSvc, userID, code, "s3_mfa_delete"); err != nil {
 		return errMFARequired
 	}
 

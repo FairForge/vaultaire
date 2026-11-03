@@ -109,7 +109,9 @@ func TestAuthLogin_ARightPasswordAndTenBadCodesLockTheAccount(t *testing.T) {
 	assert.Equal(t, "Invalid credentials\n", w.Body.String(), "nothing says 'locked'")
 	assert.Empty(t, loginToken(t, w))
 
-	want := []string{"auth.login_locked api:totp", "auth.login_failed api:password locked"}
+	// The 10th wrong code also locks the user's code paths (RP90-7: one
+	// counter for every verifier site), audited once.
+	want := []string{"auth.login_locked api:totp", "auth.login_failed api:password locked", "auth.mfa_locked"}
 	for i := 0; i < 10; i++ {
 		want = append(want, "auth.mfa_failed api:totp bad_code")
 	}
