@@ -6,7 +6,9 @@
 #
 # Vars: STORED_API is the origin the management API and the OAuth server
 # answer on (the canonical web origin); STORED_S3 is the S3 endpoint the
-# object tools sign against (the origin, never s3.stored.cloud's Worker).
+# object tools sign against (the origin, never s3.stored.cloud's Worker);
+# STORED_DOCS is the docs origin the protected-resource metadata names when
+# the origin's authorization-server metadata does not answer (RP91-12).
 name = "stored-mcp"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
@@ -17,3 +19,4 @@ routes = [{ pattern = "mcp.stored.cloud/*", zone_name = "stored.cloud" }]
 STORED_API = "https://stored.cloud"
 STORED_S3 = "https://stored.ge"
 MCP_RESOURCE = "https://mcp.stored.cloud/mcp"
+STORED_DOCS = "https://docs.stored.cloud"

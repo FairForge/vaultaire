@@ -36,7 +36,8 @@ func TemplateFuncs() template.FuncMap {
 
 // hostCopy gives a template a host or an address from the one host source
 // (internal/hosts, WP-DOMAIN-1) — no template types a domain:
-// {{host "web"}} the canonical origin, {{host "s3"}} the S3 endpoint,
+// {{host "web"}} the canonical origin, {{host "app"}} the dashboard's origin
+// (hosts.AppBase — VAULTAIRE_BASE_URL, RP91-12), {{host "s3"}} the S3 endpoint,
 // {{host "s3host"}} its bare host name (s3cmd --host), {{host "cdn"}} the
 // public-object URL prefix, {{host "cdnhost"}} its host, {{host "domain"}} the canonical domain,
 // {{host "support"}} / {{host "security"}} / {{host "abuse"}} the addresses,
@@ -48,6 +49,8 @@ func hostCopy(what string) string {
 	switch what {
 	case "web":
 		return h.Canonical
+	case "app":
+		return h.AppBase()
 	case "s3":
 		return h.S3
 	case "s3host":

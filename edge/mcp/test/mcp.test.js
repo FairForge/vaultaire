@@ -17,7 +17,7 @@ beforeEach(() => {
     if (u.origin === env.STORED_API) {
       // The origin's issuer is its CANONICAL host, which need not be the
       // host the Worker reaches it on (prod: stored.ge until WP-DOMAIN-1).
-      if (u.pathname === "/.well-known/oauth-authorization-server") return j(200, { issuer: "https://issuer.test" });
+      if (u.pathname === "/.well-known/oauth-authorization-server") return j(200, { issuer: "https://issuer.test", service_documentation: "https://docs.test/api#agents" });
       if (u.pathname === "/api/v1/manage/buckets" && init.method === "POST") return j(201, { name: JSON.parse(init.body).name, mode: "standard", versioning: "Enabled" });
       if (u.pathname === "/api/v1/manage/buckets") return j(200, { data: [{ name: "notes", mode: "standard" }] });
       if (u.pathname.startsWith("/api/v1/manage/buckets/") && init.method === "DELETE")
@@ -43,6 +43,27 @@ test("no grant: 401 naming the protected-resource metadata, which names the orig
   const meta = await (await worker.fetch(new Request("https://mcp.test/.well-known/oauth-protected-resource"), env)).json();
   assert.deepEqual(meta.authorization_servers, ["https://issuer.test"], "the AS is named by the issuer the origin publishes (RFC 8414 § 3.3)");
   assert.equal(meta.resource, "https://mcp.test/mcp");
+});
+
+// RP91-12: the PRM's resource_documentation is the origin's own
+// service_documentation (hosts.DocsBase + "/api#agents" — the docs host since
+// the flip), never <issuer>/docs/api; with the origin silent, STORED_DOCS's.
+test("resource_documentation names the docs host the origin publishes", async () => {
+  const meta = await (await worker.fetch(new Request("https://mcp.test/.well-known/oauth-protected-resource"), env)).json();
+  assert.equal(meta.resource_documentation, "https://docs.test/api#agents");
+  const saved = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response("down", { status: 503 });
+    const silent = await (await worker.fetch(new Request("https://mcp.test/.well-known/oauth-protected-resource"),
+      { ...env, STORED_DOCS: "https://docs.fallback.test" })).json();
+    assert.equal(silent.resource_documentation, "https://docs.fallback.test/api#agents");
+    globalThis.fetch = async () => new Response(JSON.stringify({ issuer: "https://issuer.test", service_documentation: "javascript:alert(1)" }), { status: 200 });
+    const odd = await (await worker.fetch(new Request("https://mcp.test/.well-known/oauth-protected-resource"),
+      { ...env, STORED_DOCS: "https://docs.fallback.test" })).json();
+    assert.equal(odd.resource_documentation, "https://docs.fallback.test/api#agents", "only an https URL is taken from the origin");
+  } finally {
+    globalThis.fetch = saved;
+  }
 });
 
 test("initialize, tools/list, and a notification answers 202", async () => {
