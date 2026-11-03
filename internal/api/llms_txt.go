@@ -91,10 +91,13 @@ STS: POST /api/v1/sts/token {"duration_seconds","permissions","bucket_scope","pa
 AI agents (MCP): an MCP client connects to https://mcp.stored.cloud/mcp (OAuth 2.1 + PKCE with
   dynamic registration; the account holder consents on the dashboard with their authenticator code).
   The agent acts for that person: deleting a bucket asks them first (403 approval_required with an
-  approval_url to show them), its buckets are versioned, it never reads a Private bucket.
+  approval_url to show them), its buckets are versioned, it deletes only in a versioned bucket and
+  never a version, it never reads a Private bucket.
   Local clients: "stored mcp" (STORED_TOKEN = the agent's key).
 Apps (/api/v1/manage/apps): an account makes app children for its own users; an app's key makes
   its users at POST /api/v1/platform/tenants, inside the account's storage.
+Family (/api/v1/manage/family): up to six people share one plan, each with their own account; the
+  organizer sees how much each stores and sets caps, never their files.
 
 Conventions: single object {"object": "...", ..., "request_id"}; lists
 {"object":"list","data":[...],"has_more":bool,"next_cursor":"..."} with ?limit=&starting_after=;

@@ -651,13 +651,17 @@ The **agent grant** is a management key (§ Management keys) with `manage:write`
 - deleting a bucket, and revoking a key the grant did not mint: 403 `approval_required` with `approval_id` and `approval_url`. The person approves on the dashboard or with `POST /api/v1/manage/approvals/{id}/approve {"code": "<TOTP>"}` (their own role must allow the act; `…/deny` refuses it). An approval names one action on one resource, is used once by the agent's next identical request, and lives 24 hours;
 - a **Private** bucket, ever: the lists leave it out, every bucket route answers 403 `private_bucket`, and its S3 keys get AccessDenied;
 - what needs a person: members, exports, the erasure, management keys (403 `person_required`);
-- making anything public, turning versioning off, ACLs, Object Lock and retention (outside its S3 keys' permissions).
+- making anything public, turning versioning off, ACLs, Object Lock and retention (outside its S3 keys' permissions);
+- **deleting for good** (Stage 1a Prompt 56, RP90-1): its S3 keys delete only in a bucket whose versioning is Enabled, and never a version (`DELETE ?versionId`, a `DeleteObjects` entry with a `VersionId`) — AccessDenied naming the account holder;
+- capping a person's key or a bucket it did not create (403 `person_required`; its own keys and buckets it caps).
 
-A bucket an agent creates is **versioning-Enabled**: a mistake is a version back.
+A bucket an agent creates — on the management API or through its S3 key — is **versioning-Enabled**: a mistake is a version back. An approval is bound to the resource as it was asked for: a bucket deleted and re-created under the same name needs a new one; an ask for a bucket or key that does not exist is a 404; one grant holds at most 20 pending asks (429 `too_many_pending_approvals`). Ten wrong authenticator codes in 15 minutes, anywhere (sign-in, consent, approvals, the account's deletion), lock that person's codes for 15 minutes.
+
+Its keys stop with the grant — a revoke, the member's removal from the account (whatever `revoke_keys` says), the person's erasure — and while the account's `agent_grants` flag is off. A loopback redirect URI (`http://127.0.0.1`, `[::1]`, `localhost`) matches any port (RFC 8252 § 7.3).
 
 | Route | What |
 |---|---|
-| `GET /api/v1/manage/agents` | The grants: the agent, its client, the member it acts for, caps, expiry, last use |
+| `GET /api/v1/manage/agents` | The grants: the agent, its client, the member it acts for, caps, expiry, last use. A person's |
 | `POST /api/v1/manage/agents/{id}/renew` | A fresh 30 days on both its keys; widens nothing. A person's |
 | `DELETE /api/v1/manage/agents/{id}` | Revokes both its keys and every S3 key it minted. A person's |
 | `GET /api/v1/manage/approvals` (`?pending=1`) | What agents asked for, the last 30 days |
@@ -682,6 +686,21 @@ With its key, the app's backend makes its users — `POST /api/v1/platform/tenan
 - the person opens the link (`/dashboard/claim/{token}`, or `POST /api/v1/manage/claims/{token}`) on a verified account and keeps the app with its files and keys: it becomes an app of their account and its bytes count in their pool. Used once (410 `claim_gone` after);
 - unclaimed after 7 days, it is erased.
 
+## Family
+
+A **family** is a pool of personal accounts (`docs/ACCOUNTS.md` § A family): the organizer's plan pays, and each member keeps their own account — sign-in, keys, recovery and files. The organizer sees how much each member stores and may set a cap or remove a member; never a member's buckets, objects, keys or requests. Up to six people, the organizer included. Dark behind the `family` flag (the organizer's).
+
+| Route | What |
+|---|---|
+| `POST /api/v1/manage/family/invitations {email, code}` | The organizer (a person, the account's owner; `code` = the current code of their authenticator app) invites an address. The link (`/dashboard/family/join/{token}`) works once, for 7 days; re-inviting is the resend. 409 `family_full` (six people, pending invitations counted), `already_in_family`; 403 `totp_required`, `person_required` (a management key never invites) |
+| `POST /api/v1/manage/family/join/{token}` | The invited person, signed in to their OWN account (its owner, the invited address), attaches it: its storage then counts in the organizer's plan. 409 `member_pays_own_plan` (an account with a live paid plan joins after cancelling it), `cannot_join_family` (a child account, a sandbox, a platform, an account with apps of its own); 403 `invitation_other_address`; 410 `invitation_used` / `invitation_expired` |
+| `GET /api/v1/manage/family` | The organizer: `members` (`id`, `label` = the member's address, `storage_used_bytes`, `storage_limit_bytes` — null = the pool decides —, `joined_at`), pending `invitations`, `pool_used_bytes`, `pool_limit_bytes`. A member: `role: member` and its `organizer` |
+| `PUT /api/v1/manage/family/members/{id}/cap {storage_limit_bytes}` | The organizer caps a member inside the pool (0 or null = none) |
+| `DELETE /api/v1/manage/family/members/{id}` | The organizer removes a member |
+| `POST /api/v1/manage/family/leave` | A member leaves |
+
+A member who leaves, is removed, or whose organizer's account is erased **keeps their account and every file**: it becomes an account of its own on the free tier. Above the free tier its files stay readable and new writes are refused (403 `QuotaExceeded`) until it chooses a plan; nothing is deleted. A member is suspended only for its own abuse, never for its organizer's.
+
 ## Rate limits
 
 | Surface | Limit |
@@ -690,6 +709,7 @@ With its key, the app's backend makes its users — `POST /api/v1/platform/tenan
 | CDN | Egress counts on the bucket owner's allowance and shares its rate limit; while the owner is rate-limited, more than 16 concurrent `/cdn` downloads answer 429 + `Retry-After: 60`. Request rate: 100 requests/s, burst 200, **per bucket** (keyed `cdn:<slug>:<bucket>`, not per client); the refusal is currently a 404 — WP-R14-1 moves it to per-IP + 429 |
 | JSON API (`/api/v1/*`) | 100 requests/min per tenant, burst 10, `X-RateLimit-*` + `Retry-After` |
 | `/auth/login`, password reset | 5/min per IP; `/auth/register` 10/min per IP; `/api/waitlist` 10/hour per IP |
+| `/oauth/register`, `/oauth/token` (the MCP authorization server) | 10/min per IP each; at most 20 clients registered per IP per day; 429 `temporarily_unavailable` + `Retry-After` |
 | Email | 10 messages/min per recipient |
 
 ## SDK snippets
