@@ -15,7 +15,8 @@ type LoginRateLimiter struct {
 	limiters map[string]*visitorLimiter
 	rps      rate.Limit // tokens per second
 	burst    int
-	inserts  int // new-IP inserts since the last sweep (see getLimiter)
+	inserts  int           // new-IP inserts since the last sweep (see getLimiter)
+	idle     time.Duration // an entry unseen this long is swept (0 = rateLimitIdle)
 }
 
 // Bound the per-IP map without a goroutine: every rateLimitSweepEvery new
@@ -41,6 +42,24 @@ func NewLoginRateLimiter(perMinute int, burst int) *LoginRateLimiter {
 		rps:      rate.Limit(float64(perMinute) / 60.0),
 		burst:    burst,
 	}
+}
+
+// NewRateLimiter allows n requests per period per IP, bursting to n — the
+// login limiter's shape for any window (RP90-3: the OAuth endpoints, a day's
+// cap of registrations). An entry is kept at least a period after its IP was
+// last seen, so a long window is never reset by the sweep.
+func NewRateLimiter(period time.Duration, n int) *LoginRateLimiter {
+	return &LoginRateLimiter{
+		limiters: make(map[string]*visitorLimiter),
+		rps:      rate.Limit(float64(n) / period.Seconds()),
+		burst:    n,
+		idle:     period,
+	}
+}
+
+// Allow spends one of ip's requests (false = over the limit).
+func (rl *LoginRateLimiter) Allow(ip string) bool {
+	return rl.getLimiter(ip).Allow()
 }
 
 // Limit returns middleware that rate-limits requests by client IP.
@@ -94,7 +113,11 @@ func (rl *LoginRateLimiter) cleanupLocked(now time.Time) {
 		rl.limiters = make(map[string]*visitorLimiter)
 		return
 	}
-	cutoff := now.Add(-rateLimitIdle)
+	idle := rl.idle
+	if idle < rateLimitIdle {
+		idle = rateLimitIdle
+	}
+	cutoff := now.Add(-idle)
 	for ip, v := range rl.limiters {
 		if v.lastSeen.Before(cutoff) {
 			delete(rl.limiters, ip)

@@ -114,6 +114,8 @@ func setupRetentionFixture(t *testing.T) *retentionFixture {
 			scope = "webhook_id = '" + f.webhook + "'"
 		case "waitlist_signups":
 			scope = "email LIKE 'ret-" + id + "-%'"
+		case "agent_oauth_clients":
+			scope = "client_id LIKE 'ret-" + id + "-%'"
 		}
 		if p.Extra != "" {
 			scope += " AND " + p.Extra
@@ -242,6 +244,10 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		// The developers' request log (WP-LOG-1): "developer request
 		// records, 7 days".
 		"request_log": 7 * 24 * time.Hour,
+		// The MCP authorization server's open registrations (RP90-3):
+		// "agent connection records": a client unused 30 days, a code 24 h.
+		"agent_oauth_clients": 30 * 24 * time.Hour,
+		"agent_oauth_codes":   24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {

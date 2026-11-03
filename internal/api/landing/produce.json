@@ -534,6 +534,31 @@
       "what": "Finished webhook deliveries (a pending one is kept until it finishes)."
     },
     {
+      "table": "agent_oauth_clients",
+      "days": 30,
+      "action": "delete",
+      "holds": [
+        "client_name",
+        "redirect_uris",
+        "created_at",
+        "last_used_at"
+      ],
+      "what": "An AI agent's registration with our sign-in service (its name and return addresses), deleted once no one has used it for 30 days and no live agent connection names it."
+    },
+    {
+      "table": "agent_oauth_codes",
+      "days": 1,
+      "action": "delete",
+      "holds": [
+        "user_id",
+        "redirect_uri",
+        "agent_name",
+        "created_at",
+        "used_at"
+      ],
+      "what": "The one-time sign-in code of an agent connection (valid 10 minutes), deleted 24 hours after it was made."
+    },
+    {
       "table": "waitlist_signups",
       "days": 90,
       "action": "scrub",

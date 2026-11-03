@@ -20,14 +20,44 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/clientip"
+	dashmw "github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
+// The public OAuth endpoints' limits (RP90-3; RFC 7591 § 5): per client IP
+// (internal/clientip), whatever the agent_grants flag.
+const (
+	oauthPerMinute          = 10 // registrations, and token requests, a minute
+	oauthClientsPerIPPerDay = 20 // clients one IP may register in a day
+)
+
 func (s *Server) registerAgentOAuthRoutes() {
+	if s.oauthRegisterLimiter == nil {
+		s.oauthRegisterLimiter = dashmw.NewRateLimiter(time.Minute, oauthPerMinute)
+	}
+	if s.oauthTokenLimiter == nil {
+		s.oauthTokenLimiter = dashmw.NewRateLimiter(time.Minute, oauthPerMinute)
+	}
+	if s.oauthClientsPerDay == nil {
+		s.oauthClientsPerDay = dashmw.NewRateLimiter(24*time.Hour, oauthClientsPerIPPerDay)
+	}
 	s.router.Get("/.well-known/oauth-authorization-server", s.handleOAuthMetadata)
 	s.router.Post("/oauth/register", s.handleOAuthRegister)
 	s.router.Get("/oauth/authorize", s.handleOAuthAuthorize)
 	s.router.Post("/oauth/token", s.handleOAuthToken)
+}
+
+// oauthLimited spends one of the client IP's requests on l and answers 429
+// (an RFC 6749 error body, Retry-After) when it is over (true = stop).
+func oauthLimited(w http.ResponseWriter, r *http.Request, l *dashmw.LoginRateLimiter, retryAfter string) bool {
+	if l == nil || l.Allow(clientip.FromRequest(r)) {
+		return false
+	}
+	w.Header().Set("Retry-After", retryAfter)
+	oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many requests from this address: try again later")
+	noteS3Error(w, "oauth_rate_limited", getRequestID(w))
+	return true
 }
 
 // handleOAuthMetadata is RFC 8414's document.
@@ -57,6 +87,9 @@ func oauthError(w http.ResponseWriter, status int, code, description string) {
 // handleOAuthRegister is RFC 7591's registration: a public client (no
 // secret: PKCE is its proof).
 func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	if oauthLimited(w, r, s.oauthRegisterLimiter, "60") {
+		return
+	}
 	if s.db == nil {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "no database")
 		return
@@ -67,6 +100,9 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		oauthError(w, http.StatusBadRequest, "invalid_client_metadata", "the body must be a JSON client registration")
+		return
+	}
+	if oauthLimited(w, r, s.oauthClientsPerDay, "3600") {
 		return
 	}
 	c, err := auth.RegisterOAuthClient(r.Context(), s.db, req.ClientName, req.RedirectURIs)
@@ -122,6 +158,9 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 // the agent grant minted, its key the access token. The grant's sandbox key
 // rides along as stored_test_token (the rehearsal key, RP88-1).
 func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
+	if oauthLimited(w, r, s.oauthTokenLimiter, "60") {
+		return
+	}
 	if s.db == nil {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "no database")
 		return

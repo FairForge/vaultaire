@@ -69,6 +69,8 @@ const (
 	retentionCDNAccessLog = 2 * 24 * time.Hour // rolled into cdn_stats_daily; yesterday is re-rolled every hour (R13-03)
 	retentionWebhookDeliv = 30 * 24 * time.Hour
 	retentionWaitlistPII  = 90 * 24 * time.Hour
+	retentionOAuthClients = 30 * 24 * time.Hour // unused this long (RP90-3)
+	retentionOAuthCodes   = 24 * time.Hour      // a code lives 10 min (RP90-15)
 )
 
 // defaultRetentionPolicies is the shipped policy set.
@@ -96,6 +98,15 @@ func defaultRetentionPolicies() []retentionPolicy {
 		// rows are pruned; the privacy policy's "webhook delivery records,
 		// 30 days" covers both tables.
 		{Table: "webhook_outbox", Column: "created_at", MaxAge: retentionWebhookDeliv, Extra: "state <> 'pending'"},
+		// The MCP authorization server's open registrations (RP90-3): a client
+		// no one has used for 30 days goes — unless a live agent grant names it
+		// (its connector renews through it); a one-time code goes a day after
+		// it was made, used or not (RP90-15).
+		{Table: "agent_oauth_clients", Column: "COALESCE(last_used_at, created_at)", MaxAge: retentionOAuthClients,
+			Extra: `NOT EXISTS (SELECT 1 FROM agent_grants g JOIN management_keys k ON k.id = g.management_key_id
+			         WHERE g.client_id = agent_oauth_clients.client_id AND k.revoked_at IS NULL
+			           AND (k.expires_at IS NULL OR k.expires_at > NOW()))`},
+		{Table: "agent_oauth_codes", Column: "created_at", MaxAge: retentionOAuthCodes},
 		{Table: "waitlist_signups", Column: "created_at", MaxAge: retentionWaitlistPII,
 			Action: retentionScrubColumns, ScrubColumns: []string{"ip_address", "user_agent"},
 			Extra: "(ip_address <> '' OR user_agent <> '')"},
