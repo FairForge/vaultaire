@@ -249,7 +249,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	outcome, err := s.createBucketRegistryWith(r.Context(), tenantID, req.Name, req.Region,
-		bucketCreateOptions{private: req.Mode == modes.Private, versioned: agentOf(r.Context()) != nil})
+		bucketCreateOptions{private: req.Mode == modes.Private, versioned: agentOf(r.Context()) != nil, agentGrant: agentGrantOf(r.Context())})
 	if err != nil {
 		s.logger.Error("management create bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create bucket", "")

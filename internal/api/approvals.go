@@ -301,3 +301,11 @@ func writeAgentDeleteRefusal(w http.ResponseWriter, r *http.Request) {
 		WithMessage("An agent never deletes for good: it deletes only from a bucket with versioning Enabled, and never a version."),
 		WithSuggestion("Ask the account holder: they delete this with their own key or on the dashboard."))
 }
+
+// agentGrantOf is the grant id of the agent behind the request ("" = none).
+func agentGrantOf(ctx context.Context) string {
+	if a := agentOf(ctx); a != nil {
+		return a.AgentGrantID
+	}
+	return ""
+}
