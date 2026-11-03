@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/FairForge/vaultaire/internal/dashboard"
+	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/docs"
 	"github.com/FairForge/vaultaire/internal/hosts"
 )
@@ -54,10 +55,11 @@ func docsHostPath(slug string) string { return "/" + slug }
 // host) — is the pixel 404, never cached (D-P33-6: a 404, never a 301 to the
 // canonical origin). Its middleware is the main router's minus the alias
 // redirect and the site statistics: a request id, the request limits, the
-// version header, the access log.
+// version header, the access log — plus the dashboard's security headers
+// (docsSecurityHeaders, RP91-11).
 func (s *Server) newDocsRouter() http.Handler {
 	r := chi.NewRouter()
-	r.Use(s.requestIDMiddleware, s.requestLimitsMiddleware, s.versionMiddleware, s.loggingMiddleware)
+	r.Use(s.requestIDMiddleware, s.requestLimitsMiddleware, s.versionMiddleware, s.loggingMiddleware, docsSecurityHeaders)
 	r.NotFound(docsNotFound)
 	r.MethodNotAllowed(docsNotFound)
 	mount := func(path string, h http.HandlerFunc) {
@@ -126,4 +128,23 @@ func (s *Server) handleDocsSitemapXML(w http.ResponseWriter, r *http.Request) {
 	}
 	b.WriteString("</urlset>\n")
 	writeWebFile(w, r, "application/xml; charset=utf-8", "public, max-age=3600", []byte(b.String()))
+}
+
+// docsAPIContentSecurityPolicy is the API reference's policy (RP91-11): the
+// dashboard's (middleware.ContentSecurityPolicy) with unpkg.com added to
+// script-src and style-src, because swagger-ui loads from there. /api only:
+// no other docs page loads anything from another host.
+const docsAPIContentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data:; frame-ancestors 'none'"
+
+// docsSecurityHeaders gives every docs-host answer the dashboard's security
+// headers (CSP, X-Frame-Options DENY, nosniff, Referrer-Policy,
+// Permissions-Policy — RP91-11: the guides carried none), with the API
+// reference's own CSP on /api.
+func docsSecurityHeaders(next http.Handler) http.Handler {
+	return middleware.SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" {
+			w.Header().Set("Content-Security-Policy", docsAPIContentSecurityPolicy)
+		}
+		next.ServeHTTP(w, r)
+	}))
 }
