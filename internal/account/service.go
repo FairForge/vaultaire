@@ -378,8 +378,8 @@ func lockedStillDue(ctx context.Context, tx *sql.Tx, userID string, now time.Tim
 // erased with the sponsor): each, in its own transaction, leaves the pool —
 // its bytes leave the root's pool counter (the root's quota row locked
 // first, the ledger's order), it becomes its own root (pool_root_id), its
-// pool's counting floor rows (limit 0) go, a cap of 0 becomes freeLimit (a
-// tier of its own) — and its parent edge and kind are cleared, with an
+// pool's counting floor rows (limit 0) go, its cap becomes freeLimit (the
+// free tier of its own, whatever cap the sponsor set) — and its parent edge and kind are cleared, with an
 // account.sponsor_detached audit row on it. Its data, keys and sign-in are
 // untouched. Returns the detached ids.
 func (s *Service) DetachSponsored(ctx context.Context, parent string, freeLimit int64) ([]string, error) {
@@ -407,7 +407,7 @@ func (s *Service) DetachSponsored(ctx context.Context, parent string, freeLimit 
 	}
 	var done []string
 	for _, id := range ids {
-		if err := s.detachOne(ctx, id, freeLimit); err != nil {
+		if err := s.detachOne(ctx, id, "", freeLimit, detachReasonSponsorErased); err != nil {
 			return done, err
 		}
 		done = append(done, id)
@@ -415,15 +415,40 @@ func (s *Service) DetachSponsored(ctx context.Context, parent string, freeLimit 
 	return done, nil
 }
 
-func (s *Service) detachOne(ctx context.Context, child string, freeLimit int64) error {
+// The reasons an account.sponsor_detached row states.
+const (
+	detachReasonSponsorErased = "the sponsor's account was erased; this account keeps its data and pays for itself"
+	detachReasonRemoved       = "removed from the family by its organizer; this account keeps its data and pays for itself"
+	detachReasonLeft          = "left the family; this account keeps its data and pays for itself"
+)
+
+// ErrNotAFamilyMember: the tenant is no sponsored member (of that organizer).
+var ErrNotAFamilyMember = errors.New("not a member of this family")
+
+// detachOne detaches one sponsored child in ONE transaction. parent, when
+// set, must be the child's sponsor (ErrNotAFamilyMember otherwise — the
+// edge is read under the child's row lock, so a concurrent detach is seen).
+func (s *Service) detachOne(ctx context.Context, child, parent string, freeLimit int64, reason string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("detach %s: %w", child, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var root string
-	if err := tx.QueryRowContext(ctx, `SELECT pool_root_id FROM tenants WHERE id = $1 FOR UPDATE`, child).Scan(&root); err != nil {
+	var gotParent, kind sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT pool_root_id, parent_tenant_id, child_kind FROM tenants WHERE id = $1 FOR UPDATE`, child).
+		Scan(&root, &gotParent, &kind)
+	if errors.Is(err, sql.ErrNoRows) && parent != "" {
+		return ErrNotAFamilyMember
+	}
+	if err != nil {
 		return fmt.Errorf("detach %s: %w", child, err)
+	}
+	if kind.String != "sponsored" || (parent != "" && gotParent.String != parent) {
+		if parent == "" && kind.String != "sponsored" {
+			return fmt.Errorf("detach %s: not a sponsored child", child)
+		}
+		return ErrNotAFamilyMember
 	}
 	// The root's quota row first, then the child's (usage/ledger_tx.go).
 	if root != child {
@@ -447,7 +472,9 @@ func (s *Service) detachOne(ctx context.Context, child string, freeLimit int64) 
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE tenant_quotas
 			   SET pool_used_bytes = storage_used_bytes,
-			       storage_limit_bytes = CASE WHEN storage_limit_bytes = 0 THEN $2 ELSE storage_limit_bytes END,
+			       -- the free tier, whatever cap the sponsor set inside its pool
+			       -- (WP-FAMILY-1: a cap was the pool's, not the account's)
+			       storage_limit_bytes = $2, tier = 'free',
 			       egress_cap_bytes = 0, updated_at = NOW()
 			 WHERE tenant_id = $1`, child, freeLimit); err != nil {
 			return fmt.Errorf("detach %s: its own pool: %w", child, err)
@@ -461,8 +488,8 @@ func (s *Service) detachOne(ctx context.Context, child string, freeLimit int64) 
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_logs (tenant_id, event_type, action, resource, result, severity, metadata)
-		VALUES ($1, 'account', 'account.sponsor_detached', $2, 'success', 'info',
-		        '{"reason": "the sponsor''s account was erased; this account keeps its data and pays for itself"}'::jsonb)`, child, "tenant:"+child); err != nil {
+		VALUES ($1, 'account', 'account.sponsor_detached', $2, 'success', 'info', jsonb_build_object('reason', $3::text))`,
+		child, "tenant:"+child, reason); err != nil {
 		return fmt.Errorf("detach %s: audit: %w", child, err)
 	}
 	return tx.Commit()
@@ -552,4 +579,39 @@ func (s *Service) ScheduleSignIn(ctx context.Context, userID, reason string) (ti
 		return time.Time{}, ErrStillAMember
 	}
 	return s.Schedule(ctx, userID, "", reason)
+}
+
+// RemoveFamilyMember detaches organizer's sponsored member (WP-FAMILY-1
+// PR B): the same detach as the organizer's erasure (DetachSponsored), in
+// ONE transaction — a root again, its bytes out of the pool, freeLimit as
+// its cap (the free tier), its data, keys and sign-in untouched; over the
+// free tier it is read-only, never deleted. ErrNotAFamilyMember when the
+// tenant is no sponsored member of organizer.
+func (s *Service) RemoveFamilyMember(ctx context.Context, organizer, member string, freeLimit int64) error {
+	if s.db == nil {
+		return ErrNoDatabase
+	}
+	if organizer == "" {
+		return ErrNotAFamilyMember
+	}
+	return s.detachOne(ctx, member, organizer, freeLimit, detachReasonRemoved)
+}
+
+// LeaveFamily detaches member from whatever family sponsors it, as
+// RemoveFamilyMember does. ErrNotAFamilyMember when it is in none.
+func (s *Service) LeaveFamily(ctx context.Context, member string, freeLimit int64) (organizer string, err error) {
+	if s.db == nil {
+		return "", ErrNoDatabase
+	}
+	var parent, kind sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT parent_tenant_id, child_kind FROM tenants WHERE id = $1`, member).Scan(&parent, &kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotAFamilyMember
+		}
+		return "", fmt.Errorf("leave the family: %w", err)
+	}
+	if kind.String != "sponsored" || !parent.Valid {
+		return "", ErrNotAFamilyMember
+	}
+	return parent.String, s.detachOne(ctx, member, parent.String, freeLimit, detachReasonLeft)
 }

@@ -1293,6 +1293,36 @@ func generateManagementPaths() map[string]*PathItem {
 					"410": errResp("`invitation_used` or `invitation_expired`"),
 				})),
 		},
+		"/api/v1/manage/family/members/{id}": {
+			Parameters: []Parameter{pathParam("id", "The member's account id")},
+			Delete: mut(jsonOp("Management", "Remove a family member", "ManageFamilyRemove",
+				"The organizer (a person, the owner) removes a member: it becomes an account of its own on the free tier, its sign-in, keys and every file untouched; above the free tier its files stay readable and writes are refused until it chooses a plan; nothing is deleted. Audited `family.member_removed` and `account.sponsor_detached`.",
+				map[string]Response{
+					"200": jsonResp("Removed", objectPtr("", map[string]*Schema{"object": strEnum("", "family_member"), "id": str(""), "removed": boolean("")})),
+					"403": errResp("`person_required` or `role_forbidden`"),
+					"404": errResp("`family_member_not_found` or `not_found`"),
+				})),
+		},
+		"/api/v1/manage/family/members/{id}/cap": {
+			Parameters: []Parameter{pathParam("id", "The member's account id")},
+			Put: mut(withBody(jsonOp("Management", "Cap a family member", "ManageFamilyCap",
+				"The organizer caps a member inside the pool (0 or null = the pool decides). Audited `family.member_capped`.",
+				map[string]Response{
+					"200": jsonResp("Capped", objectPtr("", map[string]*Schema{"object": strEnum("", "family_member"), "id": str(""), "storage_limit_bytes": integer("null = none")})),
+					"400": errResp("`invalid_json` or `invalid_cap`"),
+					"404": errResp("`family_member_not_found` or `not_found`"),
+				}),
+				jsonBody("The cap", objectPtr("", map[string]*Schema{"storage_limit_bytes": integer("Bytes; 0 or null = none")})))),
+		},
+		"/api/v1/manage/family/leave": {
+			Post: mut(jsonOp("Management", "Leave the family", "ManageFamilyLeave",
+				"A member (a person, its account's owner) leaves its family, as a removal does: its account, sign-in, keys and files stay its own, on the free tier. Audited `family.member_left` and `account.sponsor_detached`.",
+				map[string]Response{
+					"200": jsonResp("Left", objectPtr("", map[string]*Schema{"object": strEnum("", "family_membership"), "tenant_id": str(""), "left": boolean("")})),
+					"403": errResp("`person_required` or `role_forbidden`"),
+					"409": errResp("`not_in_family`"),
+				})),
+		},
 		// WP-TEAM-1 (Stage 1a Prompt 52): members, roles and invitations
 		// (docs/API.md § Members).
 		"/api/v1/manage/members": {

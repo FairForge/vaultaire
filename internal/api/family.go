@@ -19,6 +19,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/FairForge/vaultaire/internal/account"
+	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/usage"
@@ -34,6 +36,10 @@ func (s *Server) registerFamilyRoutes(r chi.Router) {
 	// Every write is the owner's: the pool is paid for (auth.ActionBilling).
 	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/invitations", s.handleMgmtFamilyInvite)
 	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/join/{token}", s.handleMgmtFamilyJoin)
+	// PR B: caps, removal, leaving — a person's, the owner's.
+	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Put("/family/members/{id}/cap", s.handleMgmtFamilyCap)
+	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Delete("/family/members/{id}", s.handleMgmtFamilyRemove)
+	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/leave", s.handleMgmtFamilyLeave)
 }
 
 // familyOn reports whether tenantID's pool root has the family flag (a
@@ -215,4 +221,108 @@ func (s *Server) handleMgmtFamilyJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "family_membership", "tenant_id": tenantID, "organizer_id": inv.TenantID,
 		"request_id": getRequestID(w)})
+}
+
+// familyOwner answers whether the caller may act for the active tenant's
+// family: the flag on, and the owner (false: answered).
+func (s *Server) familyOwner(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenantID := activeTenant(r)
+	if !s.familyOn(r.Context(), tenantID) {
+		writeFamilyNotFound(w)
+		return "", false
+	}
+	if role, _ := r.Context().Value(roleKey).(auth.Role); role != "" && role != auth.RoleOwner {
+		writeManagementError(w, ErrTypePermission, "role_forbidden", "only the account's owner acts for its family", "")
+		return "", false
+	}
+	return tenantID, true
+}
+
+// handleMgmtFamilyCap is PUT /api/v1/manage/family/members/{id}/cap
+// {storage_limit_bytes}: a member's cap inside the pool (null or 0 = the
+// pool decides; docs/ACCOUNTS.md "caps inside the pool").
+func (s *Server) handleMgmtFamilyCap(w http.ResponseWriter, r *http.Request) {
+	organizer, ok := s.familyOwner(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		StorageLimit *int64 `json:"storage_limit_bytes"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&req); err != nil {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_json", "request body must be valid JSON", "")
+		return
+	}
+	var limit int64
+	if req.StorageLimit != nil {
+		limit = *req.StorageLimit
+	}
+	if limit < 0 {
+		writeManagementError(w, ErrTypeInvalidRequest, "invalid_cap", "a cap is a number of bytes, 0 or null for none", "storage_limit_bytes")
+		return
+	}
+	member := chi.URLParam(r, "id")
+	res, err := s.db.ExecContext(r.Context(), `UPDATE tenant_quotas q SET storage_limit_bytes = $3, updated_at = NOW()
+		  FROM tenants t
+		 WHERE t.id = q.tenant_id AND t.id = $2 AND t.parent_tenant_id = $1 AND t.child_kind = 'sponsored'`, organizer, member, limit)
+	if err != nil {
+		s.logger.Error("family: cap", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to set the cap", "")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeManagementError(w, ErrTypeNotFound, "family_member_not_found", "no member of this family has that id", "id")
+		return
+	}
+	audit.Record(r.Context(), s.db, audit.Entry{TenantID: organizer, Action: "family.member_capped", Resource: "tenant:" + member,
+		Metadata: map[string]any{"storage_limit_bytes": limit}})
+	var out *int64
+	if limit > 0 {
+		out = &limit
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "family_member", "id": member, "storage_limit_bytes": out, "request_id": getRequestID(w)})
+}
+
+// handleMgmtFamilyRemove is DELETE /api/v1/manage/family/members/{id}: the
+// member detaches — its account, data, keys and sign-in its own.
+func (s *Server) handleMgmtFamilyRemove(w http.ResponseWriter, r *http.Request) {
+	organizer, ok := s.familyOwner(w, r)
+	if !ok {
+		return
+	}
+	member := chi.URLParam(r, "id")
+	err := account.NewService(s.db, s.logger).RemoveFamilyMember(r.Context(), organizer, member, usage.FreeTierLimits.StorageBytes)
+	if errors.Is(err, account.ErrNotAFamilyMember) {
+		writeManagementError(w, ErrTypeNotFound, "family_member_not_found", "no member of this family has that id", "id")
+		return
+	}
+	if err != nil {
+		s.logger.Error("family: remove", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to remove the member", "")
+		return
+	}
+	audit.Record(r.Context(), s.db, audit.Entry{TenantID: organizer, Action: "family.member_removed", Resource: "tenant:" + member})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "family_member", "id": member, "removed": true, "request_id": getRequestID(w)})
+}
+
+// handleMgmtFamilyLeave is POST /api/v1/manage/family/leave: the member's
+// own account leaves its family, as a removal does.
+func (s *Server) handleMgmtFamilyLeave(w http.ResponseWriter, r *http.Request) {
+	member := activeTenant(r)
+	if role, _ := r.Context().Value(roleKey).(auth.Role); role != "" && role != auth.RoleOwner {
+		writeManagementError(w, ErrTypePermission, "role_forbidden", "only the account's owner takes it out of a family", "")
+		return
+	}
+	organizer, err := account.NewService(s.db, s.logger).LeaveFamily(r.Context(), member, usage.FreeTierLimits.StorageBytes)
+	if errors.Is(err, account.ErrNotAFamilyMember) {
+		writeManagementError(w, ErrTypeConflict, "not_in_family", "this account is in no family", "")
+		return
+	}
+	if err != nil {
+		s.logger.Error("family: leave", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to leave the family", "")
+		return
+	}
+	audit.Record(r.Context(), s.db, audit.Entry{TenantID: organizer, Action: "family.member_left", Resource: "tenant:" + member})
+	writeJSON(w, http.StatusOK, map[string]any{"object": "family_membership", "tenant_id": member, "left": true, "request_id": getRequestID(w)})
 }
