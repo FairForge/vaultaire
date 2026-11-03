@@ -148,7 +148,7 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /family/members/{id}/cap":         auth.ActionBilling,
 	"POST /family/members/{id}/remove":      auth.ActionBilling,
 	"POST /family/leave":                    auth.ActionBilling,
-	"POST /family/join/{token}":             auth.ActionBilling,
+	"POST /family/join/{token}":             personalWrite, // the person's own account (RP92-2)
 	"POST /settings/profile":                personalWrite,
 	"POST /settings/password":               personalWrite,
 	"POST /settings/notifications":          personalWrite,

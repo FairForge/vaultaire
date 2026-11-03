@@ -75,6 +75,12 @@ func HandleFamilyPage(tmpl *template.Template, d FamilyDeps) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		// Members' addresses and usage: the billing role's (RP92-6) — a
+		// viewer of the organizer's team sees no family.
+		if !auth.Can(sessionRole(sd), auth.ActionBilling) {
+			http.Error(w, "Your role on this account ("+string(sessionRole(sd))+") may not see its family.", http.StatusForbidden)
+			return
+		}
 		data := sessionData(sd, "family")
 		withCSRF(r.Context(), data)
 		data["Owner"] = sessionRole(sd) == auth.RoleOwner
@@ -269,13 +275,13 @@ func HandleFamilyJoin(tmpl *template.Template, d FamilyDeps) http.HandlerFunc {
 		_ = d.DB.QueryRowContext(r.Context(), `SELECT email FROM tenants WHERE id = $1`, inv.TenantID).Scan(&organizer)
 		data["From"] = organizer
 		data["Invitation"] = inv
+		// The account that joins is the person's OWN (RP92-2), whatever
+		// tenant the session acts on; the page names it.
+		if _, account, err := auth.OwnRootTenant(r.Context(), d.DB, sd.UserID); err == nil {
+			data["Account"] = account
+		}
 		if r.Method == http.MethodPost {
-			if sessionRole(sd) != auth.RoleOwner {
-				data["Error"] = "Join with your own account: sign in to it (you are not the owner of this one)."
-				renderPage(w, tmpl, data, http.StatusForbidden, d.Logger)
-				return
-			}
-			if _, err := auth.AcceptFamilyInvitation(r.Context(), d.DB, token, sd.UserID, sd.Email, sd.TenantID, time.Now()); err != nil {
+			if _, err := auth.AcceptFamilyInvitation(r.Context(), d.DB, token, sd.UserID, sd.Email, time.Now()); err != nil {
 				data["Error"] = familyFlash(err)
 				renderPage(w, tmpl, data, http.StatusConflict, d.Logger)
 				return
@@ -295,8 +301,12 @@ func familyFlash(err error) string {
 		return "A family is six people, you included (pending invitations count)."
 	case errors.Is(err, auth.ErrMemberPaysOwnPlan):
 		return "This account pays for its own plan: cancel it first, then join the family."
+	case errors.Is(err, auth.ErrFamilyPoolFull):
+		return "Your files do not fit the family's plan: ask the organizer for a bigger plan first, or join after deleting some."
+	case errors.Is(err, auth.ErrNoOwnAccount):
+		return "You have no account of your own to join with."
 	case errors.Is(err, auth.ErrCannotJoinFamily):
-		return "Only a personal account with no apps or child accounts of its own joins a family."
+		return "Only a personal account joins a family: no other members or pending member invitations, no apps or child accounts."
 	case errors.Is(err, auth.ErrNotFamilyOrganizer):
 		return "A family member does not organize a family of its own."
 	case errors.Is(err, auth.ErrAlreadyMember):

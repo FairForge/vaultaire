@@ -30,12 +30,16 @@ import (
 const flagFamily = "family"
 
 func (s *Server) registerFamilyRoutes(r chi.Router) {
-	r.Get("/family", s.handleMgmtFamily)
+	// Members' addresses and usage: the billing role's (RP92-6).
+	r.With(s.requireRole(auth.ActionBilling)).Get("/family", s.handleMgmtFamily)
 	// A person's only: a management key or an agent never invites anyone
 	// into a pool, nor attaches an account to one.
 	// Every write is the owner's: the pool is paid for (auth.ActionBilling).
 	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/invitations", s.handleMgmtFamilyInvite)
-	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/join/{token}", s.handleMgmtFamilyJoin)
+	// The join is the PERSON's: it attaches their own account, whatever
+	// tenant they act on (RP92-2), and AcceptFamilyInvitation checks they
+	// own it — never the active tenant's role.
+	r.With(s.requirePerson).Post("/family/join/{token}", s.handleMgmtFamilyJoin)
 	// PR B: caps, removal, leaving — a person's, the owner's.
 	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Put("/family/members/{id}/cap", s.handleMgmtFamilyCap)
 	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Delete("/family/members/{id}", s.handleMgmtFamilyRemove)
@@ -66,6 +70,10 @@ func writeFamilyError(w http.ResponseWriter, err error) bool {
 		writeManagementError(w, ErrTypeConflict, "family_full", "a family is six people, the organizer included (pending invitations count)", "")
 	case errors.Is(err, auth.ErrMemberPaysOwnPlan):
 		writeManagementError(w, ErrTypeConflict, "member_pays_own_plan", "this account pays for its own plan: cancel it, then join the family", "")
+	case errors.Is(err, auth.ErrFamilyPoolFull):
+		writeManagementError(w, ErrTypeConflict, "family_pool_full", err.Error(), "")
+	case errors.Is(err, auth.ErrNoOwnAccount):
+		writeManagementError(w, ErrTypeConflict, "cannot_join_family", err.Error(), "")
 	case errors.Is(err, auth.ErrCannotJoinFamily):
 		writeManagementError(w, ErrTypeConflict, "cannot_join_family", err.Error(), "")
 	case errors.Is(err, auth.ErrNotFamilyOrganizer):
@@ -188,10 +196,10 @@ func (s *Server) sendFamilyInvitation(ctx context.Context, tenantID, inviterEmai
 }
 
 // handleMgmtFamilyJoin is POST /api/v1/manage/family/join/{token}: the
-// invited person attaches the account they act on — their own — to the
-// family. The flag is the organizer's.
+// invited person attaches their OWN account (auth.OwnRootTenant — never
+// the tenant the token acts on, RP92-2) to the family. The flag is the
+// organizer's.
 func (s *Server) handleMgmtFamilyJoin(w http.ResponseWriter, r *http.Request) {
-	tenantID := activeTenant(r)
 	userID, _ := r.Context().Value(userIDKey).(string)
 	addr, _ := r.Context().Value(emailKey).(string)
 	token := chi.URLParam(r, "token")
@@ -207,11 +215,7 @@ func (s *Server) handleMgmtFamilyJoin(w http.ResponseWriter, r *http.Request) {
 		writeFamilyNotFound(w)
 		return
 	}
-	if role, _ := r.Context().Value(roleKey).(auth.Role); role != "" && role != auth.RoleOwner {
-		writeManagementError(w, ErrTypePermission, "role_forbidden", "join with your own account: you are not its owner", "")
-		return
-	}
-	inv, err = auth.AcceptFamilyInvitation(r.Context(), s.db, token, userID, addr, tenantID, time.Now())
+	inv, err = auth.AcceptFamilyInvitation(r.Context(), s.db, token, userID, addr, time.Now())
 	if err != nil {
 		if !writeFamilyError(w, err) {
 			s.logger.Error("family: join", zap.Error(err))
@@ -219,7 +223,8 @@ func (s *Server) handleMgmtFamilyJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "family_membership", "tenant_id": tenantID, "organizer_id": inv.TenantID,
+	joined, _, _ := auth.OwnRootTenant(r.Context(), s.db, userID)
+	writeJSON(w, http.StatusOK, map[string]any{"object": "family_membership", "tenant_id": joined, "organizer_id": inv.TenantID,
 		"request_id": getRequestID(w)})
 }
 
