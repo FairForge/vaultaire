@@ -330,8 +330,9 @@ func TestVaultHead_RestoreLookupBounded(t *testing.T) {
 }
 
 func TestVaultHead_RestoreLookupUnchangedByTheFlag(t *testing.T) {
-	// The flag gates GET only: HEAD's lookup is made, and answered, the
-	// same with it on.
+	// No parity row can serve the object: HEAD's lookup is made, and
+	// answered, the same with the flag on (with a servable parity HEAD says
+	// ongoing-request="false" instead — RP91-1).
 	f, stub, s := restoreFixture(t)
 	putArchiveObject(t, f, "cold2.bin", generateTestData(512))
 	stub.archived = true
@@ -379,4 +380,63 @@ func TestVaultHead_RestoreLookupSkippedWhileTheBreakerIsOpen(t *testing.T) {
 	assert.Empty(t, w.Header().Get("x-amz-restore"), "no lookup: the header is omitted")
 	assert.Equal(t, before, stub.statusCalls, "Geyser was not asked")
 	assert.Equal(t, skipped+1, promtest.ToFloat64(vaultHeadRestoreLookups.WithLabelValues("breaker_open")))
+}
+
+// restoringGeyser is the parity fixture's Geyser answering a restore
+// lookup (an object on tape, a recall running) and counting the lookups.
+type restoringGeyser struct {
+	*flakyGetDriver
+	lookups atomic.Int32
+}
+
+func (d *restoringGeyser) RestoreStatus(context.Context, string, string) (*engine.RestoreStatus, error) {
+	d.lookups.Add(1)
+	return &engine.RestoreStatus{Restore: `ongoing-request="true"`}, nil
+}
+
+func (d *restoringGeyser) RestoreObject(context.Context, string, string, int32) error { return nil }
+
+func (f *parityFixture) head(s *Server, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("HEAD", "/"+f.bucket+"/"+key, nil)
+	req = req.WithContext(s3Ctx(req.Context(), f.tn))
+	w := httptest.NewRecorder()
+	s.handleHeadObject(w, req, &S3Request{Bucket: f.bucket, Object: key, TenantID: f.tenantID})
+	return w
+}
+
+// RP91-1: aws-cli skips the download of a GLACIER object unless HEAD's
+// x-amz-restore says ongoing-request="false". With vault_parity_serve on and
+// the parity able to serve the object, HEAD says so from the one row read —
+// the GET will be served from the parity — and asks Geyser nothing. Flag
+// off: today's live lookup, unchanged.
+func TestVaultHead_FlagOn_SaysRestoredSoAwsCliDownloads(t *testing.T) {
+	f, g := serveFixture(t, true)
+	rg := &restoringGeyser{flakyGetDriver: g.flakyGetDriver}
+	f.eng.AddDriver("geyser", rg)
+	f.object("films/aws-cli.mkv", 1<<20+3)
+	f.run()
+	s := &Server{engine: f.eng, db: f.db, logger: zap.NewNop(), vaultParity: f.svc}
+
+	w := f.head(s, "films/aws-cli.mkv")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "GLACIER", w.Header().Get("x-amz-storage-class"))
+	assert.Equal(t, `ongoing-request="false"`, w.Header().Get("x-amz-restore"))
+	assert.Equal(t, int32(0), rg.lookups.Load(), "no Geyser restore lookup")
+
+	// Flag off: the live lookup, as before.
+	f.setServeFirst(false)
+	w = f.head(s, "films/aws-cli.mkv")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, `ongoing-request="true"`, w.Header().Get("x-amz-restore"))
+	assert.Equal(t, int32(1), rg.lookups.Load(), "one live lookup with the flag off")
+
+	// Flag on but the parity cannot serve (its row not complete): the live
+	// lookup too.
+	f.setServeFirst(true)
+	_, err := f.db.Exec(`UPDATE vault_parity SET state = 'partial' WHERE tenant_id = $1`, f.tenantID)
+	require.NoError(t, err)
+	w = f.head(s, "films/aws-cli.mkv")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, `ongoing-request="true"`, w.Header().Get("x-amz-restore"))
+	assert.Equal(t, int32(2), rg.lookups.Load())
 }
