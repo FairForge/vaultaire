@@ -85,6 +85,21 @@ type AdmitRequest struct {
 	// know is never given — a 0.3.0 Worker would GET a windowed link whole
 	// and fall back, charging the backend's breaker.
 	Features []string `json:"features,omitempty"`
+	// Form is a browser POST policy upload (op "post", WP-POST-1 PR B): the
+	// host read the form up to its file part and describes it — the body
+	// itself goes to the backend link.
+	Form *AdmitForm `json:"form,omitempty"`
+}
+
+// AdmitForm is a POST policy form as the host read it: its fields (names
+// lower-cased, values as sent), the file part's name, and the exact length
+// of the file part (the body less PreBytes and the closing delimiter —
+// D-POST-2), PreBytes the bytes before it.
+type AdmitForm struct {
+	Fields   map[string]string `json:"fields"`
+	Filename string            `json:"filename"`
+	FileSize int64             `json:"file_size"`
+	PreBytes int64             `json:"pre_bytes"`
 }
 
 // Has says whether the host named the feature.

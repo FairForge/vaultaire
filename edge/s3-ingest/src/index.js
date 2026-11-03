@@ -72,6 +72,7 @@ const STREAMING_TRAILER = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
  * `x-id=GetObject`): not a sub-resource.
  */
 export function classify(request) {
+  if (request.method === "POST") return classifyPost(request);
   if (request.method !== "PUT" && request.method !== "GET") return { kind: "pass", reason: "method" };
   const url = new URL(request.url);
   const path = url.pathname;
@@ -93,6 +94,199 @@ export function classify(request) {
   const set = new Set(keys);
   if (set.size === 2 && set.has("partNumber") && set.has("uploadId")) return { kind: "part" };
   return { kind: "pass", reason: "query" };
+}
+
+// --- a browser's POST policy form (0.7.0, WP-POST-1 PR B) ---------------------
+
+/** FORM_PREFIX_MAX bounds what precedes the file part: AWS's 20 KB of
+ * fields, plus the file part's own headers. */
+export const FORM_PREFIX_MAX = 24 << 10;
+
+/**
+ * classifyPost: a POST of multipart/form-data to a bucket's path (one
+ * segment), with no Authorization header, no query and a Content-Length, is
+ * a policy form — the edge's to describe; anything else is the origin's.
+ */
+export function classifyPost(request) {
+  const url = new URL(request.url);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  if (!boundaryOf(request.headers.get("content-type") || "")) return { kind: "pass", reason: "method" };
+  if (!path || path.includes("/")) return { kind: "pass", reason: "no_bucket" };
+  if (request.headers.get("authorization")) return { kind: "pass", reason: "post_signed" };
+  if ([...url.searchParams.keys()].length) return { kind: "pass", reason: "query" };
+  if (!request.headers.get("content-length")) return { kind: "pass", reason: "no_length" };
+  return { kind: "post" };
+}
+
+/** boundaryOf is a multipart/form-data Content-Type's boundary ("" when it is none). */
+export function boundaryOf(contentType) {
+  const m = /^\s*multipart\/form-data\s*;(.*)$/i.exec(contentType);
+  if (!m) return "";
+  const b = /(?:^|;)\s*boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i.exec(m[1]);
+  const v = b ? b[1] || b[2] : "";
+  return v.length > 0 && v.length <= 70 ? v : "";
+}
+
+const latin1 = (bytes) => {
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 4096) s += String.fromCharCode(...bytes.subarray(i, i + 4096));
+  return s;
+};
+
+/**
+ * parseFormPrefix reads the fields of a form whose first bytes are `bytes`,
+ * up to the file part (S3's order rule: the file is the last field):
+ * {fields, filename, fileStart} — fileStart the offset of the file's first
+ * byte — or null when more bytes are needed. Throws on a form that is not
+ * one, a field given twice, or a form with no file. Names lower-cased,
+ * values decoded as UTF-8.
+ */
+export function parseFormPrefix(bytes, boundary) {
+  const s = latin1(bytes);
+  const delim = "--" + boundary;
+  let at = s.indexOf(delim);
+  if (at < 0) return s.length > FORM_PREFIX_MAX ? fail("no delimiter") : null;
+  at += delim.length;
+  const fields = {};
+  const utf8 = new TextDecoder();
+  for (;;) {
+    if (s.length < at + 2) return null;
+    if (s.slice(at, at + 2) === "--") throw new Error("POST requires exactly one file upload per request");
+    if (s.slice(at, at + 2) !== "\r\n") fail("a delimiter not followed by CRLF");
+    const hdrStart = at + 2;
+    const hdrEnd = s.indexOf("\r\n\r\n", hdrStart);
+    if (hdrEnd < 0) return s.length > FORM_PREFIX_MAX ? fail("the fields exceed 24 KB") : null;
+    const disposition = /^content-disposition\s*:\s*(.*)$/im.exec(s.slice(hdrStart, hdrEnd));
+    const name = disposition && /(?:^|;)\s*name\s*=\s*"([^"]*)"/i.exec(disposition[1]);
+    if (!name) fail("a part with no name");
+    const fieldName = name[1].toLowerCase();
+    if (fieldName === "file") {
+      const fn = /(?:^|;)\s*filename\s*=\s*"([^"]*)"/i.exec(disposition[1]);
+      return { fields, filename: fn ? utf8.decode(Uint8Array.from(fn[1], (c) => c.charCodeAt(0))) : "", fileStart: hdrEnd + 4 };
+    }
+    const valueStart = hdrEnd + 4;
+    const valueEnd = s.indexOf("\r\n" + delim, valueStart);
+    if (valueEnd < 0) return s.length > FORM_PREFIX_MAX ? fail("the fields exceed 24 KB") : null;
+    if (fieldName in fields) fail(`the field ${fieldName} is given twice`);
+    fields[fieldName] = utf8.decode(bytes.subarray(valueStart, valueEnd));
+    at = valueEnd + 2 + delim.length;
+  }
+}
+
+function fail(why) {
+  throw new Error(`the body is not well-formed multipart/form-data: ${why}`);
+}
+
+/** formTail is the closing delimiter after the file part. */
+export function formTail(boundary) {
+  return new TextEncoder().encode(`\r\n--${boundary}--\r\n`);
+}
+
+/**
+ * readFormPrefix reads the body until its file part begins: {form, prefix,
+ * reader} — the bytes read so far (the fields and the first of the file)
+ * and the reader of the rest. On a form it cannot read it throws, with the
+ * bytes read in err.prefix and the reader in err.reader (the body can still
+ * go to the origin whole: rebuiltBody).
+ */
+export async function readFormPrefix(body, boundary) {
+  const reader = body.getReader();
+  let prefix = new Uint8Array(0);
+  for (;;) {
+    let form;
+    try {
+      form = parseFormPrefix(prefix, boundary);
+    } catch (e) {
+      throw Object.assign(e, { prefix, reader });
+    }
+    if (form) return { form, prefix, reader };
+    const { value, done } = await reader.read();
+    if (done) throw Object.assign(new Error("the body ended before its file part"), { prefix, reader });
+    const next = new Uint8Array(prefix.length + value.length);
+    next.set(prefix);
+    next.set(value, prefix.length);
+    prefix = next;
+  }
+}
+
+/** rebuiltBody is the client's body whole again: the bytes read, then the rest. */
+export function rebuiltBody(prefix, reader) {
+  let first = true;
+  return new ReadableStream({
+    async pull(c) {
+      if (first) {
+        first = false;
+        if (prefix.length) return c.enqueue(prefix);
+      }
+      const { value, done } = await reader.read();
+      if (done) c.close();
+      else c.enqueue(value);
+    },
+    cancel(r) {
+      return reader.cancel(r);
+    },
+  });
+}
+
+/**
+ * fileStream is the file part as its own body: exactly `size` bytes — the
+ * first of them `head` (read with the fields), the rest from `reader` — and
+ * then the closing delimiter, which must follow exactly with nothing after
+ * it, or the stream errors (the backend PUT fails, nothing commits). The
+ * one place this Worker's JavaScript touches a write's bytes besides the
+ * codec: the delimiter must be withheld from the backend.
+ */
+export function fileStream(head, reader, size, tail) {
+  let left = size;
+  let carry = head;
+  const after = [];
+  let afterLen = 0;
+  const keepTail = (b) => {
+    after.push(b);
+    afterLen += b.length;
+  };
+  return new ReadableStream({
+    async pull(c) {
+      for (;;) {
+        let chunk = carry;
+        carry = null;
+        if (!chunk) {
+          const { value, done } = await reader.read();
+          if (done) {
+            if (left > 0) return c.error(new Error("the body ended inside its file part"));
+            const got = new Uint8Array(afterLen);
+            let o = 0;
+            for (const b of after) {
+              got.set(b, o);
+              o += b.length;
+            }
+            if (got.length !== tail.length || got.some((v, i) => v !== tail[i])) {
+              return c.error(new Error("the file part does not end at the closing delimiter"));
+            }
+            return c.close();
+          }
+          chunk = value;
+        }
+        if (left === 0) {
+          keepTail(chunk);
+          if (afterLen > tail.length) return c.error(new Error("bytes after the closing delimiter"));
+          continue;
+        }
+        if (chunk.length <= left) {
+          left -= chunk.length;
+          return c.enqueue(chunk);
+        }
+        const mine = chunk.subarray(0, left);
+        keepTail(chunk.subarray(left));
+        left = 0;
+        if (afterLen > tail.length) return c.error(new Error("bytes after the closing delimiter"));
+        return c.enqueue(mine);
+      }
+    },
+    cancel(r) {
+      return reader.cancel(r);
+    },
+  });
 }
 
 // --- the description -------------------------------------------------------
@@ -637,6 +831,82 @@ async function serveWindow(request, env, ctx, admit, requestId) {
   return new Response(readable, { status: admit.status || admit.expect_status, headers: admit.response_headers || {} });
 }
 
+/**
+ * servePost serves a browser's POST policy form (0.7.0, WP-POST-1 PR B):
+ * the fields are read (at most FORM_PREFIX_MAX), described to the control
+ * plane with the file part's exact size (Content-Length less the fields and
+ * the closing delimiter), and an admitted form's file part goes to the
+ * backend PUT the control plane signed for exactly that size — the commit's
+ * answer is the origin's POST answer. A form the control plane declines, or
+ * one this Worker cannot read, goes to the origin whole.
+ */
+async function servePost(request, env, ctx, requestId, url) {
+  const boundary = boundaryOf(request.headers.get("content-type") || "");
+  const contentLength = Number(request.headers.get("content-length"));
+  const origin = (prefix, reader) =>
+    fetch(new Request(request, { body: rebuiltBody(prefix, reader), duplex: "half" }), { cache: "no-store" });
+  let read;
+  try {
+    read = await readFormPrefix(request.body, boundary);
+  } catch (e) {
+    console.log(JSON.stringify({ edge: "post_unread", error: String(e && e.message ? e.message : e), request_id: requestId }));
+    return origin(e.prefix || new Uint8Array(0), e.reader);
+  }
+  const { form, prefix, reader } = read;
+  const tail = formTail(boundary);
+  const size = contentLength - form.fileStart - tail.length;
+  if (!(size >= 0)) return origin(prefix, reader);
+  const description = describe(request, "post", requestId);
+  description.form = { fields: form.fields, filename: form.filename, file_size: size, pre_bytes: form.fileStart };
+  let admit;
+  try {
+    const r = await controlPlane(env, "/api/v1/edge/admit", description, ORIGIN_TIMEOUT_MS);
+    if (r.status !== 200) {
+      await r.body?.cancel();
+      return origin(prefix, reader);
+    }
+    admit = await r.json();
+  } catch (e) {
+    console.log(JSON.stringify({ edge: "admit_failed", op: "post", error: String(e && e.message ? e.message : e), request_id: requestId }));
+    return origin(prefix, reader);
+  }
+  if (admit.refusal) {
+    await reader.cancel().catch(() => {});
+    return relayResponse(admit.refusal);
+  }
+  if (!admit.edge || admit.codec || admit.rs) {
+    console.log(JSON.stringify({ edge: "pass", op: "post", reason: admit.reason || "", request_id: requestId }));
+    return origin(prefix, reader);
+  }
+  const { readable, writable } = fixedLength(size);
+  fileStream(prefix.subarray(form.fileStart), reader, size, tail).pipeTo(writable).catch(() => {});
+  const file = { body: readable, headers: new Headers({ "content-length": String(size) }) };
+  const { result: moved, mirror } = await moveBody(file, admit);
+  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url);
+  console.log(JSON.stringify({ edge: "post", request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit }));
+  if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
+  if (!commit) return slowDown(url.pathname, requestId);
+  return relayResponse(commit);
+}
+
+/** commitWrite reports a write's outcome; a lost answer is retried once. */
+async function commitWrite(env, commitBody, requestId, url) {
+  let commit = null;
+  for (let attempt = 0; attempt < 2 && !commit; attempt++) {
+    if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
+    try {
+      const r = await controlPlane(env, "/api/v1/edge/commit", commitBody, ORIGIN_TIMEOUT_MS);
+      if (r.status === 200) commit = await r.json();
+      else if (r.status === 404 || r.status === 410) {
+        commit = { status: 503, headers: { "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER }, body: s3ErrorXML("SlowDown", "The edge admission of this upload expired before it was committed. Retry the upload.", url.pathname, requestId) };
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ edge: "commit_failed", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
+    }
+  }
+  return commit;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const kind = classify(request);
@@ -652,6 +922,7 @@ export default {
 
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
+    if (kind.kind === "post") return servePost(request, env, ctx, requestId, url);
     const description = describe(request, kind.kind, requestId);
 
     let admit;

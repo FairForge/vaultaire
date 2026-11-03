@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
@@ -276,6 +277,7 @@ func (f *postFileReader) Read(p []byte) (int, error) {
 type postPolicyUpload struct {
 	status int // 200, 201 or 204 (success_action_status)
 	meta   http.Header
+	keyID  string // the policy's access key id (the request log's key_id)
 }
 
 type postPolicyKey struct{}
@@ -328,6 +330,20 @@ func (p *postRefusal) write(w http.ResponseWriter, r *http.Request) {
 	WriteS3ErrorWithContext(w, p.code, r.URL.Path, generateRequestID(), opts...)
 }
 
+// postAdmission is a verified form: the key's tenant and scope, the policy,
+// the object's key (${filename} expanded), the inner request's headers and
+// the answer its success gets.
+type postAdmission struct {
+	tenantID string
+	scope    *auth.KeyScope
+	policy   *auth.PostPolicy
+	bucket   string
+	key      string
+	header   http.Header
+	upload   *postPolicyUpload
+	keyID    string // the credential's access key id (the access log's)
+}
+
 // authorizePostPolicy reads and verifies a policy form; on success it
 // returns the key's tenant and scope and the inner request — the file part
 // as a POST /{bucket}/{key} of exactly its size, with the form's object
@@ -346,49 +362,69 @@ func (s *Server) authorizePostPolicy(r *http.Request) (string, *auth.KeyScope, *
 	case err != nil:
 		return "", nil, nil, &postRefusal{code: ErrMalformedPOSTRequest, message: err.Error()}
 	}
-	fields := form.fields
+	a, refused := s.admitPostForm(r.Context(), bucket, form.fields, form.filename, form.size, clientip.FromRequest(r), r.Header)
+	if refused != nil {
+		return "", nil, nil, refused
+	}
+	inner := r.Clone(context.WithValue(r.Context(), postPolicyKey{}, a.upload))
+	inner.Header = a.header
+	inner.URL = &url.URL{Path: "/" + bucket + "/" + a.key}
+	inner.RequestURI = ""
+	inner.ContentLength = form.size
+	inner.Body = struct {
+		io.Reader
+		io.Closer
+	}{form.file, r.Body}
+	return a.tenantID, a.scope, inner, nil
+}
+
+// admitPostForm verifies a read form — the origin's (authorizePostPolicy)
+// and the edge's (edgeAdmitPost) — and decides everything that does not
+// need the file's bytes: the policy, the refused fields, the key, the size
+// against content-length-range, the inner request's headers (only fields
+// the policy named, plus outer's client-address headers).
+func (s *Server) admitPostForm(ctx context.Context, bucket string, fields map[string]string, filename string, size int64,
+	clientIP string, outer http.Header) (*postAdmission, *postRefusal) {
 	fields["bucket"] = bucket
-	tenantID, scope, policy, err := s.s3Auth().ValidatePostPolicy(r.Context(), fields, clientip.FromRequest(r))
+	tenantID, scope, policy, err := s.s3Auth().ValidatePostPolicy(ctx, fields, clientIP)
 	if err != nil {
-		return "", nil, nil, postAuthRefusal(err)
+		return nil, postAuthRefusal(err)
 	}
 	if fields["success_action_redirect"] != "" || fields["redirect"] != "" {
-		return "", nil, nil, &postRefusal{code: ErrInvalidArgument,
+		return nil, &postRefusal{code: ErrInvalidArgument,
 			message: "success_action_redirect is not supported: answer with success_action_status (200, 201 or 204) and redirect in the page"}
 	}
 	if acl := fields["acl"]; acl != "" && acl != "private" {
-		return "", nil, nil, &postRefusal{code: ErrInvalidArgument,
+		return nil, &postRefusal{code: ErrInvalidArgument,
 			message: "only acl=private: a bucket's mode decides who reads it (Public, Standard, Private)"}
 	}
 	if fields["tagging"] != "" {
-		return "", nil, nil, &postRefusal{code: ErrNotImplemented, message: "tagging in a POST form is not supported"}
+		return nil, &postRefusal{code: ErrNotImplemented, message: "tagging in a POST form is not supported"}
 	}
 	key := fields["key"]
 	if key == "" {
-		return "", nil, nil, &postRefusal{code: ErrInvalidArgument, message: "Bucket POST must contain a field named 'key'."}
+		return nil, &postRefusal{code: ErrInvalidArgument, message: "Bucket POST must contain a field named 'key'."}
 	}
 	if strings.Contains(key, "${filename}") {
-		name := form.filename
-		if name == "" || name == "." || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
-			return "", nil, nil, &postRefusal{code: ErrInvalidArgument,
+		if filename == "" || filename == "." || strings.ContainsAny(filename, `/\`) || strings.Contains(filename, "..") {
+			return nil, &postRefusal{code: ErrInvalidArgument,
 				message: "the file's name must be a base name (no /, \\ or ..) to replace ${filename}"}
 		}
-		key = strings.ReplaceAll(key, "${filename}", name)
+		key = strings.ReplaceAll(key, "${filename}", filename)
 	}
 	if min, max, ok := policy.SizeRange(); ok {
-		if form.size > max {
-			return "", nil, nil, &postRefusal{code: ErrEntityTooLarge, status: http.StatusBadRequest,
-				message: fmt.Sprintf("Your proposed upload exceeds the maximum allowed size: %d bytes, the policy's content-length-range is %d–%d.", form.size, min, max)}
+		if size > max {
+			return nil, &postRefusal{code: ErrEntityTooLarge, status: http.StatusBadRequest,
+				message: fmt.Sprintf("Your proposed upload exceeds the maximum allowed size: %d bytes, the policy's content-length-range is %d–%d.", size, min, max)}
 		}
-		if form.size < min {
-			return "", nil, nil, &postRefusal{code: ErrEntityTooSmall,
-				message: fmt.Sprintf("Your proposed upload is smaller than the minimum allowed size: %d bytes, the policy's content-length-range is %d–%d.", form.size, min, max)}
+		if size < min {
+			return nil, &postRefusal{code: ErrEntityTooSmall,
+				message: fmt.Sprintf("Your proposed upload is smaller than the minimum allowed size: %d bytes, the policy's content-length-range is %d–%d.", size, min, max)}
 		}
 	}
-
 	h := http.Header{}
 	for _, k := range postPolicyPassHeaders {
-		if v := r.Header.Values(k); len(v) > 0 {
+		if v := outer.Values(k); len(v) > 0 {
 			h[http.CanonicalHeaderKey(k)] = append([]string(nil), v...)
 		}
 	}
@@ -411,16 +447,9 @@ func (s *Server) authorizePostPolicy(r *http.Request) (string, *auth.KeyScope, *
 	case "201":
 		status = http.StatusCreated
 	}
-	inner := r.Clone(context.WithValue(r.Context(), postPolicyKey{}, &postPolicyUpload{status: status, meta: meta}))
-	inner.Header = h
-	inner.URL = &url.URL{Path: "/" + bucket + "/" + key}
-	inner.RequestURI = ""
-	inner.ContentLength = form.size
-	inner.Body = struct {
-		io.Reader
-		io.Closer
-	}{form.file, r.Body}
-	return tenantID, scope, inner, nil
+	return &postAdmission{tenantID: tenantID, scope: scope, policy: policy, bucket: bucket, key: key, header: h,
+		upload: &postPolicyUpload{status: status, meta: meta, keyID: strings.SplitN(fields["x-amz-credential"], "/", 2)[0]},
+		keyID:  strings.SplitN(fields["x-amz-credential"], "/", 2)[0]}, nil
 }
 
 // postAuthRefusal maps the verifier's refusal to the S3 answer and the
@@ -499,11 +528,36 @@ func (s *Server) handlePostObject(w http.ResponseWriter, r *http.Request, req *S
 	if pw.passed {
 		return
 	}
-	scheme := "https"
-	if r.TLS == nil && !strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") && r.URL.Scheme != "https" {
-		scheme = "http"
+	writePostSuccess(w, postLocationScheme(r)+"://"+r.Host, req.Bucket, req.Object, w.Header().Get("ETag"), up)
+}
+
+// postLocationScheme is the client's scheme for the answer's Location:
+// https — behind HAProxy and Cloudflare the origin sees plain HTTP (the
+// prod proof of 2026-11-03 answered http://), and the public endpoints are
+// https only — except a plain request to a loopback host (a lab).
+func postLocationScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
 	}
-	location := scheme + "://" + r.Host + "/" + url.PathEscape(req.Bucket) + "/" + escapeKeyPath(req.Object)
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return "http"
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return "http"
+	}
+	return "https"
+}
+
+// writePostSuccess answers a stored form upload — the origin's and the edge
+// commit's: Location, the x-amz-meta-* fields echoed, success_action_status
+// (201 = the PostResponse document). base is the client's scheme and host.
+func writePostSuccess(w http.ResponseWriter, base, bucket, key, etag string, up *postPolicyUpload) {
+	location := base + "/" + url.PathEscape(bucket) + "/" + escapeKeyPath(key)
 	h := w.Header()
 	h.Set("Location", location)
 	for k, v := range up.meta {
@@ -511,9 +565,9 @@ func (s *Server) handlePostObject(w http.ResponseWriter, r *http.Request, req *S
 	}
 	switch up.status {
 	case http.StatusCreated:
-		body, err := xml.Marshal(PostResponse{Location: location, Bucket: req.Bucket, Key: req.Object, ETag: h.Get("ETag")})
+		body, err := xml.Marshal(PostResponse{Location: location, Bucket: bucket, Key: key, ETag: etag})
 		if err != nil {
-			WriteS3Error(w, ErrInternalError, r.URL.Path, generateRequestID())
+			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		h.Set("Content-Type", "application/xml")
@@ -521,8 +575,10 @@ func (s *Server) handlePostObject(w http.ResponseWriter, r *http.Request, req *S
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, xml.Header)
 		_, _ = w.Write(body)
+	case http.StatusOK:
+		w.WriteHeader(http.StatusOK)
 	default:
-		w.WriteHeader(up.status)
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

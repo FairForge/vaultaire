@@ -119,6 +119,9 @@ func (s *Server) accessKeyExists(ctx context.Context, accessKey string) bool {
 // tried, never to one the request merely carries (post-merge #604:
 // auth.AccessKeyFromRequest prefers the header whatever path ran).
 func attemptedAccessKey(r *http.Request) string {
+	if up := postPolicyOf(r.Context()); up != nil {
+		return up.keyID // a POST policy form's credential is a field (WP-POST-1)
+	}
 	if isPresignedRequest(r) {
 		return auth.PresignedAccessKey(r)
 	}

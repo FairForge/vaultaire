@@ -318,3 +318,29 @@ func TestPostPolicy_AnIPRestrictedKeyFromElsewhereIsRefused(t *testing.T) {
 	_, _, _, ok := f.headRow("ip.txt")
 	assert.False(t, ok)
 }
+
+// Found by the prod proof (2026-11-03): behind HAProxy and Cloudflare the
+// origin sees plain HTTP, and the answer's Location said http://; and the
+// request log's row named no key (a form has no Authorization header).
+func TestPostPolicy_LocationIsHTTPSAndTheLogNamesTheKey(t *testing.T) {
+	f := setupEdgeFixture(t)
+	tr := NewS3AccessLogTracker(f.db)
+	tr.SetRequestLog(func(string) bool { return true })
+	f.srv.accessLogTracker = tr
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM request_log WHERE tenant_id = $1`, f.tenantID) })
+	conds := []any{map[string]any{"bucket": f.bucket}, map[string]any{"key": "loc.txt"}, map[string]any{"success_action_status": "201"}}
+	fields := f.policyFields(time.Now().Add(time.Hour), conds, formField{"key", "loc.txt"}, formField{"success_action_status", "201"})
+	body, ct := buildPostForm(t, fields, "loc.txt", []byte("loc"))
+	r := httptest.NewRequest(http.MethodPost, "http://"+f.host+"/"+f.bucket, bytes.NewReader(body)) // as the proxy hands it on
+	r.Header.Set("Content-Type", ct)
+	r.ContentLength = int64(len(body))
+	r.RemoteAddr = "203.0.113.9:4444"
+	w := f.serve(r)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	assert.Equal(t, "https://"+f.host+"/"+f.bucket+"/loc.txt", w.Header().Get("Location"))
+	assert.Contains(t, w.Body.String(), "<Location>https://")
+	tr.Flush()
+	var keyID string
+	require.NoError(t, f.db.QueryRow(`SELECT key_id FROM request_log WHERE tenant_id = $1 AND op = 'PostObject'`, f.tenantID).Scan(&keyID))
+	assert.Equal(t, f.ak, keyID, "the policy's access key")
+}
