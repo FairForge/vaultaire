@@ -225,6 +225,7 @@ func registerFlags(fl *flags.Service) {
 	// before authentication, so a tenant row could open nothing: refused.
 	fl.Register(flagAgentGrants, false) // WP-AGENT-1: per tenant first
 	fl.Register(flagApps, false)        // WP-APP-1: per tenant first
+	fl.Register(flagFamily, false)      // WP-FAMILY-1: per tenant first (the organizer's)
 	fl.Register(flagRecoveryVault, false)
 	fl.GlobalOnly(flagRecoveryVault)
 	// 43.4: the law-enforcement policy and the "what we can produce" page
