@@ -54,8 +54,39 @@ var (
 	// ErrCannotJoinFamily: the joining account is not a plain personal
 	// account (a child, a sandbox, a platform or partner, an account with
 	// apps or children of its own, already in a family, or the organizer's).
-	ErrCannotJoinFamily = errors.New("only a personal account with no apps or child accounts of its own joins a family")
+	ErrCannotJoinFamily = errors.New("only a personal account — no other members or pending member invitations, no apps or child accounts — joins a family")
+	// ErrFamilyPoolFull: the member's bytes do not fit the organizer's pool
+	// (RP92-3, D-STRIPE-97's recommended half): a join that overflowed it
+	// would make every write of the family — the organizer's too — refused.
+	ErrFamilyPoolFull = errors.New("this account's files do not fit the family's plan: the organizer needs a bigger plan first")
+	// ErrNoOwnAccount: the signed-in person owns no account of their own
+	// to attach (RP92-2: the join never attaches the tenant they act on).
+	ErrNoOwnAccount = errors.New("no account of your own to join with")
 )
+
+// OwnRootTenant is the account a person joins a family with (RP92-2): the
+// tenant whose e-mail is theirs and of which they are the owner member —
+// the one their registration made — never a sandbox; a root first. Never
+// the tenant they are acting on (a team they belong to). Returns its id
+// and e-mail; ErrNoOwnAccount when there is none.
+func OwnRootTenant(ctx context.Context, q interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}, userID string) (id, label string, err error) {
+	err = q.QueryRowContext(ctx, `
+		SELECT t.id, t.email FROM tenants t
+		  JOIN users u ON u.id::text = $1 AND lower(u.email) = lower(t.email)
+		  JOIN tenant_members m ON m.tenant_id = t.id AND m.user_id = u.id AND m.role = 'owner'
+		 WHERE t.sandbox_of IS NULL
+		 ORDER BY (t.parent_tenant_id IS NULL) DESC, t.created_at, t.id
+		 LIMIT 1`, userID).Scan(&id, &label)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNoOwnAccount
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("the account of user %s: %w", userID, err)
+	}
+	return id, label, nil
+}
 
 // InviteFamilyMember invites email to organizer's family and returns the
 // invitation and its token (shown once: in the e-mailed link). It counts
@@ -169,15 +200,17 @@ func checkFamilyInvitation(inv Invitation, now time.Time) error {
 
 // AcceptFamilyInvitation spends the family invitation for the signed-in
 // user userID, whose e-mail must be the invited address, attaching their
-// OWN root tenant (memberTenant: the account they act on, which they own)
+// OWN root tenant (OwnRootTenant — never the tenant they act on, RP92-2)
 // to the organizer — in ONE transaction: the invitation locked, both
 // tenants' rows locked in id order, the checks (F-40's live entitlement,
 // a plain personal account, the family's size), the edge (parent, kind
 // 'sponsored', the organizer's pool), usage.MovePoolTx (the bytes into the
 // pool; the pool's lock order), the member's own cap cleared (0: the pool
 // decides, docs/ACCOUNTS.md "caps inside the pool"), the invitation spent,
-// and an audit row on each tenant.
-func AcceptFamilyInvitation(ctx context.Context, db *sql.DB, token, userID, userEmail, memberTenant string, now time.Time) (Invitation, error) {
+// and an audit row on each tenant. A team (another member, or a pending
+// member invitation) never joins, and neither does an account whose bytes
+// would overflow the pool (RP92-3).
+func AcceptFamilyInvitation(ctx context.Context, db *sql.DB, token, userID, userEmail string, now time.Time) (Invitation, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return Invitation{}, fmt.Errorf("join the family: %w", err)
@@ -198,6 +231,10 @@ func AcceptFamilyInvitation(ctx context.Context, db *sql.DB, token, userID, user
 		return inv, ErrInvitationEmailMismatch
 	}
 	organizer := inv.TenantID
+	memberTenant, _, err := OwnRootTenant(ctx, tx, userID)
+	if err != nil {
+		return inv, err
+	}
 	if memberTenant == organizer {
 		return inv, ErrCannotJoinFamily
 	}
@@ -218,11 +255,15 @@ func AcceptFamilyInvitation(ctx context.Context, db *sql.DB, token, userID, user
 	err = tx.QueryRowContext(ctx, `
 		SELECT t.parent_tenant_id IS NULL AND t.sandbox_of IS NULL AND t.provisional_until IS NULL
 		       AND NOT t.platform AND NOT t.partner
-		       AND NOT EXISTS (SELECT 1 FROM tenants c WHERE c.parent_tenant_id = t.id),
+		       AND NOT EXISTS (SELECT 1 FROM tenants c WHERE c.parent_tenant_id = t.id)
+		       -- a team never joins (RP92-2): no other person on it, none invited
+		       AND NOT EXISTS (SELECT 1 FROM tenant_members m WHERE m.tenant_id = t.id AND m.user_id::text <> $2)
+		       AND NOT EXISTS (SELECT 1 FROM tenant_invitations i WHERE i.tenant_id = t.id AND i.kind = 'member'
+		                         AND i.accepted_at IS NULL AND i.expires_at > $3),
 		       EXISTS (SELECT 1 FROM tenant_members m WHERE m.tenant_id = t.id AND m.user_id::text = $2 AND m.role = 'owner')
 		         OR EXISTS (SELECT 1 FROM users u WHERE u.id::text = $2 AND lower(u.email) = lower(t.email)),
 		       EXISTS (SELECT 1 FROM entitlements e WHERE e.tenant_id = t.id AND e.lapsed_at IS NULL)
-		  FROM tenants t WHERE t.id = $1`, memberTenant, userID).Scan(&plain, &owns, &pays)
+		  FROM tenants t WHERE t.id = $1`, memberTenant, userID, now).Scan(&plain, &owns, &pays)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return inv, ErrTenantNotFound
@@ -247,6 +288,17 @@ func AcceptFamilyInvitation(ctx context.Context, db *sql.DB, token, userID, user
 	}
 	if _, err := usage.MovePoolTx(ctx, tx, memberTenant, memberTenant, organizer); err != nil {
 		return inv, fmt.Errorf("join the family: %w", err)
+	}
+	// RP92-3: the pool's row is locked (MovePoolTx) and now counts the
+	// member's bytes; over the pool's limit the join is refused and the
+	// transaction rolled back — nothing moved.
+	var poolUsed, poolLimit int64
+	if err := tx.QueryRowContext(ctx, `SELECT pool_used_bytes, storage_limit_bytes FROM tenant_quotas WHERE tenant_id = $1`, organizer).
+		Scan(&poolUsed, &poolLimit); err != nil {
+		return inv, fmt.Errorf("join the family: the pool: %w", err)
+	}
+	if poolUsed > poolLimit {
+		return inv, ErrFamilyPoolFull
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenant_quotas SET storage_limit_bytes = 0, updated_at = NOW() WHERE tenant_id = $1`, memberTenant); err != nil {
 		return inv, fmt.Errorf("join the family: the pool decides: %w", err)

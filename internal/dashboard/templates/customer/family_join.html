@@ -11,7 +11,8 @@
     <p class="text-muted">Until {{.Invitation.ExpiresAt.Format "2006-01-02 15:04"}} UTC.</p>
     <form method="post" action="/dashboard/family/join/{{.Token}}">
         <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <button class="btn btn-primary" type="submit">Join with this account</button>
+        {{if .Account}}<p>The account that joins is your own: <strong>{{.Account}}</strong>.</p>{{end}}
+        <button class="btn btn-primary" type="submit">Join with {{if .Account}}{{.Account}}{{else}}your account{{end}}</button>
     </form>
 </div>
 {{end}}

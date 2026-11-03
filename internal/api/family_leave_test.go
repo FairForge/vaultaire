@@ -115,7 +115,7 @@ func TestFamily_SponsorErasureDetachesNeverErases(t *testing.T) {
 	})
 	_, token, err := auth.InviteFamilyMember(ctx, f.db, f.tenantID, f.userID, mu.Email, time.Now())
 	require.NoError(t, err)
-	_, err = auth.AcceptFamilyInvitation(ctx, f.db, token, mu.ID, mu.Email, member, time.Now())
+	_, err = auth.AcceptFamilyInvitation(ctx, f.db, token, mu.ID, mu.Email, time.Now())
 	require.NoError(t, err)
 	f.exec(`INSERT INTO buckets (tenant_id, name) VALUES ($1, 'my-library')`, member)
 	f.exec(`INSERT INTO object_head_cache (tenant_id, bucket, object_key, size_bytes, etag, backend_name) VALUES ($1, 'my-library', 'a.jpg', 13, 'e', 'local')`, member)

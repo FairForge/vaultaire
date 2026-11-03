@@ -122,6 +122,7 @@ func TestMembers_ANonMemberIsRefused(t *testing.T) {
 var memberWritesOpenToAnyMember = map[string]string{
 	"POST /api/v1/manage/invitations/{token}/accept": "the invitee is no member yet: the invitation's own address decides (PR B)",
 	"DELETE /api/v1/user/signin":                     "a sign-in with no tenant and no membership erases itself (RB10-1); anyone still a member is 409 still_a_member",
+	"POST /api/v1/manage/family/join/{token}":        "the person's OWN account joins whatever tenant the token acts on (RP92-2): auth.OwnRootTenant and the join's owns check decide, never the active tenant's role",
 }
 
 // Every write route of /api/v1/manage, /api/v1/platform and /api/v1/user

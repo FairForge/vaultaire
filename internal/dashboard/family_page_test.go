@@ -178,7 +178,7 @@ func TestDashboard_FamilyPage(t *testing.T) {
 	// Join again, then leave on its own.
 	_, token, err = auth.InviteFamilyMember(ctx, db, org.TenantID, org.ID, mem.Email, time.Now())
 	require.NoError(t, err)
-	_, err = auth.AcceptFamilyInvitation(ctx, db, token, mem.ID, mem.Email, mem.TenantID, time.Now())
+	_, err = auth.AcceptFamilyInvitation(ctx, db, token, mem.ID, mem.Email, time.Now())
 	require.NoError(t, err)
 	w = post(memC, "/dashboard/family/leave", url.Values{})
 	require.Equal(t, http.StatusSeeOther, w.Code)
