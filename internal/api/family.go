@@ -21,6 +21,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/email"
+	"github.com/FairForge/vaultaire/internal/usage"
 )
 
 // flagFamily turns the family on for an organizer (per tenant first).
@@ -30,8 +31,9 @@ func (s *Server) registerFamilyRoutes(r chi.Router) {
 	r.Get("/family", s.handleMgmtFamily)
 	// A person's only: a management key or an agent never invites anyone
 	// into a pool, nor attaches an account to one.
-	r.With(s.requirePerson).Post("/family/invitations", s.handleMgmtFamilyInvite)
-	r.With(s.requirePerson).Post("/family/join/{token}", s.handleMgmtFamilyJoin)
+	// Every write is the owner's: the pool is paid for (auth.ActionBilling).
+	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/invitations", s.handleMgmtFamilyInvite)
+	r.With(s.requirePerson, s.requireRole(auth.ActionBilling)).Post("/family/join/{token}", s.handleMgmtFamilyJoin)
 }
 
 // familyOn reports whether tenantID's pool root has the family flag (a
@@ -40,8 +42,8 @@ func (s *Server) familyOn(ctx context.Context, tenantID string) bool {
 	if s.db == nil || s.flags == nil || tenantID == "" {
 		return false
 	}
-	var root string
-	if err := s.db.QueryRowContext(ctx, `SELECT pool_root_id FROM tenants WHERE id = $1`, tenantID).Scan(&root); err != nil {
+	root, err := usage.PoolRoot(ctx, s.db, tenantID)
+	if err != nil {
 		return false
 	}
 	return s.flags.Enabled(flagFamily, root)
