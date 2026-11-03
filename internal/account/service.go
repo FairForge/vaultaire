@@ -136,16 +136,9 @@ func (s *Service) ScheduleTenant(ctx context.Context, tenantID string) (time.Tim
 	if s.db == nil {
 		return time.Time{}, ErrNoDatabase
 	}
-	var got time.Time
-	err := s.db.QueryRowContext(ctx, `
-		UPDATE tenants SET deletion_scheduled_at = COALESCE(deletion_scheduled_at, $1)
-		 WHERE id = $2 AND parent_tenant_id IS NOT NULL
-		 RETURNING deletion_scheduled_at`, s.now().Add(GracePeriod), tenantID).Scan(&got)
-	if errors.Is(err, sql.ErrNoRows) {
-		return time.Time{}, fmt.Errorf("schedule deletion of tenant %s: %w", tenantID, ErrNotAChild)
-	}
+	got, err := s.scheduleTenantTx(ctx, s.db, tenantID)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("schedule deletion of tenant %s: %w", tenantID, err)
+		return time.Time{}, err
 	}
 	s.logger.Info("child tenant deletion scheduled", zap.String("tenant_id", tenantID), zap.Time("scheduled_at", got))
 	return got, nil

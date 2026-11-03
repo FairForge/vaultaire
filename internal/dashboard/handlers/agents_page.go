@@ -247,19 +247,13 @@ func HandleAppDelete(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			http.Redirect(w, r, "/dashboard/apps", http.StatusSeeOther)
 			return
 		}
-		svc := account.NewService(db, logger)
-		if _, err := svc.ScheduleTenant(r.Context(), id); err != nil {
+		// One deletion for both doors (RP90-8): the app and its users
+		// scheduled, every key of the subtree revoked, in one transaction.
+		if _, err := account.NewService(db, logger).ScheduleApp(r.Context(), sd.TenantID, id); err != nil {
 			logger.Error("apps page: schedule", zap.Error(err))
 			middleware.SetFlash(w, "error", "The app could not be deleted. Try again.")
 			http.Redirect(w, r, "/dashboard/apps", http.StatusSeeOther)
 			return
-		}
-		if _, err := db.ExecContext(r.Context(), `UPDATE tenants SET deletion_scheduled_at = COALESCE(deletion_scheduled_at, (SELECT deletion_scheduled_at FROM tenants WHERE id = $1))
-			 WHERE parent_tenant_id = $1`, id); err != nil {
-			logger.Warn("apps page: schedule the end users (the cascade erases them with the app)", zap.Error(err))
-		}
-		if _, err := db.ExecContext(r.Context(), `UPDATE management_keys SET revoked_at = NOW() WHERE tenant_id = $1 AND revoked_at IS NULL`, id); err != nil {
-			logger.Error("apps page: revoke the app's keys", zap.Error(err))
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "app.deletion_scheduled", Resource: "tenant:" + id})
 		middleware.SetFlash(w, "success", "Deleted: the app and its users are erased after the 30-day grace; its keys stopped now.")
