@@ -185,6 +185,11 @@ func (s *Server) CreateBucket(w http.ResponseWriter, r *http.Request) {
 	// x-amz-bucket-object-lock-enabled (aws-cli --object-lock-enabled-for-bucket;
 	// RP16-4: it was ignored, the bucket made without lock).
 	var opts bucketCreateOptions
+	// A bucket an agent's S3 key creates is versioned, as on the management
+	// API (F-41, RP90-1): the promise holds on every door.
+	if ks := auth.KeyScopeFromContext(ctx); ks != nil && ks.AgentGrantID != "" {
+		opts.versioned = true
+	}
 	switch v := r.Header.Get("x-amz-bucket-object-lock-enabled"); {
 	case v == "" || strings.EqualFold(v, "false"):
 	case strings.EqualFold(v, "true"):

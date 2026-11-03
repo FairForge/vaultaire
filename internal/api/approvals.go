@@ -276,3 +276,28 @@ func (s *Server) agentS3PrivateRefused(r *http.Request, tenantID string, req *S3
 	}
 	return false
 }
+
+// agentDeleteRefused reports whether a DeleteObject / DeleteObjects of an
+// S3 key an agent grant minted must be refused (RP90-1, F-41: "a mistake is
+// a version back"): a delete that names a version is for good, and so is
+// any delete on a bucket whose versioning is not Enabled (Suspended
+// replaces the null version). The person keeps those — with their own key
+// or the dashboard. D-STRIPE-85 (an objects.delete approval, or this rule
+// for good) is the owner's; until then this rule. Fail closed.
+func (s *Server) agentDeleteRefused(ctx context.Context, tenantID, bucket string, namesAVersion bool) bool {
+	ks := auth.KeyScopeFromContext(ctx)
+	if ks == nil || ks.AgentGrantID == "" {
+		return false
+	}
+	if namesAVersion || s.db == nil {
+		return true
+	}
+	return getBucketVersioningStatus(ctx, s.db, tenantID, bucket) != "Enabled"
+}
+
+// writeAgentDeleteRefusal answers agentDeleteRefused's refusal.
+func writeAgentDeleteRefusal(w http.ResponseWriter, r *http.Request) {
+	WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+		WithMessage("An agent never deletes for good: it deletes only from a bucket with versioning Enabled, and never a version."),
+		WithSuggestion("Ask the account holder: they delete this with their own key or on the dashboard."))
+}

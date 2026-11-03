@@ -29,6 +29,7 @@ import (
 // the person's approval, or is a person's own act.
 var agentNever = []string{
 	"delete a bucket",
+	"delete a file for good: it deletes only in a bucket with versioning on, never an earlier version",
 	"make a bucket or a file public",
 	"turn a bucket's versioning off, or set Object Lock or retention",
 	"make keys beyond its own scope",

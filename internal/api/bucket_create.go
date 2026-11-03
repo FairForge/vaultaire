@@ -41,6 +41,10 @@ type bucketCreateOptions struct {
 	// row is born Standard and made Private through the door in the same
 	// transaction, so no write can land between the two.
 	private bool
+	// versioned: the bucket is born versioning-Enabled — a bucket an agent
+	// creates, on every door (F-41, RP90-1): written by the INSERT itself,
+	// so no write can land on an unversioned bucket between two statements.
+	versioned bool
 }
 
 // bucketCreateOutcome is what createBucketRegistry decided. Region is the
@@ -187,7 +191,7 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 	// An Object Lock bucket is created with versioning Enabled (AWS: lock
 	// implies versioning, and it cannot be suspended by the create).
 	versioning := "disabled"
-	if opts.objectLock {
+	if opts.objectLock || opts.versioned {
 		versioning = "Enabled"
 	}
 	if opts.private {

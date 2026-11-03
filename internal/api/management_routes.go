@@ -249,7 +249,7 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 	}
 
 	outcome, err := s.createBucketRegistryWith(r.Context(), tenantID, req.Name, req.Region,
-		bucketCreateOptions{private: req.Mode == modes.Private})
+		bucketCreateOptions{private: req.Mode == modes.Private, versioned: agentOf(r.Context()) != nil})
 	if err != nil {
 		s.logger.Error("management create bucket", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to create bucket", "")
@@ -298,14 +298,9 @@ func (s *Server) handleMgmtCreateBucket(w http.ResponseWriter, r *http.Request) 
 		RequestID: getRequestID(w),
 	}
 	// A bucket an agent creates is versioning-Enabled (F-41): an agent's
-	// mistake is a version back. Its keys may never turn it off.
-	if agentOf(r.Context()) != nil && s.db != nil {
-		if _, err := s.db.ExecContext(r.Context(), `UPDATE buckets SET versioning_status = 'Enabled', updated_at = NOW()
-			 WHERE tenant_id = $1 AND name = $2`, tenantID, req.Name); err != nil {
-			s.logger.Error("agent bucket versioning", zap.Error(err))
-			writeManagementError(w, ErrTypeAPI, "internal_error", "the bucket was created but its versioning could not be turned on", "")
-			return
-		}
+	// mistake is a version back. The create's INSERT wrote it (RP90-1); its
+	// keys may never turn it off.
+	if agentOf(r.Context()) != nil {
 		bucket.Versioning = "Enabled"
 	}
 	writeJSON(w, http.StatusCreated, bucket)
