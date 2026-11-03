@@ -49,18 +49,21 @@ func TestProduceRetentionRowsAreTheRetentionJobs(t *testing.T) {
 	f := produce.All()
 	pol := defaultRetentionPolicies()
 	require.Len(t, f.Retention, len(pol), "one row per retention policy")
+	// A table may have a delete row and a scrub row (agent_oauth_clients:
+	// the client after 30 days unused, its address after two — RP92-5).
 	byTable := map[string]produce.RetentionRow{}
 	for _, r := range f.Retention {
-		byTable[r.Table] = r
+		byTable[r.Table+"/"+r.Action] = r
 	}
+	require.Len(t, byTable, len(f.Retention), "one row per (table, action)")
 	for _, p := range pol {
-		r, ok := byTable[p.Table]
-		require.True(t, ok, "policy %s has no row", p.Table)
-		assert.Equal(t, p.MaxAge, time.Duration(r.Days)*24*time.Hour, "%s period", p.Table)
 		want := "delete"
 		if p.Action == retentionScrubColumns {
 			want = "scrub"
 		}
+		r, ok := byTable[p.Table+"/"+want]
+		require.True(t, ok, "policy %s (%s) has no row", p.Table, want)
+		assert.Equal(t, p.MaxAge, time.Duration(r.Days)*24*time.Hour, "%s period", p.Table)
 		assert.Equal(t, want, r.Action, "%s action", p.Table)
 		assert.Equal(t, p.ScrubColumns, nilIfEmpty(r.Scrub), "%s scrubbed columns", p.Table)
 	}

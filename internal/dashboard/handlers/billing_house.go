@@ -582,6 +582,10 @@ func refusedForProvider(w http.ResponseWriter, r *http.Request, err error) bool 
 	switch {
 	case errors.Is(err, payments.ErrProviderDisabled):
 		code, title, msg = "provider_disabled", "This way of paying is switched off", "This way of paying is switched off right now, so nothing was started or changed. Email "+hosts.Get().SupportEmail()+" and we will help you pay another way."
+	case errors.Is(err, payments.ErrInAFamily):
+		// RP92-1 (D-STRIPE-96): a sponsored member's storage is the
+		// organizer's plan; a house of its own would be lost at detach.
+		code, title, msg = "in_a_family", "Your storage comes from your family", "This account is a member of a family, so its storage comes from the organizer's plan. Leave the family first (the Family page) to buy a plan of your own. Nothing was started or charged."
 	case errors.Is(err, payments.ErrOtherProviderLive):
 		code, title, msg = "other_provider_live", "Your house is renewed another way", "Your house is renewed by another way of paying. Stop that renewal first (Manage Payment), then switch — otherwise you would pay twice."
 	case errors.Is(err, payments.ErrCryptoInvoiceOpen):

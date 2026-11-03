@@ -53,6 +53,10 @@ type retentionPolicy struct {
 	MaxAge       time.Duration
 	Action       retentionAction
 	ScrubColumns []string
+	// ScrubToNull blanks ScrubColumns to NULL instead of '' (a nullable
+	// column of a type with no empty value: agent_oauth_clients.created_ip
+	// is INET, RP92-5).
+	ScrubToNull bool
 	// Extra is an additional WHERE predicate (no leading AND).
 	Extra string
 }
@@ -71,6 +75,7 @@ const (
 	retentionWaitlistPII  = 90 * 24 * time.Hour
 	retentionOAuthClients = 30 * 24 * time.Hour // unused this long (RP90-3)
 	retentionOAuthCodes   = 24 * time.Hour      // a code lives 10 min (RP90-15)
+	retentionOAuthIP      = 2 * 24 * time.Hour  // the day's registration cap reads it (RP92-5)
 )
 
 // defaultRetentionPolicies is the shipped policy set.
@@ -107,6 +112,11 @@ func defaultRetentionPolicies() []retentionPolicy {
 			         WHERE g.client_id = agent_oauth_clients.client_id AND k.revoked_at IS NULL
 			           AND (k.expires_at IS NULL OR k.expires_at > NOW()))`},
 		{Table: "agent_oauth_codes", Column: "created_at", MaxAge: retentionOAuthCodes},
+		// The registering address (migration 124, RP92-5) is what the day's
+		// cap counts; it is blanked once no cap can read it. The client stays.
+		{Table: "agent_oauth_clients", Column: "created_at", MaxAge: retentionOAuthIP,
+			Action: retentionScrubColumns, ScrubColumns: []string{"created_ip"}, ScrubToNull: true,
+			Extra: "created_ip IS NOT NULL"},
 		{Table: "waitlist_signups", Column: "created_at", MaxAge: retentionWaitlistPII,
 			Action: retentionScrubColumns, ScrubColumns: []string{"ip_address", "user_agent"},
 			Extra: "(ip_address <> '' OR user_agent <> '')"},
@@ -255,8 +265,12 @@ func (j *RetentionJob) prune(ctx context.Context, p retentionPolicy) (int64, err
 	switch p.Action {
 	case retentionScrubColumns:
 		sets := make([]string, len(p.ScrubColumns))
+		blank := "''"
+		if p.ScrubToNull {
+			blank = "NULL"
+		}
 		for i, c := range p.ScrubColumns {
-			sets[i] = c + " = ''"
+			sets[i] = c + " = " + blank
 		}
 		stmt = fmt.Sprintf(`UPDATE %s SET %s WHERE ctid = ANY(ARRAY(SELECT ctid FROM %s WHERE %s LIMIT $2))`,
 			p.Table, strings.Join(sets, ", "), p.Table, where)

@@ -140,3 +140,23 @@ func TestFromRequest_AmbiguousCloudflareHeaderFallsBackToPeer(t *testing.T) {
 	r.Header.Add("CF-Connecting-IP", "203.0.113.7")
 	assert.Equal(t, "104.16.1.1", FromRequest(r))
 }
+
+// RP92-5: a limit keyed on an address counts an IPv6 peer by its /64 —
+// every residential customer holds one, so per-address counting is free
+// to evade — and an IPv4 peer by its /32.
+func TestNetwork_IPv6BySlash64IPv4ByAddress(t *testing.T) {
+	for in, want := range map[string]string{
+		"198.51.100.7":           "198.51.100.7/32",
+		"2001:db8:1:2:3:4:5:6":   "2001:db8:1:2::/64",
+		"2001:db8:1:2::1":        "2001:db8:1:2::/64",
+		"::ffff:198.51.100.7":    "198.51.100.7/32",
+		"::1":                    "::/64",
+		"fe80::1%en0":            "fe80::/64",
+		" 2001:DB8:1:2:ffff::9 ": "2001:db8:1:2::/64",
+	} {
+		assert.Equal(t, want, Network(in), in)
+	}
+	assert.Equal(t, "not-an-ip", Network("not-an-ip"), "an unparsable key is its own")
+	assert.Equal(t, Network("2001:db8:1:2::1"), Network("2001:db8:1:2:aaaa::1"), "one /64, one network")
+	assert.NotEqual(t, Network("2001:db8:1:2::1"), Network("2001:db8:1:3::1"))
+}

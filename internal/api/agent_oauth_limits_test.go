@@ -8,6 +8,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,7 +28,7 @@ import (
 func TestOAuth_RegisterAndTokenAreRateLimited(t *testing.T) {
 	f := setupPlatformFixture(t).withManagement().withAgents()
 	f.s.registerAgentOAuthRoutes()
-	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM agent_oauth_clients WHERE client_name = 'rp90-3'`) })
+	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM agent_oauth_clients WHERE client_name LIKE 'rp90-3%'`) })
 	register := func(ip string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodPost, "/oauth/register",
 			strings.NewReader(`{"client_name":"rp90-3","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`))
@@ -60,12 +61,22 @@ func TestOAuth_RegisterAndTokenAreRateLimited(t *testing.T) {
 	}
 	assert.Equal(t, http.StatusTooManyRequests, token("198.51.100.9").Code, "the 11th token request in a minute from one IP")
 
-	// The day's cap counts clients, whatever the minute's pace.
+	// The day's cap counts clients, whatever the minute's pace — distinct
+	// ones: an identical registration is the same client (RP92-4,
+	// TestOAuth_ClaudeAIsSharedEgressIsNotOneClient).
 	f.s.oauthRegisterLimiter = dashmw.NewRateLimiter(time.Minute, 1000)
-	for i := 0; i < oauthClientsPerIPPerDay; i++ {
-		require.Equal(t, http.StatusCreated, register("198.51.100.10").Code, "client %d of the day", i+1)
+	registerNamed := func(ip, name string) int {
+		r := httptest.NewRequest(http.MethodPost, "/oauth/register",
+			strings.NewReader(`{"client_name":"`+name+`","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`))
+		r.RemoteAddr = ip + ":40000"
+		w := httptest.NewRecorder()
+		f.s.router.ServeHTTP(w, r)
+		return w.Code
 	}
-	assert.Equal(t, http.StatusTooManyRequests, register("198.51.100.10").Code, "one IP registers at most the day's cap of clients")
+	for i := 0; i < oauthClientsPerIPPerDay; i++ {
+		require.Equal(t, http.StatusCreated, registerNamed("198.51.100.10", fmt.Sprintf("rp90-3 %d", i)), "client %d of the day", i+1)
+	}
+	assert.Equal(t, http.StatusTooManyRequests, registerNamed("198.51.100.10", "rp90-3 over"), "one IP registers at most the day's cap of clients")
 }
 
 func TestRetention_OAuthClientsAndCodes(t *testing.T) {

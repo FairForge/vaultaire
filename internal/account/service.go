@@ -25,6 +25,8 @@ import (
 	"unicode/utf8"
 
 	"go.uber.org/zap"
+
+	"github.com/FairForge/vaultaire/internal/usage"
 )
 
 // GracePeriod is how long after a request the erasure runs.
@@ -485,6 +487,22 @@ func (s *Service) detachOne(ctx context.Context, child, parent string, freeLimit
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE tenants SET parent_tenant_id = NULL, child_kind = NULL, pool_root_id = id WHERE id = $1`, child); err != nil {
 		return fmt.Errorf("detach %s: %w", child, err)
+	}
+	// A house it paid for is its own (RP92-1): a live entitlement (one
+	// granted before the house writers refused a sponsored member, or by
+	// an operator) is written back over the free tier — the floors, the
+	// total, the tier — in this transaction, now that it is a root again.
+	var std, vault, pinHot int
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT std_tb, vault_tb, pin_hot_tb FROM entitlements WHERE tenant_id = $1 AND lapsed_at IS NULL`, child).
+		Scan(&std, &vault, &pinHot); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("detach %s: read its entitlement: %w", child, err)
+	default:
+		if err := usage.SetHouseTx(ctx, tx, child, usage.HouseFromTB(std, vault, pinHot)); err != nil {
+			return fmt.Errorf("detach %s: keep its house: %w", child, err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_logs (tenant_id, event_type, action, resource, result, severity, metadata)

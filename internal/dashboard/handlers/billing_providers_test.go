@@ -127,3 +127,26 @@ func grant(t *testing.T, db *sql.DB, tenantID string, renewal payments.Renewal) 
 		_, _ = db.Exec(`DELETE FROM tenant_floor_quotas WHERE tenant_id = $1`, tenantID)
 	})
 }
+
+// RP92-1: a sponsored family member's checkout is the 409 in_a_family page
+// — the organizer's pool pays; the provider is never asked.
+func TestCheckout_SponsoredMember_409InAFamily(t *testing.T) {
+	db := testDashDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+	org := houseTenant(t, db, 0, 0)
+	id := houseTenant(t, db, 0, 0)
+	_, err := db.Exec(`UPDATE tenants SET parent_tenant_id = $2, child_kind = 'sponsored', pool_root_id = $2 WHERE id = $1`, id, org)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, _ = db.Exec(`UPDATE tenants SET parent_tenant_id = NULL, child_kind = NULL, pool_root_id = id WHERE id = $1`, id)
+	})
+	fb := newFakeHouseBilling()
+	h := HandleHouseCheckout(fb.registry(db, true), db, houseFlags(true), "https://stored.test", zap.NewNop())
+
+	w := postHouse(t, h, id, url.Values{"std": {"1"}, "period": {"monthly"}})
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	assert.Equal(t, "in_a_family", w.Header().Get("X-Error-Code"))
+	assert.Contains(t, w.Body.String(), "Leave the family first")
+	assert.Zero(t, fb.liveAsked, "the provider is never asked")
+}

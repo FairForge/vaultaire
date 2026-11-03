@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+
+	"github.com/FairForge/vaultaire/internal/clientip"
 )
 
 var (
@@ -37,7 +39,16 @@ var (
 	// ErrOAuthInvalidGrant: the code is unknown, used, expired, or does not
 	// match the client, the redirect or the PKCE verifier.
 	ErrOAuthInvalidGrant = errors.New("invalid_grant")
+	// ErrOAuthClientCap: the registering network has registered
+	// OAuthClientsPerNetworkPerDay clients in the last day (RP92-5).
+	ErrOAuthClientCap = errors.New("too many clients registered from this network today")
 )
+
+// OAuthClientsPerNetworkPerDay is the day's cap of NEW clients one network
+// (an IPv6 /64, an IPv4 address — clientip.Network) may register (RP90-3,
+// RP92-5); a registration identical to one of the day's is no new client
+// (RP92-4). The per-IP number stays until D-STRIPE-98.
+const OAuthClientsPerNetworkPerDay = 20
 
 // OAuthClient is a dynamically registered client.
 type OAuthClient struct {
@@ -84,8 +95,20 @@ func oauthSHA256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// RegisterOAuthClient registers a client (RFC 7591): 1–8 redirect URIs.
-func RegisterOAuthClient(ctx context.Context, db *sql.DB, name string, redirectURIs []string) (*OAuthClient, error) {
+// RegisterOAuthClient registers a client (RFC 7591): 1–8 redirect URIs,
+// from the peer address peer (clientip.FromRequest).
+//
+// A registration identical to one the same network made in the last day —
+// the client_name compared trimmed and case-folded, the redirect URIs as a
+// set — answers THAT client, no new row and nothing spent (RP92-4: every
+// claude.ai user's connector registers the same client from Anthropic's
+// egress). Otherwise the day's cap is checked in the registration's own
+// transaction, under an advisory lock on the network: COUNT of the
+// network's rows of the last day (created_ip, migration 124) — so only an
+// inserted row spends it, a restart resets nothing, and an IPv6 peer counts
+// by its /64 (RP92-5). A peer that is no address (a test's, a unix socket)
+// is neither capped nor matched.
+func RegisterOAuthClient(ctx context.Context, db *sql.DB, name string, redirectURIs []string, peer string) (*OAuthClient, error) {
 	name = strings.TrimSpace(name)
 	if len([]rune(name)) > 100 {
 		return nil, fmt.Errorf("%w: client_name is longer than 100 characters", ErrOAuthInvalidClient)
@@ -98,13 +121,59 @@ func RegisterOAuthClient(ctx context.Context, db *sql.DB, name string, redirectU
 			return nil, fmt.Errorf("%w: redirect_uri %q is not https, an http loopback address or a native app's scheme", ErrOAuthInvalidClient, u)
 		}
 	}
+	network := clientip.Network(peer)
+	var ip any // NULL unless the peer is an address
+	if strings.Contains(network, "/") {
+		ip = strings.SplitN(network, "/", 2)[0]
+		if a := net.ParseIP(strings.TrimSpace(peer)); a != nil {
+			ip = a.String()
+		}
+	} else {
+		network = ""
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("register an oauth client: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if network != "" {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('oauth-register:' || $1, 0))`, network); err != nil {
+			return nil, fmt.Errorf("register an oauth client: lock the network: %w", err)
+		}
+		c := &OAuthClient{}
+		err := tx.QueryRowContext(ctx, `
+			SELECT client_id, client_name, redirect_uris FROM agent_oauth_clients
+			 WHERE created_ip <<= $1::cidr AND created_at > NOW() - interval '1 day'
+			   AND lower(btrim(client_name)) = lower($2)
+			   AND redirect_uris @> $3 AND redirect_uris <@ $3
+			 ORDER BY created_at LIMIT 1`, network, name, pq.Array(redirectURIs)).
+			Scan(&c.ID, &c.Name, pq.Array(&c.RedirectURIs))
+		switch {
+		case err == nil:
+			return c, nil // the same client: nothing written, nothing spent
+		case !errors.Is(err, sql.ErrNoRows):
+			return nil, fmt.Errorf("register an oauth client: the day's clients: %w", err)
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM agent_oauth_clients
+			 WHERE created_ip <<= $1::cidr AND created_at > NOW() - interval '1 day'`, network).Scan(&n); err != nil {
+			return nil, fmt.Errorf("register an oauth client: count the day's clients: %w", err)
+		}
+		if n >= OAuthClientsPerNetworkPerDay {
+			return nil, ErrOAuthClientCap
+		}
+	}
 	tok, err := randomToken(18)
 	if err != nil {
 		return nil, err
 	}
 	c := &OAuthClient{ID: "mcp_" + tok, Name: name, RedirectURIs: append([]string(nil), redirectURIs...)}
-	if _, err := db.ExecContext(ctx, `INSERT INTO agent_oauth_clients (client_id, client_name, redirect_uris) VALUES ($1, $2, $3)`,
-		c.ID, c.Name, pq.Array(c.RedirectURIs)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agent_oauth_clients (client_id, client_name, redirect_uris, created_ip) VALUES ($1, $2, $3, $4::inet)`,
+		c.ID, c.Name, pq.Array(c.RedirectURIs), ip); err != nil {
+		return nil, fmt.Errorf("register an oauth client: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("register an oauth client: %w", err)
 	}
 	return c, nil

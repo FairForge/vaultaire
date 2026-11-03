@@ -25,11 +25,15 @@ import (
 	"github.com/FairForge/vaultaire/internal/hosts"
 )
 
-// The public OAuth endpoints' limits (RP90-3; RFC 7591 § 5): per client IP
-// (internal/clientip), whatever the agent_grants flag.
+// The public OAuth endpoints' limits (RP90-3; RFC 7591 § 5), whatever the
+// agent_grants flag: registrations a minute per network, token requests a
+// minute per (client, network) (RP92-4: claude.ai's users share one
+// egress), and the day's NEW clients per network — counted in SQL by
+// auth.RegisterOAuthClient (RP92-5). A network is clientip.Network's: an
+// IPv6 /64, an IPv4 address.
 const (
-	oauthPerMinute          = 10 // registrations, and token requests, a minute
-	oauthClientsPerIPPerDay = 20 // clients one IP may register in a day
+	oauthPerMinute          = 10
+	oauthClientsPerIPPerDay = auth.OAuthClientsPerNetworkPerDay
 )
 
 func (s *Server) registerAgentOAuthRoutes() {
@@ -39,25 +43,33 @@ func (s *Server) registerAgentOAuthRoutes() {
 	if s.oauthTokenLimiter == nil {
 		s.oauthTokenLimiter = dashmw.NewRateLimiter(time.Minute, oauthPerMinute)
 	}
-	if s.oauthClientsPerDay == nil {
-		s.oauthClientsPerDay = dashmw.NewRateLimiter(24*time.Hour, oauthClientsPerIPPerDay)
-	}
 	s.router.Get("/.well-known/oauth-authorization-server", s.handleOAuthMetadata)
 	s.router.Post("/oauth/register", s.handleOAuthRegister)
 	s.router.Get("/oauth/authorize", s.handleOAuthAuthorize)
 	s.router.Post("/oauth/token", s.handleOAuthToken)
 }
 
-// oauthLimited spends one of the client IP's requests on l and answers 429
-// (an RFC 6749 error body, Retry-After) when it is over (true = stop).
+// oauthLimited spends one of the client network's requests on l and
+// answers 429 when it is over (true = stop).
 func oauthLimited(w http.ResponseWriter, r *http.Request, l *dashmw.LoginRateLimiter, retryAfter string) bool {
-	if l == nil || l.Allow(clientip.FromRequest(r)) {
+	return oauthLimitedKey(w, l, clientip.FromRequest(r), retryAfter)
+}
+
+// oauthLimitedKey is oauthLimited on an explicit key (the limiter folds an
+// address key to its network).
+func oauthLimitedKey(w http.ResponseWriter, l *dashmw.LoginRateLimiter, key, retryAfter string) bool {
+	if l == nil || l.Allow(key) {
 		return false
 	}
+	oauthTooMany(w, retryAfter)
+	return true
+}
+
+// oauthTooMany is the 429: an RFC 6749 error body and Retry-After.
+func oauthTooMany(w http.ResponseWriter, retryAfter string) {
 	w.Header().Set("Retry-After", retryAfter)
 	oauthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many requests from this address: try again later")
 	noteS3Error(w, "oauth_rate_limited", getRequestID(w))
-	return true
 }
 
 // handleOAuthMetadata is RFC 8414's document.
@@ -102,12 +114,13 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_client_metadata", "the body must be a JSON client registration")
 		return
 	}
-	if oauthLimited(w, r, s.oauthClientsPerDay, "3600") {
-		return
-	}
-	c, err := auth.RegisterOAuthClient(r.Context(), s.db, req.ClientName, req.RedirectURIs)
+	c, err := auth.RegisterOAuthClient(r.Context(), s.db, req.ClientName, req.RedirectURIs, clientip.FromRequest(r))
 	if errors.Is(err, auth.ErrOAuthInvalidClient) {
 		oauthError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error())
+		return
+	}
+	if errors.Is(err, auth.ErrOAuthClientCap) {
+		oauthTooMany(w, "3600")
 		return
 	}
 	if err != nil {
@@ -158,16 +171,18 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 // the agent grant minted, its key the access token. The grant's sandbox key
 // rides along as stored_test_token (the rehearsal key, RP88-1).
 func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
-	if oauthLimited(w, r, s.oauthTokenLimiter, "60") {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		oauthError(w, http.StatusBadRequest, "invalid_request", "the body must be application/x-www-form-urlencoded")
+		return
+	}
+	// Per (client, network) (RP92-4): claude.ai's users exchange their
+	// codes from one egress, each through its own client.
+	if oauthLimitedKey(w, s.oauthTokenLimiter, r.PostForm.Get("client_id")+"|"+clientip.Network(clientip.FromRequest(r)), "60") {
 		return
 	}
 	if s.db == nil {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "no database")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if err := r.ParseForm(); err != nil {
-		oauthError(w, http.StatusBadRequest, "invalid_request", "the body must be application/x-www-form-urlencoded")
 		return
 	}
 	if gt := r.PostForm.Get("grant_type"); gt != "authorization_code" {
