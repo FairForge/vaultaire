@@ -997,7 +997,18 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, req *S
 	// downstairs object reports STANDARD, has no restore state to show and
 	// makes no backend call. Failure just omits the header (HEAD itself must
 	// stay reliable).
-	if engine.IsArchiveClass(storageClass) && s.engine != nil {
+	// RP91-1: with the tenant's vault_parity_serve flag on and the parity
+	// able to serve the object as it is now, the GET reads it from the parity
+	// (D-V3-6) — so HEAD says the object is readable, S3's own shape for a
+	// readable archive copy (aws-cli downloads a GLACIER object only then).
+	// One row read, no Geyser lookup.
+	parityReadable := engine.IsArchiveClass(storageClass) && floor == usage.FloorVault &&
+		s.vaultParity.ServeFirst(t.ID) &&
+		s.vaultParity.CanServe(r.Context(), t.ID, req.Bucket, req.Object, etag, storedBlobLength(encAlgo, sizeBytes, s.sseService))
+	if parityReadable {
+		w.Header().Set("x-amz-restore", `ongoing-request="false"`)
+	}
+	if !parityReadable && engine.IsArchiveClass(storageClass) && s.engine != nil {
 		if drv, exists := s.engine.GetDriver(backendName); exists {
 			restorer, isRestorer := drv.(engine.Restorer)
 			// RP91-3: never while the backend's breaker is open — during a

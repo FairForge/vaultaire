@@ -9,13 +9,17 @@
 #
 # What it reads (each with a 10 s bound; a source that does not answer is reported as
 # such, never as healthy):
-#   web        STATUS_ORIGIN/health (127.0.0.1:8010 — HAProxy's internal frontend to the
-#              active slot): healthy = up, degraded = degraded with its reason, else down
+#   web        "Origin (SLC)": STATUS_ORIGIN/health (127.0.0.1:8010 — HAProxy's internal
+#              frontend to the active slot, so the box itself, never the public path):
+#              healthy = up, degraded = degraded with its reason, else down
 #   s3         STATUS_ORIGIN/metrics: vaultaire_synthetic_check_success 1 and a last
 #              success within 10 min = up (the in-process canary signs PUT/HEAD/GET/DELETE
 #              against https://s3.stored.cloud, the customer path)
 #   legacy     STATUS_LEGACY_URL/health (https://stored.ge — through Cloudflare)
-#   dashboard  STATUS_WEB_URL/login (https://stored.cloud — through Cloudflare): 200
+#   dashboard  STATUS_APP_URL/login — through Cloudflare, the host every printed dashboard
+#              link names (RP91-2): 200. STATUS_APP_URL, else VAULTAIRE_BASE_URL from the
+#              environment, else from STATUS_APP_ENV (/opt/vaultaire/configs/.env, parsed
+#              for that one line, never sourced), else https://app.stored.cloud
 #   build      STATUS_ORIGIN/version's version
 #   alerts     STATUS_PROMETHEUS/api/v1/alerts: the NAMES of the alerts firing whose
 #              severity is in STATUS_ALERT_SEVERITIES (default critical,page) — never a
@@ -40,7 +44,7 @@ OUT_DIR=${STATUS_METRICS_DIR:-/var/lib/vaultaire-status}
 PUSH_URL=${STATUS_PUSH_URL:-https://status.stored.cloud/push}
 ORIGIN=${STATUS_ORIGIN:-http://127.0.0.1:8010}
 PROM=${STATUS_PROMETHEUS:-http://127.0.0.1:9090}
-WEB_URL=${STATUS_WEB_URL:-https://stored.cloud}
+APP_ENV=${STATUS_APP_ENV:-/opt/vaultaire/configs/.env}
 LEGACY_URL=${STATUS_LEGACY_URL:-https://stored.ge}
 SEVERITIES=${STATUS_ALERT_SEVERITIES:-critical,page}
 OUT=$OUT_DIR/vaultaire_status_push.prom
@@ -76,6 +80,16 @@ write_metrics() { # write_metrics SUCCESS
   if ! { chmod 0644 "$tmp" && mv -f "$tmp" "$OUT"; }; then rm -f "$tmp"; return 1; fi
 }
 
+# unquote VALUE — strips one pair of surrounding quotes.
+unquote() { local v=$1; v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}; printf '%s' "$v"; }
+
+APP_URL=${STATUS_APP_URL:-${VAULTAIRE_BASE_URL:-}}
+if [ -z "$APP_URL" ] && [ -r "$APP_ENV" ]; then
+  APP_URL=$(unquote "$(sed -n 's/^VAULTAIRE_BASE_URL=//p' "$APP_ENV" | tail -1)")
+fi
+APP_URL=${APP_URL%/}
+[[ "$APP_URL" =~ ^https?://[^/[:space:]]+$ ]] || APP_URL=https://app.stored.cloud
+
 token=""
 if [ -r "$ENV_FILE" ]; then
   token=$(sed -n 's/^STATUS_PUSH_TOKEN=//p' "$ENV_FILE" | tail -1)
@@ -106,7 +120,7 @@ health_component() { # health_component ID NAME URL
   fi
 }
 
-health_component web "stored.cloud" "$ORIGIN/health"
+health_component web "Origin (SLC)" "$ORIGIN/health"
 
 fetch "$ORIGIN/metrics"
 metric_int() { awk -v n="$1" '$1 == n {printf "%d", $2; exit}' <<< "$BODY"; }
@@ -121,7 +135,7 @@ fi
 
 health_component legacy "stored.ge" "$LEGACY_URL/health"
 
-fetch "$WEB_URL/login"
+fetch "$APP_URL/login"
 if [ "$CODE" = 200 ]; then component dashboard "Dashboard sign-in" up "HTTP 200"
 elif [ "$CODE" = 000 ]; then component dashboard "Dashboard sign-in" down "no answer"
 else component dashboard "Dashboard sign-in" down "HTTP $CODE"
