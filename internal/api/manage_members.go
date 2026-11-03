@@ -200,6 +200,9 @@ func (s *Server) handleMgmtRemoveMember(w http.ResponseWriter, r *http.Request) 
 	if res.KeysRevoked && s.auth != nil {
 		s.auth.ForgetRevokedKeys(tenantID, res.KeysMade)
 	}
+	if s.auth != nil {
+		s.auth.ForgetAgentKeys(res.AgentKeys)
+	}
 	action := "member.removed"
 	if leaving {
 		action = "member.left"

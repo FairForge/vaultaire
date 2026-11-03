@@ -129,6 +129,21 @@ func (s *Server) requireCaller(surface callerSurface) func(http.Handler) http.Ha
 					writeManagementError(w, ErrTypeAuthentication, "invalid_management_key", "the management key is unknown or revoked", "")
 					return
 				}
+				// ...and only while that person is a member of the account
+				// (RP90-4): a membership gone by any path stops the agent.
+				if k.AgentGrantedBy == "" {
+					writeManagementError(w, ErrTypeAuthentication, "invalid_management_key", "the management key is unknown or revoked", "")
+					return
+				}
+				if _, err := auth.MemberRole(r.Context(), s.db, account, k.AgentGrantedBy); err != nil {
+					if !errors.Is(err, auth.ErrNotMember) {
+						s.logger.Error("agent key: read its member", zap.Error(err))
+						writeManagementError(w, ErrTypeAPI, "management_key_lookup_failed", "could not read the management key", "")
+						return
+					}
+					writeManagementError(w, ErrTypeAuthentication, "invalid_management_key", "the management key is unknown or revoked", "")
+					return
+				}
 				ctx = audit.WithOnBehalfOf(ctx, k.AgentGrantedBy)
 				ctx = context.WithValue(ctx, agentGrantCtxKey{}, k)
 			}

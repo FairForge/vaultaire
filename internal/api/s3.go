@@ -1356,6 +1356,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, req *S3
 
 // handleDeleteObject handles DELETE requests
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, req *S3Request) {
+	if s.agentDeleteRefused(r.Context(), req.TenantID, req.Bucket, r.URL.Query().Has("versionId")) {
+		writeAgentDeleteRefusal(w, r)
+		return
+	}
 	if err := checkMFADelete(r.Context(), s.db, s.auth, s.mfaService, req.TenantID, req.Bucket, r); err != nil {
 		s.logMFADeleteUnknown(err, req.Bucket)
 		writeMFADeleteRefusal(w, r, err)

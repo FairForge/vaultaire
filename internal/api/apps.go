@@ -165,24 +165,21 @@ func (s *Server) handleMgmtDeleteApp(w http.ResponseWriter, r *http.Request) {
 		writeManagementError(w, ErrTypeNotFound, "app_not_found", "no app of this account has that id", "id")
 		return
 	}
-	svc := account.NewService(s.db, s.logger)
-	at, err := svc.ScheduleTenant(r.Context(), id)
+	// One deletion for both doors (RP90-8): the app and its users
+	// scheduled, every key of the subtree revoked, in one transaction.
+	sched, err := account.NewService(s.db, s.logger).ScheduleApp(r.Context(), tenantID, id)
+	if errors.Is(err, account.ErrNotAnApp) {
+		writeManagementError(w, ErrTypeNotFound, "app_not_found", "no app of this account has that id", "id")
+		return
+	}
 	if err != nil {
 		s.logger.Error("apps: schedule", zap.Error(err))
 		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to schedule the app's deletion", "")
 		return
 	}
-	users, err := s.appEndUsers(r, id)
-	if err != nil {
-		s.logger.Warn("apps: list the end users (the cascade still erases them with the app)", zap.Error(err))
-	}
-	for _, u := range users {
-		if _, err := svc.ScheduleTenant(r.Context(), u); err != nil {
-			s.logger.Warn("apps: schedule an end user", zap.String("tenant_id", u), zap.Error(err))
-		}
-	}
-	if _, err := s.db.ExecContext(r.Context(), `UPDATE management_keys SET revoked_at = NOW() WHERE tenant_id = $1 AND revoked_at IS NULL`, id); err != nil {
-		s.logger.Error("apps: revoke the app's keys", zap.Error(err))
+	at := sched.ScheduledAt
+	if s.auth != nil {
+		s.auth.ForgetAgentKeys(revokedKeys(sched.S3Keys))
 	}
 	audit.Record(r.Context(), s.db, audit.Entry{TenantID: tenantID, Action: "app.deletion_scheduled", Resource: "tenant:" + id,
 		Metadata: map[string]any{"scheduled_at": at}})
@@ -190,20 +187,11 @@ func (s *Server) handleMgmtDeleteApp(w http.ResponseWriter, r *http.Request) {
 		"deletion_scheduled_at": at.UTC(), "request_id": getRequestID(w)})
 }
 
-// appEndUsers lists the app's children.
-func (s *Server) appEndUsers(r *http.Request, app string) ([]string, error) {
-	rows, err := s.db.QueryContext(r.Context(), `SELECT id FROM tenants WHERE parent_tenant_id = $1 ORDER BY id`, app)
-	if err != nil {
-		return nil, err
+// revokedKeys turns a schedule's revoked keys into the cache's shape.
+func revokedKeys(in []account.RevokedKey) []auth.RevokedAgentKey {
+	out := make([]auth.RevokedAgentKey, 0, len(in))
+	for _, k := range in {
+		out = append(out, auth.RevokedAgentKey{TenantID: k.TenantID, ID: k.ID})
 	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
-			return out, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
+	return out
 }

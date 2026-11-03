@@ -133,12 +133,12 @@ func (s *Server) handlePartnerListClaimables(w http.ResponseWriter, r *http.Requ
 // handleMgmtClaim is POST /api/v1/manage/claims/{token}: a person keeps the
 // claimable as an app of the account they act on.
 func (s *Server) handleMgmtClaim(w http.ResponseWriter, r *http.Request) {
-	tenantID := activeTenant(r)
-	userID, _ := r.Context().Value(userIDKey).(string)
-	if s.db == nil || tenantID == "" {
-		writeManagementError(w, ErrTypeAPI, "no_database", "database unavailable", "")
+	// A claim makes an app: an apps route like the others (RP90-9).
+	tenantID, ok := s.appsOr404(w, r)
+	if !ok {
 		return
 	}
+	userID, _ := r.Context().Value(userIDKey).(string)
 	c, err := auth.ClaimProvisional(r.Context(), s.db, chi.URLParam(r, "token"), tenantID, userID)
 	switch {
 	case errors.Is(err, auth.ErrClaimGone):

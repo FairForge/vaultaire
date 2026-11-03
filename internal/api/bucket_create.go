@@ -41,6 +41,13 @@ type bucketCreateOptions struct {
 	// row is born Standard and made Private through the door in the same
 	// transaction, so no write can land between the two.
 	private bool
+	// versioned: the bucket is born versioning-Enabled — a bucket an agent
+	// creates, on every door (F-41, RP90-1): written by the INSERT itself,
+	// so no write can land on an unversioned bucket between two statements.
+	versioned bool
+	// agentGrant: the grant whose agent creates the bucket (RP90-5,
+	// buckets.created_by_agent_grant) — what the agent may later cap.
+	agentGrant string
 }
 
 // bucketCreateOutcome is what createBucketRegistry decided. Region is the
@@ -187,13 +194,13 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 	// An Object Lock bucket is created with versioning Enabled (AWS: lock
 	// implies versioning, and it cannot be suspended by the create).
 	versioning := "disabled"
-	if opts.objectLock {
+	if opts.objectLock || opts.versioned {
 		versioning = "Enabled"
 	}
 	if opts.private {
 		// Born Standard and made Private through the door in ONE
 		// transaction (RP33-1 c): no write can land between the two.
-		inserted, err := s.createPrivateBucketRow(ctx, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning)
+		inserted, err := s.createPrivateBucketRow(ctx, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning, opts.agentGrant)
 		if err != nil {
 			return out, err
 		}
@@ -204,10 +211,10 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 		}
 	} else if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
-			object_lock_enabled, versioning_status)
-		VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
+			object_lock_enabled, versioning_status, created_by_agent_grant)
+		VALUES ($1, $2, 'private', $3, $4, $5, $6, $7, NULLIF($8, '')::uuid)
 		ON CONFLICT (tenant_id, name) DO NOTHING
-	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning); err != nil {
+	`, tenantID, bucket, sseDefault, region, residency, opts.objectLock, versioning, opts.agentGrant); err != nil {
 		return out, fmt.Errorf("persist bucket %s: %w", bucket, err)
 	}
 	auth.EnsureTenantSlug(ctx, s.db, tenantID, s.logger)
@@ -234,7 +241,7 @@ func (s *Server) createBucketRegistryWith(ctx context.Context, tenantID, bucket,
 // create) and makes it Private through the door in the same transaction.
 // inserted is false when the name already existed (nothing changed).
 func (s *Server) createPrivateBucketRow(ctx context.Context, tenantID, bucket string, sseDefault bool, region, residency string,
-	objectLock bool, versioning string) (inserted bool, err error) {
+	objectLock bool, versioning, agentGrant string) (inserted bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, fmt.Errorf("persist bucket %s: %w", bucket, err)
@@ -243,12 +250,12 @@ func (s *Server) createPrivateBucketRow(ctx context.Context, tenantID, bucket st
 	if err := tx.QueryRowContext(ctx, `
 		WITH ins AS (
 			INSERT INTO buckets (tenant_id, name, visibility, sse_enabled, region, data_residency,
-				object_lock_enabled, versioning_status)
-			VALUES ($1, $2, 'private', $3, $4, $5, $6, $7)
+				object_lock_enabled, versioning_status, created_by_agent_grant)
+			VALUES ($1, $2, 'private', $3, $4, $5, $6, $7, NULLIF($8, '')::uuid)
 			ON CONFLICT (tenant_id, name) DO NOTHING
 			RETURNING 1)
 		SELECT EXISTS (SELECT 1 FROM ins)
-	`, tenantID, bucket, sseDefault, region, residency, objectLock, versioning).Scan(&inserted); err != nil {
+	`, tenantID, bucket, sseDefault, region, residency, objectLock, versioning, agentGrant).Scan(&inserted); err != nil {
 		return false, fmt.Errorf("persist bucket %s: %w", bucket, err)
 	}
 	if !inserted {

@@ -95,11 +95,9 @@ func HandleAgentRevoke(db *sql.DB, authSvc *auth.AuthService, logger *zap.Logger
 			http.Redirect(w, r, "/dashboard/agents", http.StatusSeeOther)
 			return
 		}
-		for _, tk := range minted {
-			t, k, _ := strings.Cut(tk, "/")
-			if err := authSvc.RevokeAPIKey(r.Context(), t, k); err != nil && !errors.Is(err, auth.ErrKeyRevoked) {
-				logger.Warn("revoke an agent's S3 key", zap.Error(err))
-			}
+		// Revoked in the grant's own transaction (RP90-2); the cache forgets them.
+		if authSvc != nil {
+			authSvc.ForgetAgentKeys(minted)
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "agent.grant_revoked", Resource: "agent:" + id})
 		middleware.SetFlash(w, "success", "Revoked: the agent's keys stopped working.")
@@ -130,9 +128,16 @@ func HandleApprovalDecide(db *sql.DB, authSvc *auth.AuthService, mfa *auth.MFASe
 			}
 			if act.Destructive {
 				code := strings.TrimSpace(r.FormValue("totp_code"))
-				secret, err := authSvc.GetMFASecret(r.Context(), sd.UserID)
-				if code == "" || err != nil || secret == "" || mfa == nil || !mfa.ValidateCode(secret, code) || !authSvc.ConsumeTOTPCode(sd.UserID, code) {
-					middleware.SetFlash(w, "error", "Enter the current code of your authenticator app to approve this.")
+				var v auth.TOTPValidator
+				if mfa != nil {
+					v = mfa
+				}
+				if err := authSvc.CheckFreshTOTP(r.Context(), v, sd.UserID, code, "approval"); err != nil {
+					msg := "Enter the current code of your authenticator app to approve this."
+					if errors.Is(err, auth.ErrTOTPLocked) {
+						msg = "Too many wrong codes: wait 15 minutes, then try again."
+					}
+					middleware.SetFlash(w, "error", msg)
 					http.Redirect(w, r, back, http.StatusSeeOther) // #nosec G710 -- a fixed local path, the id a validated uuid
 					return
 				}
@@ -242,19 +247,13 @@ func HandleAppDelete(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 			http.Redirect(w, r, "/dashboard/apps", http.StatusSeeOther)
 			return
 		}
-		svc := account.NewService(db, logger)
-		if _, err := svc.ScheduleTenant(r.Context(), id); err != nil {
+		// One deletion for both doors (RP90-8): the app and its users
+		// scheduled, every key of the subtree revoked, in one transaction.
+		if _, err := account.NewService(db, logger).ScheduleApp(r.Context(), sd.TenantID, id); err != nil {
 			logger.Error("apps page: schedule", zap.Error(err))
 			middleware.SetFlash(w, "error", "The app could not be deleted. Try again.")
 			http.Redirect(w, r, "/dashboard/apps", http.StatusSeeOther)
 			return
-		}
-		if _, err := db.ExecContext(r.Context(), `UPDATE tenants SET deletion_scheduled_at = COALESCE(deletion_scheduled_at, (SELECT deletion_scheduled_at FROM tenants WHERE id = $1))
-			 WHERE parent_tenant_id = $1`, id); err != nil {
-			logger.Warn("apps page: schedule the end users (the cascade erases them with the app)", zap.Error(err))
-		}
-		if _, err := db.ExecContext(r.Context(), `UPDATE management_keys SET revoked_at = NOW() WHERE tenant_id = $1 AND revoked_at IS NULL`, id); err != nil {
-			logger.Error("apps page: revoke the app's keys", zap.Error(err))
 		}
 		audit.Record(r.Context(), db, audit.Entry{TenantID: sd.TenantID, Actor: sd.UserID, Action: "app.deletion_scheduled", Resource: "tenant:" + id})
 		middleware.SetFlash(w, "success", "Deleted: the app and its users are erased after the 30-day grace; its keys stopped now.")
@@ -263,9 +262,15 @@ func HandleAppDelete(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 }
 
 // HandleClaim is GET and POST /dashboard/claim/{token}.
-func HandleClaim(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+func HandleClaim(tmpl *template.Template, db *sql.DB, enabled func(string) bool, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
+		// A claim makes an app: it needs the apps flag of the account it
+		// lands on, as every apps page does (RP90-9).
+		if sd == nil || enabled == nil || !enabled(sd.TenantID) {
+			http.NotFound(w, r)
+			return
+		}
 		token := chi.URLParam(r, "token")
 		data := sessionData(sd, "apps")
 		withCSRF(r.Context(), data)

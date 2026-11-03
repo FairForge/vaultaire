@@ -114,7 +114,8 @@ func TestClaimable_ClaimMovesTheDataUnderTheClaimer(t *testing.T) {
 	cleanupDescendants(partner)
 	key := partner.partner()
 	claimer := setupPlatformFixture(t).withManagement().withApps(true, false)
-	claimer.s = partner.s // one server: its auth service signs the claimer's token
+	claimer.s = partner.s                                             // one server: its auth service signs the claimer's token
+	require.NoError(t, partner.s.flags.Refresh(context.Background())) // the claimer's apps flag row (RP90-9: a claim is an apps route)
 	jwt, err := partner.s.auth.GenerateJWT(claimer.user)
 	require.NoError(t, err)
 	claimer.jwt = jwt

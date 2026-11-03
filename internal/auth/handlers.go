@@ -146,6 +146,14 @@ const keyEgressColumns = `COALESCE(ak.egress_limit_bytes, 0),
 // text is the one callers matched before it was typed ("expired STS token").
 var ErrSTSTokenExpired = errors.New("expired STS token")
 
+// agentGrantJoin / agentGrantDead: a key an agent grant minted is read
+// with its grant's live management key (RP90-2) — ONE left join — and
+// never authenticates once that key is revoked or the grant is gone,
+// whatever the key's own row says.
+const agentGrantJoin = `LEFT JOIN (agent_grants ag JOIN management_keys agk ON agk.id = ag.management_key_id) ON ag.id = ak.agent_grant_id`
+
+const agentGrantDead = `(ak.agent_grant_id IS NOT NULL AND (ag.id IS NULL OR agk.revoked_at IS NOT NULL))`
+
 // LookupCredential resolves an access key to its secret, tenant and scope.
 // It is THE credential lookup — the S3 header-auth path, the presigned-URL
 // verifier and STS all go through it (R5's invariant: one lookup, one
@@ -174,6 +182,7 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		isPrimary                bool
 		keyID, agentGrant        string
 		egressCap, egressUsed    int64
+		grantDead                bool
 	)
 	err := a.db.QueryRowContext(ctx, `
 		SELECT COALESCE(ak.tenant_id, ''), COALESCE(ak.secret_key, ''), ak.secret_wrapped, ak.secret_key_version,
@@ -181,15 +190,18 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 		       COALESCE(ak.bucket_scope, '{}'),
 		       COALESCE(ak.ip_allowlist, '{}'),
 		       ak.expires_at, ak.revoked_at, ak.is_primary,
-		       ak.id::text, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, '')
+		       ak.id::text, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, ''),
+		       `+agentGrantDead+`
 		FROM api_keys ak
+		`+agentGrantJoin+`
 		WHERE ak.key_id = $1
 	`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &permJSON, &bucketScope, &ipAllowlist, &expiresAt, &revokedAt, &isPrimary,
-		&keyID, &egressCap, &egressUsed, &agentGrant)
+		&keyID, &egressCap, &egressUsed, &agentGrant, &grantDead)
 	switch {
 	case err == nil:
-		if revokedAt.Valid {
-			a.logger.Debug("revoked access key presented", zap.String("tenant_id", tenantID), zap.Bool("primary", isPrimary))
+		if revokedAt.Valid || grantDead {
+			a.logger.Debug("revoked access key presented", zap.String("tenant_id", tenantID), zap.Bool("primary", isPrimary),
+				zap.Bool("agent_grant_revoked", grantDead))
 			return nil, ErrAccessKeyRevoked
 		}
 		if tenantID == "" {
@@ -244,19 +256,21 @@ func (a *Auth) LookupCredential(ctx context.Context, accessKey string) (*Credent
 			SELECT s.tenant_id, COALESCE(s.secret_key, ''), s.secret_wrapped, s.secret_key_version,
 			       s.permissions, s.bucket_scope, s.ip_restrict, s.expires_at,
 			       ak.key_id IS NOT NULL, ak.revoked_at IS NOT NULL, ak.expires_at,
-			       ak.id::text, ak.is_primary, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, '')
+			       ak.id::text, ak.is_primary, `+keyEgressColumns+`, COALESCE(ak.agent_grant_id::text, ''),
+			       `+agentGrantDead+`
 			FROM sts_tokens s
 			LEFT JOIN api_keys ak ON ak.key_id = s.parent_key_id
+			`+agentGrantJoin+`
 			WHERE s.access_key = $1
 		`, accessKey).Scan(&tenantID, &secretKey, &wrapped, &wrapVersion, &stsPermJSON, &stsBucketScope, &stsIPRestrict, &stsExpiresAt,
-			&parentFound, &parentRevoked, &parentExpiresAt, &parentID, &parentPrimary, &egressCap, &egressUsed, &agentGrant)
+			&parentFound, &parentRevoked, &parentExpiresAt, &parentID, &parentPrimary, &egressCap, &egressUsed, &agentGrant, &grantDead)
 		switch {
 		case err == nil:
 			if time.Now().After(stsExpiresAt) {
 				a.logger.Debug("expired STS token", zap.String("tenant_id", tenantID))
 				return nil, ErrSTSTokenExpired
 			}
-			if !parentFound || parentRevoked || (parentExpiresAt.Valid && time.Now().After(parentExpiresAt.Time)) {
+			if !parentFound || parentRevoked || grantDead || (parentExpiresAt.Valid && time.Now().After(parentExpiresAt.Time)) {
 				a.logger.Debug("STS token of a dead parent key refused", zap.String("tenant_id", tenantID),
 					zap.Bool("parent_found", parentFound), zap.Bool("parent_revoked", parentRevoked))
 				return nil, fmt.Errorf("%w: the parent key of this token is revoked", ErrAccessKeyRevoked)

@@ -148,7 +148,7 @@ func TestManagementCreateBucket(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	expectNoResidency(mock, "test-tenant")
 	mock.ExpectExec(`INSERT INTO buckets`).
-		WithArgs("test-tenant", "new-bucket", false, sqlmock.AnyArg(), sqlmock.AnyArg(), false, "disabled"). // no Object Lock: versioning off (RP16-4)
+		WithArgs("test-tenant", "new-bucket", false, sqlmock.AnyArg(), sqlmock.AnyArg(), false, "disabled", ""). // no Object Lock: versioning off (RP16-4); no agent grant (RP90-5)
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectQuery(`SELECT slug, name FROM tenants WHERE id`).
 		WithArgs("test-tenant").

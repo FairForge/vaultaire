@@ -29,6 +29,7 @@ import (
 // the person's approval, or is a person's own act.
 var agentNever = []string{
 	"delete a bucket",
+	"delete a file for good: it deletes only in a bucket with versioning on, never an earlier version",
 	"make a bucket or a file public",
 	"turn a bucket's versioning off, or set Object Lock or retention",
 	"make keys beyond its own scope",
@@ -151,8 +152,15 @@ func HandleAgentConnect(tmpl *template.Template, db *sql.DB, authSvc *auth.AuthS
 			return
 		}
 		code := strings.TrimSpace(r.PostFormValue("totp_code"))
-		secret, err := authSvc.GetMFASecret(r.Context(), sd.UserID)
-		if code == "" || err != nil || mfa == nil || !mfa.ValidateCode(secret, code) || !authSvc.ConsumeTOTPCode(sd.UserID, code) {
+		var v auth.TOTPValidator
+		if mfa != nil {
+			v = mfa
+		}
+		if err := authSvc.CheckFreshTOTP(r.Context(), v, sd.UserID, code, "agent_consent"); err != nil {
+			if errors.Is(err, auth.ErrTOTPLocked) {
+				fail("Too many wrong codes: wait 15 minutes, then enter the current code from your authenticator app.")
+				return
+			}
 			fail("Enter the current 6-digit code from your authenticator app.")
 			return
 		}

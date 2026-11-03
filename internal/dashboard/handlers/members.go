@@ -163,6 +163,9 @@ func HandleRemoveMember(db *sql.DB, keys *auth.AuthService, logger *zap.Logger) 
 			if res.KeysRevoked && keys != nil {
 				keys.ForgetRevokedKeys(sd.TenantID, res.KeysMade)
 			}
+			if keys != nil {
+				keys.ForgetAgentKeys(res.AgentKeys)
+			}
 			audit.Record(r.Context(), db, audit.Entry{UserID: target, TenantID: sd.TenantID, Action: "member.removed",
 				Resource: "user:" + target, Severity: "warning",
 				Metadata: map[string]any{"via": "dashboard", "keys_made": len(res.KeysMade), "keys_revoked": res.KeysRevoked}})

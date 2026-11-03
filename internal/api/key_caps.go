@@ -615,6 +615,9 @@ func (s *Server) handleMgmtSetKeyCaps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	if !s.agentMayCap(w, r, `SELECT agent_grant_id IS NOT DISTINCT FROM $3::uuid FROM api_keys WHERE id::text = $2 AND tenant_id = $1`, tenantID, id) {
+		return
+	}
 	res, err := qm.SetKeyCaps(r.Context(), tenantID, id, c, s.tenantEgressAllowance(r.Context(), tenantID))
 	if err != nil {
 		s.writeCapsError(w, err, "key")
@@ -643,6 +646,9 @@ func (s *Server) handleMgmtSetBucketCaps(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	if !s.agentMayCap(w, r, `SELECT created_by_agent_grant IS NOT DISTINCT FROM $3::uuid FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, name) {
+		return
+	}
 	res, err := qm.SetBucketCaps(r.Context(), tenantID, name, c, s.tenantEgressAllowance(r.Context(), tenantID))
 	if err != nil {
 		s.writeCapsError(w, err, "bucket")
@@ -653,4 +659,31 @@ func (s *Server) handleMgmtSetBucketCaps(w http.ResponseWriter, r *http.Request)
 	out := capsJSON("bucket_caps", name, c, res)
 	out["request_id"] = getRequestID(w)
 	writeJSON(w, http.StatusOK, out)
+}
+
+// agentMayCap lets an agent cap only what its grant made (RP90-5): an S3 key
+// it minted, a bucket it created — never a person's key or bucket (a cap of
+// 1 byte is a denial lever with no approval). q reads one boolean for
+// (tenant, id, the grant); a person and a server's management key pass. A
+// row that does not exist passes too: the handler answers its own 404.
+func (s *Server) agentMayCap(w http.ResponseWriter, r *http.Request, q, tenantID, id string) bool {
+	a := agentOf(r.Context())
+	if a == nil || s.db == nil {
+		return true
+	}
+	var own bool
+	err := s.db.QueryRowContext(r.Context(), q, tenantID, id, a.AgentGrantID).Scan(&own)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return true
+	case err != nil:
+		s.logger.Error("agent caps: read the owner", zap.Error(err))
+		writeManagementError(w, ErrTypeAPI, "internal_error", "failed to set the caps", "")
+		return false
+	case !own:
+		writeManagementError(w, ErrTypePermission, "person_required",
+			"an agent caps only the keys it made and the buckets it created: ask the account holder to cap this one", "")
+		return false
+	}
+	return true
 }

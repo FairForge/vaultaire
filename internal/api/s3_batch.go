@@ -139,6 +139,17 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, req *S3Re
 		return
 	}
 
+	// An agent's key never deletes for good (RP90-1): one version id in the
+	// batch, or a bucket not Enabled, refuses the whole batch.
+	namesAVersion := false
+	for _, o := range delReq.Objects {
+		namesAVersion = namesAVersion || o.VersionID != ""
+	}
+	if s.agentDeleteRefused(r.Context(), t.ID, bucket, namesAVersion) {
+		writeAgentDeleteRefusal(w, r)
+		return
+	}
+
 	result := DeleteResult{Xmlns: "http://s3.amazonaws.com/doc/2006-03-01/"}
 
 	// The request is valid and the caller known: from here the keep-alive

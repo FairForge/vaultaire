@@ -237,6 +237,12 @@ var Deleted = []Rule{
 	// naming the key, never the person (RP84-1 b). user_id stays NOT NULL:
 	// the previous build scans it into a string at boot. A key with no
 	// other owner to take it goes with the user, below.
+	// An S3 key an agent grant minted dies with the grant (RP90-2): the
+	// person erased, every key of every grant acting for them is revoked —
+	// on every tenant, before the grants forget them (below). Its user_id is
+	// the grant's actor (the tenant's owner), so the rules by user miss it.
+	{"api_keys", `UPDATE api_keys SET revoked_at = COALESCE(revoked_at, NOW())
+		 WHERE agent_grant_id IN (SELECT id FROM agent_grants WHERE granted_by::text = $1)`, ByUser},
 	{"api_keys", keyMakerHandover, ByUser},
 	{"api_keys", `DELETE FROM api_keys WHERE user_id::text = $1`, ByUser},
 	// A management key the user minted on a tenant stays that tenant's and
