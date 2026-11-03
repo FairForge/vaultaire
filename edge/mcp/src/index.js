@@ -45,16 +45,20 @@ async function rpc(env, token, msg) {
   }
 }
 
-// originIssuer is the issuer of the origin's authorization-server metadata,
-// or "" when the origin did not answer one.
-async function originIssuer(env) {
+// originMetadata is the issuer and the service_documentation of the origin's
+// authorization-server metadata ("" each when the origin did not answer one,
+// or answered something that is no https URL).
+async function originMetadata(env) {
   try {
     const res = await fetch(env.STORED_API + "/.well-known/oauth-authorization-server");
-    if (!res.ok) return "";
+    if (!res.ok) return { issuer: "", docs: "" };
     const doc = await res.json();
-    return typeof doc.issuer === "string" && /^https:\/\/[^/]+$/.test(doc.issuer) ? doc.issuer : "";
+    const issuer = typeof doc.issuer === "string" && /^https:\/\/[^/]+$/.test(doc.issuer) ? doc.issuer : "";
+    const docs = typeof doc.service_documentation === "string" && /^https:\/\/[^/\s]+\/[^\s]*$/.test(doc.service_documentation)
+      ? doc.service_documentation : "";
+    return { issuer, docs };
   } catch {
-    return "";
+    return { issuer: "", docs: "" };
   }
 }
 
@@ -66,9 +70,12 @@ export default {
       // publishes: a client fetches <issuer>/.well-known/… and refuses a
       // document whose issuer differs (RFC 8414 § 3.3), and the canonical
       // host is the origin's setting, not this Worker's.
-      const issuer = await originIssuer(env);
+      // resource_documentation is the origin's service_documentation
+      // (hosts.DocsBase + "/api#agents", RP91-12), else STORED_DOCS's.
+      const { issuer, docs } = await originMetadata(env);
+      const documentation = docs || (env.STORED_DOCS ? env.STORED_DOCS + "/api#agents" : (issuer || env.STORED_API) + "/docs/api#agents");
       return json(200, { resource: env.MCP_RESOURCE, authorization_servers: [issuer || env.STORED_API], bearer_methods_supported: ["header"],
-        scopes_supported: ["stored"], resource_documentation: (issuer || env.STORED_API) + "/docs/api#agents" },
+        scopes_supported: ["stored"], resource_documentation: documentation },
         { "cache-control": issuer ? "public, max-age=300" : "no-store" });
     }
     if (url.pathname === "/.well-known/oauth-authorization-server") {

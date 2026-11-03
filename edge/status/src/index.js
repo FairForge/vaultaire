@@ -9,7 +9,8 @@
 // health: silence from the box is itself the news.
 //
 // Routes, GET and HEAD unless said: / (the page), /state.json (the same as
-// data), POST /push. Everything else is 404. Every answer is no-store, sets no
+// data), POST /push. Everything else is 404, and so is any request carrying
+// S3 credentials (Architecture Decision 8, RP91-8). Every answer is no-store, sets no
 // cookie, and carries a CSP that lets nothing load — no script, no beacon, no
 // font, no image. One file, no bundling, no imports: the state is one Durable
 // Object (StatusState) because a report must be read back exactly as written,
@@ -185,10 +186,26 @@ async function handlePush(request, env) {
   return respond(204, null);
 }
 
+// carriesS3Credentials is the origin's credential gate's predicate
+// (Architecture Decision 8, auth.IsAWSAuthorization + signedS3Request; RP91-8):
+// an Authorization whose scheme token — before the first space, any case — is
+// SigV4, SigV4A or SigV2, or a presigned query. Such a request is an S3 client's
+// and gets a 404 here, never the page as its object bytes.
+const AWS_SCHEMES = ["aws4-hmac-sha256", "aws4-ecdsa-p256-sha256", "aws"];
+function carriesS3Credentials(request, url) {
+  const h = request.headers.get("authorization") || "";
+  const sp = h.indexOf(" ");
+  if (sp > 0 && AWS_SCHEMES.includes(h.slice(0, sp).toLowerCase())) return true;
+  const q = url.searchParams;
+  return ["X-Amz-Signature", "X-Amz-Credential", "X-Amz-Algorithm", "AWSAccessKeyId"].some((k) => q.has(k));
+}
+
 export default {
   async fetch(request, env) {
-    const { pathname } = new URL(request.url);
+    const url = new URL(request.url);
+    const { pathname } = url;
     const method = request.method;
+    if (carriesS3Credentials(request, url)) return text(404, "not found\n");
     if (pathname === "/push" && method === "POST") return handlePush(request, env);
     if ((pathname === "/" || pathname === "/state.json") && (method === "GET" || method === "HEAD")) {
       const rec = await (await stub(env).fetch(new Request("https://state/"))).json();

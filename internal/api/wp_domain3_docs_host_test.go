@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/config"
+	dashmw "github.com/FairForge/vaultaire/internal/dashboard/middleware"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/hosts"
 	"github.com/FairForge/vaultaire/internal/modes"
@@ -141,6 +142,35 @@ func TestDocsHost_RouteListIsClosed(t *testing.T) {
 
 // TestDocsHost_ServesTheSameBytesAsTheCanonicalDocs: one rendering, two
 // addresses — and the HEAD shape of the canonical pages.
+// TestDocsHost_SecurityHeaders (RP91-11): every docs-host answer carries the
+// dashboard's security headers (middleware.SecurityHeaders), and its CSP
+// lets swagger-ui load from unpkg.com on /api — only there.
+func TestDocsHost_SecurityHeaders(t *testing.T) {
+	h := fullServer(t)
+	for _, host := range docsHostNames {
+		for _, p := range append(append([]string{}, docsHostList...), "/no-such-guide") {
+			w := serve(h, hostRequest(http.MethodGet, host, p, false, true))
+			where := host + p
+			assert.Equal(t, "DENY", w.Header().Get("X-Frame-Options"), where)
+			assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"), where)
+			assert.Equal(t, "strict-origin-when-cross-origin", w.Header().Get("Referrer-Policy"), where)
+			assert.Equal(t, "camera=(), microphone=(), geolocation=()", w.Header().Get("Permissions-Policy"), where)
+			csp := w.Header().Get("Content-Security-Policy")
+			require.NotEmpty(t, csp, where)
+			assert.Contains(t, csp, "frame-ancestors 'none'", where)
+			if p == "/api" {
+				assert.Equal(t, docsAPIContentSecurityPolicy, csp, where)
+				for _, d := range []string{"script-src", "style-src"} {
+					assert.Regexp(t, d+" [^;]*https://unpkg.com", csp, where)
+				}
+			} else {
+				assert.Equal(t, dashmw.ContentSecurityPolicy, csp, where)
+				assert.NotContains(t, csp, "unpkg", where)
+			}
+		}
+	}
+}
+
 func TestDocsHost_ServesTheSameBytesAsTheCanonicalDocs(t *testing.T) {
 	h := fullServer(t)
 	for slug, canonical := range docsPages {
