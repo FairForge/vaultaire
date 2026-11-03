@@ -1130,6 +1130,51 @@ Prod: the owner's family of two addresses; a member's upload counted in the pool
 
 Done means: PRs 0 and A–D merged; the proof has run on prod; the next prompt is written here.
 
+## Stage 1a Prompt 57: WP-POST-1 — browser uploads: presigned POST policies (Part 0: RP92's findings)
+
+**From 56** (`docs/reviews/WP-STRIPE-8.md`; the post-merge review is RP92):
+- The family is built dark (`family`); a member is a `sponsored` child and the organizer sees bytes only. Nothing of it touches the S3 write path WP-POST-1 changes — except that a member's write is checked against the ORGANIZER's pool (`pool_root_id`), as every child's is.
+- Migration 123 landed with Part 0 (D-STRIPE-89). Next: **124**, expected unused by WP-POST-1 ("none" in its plan row).
+- RB14-1 (a family member keeps the free tier's bucket count) and RB14-2 (an invitee without an account cannot register while signups are closed) are residuals for F-40's price, not for this prompt.
+
+Read first: plan § WP-STRIPE, the **WP-POST-1** row; `docs/reviews/WP-STRIPE-8.md` and its review RP92 (`docs/reviews/WP-STRIPE-8-REVIEW.md`); `internal/api/s3.go` (the router's POST branches: `?uploads`, `?delete`, `?restore` — a bucket-level POST with a multipart/form-data body is today an error), `internal/auth/` (the one verifier: `ValidateRequest`, `ValidateDescribed`, the presigned verifier — a policy signature is a fourth entrance, never a second verifier), `internal/api/s3_cors.go` (the preflight is answered before SigV4), `internal/api/edge_ingest.go` (`edgeAdmitWrite`: the signed size the admit needs), `internal/api/placement.go`, `docs/API.md` § Fast uploads and downloads.
+
+Part 0 — the findings of RP92 (`docs/reviews/WP-STRIPE-8-REVIEW.md`), each test first, in the order the review gives; the review writes this list. If the note is not on main, STOP and say so — never guess a review.
+
+PR A — the policy: `POST /{bucket}` with a `multipart/form-data` body whose fields precede `file` (S3's order rule): `key` (with `${filename}`), `policy` (base64 JSON: `expiration`, `conditions` — `bucket`, `key` exact or `starts-with`, `content-length-range`, `Content-Type` exact or `starts-with`, `success_action_status`, `x-amz-meta-*`, `x-amz-credential`, `x-amz-algorithm`, `x-amz-date`), `x-amz-signature` = SigV4 over the base64 policy with the credential's signing key (`auth`, the one key lookup: `LookupCredential` — revoked, expired, scoped, IP-allowlisted, agent and Private rules exactly as a PUT's). The body streams (never buffered: Architecture Decision 4) through the PUT's own write path (`placeObject`, the quota reservation of `content-length-range`'s max, the ETag by MD5 stream); `success_action_status` 200/201/204 (201 = the XML `PostResponse`), `success_action_redirect` refused (an open redirect). Tests: `TestPostPolicy_AcceptsBoto3sGeneratePresignedPost` (a fixture policy produced by boto3 1.x's `generate_presigned_post`, checked in), `TestPostPolicy_SizeRangeEnforced` (one byte over the max is 400 `EntityTooLarge`, nothing written, the reservation released), `TestPostPolicy_ExpiredIs403`, `TestPostPolicy_ContentTypeStartsWith`, `TestPostPolicy_ARevokedKeysPolicyIsRefused`.
+
+PR B — the edge: a POST of a tenant with `edge_ingest` whose policy's `content-length-range` max is ≥ `EDGE_MIN_BYTES` and ≤ the 100 MB Worker body cap is admitted like a PUT (the policy's max is the signed size; the Worker forwards the multipart body's file part to a presigned backend PUT of the EXACT size the form's part declares, else the origin's). Over 100 MB the answer names the cap. Test: `TestPostPolicy_EdgeAdmitsTheSignedSize` + the Worker's test.
+
+PR C — docs: `docs/API.md` § Browser uploads, a guide with the `<form>` and the `fetch` example, the conformance suite's POST cases, `llms.txt`; `docs/reviews/WP-STRIPE-9.md`, STATUS, the plan row, CLAUDE.md, the ledger row; the next prompt (WP-XFER-1 if the first node exists, else WP-VAULT-2) in both editions with Part 0 = RP94.
+
+Prod: a static page on the content domain uploads a file to tenant zero's bucket through `s3.stored.cloud`; the object's ETag is the file's MD5; the access log names the POST.
+
+## Stage 1a Prompt 57 — Opus edition
+
+**From 56:** see the chain edition's "From 56" block above.
+
+You are building plan § WP-STRIPE's WP-POST-1 row in the Vaultaire repository: browser uploads through S3 presigned POST policies, the same verifier and the same write path as a PUT, admitted at the edge by the policy's signed size. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database (`make test-db TEST_DB=vaultaire_test_p57`); no migration expected — if one is needed it is **124**, written whole in the PR that needs it.
+
+Read before editing: the chain edition's "Read first" list. If RP92 (`docs/reviews/WP-STRIPE-8-REVIEW.md`) is not on main, STOP and say so.
+
+PR 0 — Branch `stage1a-p57-part0`. RP92's findings in the review's order, each test first; the P4s as one PR after. Anything the review marks LIVE goes first and deploys before PR A opens.
+
+PR A — Branch `stage1a-p57-post`.
+1. Test first: `TestPostPolicy_AcceptsBoto3sGeneratePresignedPost` (fixture: `internal/api/testdata/post_policy_boto3.json`, the fields boto3's `generate_presigned_post` produced for a fixed credential, date and key — generate it once with a script under `cmd/tools/`, commit the output), `TestPostPolicy_SizeRangeEnforced`, `TestPostPolicy_ExpiredIs403`, `TestPostPolicy_ContentTypeStartsWith`, `TestPostPolicy_ARevokedKeysPolicyIsRefused`. Red.
+2. `internal/auth/post_policy.go`: `ParsePostPolicy` (base64 → expiration + conditions, refusing an unknown operator) and `(*Auth).ValidatePostPolicy(ctx, fields)` — `LookupCredential` for the credential's key id, the SigV4 signing key (the verifier's own derivation, never a copy), `subtle.ConstantTimeCompare` on the signature, then every condition against the form's fields.
+3. `internal/api/s3_post_policy.go`: the `POST /{bucket}` branch for `multipart/form-data` (`mime/multipart.Reader`, fields until `file`, the file part streamed into the PUT's write adapter with `content-length-range`'s max reserved and the real size checked as it streams), the success answers, the S3 error shapes; the access log's op `PostObject`.
+4. A request with an `Authorization` header or a presigned query is not a POST policy (the one gate, Architecture Decision 8, is unchanged).
+
+PR B — Branch `stage1a-p57-edge`.
+5. Test first: `TestPostPolicy_EdgeAdmitsTheSignedSize`. Red.
+6. `internal/api/edge_ingest.go`: an admit `op = 'post'` (no migration: `edge_admits.op`'s check names `put|part|get` — if it must change, that is migration **124**, written whole here); the Worker (`edge/s3-ingest`) forwards the file part. Over 100 MB: the origin's error naming the cap.
+
+PR C — docs: as the chain edition's PR C.
+
+Prod: the chain edition's proof.
+
+Done means: PRs 0 and A–C merged; the proof has run on prod; the next prompt is written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -1173,5 +1218,6 @@ Done means: PRs 0 and A–D merged; the proof has run on prod; the next prompt i
   - Prod proof owed: the owner's TOTP and the Worker's route (with RB12-7).
   - The post-merge review is **RP90**.
 - **Prompt 55 reviewed by RP90 (2026-11-02, `docs/reviews/WP-STRIPE-7-REVIEW.md`): HOLDS at P2** — RP90-1 the versioning promise holds on the management API only (an agent's S3 key makes unversioned buckets and may delete versions for good), RP90-2 agent-minted S3 keys outlive the grant on the erasure and member-removal paths, RP90-3 `/oauth/register` + `/oauth/token` public and unlimited; seven P3s, nine P4s; `agent_grants` + `apps` are ON for tenant zero (live, not dark). The same day's engine lane (WP-VAULT-3, the Lyve primary, WP-DOMAIN-1 part 3) is **RP91** (`docs/reviews/WP-VAULT-3-REVIEW.md`): HOLDS at P3.
-- **Prompt 56 — WP-FAMILY-1** — WRITTEN below by Prompt 55's closeout, both editions; **Part 0 FILLED by RP90 + RP91 (2026-11-02)**. No migration expected (WP-ACCT-1's columns); if one is needed it is **123**, landed whole with PR A. Its review is RP92.
-- Then WP-POST-1, WP-XFER-1 (after the first node), WP-VAULT-2 — each written by the closeout before it.
+- **Prompt 56 — WP-FAMILY-1 — BUILT 2026-11-02/03, dark** (`docs/reviews/WP-STRIPE-8.md`; migration **123** with Part 0, D-STRIPE-89). PRs: #1126 Part 0 (RP90-1…9; deployed `204f3d11`), #1125 the RP91 P4s, #1127 RP91-1/2, #1128 the RP90 P4s, #1129 PR A the family, #1130 PR B leaving, #1131 PR C the dashboard, PR D this closeout. RP91-5 not built (open question). Prod proof owed (the owner's TOTP). The post-merge review is **RP92**.
+- **Prompt 57 — WP-POST-1** — WRITTEN by Prompt 56's closeout, both editions; Part 0 = RP92 (to be filled by the review). No migration expected; if one is needed it is **124**.
+- Then WP-XFER-1 (after the first node), WP-VAULT-2 — each written by the closeout before it.
