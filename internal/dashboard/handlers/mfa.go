@@ -229,9 +229,19 @@ func HandleMFAEnable(tmpl *template.Template, authSvc *auth.AuthService, mfaSvc 
 
 		code := strings.TrimSpace(r.FormValue("totp_code"))
 		sid := sessionID(r)
+		// A TOTP verifier site like every other (RP90-7, RP92-8): locked =
+		// no code is checked; a wrong one counts toward the lock.
+		if authSvc != nil && authSvc.TOTPLocked(sd.UserID) {
+			middleware.SetFlash(w, "error", auth.ErrTOTPLocked.Error()+".")
+			http.Redirect(w, r, setupPath, http.StatusSeeOther)
+			return
+		}
 		e, res := store.Confirm(sid, sd.UserID, func(secret string) bool {
 			return code != "" && mfaSvc.ValidateCode(secret, code)
 		})
+		if res == MFAEnrolMismatch && authSvc != nil {
+			authSvc.NoteTOTPFailure(r.Context(), sd.UserID, "mfa_enrol")
+		}
 		switch res {
 		case MFAEnrolNone:
 			middleware.SetFlash(w, "error", "That setup session has expired — it lasts 10 minutes, and a service restart ends it. Scan the new QR code below, and remove the earlier Stored entry from your authenticator.")

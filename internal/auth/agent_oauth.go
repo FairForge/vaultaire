@@ -204,10 +204,13 @@ func (c *OAuthClient) Allows(uri string) bool {
 	return false
 }
 
-// loopbackSameButPort: a registered loopback redirect (http on 127.0.0.1,
-// [::1] or localhost) matches the same URI on ANY port — RFC 8252 § 7.3: a
-// native client listens on an ephemeral port (RP90-12; it re-registered on
-// every run, feeding RP90-3). Scheme, host, path and query must be equal.
+// loopbackSameButPort: a registered loopback redirect (http on the IP
+// literals 127.0.0.1 or [::1]) matches the same URI on ANY port — RFC 8252
+// § 7.3: a native client listens on an ephemeral port (RP90-12; it
+// re-registered on every run, feeding RP90-3). Scheme, host, path and query
+// must be equal. `localhost` is NOT a loopback here (§ 8.3: NOT
+// RECOMMENDED, a name can be rebound — RP92-7): a registered localhost URI
+// matches exactly, as any other.
 func loopbackSameButPort(registered, asked string) bool {
 	r, err1 := url.Parse(registered)
 	a, err2 := url.Parse(asked)
@@ -215,7 +218,7 @@ func loopbackSameButPort(registered, asked string) bool {
 		return false
 	}
 	switch r.Hostname() {
-	case "127.0.0.1", "::1", "localhost":
+	case "127.0.0.1", "::1":
 	default:
 		return false
 	}

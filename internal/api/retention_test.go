@@ -248,6 +248,9 @@ func TestRetention_PoliciesMatchThePolicyPage(t *testing.T) {
 		// "agent connection records": a client unused 30 days, a code 24 h.
 		"agent_oauth_clients": 30 * 24 * time.Hour,
 		"agent_oauth_codes":   24 * time.Hour,
+		// Invitations (RP92-12): "invitations 30 days after they were
+		// accepted or expired".
+		"tenant_invitations": 30 * 24 * time.Hour,
 	}
 	got := map[string]time.Duration{}
 	for _, p := range defaultRetentionPolicies() {

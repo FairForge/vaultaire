@@ -609,3 +609,18 @@ func TestHandleAdminResetMFA_FragmentAndRevokesAllSessions(t *testing.T) {
 	s, _ := store.Get(context.Background(), tok)
 	assert.Nil(t, s, "all sessions revoked")
 }
+
+// RP92-8: the enrolment's confirm is a TOTP verifier site like every other
+// (RP90-7): a wrong code counts toward the user's lock, and while locked
+// even the right code enrols nothing.
+func TestMFAEnrolment_AWrongCodeCountsTowardTheLock(t *testing.T) {
+	f := newEnrolFixture(t)
+	secret := f.open(mfaTestSession)
+	for i := 0; i < auth.TOTPMaxFailures; i++ {
+		f.enable(mfaTestSession, "totp_code=000000")
+	}
+	assert.True(t, f.auth.TOTPLocked(f.userID()), "ten wrong codes lock the user's code paths")
+	w := f.enable(mfaTestSession, "totp_code="+f.code(secret))
+	assert.Equal(t, http.StatusSeeOther, w.Code)
+	assert.False(t, f.enabled(), "locked: the right code enrols nothing")
+}

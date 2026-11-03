@@ -571,6 +571,19 @@
       "what": "The one-time sign-in code of an agent connection (valid 10 minutes), deleted 24 hours after it was made."
     },
     {
+      "table": "tenant_invitations",
+      "days": 30,
+      "action": "delete",
+      "holds": [
+        "email",
+        "role",
+        "kind",
+        "expires_at",
+        "accepted_at"
+      ],
+      "what": "An invitation to join an account's team or family (the invited e-mail address), deleted 30 days after it was accepted or expired; one still pending is kept until it expires."
+    },
+    {
       "table": "waitlist_signups",
       "days": 90,
       "action": "scrub",

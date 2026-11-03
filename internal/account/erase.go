@@ -271,6 +271,9 @@ var Deleted = []Rule{
 	{"tenant_members", `UPDATE tenant_members SET invited_by = NULL WHERE invited_by::text = $1`, ByUser},
 	{"tenant_invitations", `DELETE FROM tenant_invitations WHERE tenant_id = $1`, ByTenant},
 	{"tenant_invitations", `UPDATE tenant_invitations SET invited_by = NULL WHERE invited_by::text = $1`, ByUser},
+	// An invitation another account sent TO the erased person names their
+	// address: it goes with them (RP92-12).
+	{"tenant_invitations", `DELETE FROM tenant_invitations WHERE lower(email) = lower($1)`, ByEmail},
 	{"dashboard_sessions", `DELETE FROM dashboard_sessions WHERE user_id::text = $1`, ByUser},
 	{"user_mfa", `DELETE FROM user_mfa WHERE user_id = $1`, ByUser},
 	{"mfa_audit_log", `DELETE FROM mfa_audit_log WHERE user_id = $1`, ByUser},
