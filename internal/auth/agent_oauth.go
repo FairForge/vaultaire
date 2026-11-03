@@ -128,11 +128,30 @@ func GetOAuthClient(ctx context.Context, db *sql.DB, id string) (*OAuthClient, e
 // URIs, exactly (OAuth 2.1: no partial match).
 func (c *OAuthClient) Allows(uri string) bool {
 	for _, u := range c.RedirectURIs {
-		if u == uri {
+		if u == uri || loopbackSameButPort(u, uri) {
 			return true
 		}
 	}
 	return false
+}
+
+// loopbackSameButPort: a registered loopback redirect (http on 127.0.0.1,
+// [::1] or localhost) matches the same URI on ANY port — RFC 8252 § 7.3: a
+// native client listens on an ephemeral port (RP90-12; it re-registered on
+// every run, feeding RP90-3). Scheme, host, path and query must be equal.
+func loopbackSameButPort(registered, asked string) bool {
+	r, err1 := url.Parse(registered)
+	a, err2 := url.Parse(asked)
+	if err1 != nil || err2 != nil || r.Scheme != "http" || a.Scheme != "http" {
+		return false
+	}
+	switch r.Hostname() {
+	case "127.0.0.1", "::1", "localhost":
+	default:
+		return false
+	}
+	return r.Hostname() == a.Hostname() && r.EscapedPath() == a.EscapedPath() && r.RawQuery == a.RawQuery &&
+		r.User == nil && a.User == nil && a.Fragment == ""
 }
 
 // AuthorizationRequest is what the client asked for (the query of the

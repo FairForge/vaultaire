@@ -42,7 +42,9 @@ func (s *Server) agentsEnabled(tenantID string) bool {
 
 // registerAgentRoutes are the grants' routes on /api/v1/manage (a member's).
 func (s *Server) registerAgentRoutes(r chi.Router) {
-	r.Get("/agents", s.handleMgmtListAgents)
+	// The list names the members who granted (granted_by_email): a person's
+	// (RP90-16), as every other agents route.
+	r.With(s.requirePerson).Get("/agents", s.handleMgmtListAgents)
 	r.With(s.requirePerson, s.requireRole(auth.ActionManagementKey)).Post("/agents/{id}/renew", s.handleMgmtRenewAgent)
 	r.With(s.requirePerson, s.requireRole(auth.ActionManagementKey)).Delete("/agents/{id}", s.handleMgmtRevokeAgent)
 	s.registerApprovalRoutes(r)
@@ -136,7 +138,8 @@ func (s *Server) handleMgmtRevokeAgent(w http.ResponseWriter, r *http.Request) {
 
 // markAgentKey ties an S3 key an agent minted to its grant: the grant's
 // caps (the consent's — the agent may lower them later, never raise them,
-// RP88-8), its expiry clamped to the grant's, and agent_grant_id, so the
+// RP88-8; LEAST of the two where both are set, never a replacement of a
+// smaller one, RP90-11), its expiry clamped to the grant's, and agent_grant_id, so the
 // key is revoked with the grant and never reaches a Private bucket.
 func (s *Server) markAgentKey(ctx context.Context, tenantID, keyID string) error {
 	a := agentOf(ctx)
@@ -149,7 +152,7 @@ func (s *Server) markAgentKey(ctx context.Context, tenantID, keyID string) error
 	}
 	_, err = s.db.ExecContext(ctx, `
 		UPDATE api_keys k SET agent_grant_id = $3::uuid,
-		       storage_limit_bytes = COALESCE($4, k.storage_limit_bytes), egress_limit_bytes = COALESCE($5, k.egress_limit_bytes),
+		       storage_limit_bytes = LEAST($4, k.storage_limit_bytes), egress_limit_bytes = LEAST($5, k.egress_limit_bytes),
 		       expires_at = CASE WHEN m.expires_at IS NULL THEN k.expires_at
 		                         WHEN k.expires_at IS NULL OR k.expires_at > m.expires_at THEN m.expires_at ELSE k.expires_at END
 		  FROM management_keys m

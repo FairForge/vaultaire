@@ -3,7 +3,7 @@
 <div class="page-header">
     <div>
         <h1>Connect an AI agent</h1>
-        {{if .Client}}<p class="text-muted"><strong>{{if .Client.Name}}{{.Client.Name}}{{else}}An app{{end}}</strong> asks to act on this account for you. It returns to <code>{{.ReturnsTo}}</code>.</p>{{end}}
+        {{if .Client}}<p class="text-muted"><strong>{{if .Client.Name}}{{.Client.Name}}{{else}}An app{{end}}</strong> asks to act on the account <strong>{{.TenantName}}</strong> for you. It returns to <code>{{.ReturnsTo}}</code>.</p>{{end}}
     </div>
 </div>
 

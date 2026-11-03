@@ -551,6 +551,13 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(), WithSuggestion(hint))
 			return
 		}
+		// A key an agent grant minted works only while the account's
+		// agent_grants flag is on, as its management key (RP90-13).
+		if scope.AgentGrantID != "" && !s.agentsEnabled(s.accountOf(r.Context(), tenantID)) {
+			WriteS3ErrorWithContext(w, ErrAccessDenied, r.URL.Path, generateRequestID(),
+				WithMessage("Agent keys are turned off on this account."))
+			return
+		}
 		// A key an agent grant minted never reaches a Private bucket
 		// (WP-AGENT-1, contract line 8), as the bucket or a copy's source.
 		if scope.AgentGrantID != "" && s.agentS3PrivateRefused(r, tenantID, s3Req) {
