@@ -36,13 +36,14 @@ func TestAgent_MarkKeepsTheSmallerCap(t *testing.T) {
 // RP90-12: a loopback redirect matches any port (RFC 8252 § 7.3).
 func TestOAuth_LoopbackRedirectAnyPort(t *testing.T) {
 	c := &auth.OAuthClient{RedirectURIs: []string{"http://127.0.0.1:8080/callback", "http://localhost/cb", "https://claude.ai/api/mcp/auth_callback", "http://[::1]:1/cb"}}
-	for _, ok := range []string{"http://127.0.0.1:8080/callback", "http://127.0.0.1:53111/callback", "http://localhost:6001/cb", "http://[::1]:44000/cb",
+	for _, ok := range []string{"http://127.0.0.1:8080/callback", "http://127.0.0.1:53111/callback", "http://localhost/cb", "http://[::1]:44000/cb",
 		"https://claude.ai/api/mcp/auth_callback"} {
 		assert.True(t, c.Allows(ok), ok)
 	}
 	for _, no := range []string{"http://127.0.0.1:53111/other", "http://127.0.0.2:8080/callback", "https://127.0.0.1:8080/callback",
 		"https://claude.ai:8443/api/mcp/auth_callback", "http://localhost:6001/cb?x=1", "http://evil.example:8080/callback",
-		"http://localhost.evil.example:6001/cb", "http://user@127.0.0.1:9/callback"} {
+		"http://localhost.evil.example:6001/cb", "http://user@127.0.0.1:9/callback",
+		"http://localhost:6001/cb"} { // RP92-7: localhost is no any-port loopback (RFC 8252 § 8.3)
 		assert.False(t, c.Allows(no), no)
 	}
 }

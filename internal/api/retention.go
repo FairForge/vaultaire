@@ -76,6 +76,7 @@ const (
 	retentionOAuthClients = 30 * 24 * time.Hour // unused this long (RP90-3)
 	retentionOAuthCodes   = 24 * time.Hour      // a code lives 10 min (RP90-15)
 	retentionOAuthIP      = 2 * 24 * time.Hour  // the day's registration cap reads it (RP92-5)
+	retentionInvitations  = 30 * 24 * time.Hour // after it was accepted or expired (RP92-12)
 )
 
 // defaultRetentionPolicies is the shipped policy set.
@@ -117,6 +118,10 @@ func defaultRetentionPolicies() []retentionPolicy {
 		{Table: "agent_oauth_clients", Column: "created_at", MaxAge: retentionOAuthIP,
 			Action: retentionScrubColumns, ScrubColumns: []string{"created_ip"}, ScrubToNull: true,
 			Extra: "created_ip IS NOT NULL"},
+		// Member and family invitations (RP92-12): an e-mail address — a
+		// family invites anyone, customer or not — kept 30 days after the
+		// invitation was accepted or expired; a pending one is kept.
+		{Table: "tenant_invitations", Column: "COALESCE(accepted_at, expires_at)", MaxAge: retentionInvitations},
 		{Table: "waitlist_signups", Column: "created_at", MaxAge: retentionWaitlistPII,
 			Action: retentionScrubColumns, ScrubColumns: []string{"ip_address", "user_agent"},
 			Extra: "(ip_address <> '' OR user_agent <> '')"},

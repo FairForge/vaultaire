@@ -312,6 +312,12 @@ func (s *Server) handleMgmtFamilyRemove(w http.ResponseWriter, r *http.Request) 
 // own account leaves its family, as a removal does.
 func (s *Server) handleMgmtFamilyLeave(w http.ResponseWriter, r *http.Request) {
 	member := activeTenant(r)
+	// Behind the flag (the organizer's, read through the member's pool
+	// root) as the dashboard's leave is (RP92-10).
+	if !s.familyOn(r.Context(), member) {
+		writeFamilyNotFound(w)
+		return
+	}
 	if role, _ := r.Context().Value(roleKey).(auth.Role); role != "" && role != auth.RoleOwner {
 		writeManagementError(w, ErrTypePermission, "role_forbidden", "only the account's owner takes it out of a family", "")
 		return

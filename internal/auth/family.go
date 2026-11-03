@@ -105,6 +105,13 @@ func InviteFamilyMember(ctx context.Context, db *sql.DB, organizer, invitedBy, e
 		return Invitation{}, "", fmt.Errorf("invite %s to the family: %w", email, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The address's pending invitation rows BEFORE the organizer's tenant
+	// row — the join's order (invitation, then tenants): a re-invite racing
+	// that address's join deadlocked (RP92-9).
+	if _, err := tx.ExecContext(ctx, `SELECT 1 FROM tenant_invitations WHERE tenant_id = $1 AND lower(email) = $2 AND accepted_at IS NULL
+		ORDER BY id FOR UPDATE`, organizer, email); err != nil {
+		return Invitation{}, "", fmt.Errorf("invite %s to the family: lock the pending one: %w", email, err)
+	}
 	var root bool
 	var ownEmail string
 	err = tx.QueryRowContext(ctx, `SELECT parent_tenant_id IS NULL AND sandbox_of IS NULL AND provisional_until IS NULL, lower(email)
