@@ -425,7 +425,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		dr.With(act("POST /apps/{id}/delete")).Post("/apps/{id}/delete", handlers.HandleAppDelete(deps.DB, deps.Logger))
 		claimTmpl := template.Must(baseTmpl.Clone())
 		template.Must(claimTmpl.ParseFS(Templates, "templates/customer/claim.html"))
-		claim := handlers.HandleClaim(claimTmpl, deps.DB, deps.Logger)
+		claim := handlers.HandleClaim(claimTmpl, deps.DB, deps.flagOn("apps"), deps.Logger)
 		dr.Get("/claim/{token}", claim)
 		dr.With(act("POST /claim/{token}")).Post("/claim/{token}", claim)
 

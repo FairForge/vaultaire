@@ -80,3 +80,42 @@ func TestApps_DeleteStopsEveryKey(t *testing.T) {
 		(SELECT 'tenant:' || id FROM tenants WHERE parent_tenant_id = $1)`, app2).Scan(&audited))
 	assert.Equal(t, 1, audited, "each end user's schedule has its audit row")
 }
+
+func TestClaim_NeedsTheAppsFlag(t *testing.T) {
+	partner := setupPlatformFixture(t).withManagement().withApps(true, true)
+	partner.s.registerPartnerRoutes()
+	cleanupDescendants(partner)
+	key := partner.partner()
+	claimer := setupPlatformFixture(t).withManagement()
+	claimer.s = partner.s
+	jwt, err := partner.s.auth.GenerateJWT(claimer.user)
+	require.NoError(t, err)
+	claimer.jwt = jwt
+	cleanupDescendants(claimer)
+	_, err = claimer.db.Exec(`UPDATE users SET email_verified = TRUE WHERE id = $1`, claimer.user.ID)
+	require.NoError(t, err)
+	token := claimToken(partner.claimable(key, "flagless"))
+
+	// No apps flag on the claimer's account: no claim, on either surface.
+	code, out := claimer.call(http.MethodPost, "/api/v1/manage/claims/"+token, claimer.jwt, nil)
+	assert.Equal(t, http.StatusNotFound, code, "the claim is an apps route: %v", out)
+	r := chi.NewRouter()
+	r.Post("/dashboard/claim/{token}", handlers.HandleClaim(nil, claimer.db, func(string) bool { return false }, zap.NewNop()))
+	req := httptest.NewRequest(http.MethodPost, "/dashboard/claim/"+token, nil)
+	req = req.WithContext(dashauth.WithSession(context.Background(), &dashauth.SessionData{UserID: claimer.user.ID, TenantID: claimer.user.TenantID, Role: "user"}))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusNotFound, w.Code, "the dashboard's claim page too")
+	var claimed bool
+	require.NoError(t, claimer.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM tenants WHERE parent_tenant_id = $1)`, claimer.user.TenantID).Scan(&claimed))
+	assert.False(t, claimed, "nothing was claimed")
+
+	// The flag on: the claim goes through.
+	require.NoError(t, partner.s.flags.Set(context.Background(), flagApps, claimer.user.TenantID, true, "test"))
+	require.NoError(t, partner.s.flags.Refresh(context.Background()))
+	t.Cleanup(func() {
+		_, _ = claimer.db.Exec(`DELETE FROM feature_flags WHERE tenant_id = $1`, claimer.user.TenantID)
+	})
+	code, out = claimer.call(http.MethodPost, "/api/v1/manage/claims/"+token, claimer.jwt, nil)
+	assert.Equal(t, http.StatusOK, code, out)
+}

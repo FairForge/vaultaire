@@ -262,9 +262,15 @@ func HandleAppDelete(db *sql.DB, logger *zap.Logger) http.HandlerFunc {
 }
 
 // HandleClaim is GET and POST /dashboard/claim/{token}.
-func HandleClaim(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+func HandleClaim(tmpl *template.Template, db *sql.DB, enabled func(string) bool, logger *zap.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sd := dashauth.GetSession(r.Context())
+		// A claim makes an app: it needs the apps flag of the account it
+		// lands on, as every apps page does (RP90-9).
+		if sd == nil || enabled == nil || !enabled(sd.TenantID) {
+			http.NotFound(w, r)
+			return
+		}
 		token := chi.URLParam(r, "token")
 		data := sessionData(sd, "apps")
 		withCSRF(r.Context(), data)
