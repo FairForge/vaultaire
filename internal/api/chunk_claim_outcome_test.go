@@ -229,7 +229,11 @@ func TestChunkClaim_ACancelAfterTheBodyWentOutLetsThePutFinishDetachedAndTheChun
 	close(o.drv.gate)
 	waitFor(t, "the detached PUT to make the chunk ready", func() bool { _, st, _ := o.claim(t); return st == "ready" })
 	assert.Equal(t, 0, o.refCount(t), "the aborted write took no reference")
-	assert.Equal(t, ready0+1, promtest.ToFloat64(chunkPutDetached.WithLabelValues("ready")))
+	// The counter is bumped AFTER the row flip the wait above saw: wait for
+	// it too (the server-side-counter race class — CI 2026-11-03, b0f27964).
+	waitFor(t, "the detached PUT to be counted ready", func() bool {
+		return promtest.ToFloat64(chunkPutDetached.WithLabelValues("ready")) == ready0+1
+	})
 	waitFor(t, "the registry to empty", func() bool { return o.server.chunkPuts().count() == 0 })
 
 	// A retry of the body dedups onto it at once, never the window.
