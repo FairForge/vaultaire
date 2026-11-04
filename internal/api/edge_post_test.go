@@ -30,7 +30,7 @@ func (f *edgeFixture) postAdmit(fields []formField, filename string, size int64)
 	}
 	return edgeAdmitRequest{Op: "post", Method: http.MethodPost, Host: f.host, Path: "/" + f.bucket,
 		Headers:  map[string]string{"host": f.host, "content-type": "multipart/form-data; boundary=x", "user-agent": "a-browser"},
-		ClientIP: "203.0.113.9", RequestID: "post-" + filename,
+		ClientIP: "203.0.113.9", RequestID: "post-" + filename, Features: []string{dataplane.FeaturePostTail},
 		Form: &dataplane.AdmitForm{Fields: m, Filename: filename, FileSize: size, PreBytes: 1200}}
 }
 

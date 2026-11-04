@@ -67,6 +67,16 @@ const (
 // FeatureWindow: the host reads a windowed answer (D-EDGE-32).
 const FeatureWindow = "window"
 
+// FeaturePostTail: the host proves a POST policy form's file part ends at
+// the closing delimiter — no part after it, nothing after the delimiter —
+// BEFORE it hands the backend the last file bytes, and ends the file at a
+// delimiter inside the declared bytes (RP94-B-1/B-2: the Worker 0.7.0
+// checked the tail after enqueuing the last bytes, and FixedLengthStream
+// ends the backend body at its byte count, so a corrupted form committed
+// with a 201 where the origin refuses it). A form admit from a host not
+// naming it is the origin's.
+const FeaturePostTail = "post-tail"
+
 // FeatureRS: the host stripes an RS write itself (WP-EDGE-4 PR B) — a Go
 // host (a node, host=slc); the Worker never names it.
 const FeatureRS = "rs"

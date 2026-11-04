@@ -847,8 +847,11 @@ policy must name its bucket. Conditions: `{"field": "value"}` /
 `["content-length-range", min, max]` — the file's size in bytes. An unknown
 operator is 400 `InvalidPolicyDocument`.
 
-**The form**: every field before `file` (fields after it are ignored, as at
-AWS). `key` is required; `${filename}` in it is replaced by the file's own
+**The form**: every field before `file`, and `file` LAST — a form with a
+part after it (a named submit button, a hidden field below the file input)
+is refused, 400 `MalformedPOSTRequest` "a part follows the file" (AWS
+ignores such parts; Stored never stores them — nothing is written). `key`
+is required; `${filename}` in it is replaced by the file's own
 name (a base name only: a name with `/`, `\` or `..` is 400). Object fields:
 `Content-Type`, `Cache-Control`, `Content-Disposition`, `Content-Encoding`,
 `Content-Language`, `Expires`, `x-amz-meta-*`, `x-amz-storage-class`,
