@@ -65,6 +65,14 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 		}
 		return refusalOf(rec)
 	}
+	for k := range a.header {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-checksum-") {
+			// The edge's link signs no checksum header (the backend would not
+			// verify it): a form naming one is the origin's, which does
+			// (RP94-4) — never admitted and left unchecked.
+			return passThrough("post_checksum")
+		}
+	}
 	_, max, bounded := a.policy.SizeRange()
 	if !bounded {
 		return passThrough("post_unbounded") // the signed size is what the edge admits by

@@ -347,6 +347,22 @@ var postPolicyFieldHeaders = map[string]string{
 	"x-amz-server-side-encryption-customer-algorithm": "X-Amz-Server-Side-Encryption-Customer-Algorithm",
 	"x-amz-server-side-encryption-customer-key":       "X-Amz-Server-Side-Encryption-Customer-Key",
 	"x-amz-server-side-encryption-customer-key-md5":   "X-Amz-Server-Side-Encryption-Customer-Key-Md5",
+	// RP94-4: applied and verified by the PUT path (applyObjectLockOnPut,
+	// payloadChecksum, objectAttrs) — they were accepted and dropped.
+	"x-amz-object-lock-mode":              "X-Amz-Object-Lock-Mode",
+	"x-amz-object-lock-retain-until-date": "X-Amz-Object-Lock-Retain-Until-Date",
+	"x-amz-website-redirect-location":     "X-Amz-Website-Redirect-Location",
+	"x-amz-checksum-crc32":                "X-Amz-Checksum-Crc32",
+	"x-amz-checksum-crc32c":               "X-Amz-Checksum-Crc32c",
+	"x-amz-checksum-crc64nvme":            "X-Amz-Checksum-Crc64nvme",
+	"x-amz-checksum-sha1":                 "X-Amz-Checksum-Sha1",
+	"x-amz-checksum-sha256":               "X-Amz-Checksum-Sha256",
+}
+
+// postPolicyAuthFields are the x-amz-* fields the POST itself consumes
+// (the one verifier's fourth entrance): never an object header.
+var postPolicyAuthFields = map[string]bool{
+	"x-amz-algorithm": true, "x-amz-credential": true, "x-amz-date": true, "x-amz-signature": true, "x-amz-security-token": true,
 }
 
 // postPolicyPassHeaders are the outer request's headers kept on the inner
@@ -446,6 +462,17 @@ func (s *Server) admitPostForm(ctx context.Context, bucket string, fields map[st
 	}
 	if fields["tagging"] != "" {
 		return nil, &postRefusal{code: ErrNotImplemented, message: "tagging in a POST form is not supported"}
+	}
+	// Any other x-amz-* field the PUT path would ignore (a grant, a legal
+	// hold — a PUT applies none): 501 as tagging is, never accepted and
+	// dropped (RP94-4).
+	for name, v := range fields {
+		if v == "" || !strings.HasPrefix(name, "x-amz-") || strings.HasPrefix(name, "x-amz-meta-") || postPolicyAuthFields[name] {
+			continue
+		}
+		if _, ok := postPolicyFieldHeaders[name]; !ok {
+			return nil, &postRefusal{code: ErrNotImplemented, message: name + " in a POST form is not supported"}
+		}
 	}
 	key := fields["key"]
 	if key == "" {
