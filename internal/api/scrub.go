@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/md5" // #nosec G501 -- an S3 ETag is an MD5; the scrub compares the bytes to it
 	"crypto/sha256"
@@ -240,6 +241,12 @@ type scrubItem struct {
 	storageKey                 string // the row's (a chunk's key)
 	size                       int64
 	digest                     string // the MD5 the stored bytes must have ("" = unverifiable)
+	// sealed: the row's encryption_algorithm is set (SSE-S3 or SSE-C) — the
+	// stored bytes are longer than size (a header, a tag per segment); the
+	// stored length is a function of size and the header the blob carries
+	// (RP96-1: the plaintext size was compared, and a healthy SSE-C object
+	// was `mismatch`).
+	sealed bool
 	// a chunk
 	scope, hash, encAlgo, ciphertextHash string
 	compressed, encrypted                bool
@@ -642,12 +649,14 @@ func (j *BlobScrubJob) page(ctx context.Context, backend, kind string, c scrubWa
 				return nil, fmt.Errorf("blob scrub: scan: %w", err)
 			}
 			it.digest = scrubDigest(enc, bodyMD5, etag, backendETag)
+			it.sealed = enc != ""
 		case scrubKindVersion:
 			var etag, bodyMD5, enc string
 			if err := rows.Scan(&it.tenant, &it.bucket, &it.key, &it.verID, &it.storageKey, &it.size, &etag, &bodyMD5, &enc); err != nil {
 				return nil, fmt.Errorf("blob scrub: scan: %w", err)
 			}
 			it.digest = scrubDigest(enc, bodyMD5, etag, "") // a version records no backend ETag: a sealed one is unverifiable
+			it.sealed = enc != ""
 		default:
 			var compressedSize int64
 			var algo string
@@ -773,12 +782,37 @@ func (j *BlobScrubJob) read(ctx context.Context, d engine.Driver, backend string
 		return v, why, n
 	}
 	sum := md5.New() // #nosec G401 -- the S3 ETag
-	n, err = io.Copy(sum, rc)
-	if err != nil {
-		return scrubReadVerdict(err), err.Error(), n
+	cr := &countingReader{r: io.TeeReader(rc, sum)}
+	br := bufio.NewReader(cr)
+	// What the stored length must be: the row's size for a plaintext blob;
+	// for a sealed one (RP96-1) the streaming format's length — the header
+	// the blob carries plus a tag per segment — read through the hash. A
+	// sealed blob in another format (the legacy whole-buffer SSE-C, the
+	// 0x05 multipart container) has no length the row can predict: only its
+	// digest is checked, and it must be at least its plaintext.
+	expected, sizeKnown := it.size, true
+	if it.sealed {
+		sizeKnown = false
+		if lead, perr := br.Peek(1); perr == nil && (lead[0] == crypto.StreamFormat || lead[0] == crypto.StreamFormatV3) {
+			h, herr := crypto.ReadStreamHeader(br)
+			if herr != nil {
+				return scrubMismatch, "a sealed blob whose header does not parse: " + herr.Error(), cr.n
+			}
+			expected, sizeKnown = crypto.StreamCiphertextLength(len(h.Raw), h.SegmentSize, it.size), true
+		}
 	}
-	if n != it.size {
+	if _, err = io.Copy(io.Discard, br); err != nil {
+		return scrubReadVerdict(err), err.Error(), cr.n
+	}
+	n = cr.n
+	if sizeKnown && n != expected {
+		if it.sealed {
+			return scrubMismatch, fmt.Sprintf("%d bytes, the row's %d seal to %d", n, it.size, expected), n
+		}
 		return scrubMismatch, fmt.Sprintf("%d bytes, the row says %d", n, it.size), n
+	}
+	if !sizeKnown && n < it.size {
+		return scrubMismatch, fmt.Sprintf("%d bytes, shorter than the row's %d plaintext", n, it.size), n
 	}
 	if it.digest == "" {
 		return scrubUnverifiable, "", n
