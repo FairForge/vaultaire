@@ -135,6 +135,10 @@ type (
 // edgeFeatureWindow: the host reads a windowed answer (D-EDGE-32).
 const edgeFeatureWindow = dataplane.FeatureWindow
 
+// edgeFeaturePostTail: the host proves a form's file part ends at the
+// closing delimiter before the backend sees its last bytes (RP94-B-1/B-2).
+const edgeFeaturePostTail = dataplane.FeaturePostTail
+
 // edgeAdmitAttrs is what the row keeps of the client's request for the
 // commit: the object's attributes and the Object Lock headers.
 type edgeAdmitAttrs struct {

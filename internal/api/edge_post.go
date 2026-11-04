@@ -41,6 +41,12 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 	if bucket == "" {
 		return passThrough("no_bucket")
 	}
+	if !req.Has(edgeFeaturePostTail) {
+		// A host that cannot prove the file part ends at the closing
+		// delimiter before the backend has its last bytes would commit a
+		// form the origin refuses (RP94-B-1/B-2): the origin's.
+		return passThrough("post_tail_unproven")
+	}
 	outer := http.Header{}
 	for k, v := range req.Headers {
 		outer.Set(k, v)

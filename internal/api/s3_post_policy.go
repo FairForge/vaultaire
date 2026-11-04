@@ -169,7 +169,7 @@ func readPostForm(r *http.Request) (*postForm, error) {
 				return nil, errPostMalformed
 			}
 			counter.limit = 0
-			form.file = &postFileReader{br: br, left: form.size, tail: []byte(tail)}
+			form.file = &postFileReader{br: br, left: form.size, delim: []byte("\r\n" + delim), tail: []byte(tail)}
 			return form, nil
 		}
 		value, last, err := readFieldValue(br, "\r\n"+delim, consumed)
@@ -224,52 +224,98 @@ func readFieldValue(br *bufio.Reader, delim string, consumed func() int64) (stri
 	return "", false, errPostMalformed
 }
 
-// postFileReader yields exactly the file part's left bytes, and proves the
-// closing delimiter follows them (and nothing after it) in the same Read
-// that delivers the last byte — so a consumer that stops at the declared
-// length still sees a malformed tail as an error before it commits.
+// postFileReader yields exactly the file part's left bytes — refusing a
+// delimiter INSIDE them (RP94-A-1: a part after the file; S3 ignores such
+// parts, Stored never stores them: the size D-POST-2 computed assumed the
+// file was last, and the trailing part's bytes were stored as the file's
+// tail with a 204) — and proves the closing delimiter follows them (and
+// nothing after it) in the same Read that delivers the last byte, so a
+// consumer that stops at the declared length still sees a malformed tail
+// as an error before it commits.
+//
+// The delimiter scan holds back the last len(delim)-1 bytes read until more
+// follow (a delimiter split across two reads is still found), and hands
+// everything out once the declared bytes are all in.
 type postFileReader struct {
-	br   *bufio.Reader
-	left int64
-	tail []byte
-	done bool
-	err  error
+	br    *bufio.Reader
+	left  int64  // file bytes not yet taken from br
+	delim []byte // "\r\n--" + boundary: a part after the file
+	tail  []byte // the closing delimiter
+	buf   [postFileHold]byte
+	hold  []byte // a window of buf: taken from br, not yet given
+	done  bool
+	err   error
 }
+
+// postFileHold is the reader's working set: one bounded window, no
+// allocation per read (WP-R2-6).
+const postFileHold = 64 << 10
 
 func (f *postFileReader) Read(p []byte) (int, error) {
 	if f.err != nil {
 		return 0, f.err
 	}
-	if f.done {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	carry := len(f.delim) - 1
+	if len(f.hold) > 0 && len(f.hold) < len(f.buf) {
+		// Compact the hold to the window's start before taking more.
+		n := copy(f.buf[:], f.hold)
+		f.hold = f.buf[:n]
+	}
+	// Take file bytes until the hold can give past the carry, or the file
+	// is all in, or the window is full.
+	for f.left > 0 && len(f.hold)-carry < len(p) && len(f.hold) < len(f.buf) {
+		room := int64(len(f.buf) - len(f.hold))
+		if room > f.left {
+			room = f.left
+		}
+		n, err := f.br.Read(f.buf[len(f.hold) : len(f.hold)+int(room)])
+		f.hold = f.buf[:len(f.hold)+n]
+		f.left -= int64(n)
+		if bytes.Contains(f.hold, f.delim) {
+			f.err = fmt.Errorf("%w: a part follows the file — the file must be the form's last field", errPostMalformed)
+			return 0, f.err
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if f.left > 0 {
+					f.err = io.ErrUnexpectedEOF
+					return 0, f.err
+				}
+				break
+			}
+			f.err = err
+			return 0, f.err
+		}
+	}
+	give := len(f.hold)
+	if f.left > 0 {
+		give -= carry // a delimiter may begin in the carry
+	}
+	if give > len(p) {
+		give = len(p)
+	}
+	if f.left == 0 && !f.done && give == len(f.hold) {
+		// The last bytes go out now: the closing delimiter must follow.
+		var tb [postTailMax]byte // CRLF, --, a boundary of ≤ 70 bytes, --, CRLF
+		got := tb[:len(f.tail)]
+		if _, terr := io.ReadFull(f.br, got); terr != nil || !bytes.Equal(got, f.tail) {
+			f.err = fmt.Errorf("%w: the file part does not end at the closing delimiter", errPostMalformed)
+		} else if extra, _ := f.br.Peek(1); len(extra) > 0 {
+			f.err = fmt.Errorf("%w: bytes after the closing delimiter", errPostMalformed)
+		}
+		f.done = true
+	}
+	n := copy(p, f.hold[:give])
+	f.hold = f.hold[n:]
+	if f.err != nil {
+		return n, f.err
+	}
+	if f.done && len(f.hold) == 0 && n == 0 {
 		return 0, io.EOF
 	}
-	if int64(len(p)) > f.left {
-		p = p[:f.left]
-	}
-	n, err := f.br.Read(p)
-	f.left -= int64(n)
-	if err != nil && !errors.Is(err, io.EOF) {
-		f.err = err
-		return n, err
-	}
-	if f.left > 0 {
-		if errors.Is(err, io.EOF) {
-			f.err = io.ErrUnexpectedEOF
-			return n, f.err
-		}
-		return n, nil
-	}
-	var buf [postTailMax]byte // the delimiter: CRLF, --, a boundary of ≤ 70 bytes, --, CRLF
-	got := buf[:len(f.tail)]
-	if _, terr := io.ReadFull(f.br, got); terr != nil || !bytes.Equal(got, f.tail) {
-		f.err = fmt.Errorf("%w: the file part does not end at the closing delimiter", errPostMalformed)
-		return n, f.err
-	}
-	if extra, _ := f.br.Peek(1); len(extra) > 0 {
-		f.err = fmt.Errorf("%w: bytes after the closing delimiter", errPostMalformed)
-		return n, f.err
-	}
-	f.done = true
 	return n, nil
 }
 

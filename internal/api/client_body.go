@@ -152,6 +152,14 @@ func answerClientBody(w http.ResponseWriter, r *http.Request, logger *zap.Logger
 		WriteS3Error(w, ErrXAmzContentChecksumMismatch, r.URL.Path, generateRequestID())
 		return
 	}
+	// A POST policy form whose file part is not the body's last part, or
+	// whose closing delimiter is wrong (RP94-A-1/A-6): the form's own
+	// error, with the reader's sentence.
+	if perr := firstErr(err, body.failed(), errPostMalformed); perr != nil {
+		logger.Info("POST form body malformed", append(fields, zap.String("op", op), zap.Error(perr))...)
+		WriteS3ErrorWithContext(w, ErrMalformedPOSTRequest, r.URL.Path, generateRequestID(), WithMessage(perr.Error()))
+		return
+	}
 	reason := clientBodyReason(r.Context(), body, err)
 	clientBodyErrors.WithLabelValues(op, reason).Inc()
 	code := ErrIncompleteBody
@@ -161,4 +169,14 @@ func answerClientBody(w http.ResponseWriter, r *http.Request, logger *zap.Logger
 	logger.Info("request body not received: the client's",
 		append(fields, zap.String("op", op), zap.String("reason", reason), zap.Error(err))...)
 	WriteS3Error(w, code, r.URL.Path, generateRequestID())
+}
+
+// firstErr is the first of errs that is target (errors.Is), nil when none.
+func firstErr(a, b, target error) error {
+	for _, e := range []error{a, b} {
+		if e != nil && errors.Is(e, target) {
+			return e
+		}
+	}
+	return nil
 }
