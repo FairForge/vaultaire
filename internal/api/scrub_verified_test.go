@@ -31,6 +31,8 @@ func TestDashboard_BucketSaysVerifiedAfterACleanCycle(t *testing.T) {
 	f.putObject("a.bin", testBytes(1000), nil)
 	f.putObject("b.bin", testBytes(1000), nil)
 	assert.Empty(t, line(), "never scrubbed: nothing claimed")
+	// The flag was set before any cycle began (the fixture set it now).
+	f.exec(`UPDATE feature_flags SET updated_at = NOW() - interval '1 hour' WHERE flag_key = $1 AND tenant_id = $2`, flagBlobScrub, f.tenantID)
 
 	// One blob a run: the first run leaves the cycle in progress.
 	f.job.Every = 12 * time.Hour
@@ -49,6 +51,11 @@ func TestDashboard_BucketSaysVerifiedAfterACleanCycle(t *testing.T) {
 	f.exec(`INSERT INTO scrub_findings (tenant_id, bucket, object_key, address, backend, kind, verdict, source) VALUES ($1, $2, 'a.bin', 'a.bin@x', 'edgefake', 'whole', 'repaired', 'edgemirror')`,
 		f.tenantID, f.bucket)
 	assert.Equal(t, "Every file here was read back and checked on "+date+"; 1 file was repaired from a second copy.", line())
+
+	// A flag set AFTER the counted cycle began (mid-cycle): nothing claimed.
+	f.exec(`UPDATE feature_flags SET updated_at = NOW() + interval '1 hour' WHERE flag_key = $1 AND tenant_id = $2`, flagBlobScrub, f.tenantID)
+	assert.Empty(t, line(), "the tenant joined the scrub after the cycle began")
+	f.exec(`UPDATE feature_flags SET updated_at = NOW() - interval '1 hour' WHERE flag_key = $1 AND tenant_id = $2`, flagBlobScrub, f.tenantID)
 
 	// Another bucket of the tenant is not this one's findings; a tenant
 	// without the flag gets nothing.

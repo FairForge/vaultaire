@@ -17,7 +17,9 @@ import (
 // walk in job_runs.result; scrub_findings holds what it found wrong and
 // what it repaired. The line says so only when it is true of every byte:
 //
-//   - the tenant is in the scrub (the flag: its own row, else the global);
+//   - the tenant is in the scrub (the flag: its own row, else the global),
+//     and was before the cycles counted began (a flag set mid-cycle reads
+//     only the walk after its cursor);
 //   - every backend the scrub holds data for has finished a cycle (one in
 //     its first cycle means nothing is claimed yet);
 //   - since the earliest of those cycles began, nothing found wrong in the
@@ -61,10 +63,13 @@ func BucketVerifiedLine(ctx context.Context, db *sql.DB, tenantID, bucket string
 	if db == nil {
 		return ""
 	}
+	// The flag's effective row (the tenant's, else the global) and when it
+	// was set: a cycle that began before the tenant was in the scrub read
+	// only the part of the walk after its cursor — it claims nothing.
 	var on bool
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(
-		(SELECT enabled FROM feature_flags WHERE flag_key = 'blob_scrub' AND tenant_id = $1),
-		(SELECT enabled FROM feature_flags WHERE flag_key = 'blob_scrub' AND tenant_id = '*'), FALSE)`, tenantID).Scan(&on); err != nil || !on {
+	var since sql.NullTime
+	if err := db.QueryRowContext(ctx, `SELECT enabled, updated_at FROM feature_flags
+		WHERE flag_key = 'blob_scrub' AND tenant_id IN ($1, '*') ORDER BY tenant_id = '*' LIMIT 1`, tenantID).Scan(&on, &since); err != nil || !on {
 		return ""
 	}
 	var raw []byte
@@ -91,6 +96,9 @@ func BucketVerifiedLine(ctx context.Context, db *sql.DB, tenantID, bucket string
 			windowStart = b.LastCycleStartedAt
 		}
 		seen = true
+	}
+	if since.Valid && windowStart.Before(since.Time) {
+		return "" // the finished cycle began before the tenant was in it
 	}
 	if !seen {
 		return ""
