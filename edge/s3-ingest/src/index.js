@@ -156,16 +156,9 @@ export function parseFormPrefix(bytes, boundary) {
     const hdrStart = at + 2;
     const hdrEnd = s.indexOf("\r\n\r\n", hdrStart);
     if (hdrEnd < 0) return s.length > FORM_PREFIX_MAX ? fail("the fields exceed 24 KB") : null;
-    const disposition = /^content-disposition\s*:\s*(.*)$/im.exec(s.slice(hdrStart, hdrEnd));
-    const name = disposition && /(?:^|;)\s*name\s*=\s*"([^"]*)"/i.exec(disposition[1]);
-    if (!name) fail("a part with no name");
-    const fieldName = name[1].toLowerCase();
+    const { name: fieldName, filename } = partDisposition(s.slice(hdrStart, hdrEnd));
     if (fieldName === "file") {
-      // An RFC 2231 filename* (RP94-11): the origin decodes it, this Worker
-      // does not — the form is the origin's, whole.
-      if (/(?:^|;)\s*filename\*\s*=/i.test(disposition[1])) fail("an RFC 2231 filename* (the origin's)");
-      const fn = /(?:^|;)\s*filename\s*=\s*"([^"]*)"/i.exec(disposition[1]);
-      return { fields, filename: fn ? utf8.decode(Uint8Array.from(fn[1], (c) => c.charCodeAt(0))) : "", fileStart: hdrEnd + 4 };
+      return { fields, filename: utf8.decode(Uint8Array.from(filename, (c) => c.charCodeAt(0))), fileStart: hdrEnd + 4 };
     }
     const valueStart = hdrEnd + 4;
     const valueEnd = s.indexOf("\r\n" + delim, valueStart);
@@ -174,6 +167,41 @@ export function parseFormPrefix(bytes, boundary) {
     fields[fieldName] = utf8.decode(bytes.subarray(valueStart, valueEnd));
     at = valueEnd + 2 + delim.length;
   }
+}
+
+/**
+ * partDisposition reads a part's Content-Disposition — {name (lower-cased),
+ * filename} — in the ONE shape this Worker reads exactly as the origin's
+ * mime.ParseMediaType does: `form-data`, then `name="…"` and at most one
+ * `filename="…"`, each a quoted string with no quoted-pair, nothing else
+ * (0.7.3, RP96-11). Anything the strict grammar does not consume whole — an
+ * unquoted token (`filename=a b.txt` the origin refuses, `filename=abc.txt`
+ * it decodes), a parameter given twice, a quoted-pair, an RFC 2231
+ * `filename*` (0.7.2), another parameter, a second Content-Disposition
+ * header — throws, and the form goes to the origin whole: the edge never
+ * stores a form the origin would refuse, nor refuses one it would accept.
+ */
+export function partDisposition(headers) {
+  const all = headers.split("\r\n");
+  // A folded header (a line starting with space or tab) the origin's
+  // textproto joins to the line before; this Worker does not.
+  if (all.some((l) => /^[ \t]/.test(l))) fail("a folded part header (the origin's)");
+  const lines = all.filter((l) => /^content-disposition\s*:/i.test(l));
+  if (lines.length !== 1) fail(lines.length ? "a part with two Content-Disposition headers (the origin's)" : "a part with no name");
+  const value = lines[0].replace(/^content-disposition\s*:/i, "");
+  // An RFC 2231 filename* (RP94-11, 0.7.2): the origin decodes it.
+  if (/(?:^|;)\s*filename\*\s*=/i.test(value)) fail("an RFC 2231 filename* (the origin's)");
+  const m = /^[ \t]*form-data[ \t]*((?:;[ \t]*[A-Za-z]+[ \t]*=[ \t]*"[^"\\\r\n]*"[ \t]*)*)$/i.exec(value);
+  if (!m) fail("a Content-Disposition this Worker does not read whole (the origin's)");
+  const params = {};
+  for (const p of m[1].matchAll(/;[ \t]*([A-Za-z]+)[ \t]*=[ \t]*"([^"]*)"/g)) {
+    const k = p[1].toLowerCase();
+    if (k !== "name" && k !== "filename") fail(`a Content-Disposition parameter ${k} (the origin's)`);
+    if (k in params) fail(`the parameter ${k} is given twice (the origin's)`);
+    params[k] = p[2];
+  }
+  if (params.name === undefined) fail("a part with no name");
+  return { name: params.name.toLowerCase(), filename: params.filename ?? "" };
 }
 
 function fail(why) {
@@ -535,9 +563,9 @@ async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
     commit = await runCodec(request, admit, env, ctx, { ...mods, controlPlane: cp, log, requestId, tamper });
   } catch (e) {
     log({ edge: "codec_failed", error: String(e && e.message ? e.message : e), request_id: requestId });
-    return slowDown(url.pathname, requestId);
+    return slowDown(url.pathname, requestId, admit);
   }
-  if (!commit) return slowDown(url.pathname, requestId);
+  if (!commit) return slowDown(url.pathname, requestId, admit);
   return relayResponse(commit);
 }
 
@@ -556,11 +584,26 @@ export function passThrough(request) {
   return fetch(request, { cache: "no-store" });
 }
 
-function slowDown(path, requestId) {
+function slowDown(path, requestId, admit) {
   return new Response(s3ErrorXML("SlowDown", "Please reduce your request rate: the edge could not report your upload to the control plane. Retry.", path, requestId), {
     status: 503,
-    headers: { "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER, "x-amz-request-id": requestId },
+    headers: withCORS({ "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER, "x-amz-request-id": requestId }, admit),
   });
+}
+
+/**
+ * withCORS adds the admit's CORS origin (0.7.3, RP96-12: the control plane's
+ * pre-auth Allow-Origin for the request's Origin) to an answer this Worker
+ * mints itself — a form's own 400, a 503 — so a page on an allowed origin
+ * can read it, as it can the origin's twin. No admit, or none named: as is.
+ */
+export function withCORS(headers, admit) {
+  const allow = admit && admit.cors_origin;
+  if (allow) {
+    headers["access-control-allow-origin"] = allow;
+    headers["vary"] = "Origin";
+  }
+  return headers;
 }
 
 async function controlPlane(env, path, body, timeoutMs) {
@@ -903,10 +946,34 @@ async function servePost(request, env, ctx, requestId, url) {
   // answers a form with no length 411 MissingContentLength (0.7.0's
   // pass-through, found by Prompt 58's prod baseline). A body that is not
   // its declared length errors the stream: the origin's request fails.
-  const origin = (prefix, reader) => {
+  //
+  // 0.7.3 (RP96-21): a client body SHORTER than its Content-Length errors
+  // that stream and the origin fetch rejects — an unhandled rejection was
+  // Cloudflare's 1101 page; it is the origin's own answer, IncompleteBody.
+  const origin = async (prefix, reader) => {
     const { readable, writable } = fixedLength(contentLength);
-    rebuiltBody(prefix, reader).pipeTo(writable).catch(() => {});
-    return fetch(new Request(request, { body: readable, duplex: "half" }), { cache: "no-store" });
+    let sent = 0;
+    let ended = false;
+    const counted = rebuiltBody(prefix, reader).pipeThrough(new TransformStream({
+      transform(chunk, c) {
+        sent += chunk.length;
+        c.enqueue(chunk);
+      },
+      flush() {
+        ended = true;
+      },
+    }));
+    counted.pipeTo(writable).catch(() => {});
+    try {
+      return await fetch(new Request(request, { body: readable, duplex: "half" }), { cache: "no-store" });
+    } catch (e) {
+      if (!(ended && sent < contentLength)) throw e;
+      console.log(JSON.stringify({ edge: "post_short_body", sent, content_length: contentLength, request_id: requestId }));
+      return new Response(s3ErrorXML("IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header.", url.pathname, requestId), {
+        status: 400,
+        headers: { "content-type": "application/xml", "x-amz-request-id": requestId },
+      });
+    }
   };
   let read;
   try {
@@ -953,7 +1020,7 @@ async function servePost(request, env, ctx, requestId, url) {
     moved.outcome = "edge_error";
     moved.backend_code = "form_error_after_ok";
   }
-  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url);
+  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit);
   console.log(JSON.stringify({ edge: "post", request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit, form_error: formError ? formError.message : undefined }));
   if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
   if (formError) {
@@ -961,15 +1028,15 @@ async function servePost(request, env, ctx, requestId, url) {
     // above released the admission; nothing was stored.
     return new Response(s3ErrorXML(formError.code, formError.code === "IncompleteBody" ? "You did not provide the number of bytes specified by the Content-Length HTTP header." : `The body of your POST request is not well-formed multipart/form-data: ${formError.message}.`, url.pathname, requestId), {
       status: 400,
-      headers: { "content-type": "application/xml", "x-amz-request-id": requestId },
+      headers: withCORS({ "content-type": "application/xml", "x-amz-request-id": requestId }, admit),
     });
   }
-  if (!commit) return slowDown(url.pathname, requestId);
+  if (!commit) return slowDown(url.pathname, requestId, admit);
   return relayResponse(commit);
 }
 
 /** commitWrite reports a write's outcome; a lost answer is retried once. */
-async function commitWrite(env, commitBody, requestId, url) {
+async function commitWrite(env, commitBody, requestId, url, admit) {
   let commit = null;
   for (let attempt = 0; attempt < 2 && !commit; attempt++) {
     if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
@@ -977,7 +1044,7 @@ async function commitWrite(env, commitBody, requestId, url) {
       const r = await controlPlane(env, "/api/v1/edge/commit", commitBody, ORIGIN_TIMEOUT_MS);
       if (r.status === 200) commit = await r.json();
       else if (r.status === 404 || r.status === 410) {
-        commit = { status: 503, headers: { "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER }, body: s3ErrorXML("SlowDown", "The edge admission of this upload expired before it was committed. Retry the upload.", url.pathname, requestId) };
+        commit = { status: 503, headers: withCORS({ "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER }, admit), body: s3ErrorXML("SlowDown", "The edge admission of this upload expired before it was committed. Retry the upload.", url.pathname, requestId) };
       }
     } catch (e) {
       console.log(JSON.stringify({ edge: "commit_failed", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
@@ -1026,23 +1093,10 @@ export default {
     if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
 
     const { result: moved, mirror } = await moveBody(request, admit);
-    const commitBody = { admit_id: admit.admit_id, ...moved };
-    let commit = null;
-    for (let attempt = 0; attempt < 2 && !commit; attempt++) {
-      if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
-      try {
-        const r = await controlPlane(env, "/api/v1/edge/commit", commitBody, ORIGIN_TIMEOUT_MS);
-        if (r.status === 200) commit = await r.json();
-        else if (r.status === 404 || r.status === 410) {
-          commit = { status: 503, headers: { "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER }, body: s3ErrorXML("SlowDown", "The edge admission of this upload expired before it was committed. Retry the upload.", url.pathname, requestId) };
-        }
-      } catch (e) {
-        console.log(JSON.stringify({ edge: "commit_failed", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
-      }
-    }
+    const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit);
     console.log(JSON.stringify({ edge: kind.kind, request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, ms: moved.duration_ms, committed: !!commit }));
     if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
-    if (!commit) return slowDown(url.pathname, requestId);
+    if (!commit) return slowDown(url.pathname, requestId, admit);
     return relayResponse(commit);
   },
 };

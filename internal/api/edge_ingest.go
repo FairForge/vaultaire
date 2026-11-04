@@ -396,11 +396,35 @@ func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmit
 // edgeRefusalCORS gives a relayed refusal that carries no CORS header of
 // its own the pre-auth Allow-Origin the origin's applyS3CORSPreAuth would
 // (RP94-3): some same-named bucket's rule allows the origin and method, so
-// a page can read the error.
+// a page can read the error. An ADMITTED request gets the same origin as
+// CORSOrigin (RP96-12): the host sets it on the answers it mints itself.
 func (s *Server) edgeRefusalCORS(ctx context.Context, req edgeAdmitRequest, resp *edgeAdmitResponse) {
-	if resp.Refusal == nil {
+	if resp.Refusal == nil && !resp.Edge {
 		return
 	}
+	if resp.Refusal != nil {
+		if _, ok := resp.Refusal.Headers["Access-Control-Allow-Origin"]; ok {
+			return
+		}
+	}
+	allow := s.edgePreAuthCORSOrigin(ctx, req)
+	if allow == "" {
+		return
+	}
+	if resp.Refusal == nil {
+		resp.CORSOrigin = allow
+		return
+	}
+	if resp.Refusal.Headers == nil {
+		resp.Refusal.Headers = map[string]string{}
+	}
+	resp.Refusal.Headers["Access-Control-Allow-Origin"] = allow
+	resp.Refusal.Headers["Vary"] = "Origin"
+}
+
+// edgePreAuthCORSOrigin is the Allow-Origin the origin's pre-auth CORS
+// answers for the described request's Origin ("" = none, or no Origin).
+func (s *Server) edgePreAuthCORSOrigin(ctx context.Context, req edgeAdmitRequest) string {
 	origin := ""
 	for k, v := range req.Headers {
 		if strings.EqualFold(k, "origin") {
@@ -408,22 +432,13 @@ func (s *Server) edgeRefusalCORS(ctx context.Context, req edgeAdmitRequest, resp
 		}
 	}
 	if origin == "" {
-		return
-	}
-	if resp.Refusal.Headers == nil {
-		resp.Refusal.Headers = map[string]string{}
-	}
-	if _, ok := resp.Refusal.Headers["Access-Control-Allow-Origin"]; ok {
-		return
+		return ""
 	}
 	rule := s.corsRuleForRequest(ctx, corsBucketFromPath(req.Path), origin, req.Method, nil, false)
 	if rule == nil {
-		return
+		return ""
 	}
-	if allow := corsAllowedOrigin(rule, origin); allow != "" {
-		resp.Refusal.Headers["Access-Control-Allow-Origin"] = allow
-		resp.Refusal.Headers["Vary"] = "Origin"
-	}
+	return corsAllowedOrigin(rule, origin)
 }
 
 // edgeCommitCORS sets the bucket's CORS headers for the admitted request's

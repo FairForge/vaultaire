@@ -349,3 +349,117 @@ test("a filename* form goes to the origin whole", async () => {
   assert.equal(admitted, false, "never described to the control plane");
   assert.deepEqual(toOrigin, body);
 });
+
+// RP96-11 (0.7.3): the edge reads a file part's Content-Disposition only in
+// the one shape it reads exactly as the origin's mime.ParseMediaType does.
+// An unquoted filename (the origin refuses `a b.txt`, decodes `abc.txt`), a
+// repeated parameter, a quoted-pair, a folded header — the origin's, whole.
+test("an unquoted or repeated filename goes to the origin whole", async () => {
+  const shapes = [
+    'form-data; name="file"; filename=a b.txt',
+    'form-data; name="file"; filename=abc.txt',
+    'form-data; name="file"; filename="a.txt"; filename="b.txt"',
+    'form-data; name="file"; filename="a\\"b.txt"',
+    'form-data; name="file"; name="file"; filename="a.txt"',
+    'form-data; name=file; filename="a.txt"',
+    'form-data; name="file"; filename="a.txt"; size="3"',
+    'attachment; name="file"; filename="a.txt"',
+    'form-data; name="file";\r\n filename="a.txt"',
+  ];
+  for (const cd of shapes) {
+    const head = enc.encode(`--${B}\r\nContent-Disposition: form-data; name="key"\r\n\r\nin/\${filename}\r\n` +
+      `--${B}\r\nContent-Disposition: ${cd}\r\nContent-Type: text/plain\r\n\r\n`);
+    assert.throws(() => parseFormPrefix(head, B), /the origin's|no name/, cd);
+    const content = enc.encode("q".repeat(2000));
+    const t = formTail(B);
+    const body = new Uint8Array(head.length + content.length + t.length);
+    body.set(head);
+    body.set(content, head.length);
+    body.set(t, head.length + content.length);
+    let toOrigin = null;
+    let admitted = false;
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/api/v1/edge/admit")) admitted = true;
+      toOrigin = await bytesOf(input.body);
+      return new Response(null, { status: 400 });
+    };
+    const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+    assert.equal(resp.status, 400, cd);
+    assert.equal(admitted, false, `never described: ${cd}`);
+    assert.deepEqual(toOrigin, body, cd);
+  }
+  // The shape the edge reads: the name decoded, one header per part, any case.
+  const ok = enc.encode(`--${B}\r\nCONTENT-DISPOSITION: Form-Data; Name="key"\r\n\r\nk\r\n--${B}\r\ncontent-disposition: form-data;name="file" ; FILENAME="é b.txt"\r\n\r\n`);
+  const f = parseFormPrefix(ok, B);
+  assert.equal(f.fields.key, "k");
+  assert.equal(f.filename, "é b.txt");
+});
+
+// RP96-12 (0.7.3): the answers the Worker mints itself carry the admit's
+// CORS origin, as the origin's twins do — a page can read them.
+test("the Worker's own 400 carries the admit's CORS origin", async (t) => {
+  withFLS(t);
+  const { body } = form(fields, "cat.png", enc.encode("w".repeat(4000)));
+  body[body.length - 3] = 0x41; // a wrong tail
+  const seen = {};
+  const stub = edgeStub(seen, 4000);
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) {
+      seen.admit = JSON.parse(init.body);
+      return Response.json({ edge: true, admit_id: "a1", url: "https://backend.test/put", method: "PUT", cors_origin: "https://page.example", send_headers: { "content-length": "4000" } });
+    }
+    return stub(input, init);
+  };
+  const resp = await worker.fetch(postRequest(body, { origin: "https://page.example" }), env, { waitUntil() {} });
+  assert.equal(resp.status, 400);
+  assert.equal(resp.headers.get("access-control-allow-origin"), "https://page.example");
+  assert.equal(resp.headers.get("vary"), "Origin");
+  assert.equal(resp.headers.get("access-control-allow-credentials"), null, "never credentials");
+
+  // A lost commit: the Worker's 503, the same header.
+  const { body: good } = form(fields, "cat.png", enc.encode("v".repeat(4000)));
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) return Response.json({ edge: true, admit_id: "a2", url: "https://backend.test/put", method: "PUT", cors_origin: "https://page.example", send_headers: { "content-length": "4000" } });
+    if (url === "https://backend.test/put") {
+      await bytesOf(init.body);
+      return new Response(null, { status: 200, headers: { etag: '"e"' } });
+    }
+    if (url.endsWith("/api/v1/edge/commit")) throw new Error("control plane down");
+    throw new Error("unexpected " + url);
+  };
+  const lost = await worker.fetch(postRequest(good, { origin: "https://page.example" }), env, { waitUntil() {} });
+  assert.equal(lost.status, 503);
+  assert.equal(lost.headers.get("access-control-allow-origin"), "https://page.example");
+  // No origin named by the admit: none.
+  const { body: plain } = form(fields, "cat.png", enc.encode("u".repeat(4000)));
+  plain[plain.length - 3] = 0x41;
+  globalThis.fetch = edgeStub({}, 4000);
+  const none = await worker.fetch(postRequest(plain), env, { waitUntil() {} });
+  assert.equal(none.status, 400);
+  assert.equal(none.headers.get("access-control-allow-origin"), null);
+});
+
+// RP96-21 (0.7.3): a pass-through form whose body is shorter than its
+// Content-Length was an unhandled rejection (Cloudflare's 1101 page).
+test("a short pass-through body is IncompleteBody", async (t) => {
+  withFLS(t);
+  const { body } = form(fields, "cat.png", enc.encode("y".repeat(3000)));
+  const short = body.subarray(0, body.length - 500);
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) return Response.json({ edge: false, reason: "post_over_edge_cap" });
+    await bytesOf(input.body); // rejects: the double errors short
+    return new Response(null, { status: 204 });
+  };
+  const req = new Request("https://s3.stored.cloud/my-bucket", {
+    method: "POST",
+    body: short,
+    headers: { "content-type": `multipart/form-data; boundary=${B}`, "content-length": String(body.length) },
+  });
+  const resp = await worker.fetch(req, env, { waitUntil() {} });
+  assert.equal(resp.status, 400);
+  assert.match(await resp.text(), /<Code>IncompleteBody<\/Code>/);
+});
