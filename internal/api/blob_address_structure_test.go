@@ -57,6 +57,7 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 		},
 		"scrub.go": {
 			"d.Get(actx, container, artifact)":                                     "the blob scrub's read at scrubItem.address: objectBlobAddress of the row's storage_key, or a chunk's one address (WP-VAULT-2 Part 2)",
+			"rg.GetRangeInfo(actx, container, artifact, offset, scrubOpenRange)":   "the blob scrub's ranged read across runs at the same scrubItem.address (RP96-2)",
 			"src.Get(cctx, container, artifact)":                                   "a mirror copy read at the same resolved address on its leg (blob_copies.storage_key) to repair it",
 			"d.Put(cctx, container, artifact, vr, engine.WithContentLength(size))": "the repair: the verified copy rewritten at the row's own resolved address (an address is never reused for other bytes)",
 		},
