@@ -373,3 +373,19 @@ func TestBlobScrubCycleFromEnv(t *testing.T) {
 	}
 	assert.Nil(t, newBlobScrubJob(&Server{}, 0), "no cycle: no job")
 }
+
+// A chunk written before WP-R8-7 still under its uploader's prefix (until the
+// chunk move) is read and checked there — never a `missing` finding.
+func TestScrub_ALegacyChunkIsReadWhereItIs(t *testing.T) {
+	f := setupBlobScrubFixture(t, 24*time.Hour)
+	f.job.Every = 24 * time.Hour
+	data := testBytes(1300)
+	hash := f.chunk(data)
+	// Move the blob from the one address to the uploader's prefix.
+	ctx := context.Background()
+	require.NoError(t, f.drv.Delete(engine.ChunkContext(ctx), engine.ChunkContainer, "_chunks/"+hash))
+	require.NoError(t, f.drv.Put(engine.LegacyChunkContext(ctx, f.tenantID), engine.ChunkContainer, "_chunks/"+hash, bytes.NewReader(data)))
+	res := f.run()
+	assert.Equal(t, map[string]int{"chunk": 1}, res.Backends["edgefake"].Checked)
+	assert.Empty(t, f.findings(), "present at its legacy address: no finding")
+}

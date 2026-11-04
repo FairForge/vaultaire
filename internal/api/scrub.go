@@ -695,7 +695,7 @@ func isMD5Hex(s string) bool {
 // check reads one blob whole and judges it; a finding is written for what
 // is not ok, and a repair tried. n = the bytes read.
 func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult) (string, int64) {
-	verdict, detail, n := j.read(ctx, d, it)
+	verdict, detail, n := j.read(ctx, d, backend, it)
 	switch verdict {
 	case scrubOK, scrubNoVerdict:
 		return verdict, n
@@ -743,11 +743,19 @@ func scrubReadTimeout(size int64) time.Duration {
 
 // read is the blob's verdict: ok, mismatch, unreadable, missing,
 // unverifiable, or no verdict (no answer).
-func (j *BlobScrubJob) read(ctx context.Context, d engine.Driver, it scrubItem) (verdict, detail string, n int64) {
+func (j *BlobScrubJob) read(ctx context.Context, d engine.Driver, backend string, it scrubItem) (verdict, detail string, n int64) {
 	cctx, cancel := context.WithTimeout(ctx, scrubReadTimeout(it.size))
 	defer cancel()
 	actx, container, artifact := it.address(cctx)
 	rc, err := d.Get(actx, container, artifact)
+	if err != nil && it.kind == scrubKindChunk && scrubReadVerdict(err) == scrubMissing {
+		// A chunk written before WP-R8-7 may still sit under an uploader's
+		// prefix until the chunk move (routing truth's `legacy`): read and
+		// check it there — never a `missing` finding for a blob that is.
+		if lrc, ok := j.legacyChunk(cctx, d, backend, it); ok {
+			rc, err = lrc, nil
+		}
+	}
 	if err != nil {
 		return scrubReadVerdict(err), err.Error(), 0
 	}
@@ -779,6 +787,22 @@ func (j *BlobScrubJob) read(ctx context.Context, d engine.Driver, it scrubItem) 
 		return scrubMismatch, "md5 " + got + ", the row says " + it.digest, n
 	}
 	return scrubOK, "", n
+}
+
+// legacyChunk opens a chunk at a legacy (uploader-prefix) address, the
+// driver called directly.
+func (j *BlobScrubJob) legacyChunk(ctx context.Context, d engine.Driver, backend string, it scrubItem) (io.ReadCloser, bool) {
+	cs := newChunkStore(j.s.engine, j.s.db, j.s.log())
+	tenants, err := cs.legacyTenants(ctx, chunkAddr{scope: it.scope, hash: it.hash, backend: backend, key: it.storageKey})
+	if err != nil {
+		return nil, false
+	}
+	for _, tid := range tenants {
+		if rc, err := d.Get(engine.LegacyChunkContext(ctx, tid), engine.ChunkContainer, it.storageKey); err == nil {
+			return rc, true
+		}
+	}
+	return nil, false
 }
 
 // scrubReadVerdict is readProbe's classification of a failed read: a tape
