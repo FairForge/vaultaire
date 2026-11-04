@@ -133,6 +133,9 @@ type BlobCopiesJob struct {
 	// egress budget (tests use their own).
 	copyBatch   int
 	capacityJob string
+	// scrubJob is the blob scrub's job_runs row: its month's reads share
+	// the vendor ledger (jobsEgressLeft, RP96-7).
+	scrubJob string
 }
 
 // newBlobCopiesJob is the job of s; nil without a database or an engine.
@@ -141,7 +144,7 @@ func newBlobCopiesJob(s *Server) *BlobCopiesJob {
 		return nil
 	}
 	return &BlobCopiesJob{s: s, JobName: blobCopiesJobName, now: time.Now, maxBytes: blobCopiesMaxBytesPerRun,
-		copyBatch: blobCopiesCopyBatch, capacityJob: backendCapacityJobName}
+		copyBatch: blobCopiesCopyBatch, capacityJob: backendCapacityJobName, scrubJob: blobScrubJobName}
 }
 
 func (j *BlobCopiesJob) spec() jobSpec {
@@ -298,13 +301,16 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 	rows, err := j.s.db.QueryContext(ctx, `
 		SELECT h.tenant_id, h.bucket, h.object_key, COALESCE(h.storage_key, h.object_key), h.backend_name, h.size_bytes,
 		       COALESCE(NULLIF(h.body_md5, ''), h.etag), COALESCE(b.region, ''), COALESCE(b.tier_preference, ''),
-		       COALESCE((SELECT t.residency FROM tenants t WHERE t.id = h.tenant_id), '')
+		       COALESCE((SELECT t.residency FROM tenants t WHERE t.id = h.tenant_id), ''),
+		       COALESCE(h.encryption_algorithm, ''), COALESCE(h.backend_etag, '')
 		FROM object_head_cache h
 		LEFT JOIN buckets b ON b.tenant_id = h.tenant_id AND b.name = h.bucket
 		WHERE ($1 OR h.tenant_id = ANY($2)) AND NOT h.is_chunked AND h.floor <> 'vault'
 		  AND COALESCE(h.backend_name, '') NOT IN ('', '`+chunkedBackendSentinel+`', '`+rsBackendSentinel+`')
 		  AND NOT (COALESCE(h.backend_name, '') = ANY($4)) AND NOT (COALESCE(b.tier_preference, '') = ANY($4))
 		  AND h.size_bytes > 0
+		  -- RP96-9: a sealed row's stored bytes are named by its backend_etag
+		  AND (COALESCE(h.encryption_algorithm, '') = '' OR COALESCE(h.backend_etag, '') <> '')
 		  AND `+notSandboxH+` -- WP-DX-1: a sandbox's bytes stay on local
 		  AND NOT EXISTS (SELECT 1 FROM blob_copies c WHERE c.tenant_id = h.tenant_id
 		                  AND c.storage_key = COALESCE(h.storage_key, h.object_key) AND c.kind = 'mirror')
@@ -314,20 +320,28 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		return err
 	}
 	type cand struct {
-		c     blobCopy
-		md5   string
-		scope bucketScope
+		c      blobCopy
+		md5    string
+		scope  bucketScope
+		sealed bool
 	}
 	var cands []cand
 	for rows.Next() {
 		var c blobCopy
-		var digest string
+		var digest, encryption, backendETag string
 		var scope bucketScope
-		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest, &scope.Region, &scope.Tier, &scope.Residency); err != nil {
+		if err := rows.Scan(&c.TenantID, &c.Bucket, &c.Key, &c.StorageKey, &c.Source, &c.Size, &digest, &scope.Region, &scope.Tier, &scope.Residency,
+			&encryption, &backendETag); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		cands = append(cands, cand{c: c, md5: digest, scope: scope})
+		// RP96-9: a sealed row's copy is of its STORED bytes — their MD5
+		// is the backend_etag (the scrub's digest rule), their length the
+		// source's (below), never the plaintext's etag and size.
+		if encryption != "" {
+			digest = strings.Trim(backendETag, `"`)
+		}
+		cands = append(cands, cand{c: c, md5: digest, scope: scope, sealed: encryption != ""})
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
@@ -354,6 +368,15 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 			continue
 		}
 		c.Leg, c.State = leg, copyPending
+		if cd.sealed {
+			// The stored length is the source's word for the blob (one
+			// HEAD); a source that cannot say is skipped this run.
+			n, ok := j.storedLength(ctx, c)
+			if !ok {
+				continue
+			}
+			c.Size = n
+		}
 		if unverifiedReason(cd.md5) == "" {
 			c.ETag = cd.md5
 		}
@@ -369,6 +392,28 @@ func (j *BlobCopiesJob) backfill(ctx context.Context, res *BlobCopiesResult) err
 		blobCopiesTotal.WithLabelValues(blobCopyEnqueued).Inc()
 	}
 	return nil
+}
+
+// storedLength is a sealed blob's stored length on its source (one HEAD,
+// engine.ObjectHeader): a sealed blob is longer than its plaintext size by
+// its header and a tag per segment, and the copy is of the stored bytes.
+func (j *BlobCopiesJob) storedLength(ctx context.Context, c blobCopy) (int64, bool) {
+	d, ok := j.s.engine.GetDriver(c.Source)
+	if !ok || j.s.engine.CanAsk(c.Source) != nil {
+		return 0, false
+	}
+	oh, ok := d.(engine.ObjectHeader)
+	if !ok {
+		return 0, false
+	}
+	hctx, cancel := context.WithTimeout(ctx, blobCopiesCallTimeout)
+	defer cancel()
+	cctx, container, artifact := c.address(hctx)
+	info, err := oh.HeadObject(cctx, container, artifact)
+	if err != nil || info.Size <= 0 {
+		return 0, false
+	}
+	return info.Size, true
 }
 
 // copyRec is a blob_copies row the passes read.
@@ -586,14 +631,14 @@ func (j *BlobCopiesJob) unmirrorable(c blobCopy) bool {
 }
 
 // egressLedger is the copy pass's egress budget per vendor account (a
-// source's planAccountOf: every iDrive region is the idrive account) for one run
-// (RP76-4): a source whose plan row (backend_plans) names an
-// egress_free_multiple may give the pass, this UTC month, at most that
-// multiple of what the last backend_capacity run counted stored on it,
-// less what is already spent — the vendor's own month-to-date where it
-// reports one, else (and at least) what this job read from it this month.
-// A source with no plan row or a NULL multiple is unmetered. A metered
-// source with no capacity run yet gets nothing (unknown = no egress).
+// source's planAccountOf: every iDrive region is the idrive account) for one
+// run (RP76-4): the ONE vendor ledger the blob scrub spends too
+// (jobsEgressLeft, RP96-7) — (multiple − 1) × min(the plan, the account's
+// stored) less what the two jobs read this month while the vendor reports
+// no month-to-date (one multiple stays the customers', RP78-5), the full
+// multiple less the larger of the vendor's figure and ours when it does. A
+// source with no plan row or a NULL multiple is unmetered; a metered source
+// with no capacity run yet gets nothing (unknown = no egress).
 type egressLedger struct {
 	mu      sync.Mutex
 	month   string
@@ -618,46 +663,17 @@ func (j *BlobCopiesJob) egressLedger(ctx context.Context, res *BlobCopiesResult)
 			l.spent[k] = v
 		}
 	}
-	var capRes BackendCapacityResult
-	haveCap := false
-	raw = nil
-	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.capacityJob).Scan(&raw); err == nil && len(raw) > 0 {
-		haveCap = json.Unmarshal(raw, &capRes) == nil
-	}
-	rows, err := j.s.db.QueryContext(ctx, `SELECT backend, capacity_bytes, egress_free_multiple FROM backend_plans WHERE egress_free_multiple IS NOT NULL`)
+	// The ONE vendor ledger (jobsEgressLeft, RP96-7): the scrub's month
+	// counts here too, and the full multiple only when the vendor reports.
+	left, notes, err := jobsEgressLeft(ctx, j.s.db, egressJobs{capacity: j.capacityJob, scrub: j.scrubJob, copies: j.JobName}, l.month)
 	if err != nil {
 		res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
-		l.limit = nil // nil = every source refused (below)
+		l.limit = nil // nil = every source refused (take)
 	} else {
-		for rows.Next() {
-			var backend string
-			var capacity int64
-			var mult float64
-			if rows.Scan(&backend, &capacity, &mult) != nil {
-				continue
-			}
-			// The row is an ACCOUNT (egress_account.go): its pool is every
-			// backend of it (idrive + idrive-<region>), counted strictly —
-			// never more than the capacity bought — and the vendor's
-			// month-to-date is the account's.
-			var stored, used int64
-			if haveCap {
-				stored = egressBase(capacity, accountStored(capRes.Backends, backend))
-				if v, ok := capRes.Vendor[backend]; ok && !v.EgressUnmetered {
-					used = v.EgressMonthBytes
-				}
-			}
-			used = max(used, l.spent[backend])
-			// RP78-5: the pass spends only the allowance ABOVE one multiple
-			// of stored — the customers' own GETs keep 1× stored before
-			// the vendor's overage rate; the 2× lane is never worth that.
-			l.limit[backend] = max(0, int64((mult-1)*float64(stored))-used)
+		l.limit = left
+		for _, n := range notes {
+			res.note(errors.New("egress budget: " + n))
 		}
-		if err := rows.Err(); err != nil {
-			res.note(fmt.Errorf("egress budget: the plans could not be read — nothing metered is copied: %w", err))
-			l.limit = nil
-		}
-		_ = rows.Close()
 	}
 	res.Egress = &blobCopyEgress{Month: l.month, Spent: map[string]int64{}}
 	for k, v := range l.spent {

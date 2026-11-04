@@ -50,5 +50,33 @@ tests:
               backend: lyve
               severity: warning
             exp_annotations:
-              summary: "The blob scrub's cycle over lyve has run 1d 13h 30m 0s — past 1.5 cycles"
+              summary: "The blob scrub's cycle over lyve is stale: 1d 13h 30m 0s since it began, or since the last one finished with none in progress"
+              description: "job_runs WHERE job = 'blob_scrub': the backend's skipped (vendor_allowance, breaker_open) and the run's notes say why. Every blob is no longer read once a cycle."
+
+  # RP96-6: a completed-only series. lyve finished a cycle at t=0 and has
+  # none in progress: past 2 × 24 h, then the hour of `for`. idrive has one
+  # in progress (started at 47 h), so the completed expression is silent
+  # for it — and so is the started one, which is young.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_scrub_cycle_seconds'
+        values: '86400x3200'
+      - series: 'vaultaire_scrub_cycle_completed_timestamp_seconds{backend="lyve"}'
+        values: '0x3200'
+      - series: 'vaultaire_scrub_cycle_completed_timestamp_seconds{backend="idrive"}'
+        values: '0x3200'
+      - series: 'vaultaire_scrub_cycle_started_timestamp_seconds{backend="idrive"}'
+        values: '169200x3200'
+    alert_rule_test:
+      - eval_time: 48h30m
+        alertname: ScrubCycleStale
+        exp_alerts: []
+      - eval_time: 49h30m
+        alertname: ScrubCycleStale
+        exp_alerts:
+          - exp_labels:
+              backend: lyve
+              severity: warning
+            exp_annotations:
+              summary: "The blob scrub's cycle over lyve is stale: 2d 1h 30m 0s since it began, or since the last one finished with none in progress"
               description: "job_runs WHERE job = 'blob_scrub': the backend's skipped (vendor_allowance, breaker_open) and the run's notes say why. Every blob is no longer read once a cycle."

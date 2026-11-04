@@ -190,6 +190,13 @@ func (s *Server) handlePutBackendPlan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("backend %q is not registered", backend), http.StatusNotFound)
 		return
 	}
+	// One vendor account, one row (RP96-8): an iDrive region is the idrive
+	// account, and the egress budgets look the account up — a row named
+	// for the region was never spent.
+	if account := planAccountOf(backend); account != backend {
+		http.Error(w, fmt.Sprintf("plan_is_per_account: %q is the %q account's region — PUT the plan of %q (one account, one row)", backend, account, account), http.StatusBadRequest)
+		return
+	}
 	var p BackendPlan
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&p); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
