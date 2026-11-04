@@ -1,0 +1,6 @@
+{
+  "_comment": "The bucket page's verified line (WP-VAULT-2 Part 2, Stage 1a Prompt 58 PR B): shown only once a full cycle of the blob scrub over the backends holding the tenant's bytes finished, and nothing it found in the bucket is left unrepaired. Read through internal/dashboard/handlers (bucket_verified.go), never typed in a template. {date} is the day the cycle finished (UTC); {n} the files repaired from a second copy in it.",
+  "verified": "Every file here was read back and checked on {date}.",
+  "verified_repaired_one": "Every file here was read back and checked on {date}; 1 file was repaired from a second copy.",
+  "verified_repaired_many": "Every file here was read back and checked on {date}; {n} files were repaired from a second copy."
+}
