@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FairForge/vaultaire/internal/api/landing"
@@ -161,4 +162,54 @@ func BucketVerifiedLine(ctx context.Context, db *sql.DB, tenantID, bucket string
 		return strings.ReplaceAll(durability.VerifiedRepairedOne, "{date}", date)
 	}
 	return strings.NewReplacer("{date}", date, "{n}", strconv.Itoa(repaired)).Replace(durability.VerifiedRepairedMany)
+}
+
+// verifiedLineTTL is how long the bucket page keeps a computed line (RP96-20:
+// the line's queries and the JSON parse of the scrub's whole result ran on
+// every render, prefix navigation included). A minute: the line changes at
+// a cycle's end, days apart.
+const verifiedLineTTL = time.Minute
+
+// verifiedLineCacheMax bounds the cache; past it, expired entries go first,
+// then everything.
+const verifiedLineCacheMax = 10000
+
+type verifiedLineEntry struct {
+	line string
+	at   time.Time
+}
+
+var (
+	verifiedLineMu    sync.Mutex
+	verifiedLineCache = map[string]verifiedLineEntry{}
+	// verifiedLineNow is the cache's clock (tests move it).
+	verifiedLineNow = time.Now
+)
+
+// CachedBucketVerifiedLine is BucketVerifiedLine kept a minute per (tenant,
+// bucket) — what the bucket page renders.
+func CachedBucketVerifiedLine(ctx context.Context, db *sql.DB, tenantID, bucket string) string {
+	k := tenantID + "\x00" + bucket
+	now := verifiedLineNow()
+	verifiedLineMu.Lock()
+	if e, ok := verifiedLineCache[k]; ok && now.Sub(e.at) < verifiedLineTTL {
+		verifiedLineMu.Unlock()
+		return e.line
+	}
+	verifiedLineMu.Unlock()
+	line := BucketVerifiedLine(ctx, db, tenantID, bucket)
+	verifiedLineMu.Lock()
+	defer verifiedLineMu.Unlock()
+	if len(verifiedLineCache) >= verifiedLineCacheMax {
+		for key, e := range verifiedLineCache {
+			if now.Sub(e.at) >= verifiedLineTTL {
+				delete(verifiedLineCache, key)
+			}
+		}
+		if len(verifiedLineCache) >= verifiedLineCacheMax {
+			verifiedLineCache = map[string]verifiedLineEntry{}
+		}
+	}
+	verifiedLineCache[k] = verifiedLineEntry{line: line, at: now}
+	return line
 }

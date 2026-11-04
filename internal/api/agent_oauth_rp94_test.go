@@ -53,3 +53,28 @@ func TestOAuth_ElevenIdenticalRegistrationsInAMinuteAreOneClient(t *testing.T) {
 		}
 	}
 }
+
+// RP96-19: an identical registration (RP94-6) cost a transaction, the
+// network's advisory lock and two queries before any pace, so a flood of
+// identical forms from one network was bounded only by the lock. A cheap
+// per-network pre-limiter answers 429 before any database work — generous
+// (claude.ai's users share one egress), but a bound.
+func TestOAuth_AFloodOfIdenticalRegistrationsIsPacedBeforeTheDatabase(t *testing.T) {
+	f := setupPlatformFixture(t).withManagement().withAgents()
+	f.s.registerAgentOAuthRoutes()
+	f.s.oauthRegisterPreLimiter = dashmw.NewRateLimiter(time.Minute, 5)
+	tag := "rp96-19-" + uuid.NewString()[:8]
+	cleanupOAuthClients(t, f, tag)
+	egress := oauthPeer4()
+	same := registration(tag + "-Claude")
+	for i := 0; i < 5; i++ {
+		require.Equal(t, http.StatusCreated, oauthRegister(t, f.s, egress, same).Code, "registration %d", i+1)
+	}
+	db := f.s.db
+	f.s.db = nil // a sixth that reached the database would be a 503
+	w := oauthRegister(t, f.s, egress, same)
+	f.s.db = db
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, "paced before any database work: %s", w.Body)
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+	assert.Equal(t, http.StatusCreated, oauthRegister(t, f.s, oauthPeer4(), same).Code, "another network is not paced")
+}
