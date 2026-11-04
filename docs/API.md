@@ -825,6 +825,78 @@ egress is metered once, for the bytes you received.
 Also known to work unmodified: restic, JuiceFS (`docs/guides/juicefs-setup.md`),
 Cyberduck, Nextcloud's S3 object store, Immich.
 
+## Transfers
+
+Bring a bucket's files in from another S3-compatible storage — Backblaze
+B2, Wasabi, AWS S3, Cloudflare R2, another Stored account — without
+downloading them yourself. You give the source (its S3 endpoint, region,
+bucket, an optional prefix, and a key you made for this) and one of your
+buckets; Stored lists the source and copies each object into the bucket,
+resumes where it stopped, and skips what is already there. The dashboard's
+**Transfers** page does the same.
+
+```http
+POST /api/v1/manage/transfers
+{
+  "bucket": "photos",
+  "source": {
+    "endpoint": "https://s3.us-west-004.backblazeb2.com",
+    "region": "us-west-004",
+    "bucket": "my-b2-bucket",
+    "prefix": "2025/",
+    "access_key": "004a…",
+    "secret_key": "K004…"
+  },
+  "rate_bytes_per_sec": 26214400
+}
+```
+
+- **Who:** the account's owner or an admin (`transfer.write`); every member
+  reads the list.
+- **The source is checked first:** one signed listing of the source before
+  the transfer is written — `400 source_denied` when it refuses the key
+  (its answer named, e.g. `InvalidAccessKeyId`), `400 source_unreachable`
+  when it does not answer. The endpoint is `https://` and a host only (no
+  path, query or credentials); a source that resolves to a private or
+  loopback address is refused, at every connection.
+- **The destination:** a bucket of your account; not a Private bucket (`409
+  destination_private` — a transfer holds no customer key), not a Vault
+  bucket yet (`501 NotImplemented`).
+- **The key:** use a **read-only** key made for this. It is kept only while
+  the transfer runs — sealed under your account's key when the server has
+  one — and deleted when the transfer completes, fails or is cancelled.
+  No answer ever shows it, its id included (`source_key_held` says whether
+  it is still kept). It is not in your data export.
+- **What is copied:** every object under the prefix, at the same key in your
+  bucket, with its `Content-Type`, `Cache-Control`, `Content-Disposition`,
+  `Content-Encoding`, `Content-Language`, `Expires` and `x-amz-meta-*`. A
+  file is written exactly as an upload of the same bytes would be: your
+  bucket's mode and placement, versioning, Object Lock defaults, events.
+  An object of 64 MiB or more is copied as a multipart upload.
+- **Already there:** an object whose copy in your bucket has the source's
+  ETag and size, or that an earlier transfer of the same source copied and
+  that has not changed since, is `skipped` — a second transfer of the same
+  source reads nothing.
+- **Metered as an upload:** the copied bytes count against your storage. When
+  it is full the transfer **pauses** (`paused_reason: "quota"`,
+  `paused_code: "QuotaExceeded"`); make room, then
+  `POST /api/v1/manage/transfers/{id}/resume`. A source that refuses a read
+  pauses it too (`source_denied`). An object the source fails to serve three
+  times is `failed` and the transfer goes on.
+- **Speed:** at most `rate_bytes_per_sec` (default and ceiling 25 MiB/s);
+  every transfer shares the service's own cap.
+- **Progress:** `GET /api/v1/manage/transfers` (newest first) and
+  `GET /api/v1/manage/transfers/{id}`: `state` (`pending`, `running`,
+  `paused`, `completed`, `failed`, `cancelled`), `listed`, `copied`,
+  `skipped`, `failed`, `bytes`, `cursor` (the last source key listed),
+  `listed_all`, `last_error`.
+- **Cancel:** `DELETE /api/v1/manage/transfers/{id}` — the key is deleted at
+  once and nothing is written after; what was copied stays.
+- **When it ends:** a `transfer.completed` event to your webhook endpoints,
+  with the counters (never the key).
+
+A step-by-step for Backblaze B2: [`docs/guides/migrate-from-b2.md`](guides/migrate-from-b2.md).
+
 ## Browser uploads
 
 A web page can let its visitors upload straight into your bucket, with no

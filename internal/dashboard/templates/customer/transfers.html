@@ -1,0 +1,50 @@
+{{define "title"}}Transfers, Stored{{end}}
+{{define "content"}}
+<div class="page-header"><div>
+    <h1>Transfers</h1>
+    <p class="text-muted">Bring files in from another S3-compatible storage (Backblaze B2, Wasabi, AWS S3, another Stored account). Stored lists the source and copies each file into your bucket, resumes where it stopped, and skips what is already here.</p>
+</div></div>
+{{if .FlashSuccess}}<div class="alert alert-success">{{.FlashSuccess}}</div>{{end}}
+{{if .FlashError}}<div class="alert alert-error">{{.FlashError}}</div>{{end}}
+{{if .Error}}<div class="alert alert-error">{{.Error}}</div>{{end}}
+<div class="card">
+    <div class="card-title">Your transfers</div>
+    {{if .Transfers}}
+    <table class="table">
+        <thead><tr><th>From</th><th>Into</th><th>State</th><th>Progress</th><th>Copied</th>{{if .CanManage}}<th></th>{{end}}</tr></thead>
+        <tbody>
+        {{range .Transfers}}
+        <tr>
+            <td><code>{{.SourceEndpoint}}</code><br>{{.SourceBucket}}{{if .SourcePrefix}}/{{.SourcePrefix}}{{end}}</td>
+            <td>{{.Bucket}}</td>
+            <td>{{.State}}{{if .PausedReason}} — {{.PausedText}}{{end}}{{if .LastError}}<br><span class="text-muted">{{.LastError}}</span>{{end}}</td>
+            <td>{{.Copied}} copied, {{.Skipped}} already here, {{.Failed}} failed, of {{.Listed}} listed{{if not .ListedAll}} so far{{end}}</td>
+            <td>{{.BytesText}}</td>
+            {{if $.CanManage}}<td>
+                {{if eq .State "paused"}}<form method="post" action="/dashboard/transfers/{{.ID}}/resume" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="btn btn-sm" type="submit">Resume</button></form>{{end}}
+                {{if or (eq .State "pending") (eq .State "running") (eq .State "paused")}}<form method="post" action="/dashboard/transfers/{{.ID}}/cancel" style="display:inline">
+                    <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><button class="btn btn-sm btn-danger" type="submit">Cancel</button></form>{{end}}
+            </td>{{end}}
+        </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}<p class="text-muted">No transfer yet.</p>{{end}}
+</div>
+{{if .CanManage}}
+<form method="post" action="/dashboard/transfers" class="card" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="card-title">Start a transfer</div>
+    <label>Source endpoint <input type="url" name="endpoint" placeholder="https://s3.us-west-004.backblazeb2.com" value="{{.Form.Endpoint}}" required></label>
+    <label>Source region <input type="text" name="region" placeholder="us-west-004" value="{{.Form.Region}}"></label>
+    <label>Source bucket <input type="text" name="source_bucket" value="{{.Form.SourceBucket}}" required></label>
+    <label>Only names starting with (optional) <input type="text" name="prefix" value="{{.Form.Prefix}}"></label>
+    <label>Access key ID <input type="text" name="access_key" value="{{.Form.AccessKey}}" required></label>
+    <label>Secret key <input type="password" name="secret_key" autocomplete="new-password" required></label>
+    <label>Into your bucket <select name="bucket" required>{{range .Buckets}}<option value="{{.}}"{{if eq . $.Form.Bucket}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+    <button class="btn btn-primary" type="submit">Start</button>
+    <p class="text-muted">Use a <strong>read-only</strong> key made for this. Stored keeps it only while the transfer runs, sealed under your account's key, and deletes it when the transfer ends or you cancel it. The copied files count against your storage like any upload; a transfer pauses when your storage is full and resumes when you say so.</p>
+</form>
+{{end}}
+{{end}}

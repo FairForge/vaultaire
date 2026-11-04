@@ -65,6 +65,9 @@ type Deps struct {
 	// admin page that reads customer metadata is served (K4c-1,
 	// admin_reads.go); nil = no entry (tests, a box without a log).
 	AdminReads AdminReadRecorder
+	// Transfers is the API's transfer-in logic (WP-XFER-1); nil = the
+	// Transfers page is 404.
+	Transfers handlers.TransferService
 	// AccessLog finds a tenant's own transparency-log entries for "Access
 	// to your account" (Stage 1a Prompt 34b, the same adminread.Find as the
 	// API's view); nil = the page says the log is not available.
@@ -174,6 +177,9 @@ var dashboardWrites = map[string]auth.Action{
 	"POST /invitations/{token}/accept":      personalWrite, // the invited address decides
 	"POST /switch-tenant":                   personalWrite, // a member of the target, checked by the handler
 	"POST /billing/crypto-invoice/cancel":   auth.ActionBilling,
+	"POST /transfers":                       auth.ActionTransfer, // WP-XFER-1: another vendor's key, writes into the buckets
+	"POST /transfers/{id}/cancel":           auth.ActionTransfer,
+	"POST /transfers/{id}/resume":           auth.ActionTransfer,
 }
 
 // dashboardActed records the routes mounted through dashboardAction (the
@@ -449,6 +455,16 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		familyJoin := handlers.HandleFamilyJoin(familyJoinTmpl, fam)
 		dr.Get("/family/join/{token}", familyJoin)
 		dr.With(act("POST /family/join/{token}")).Post("/family/join/{token}", familyJoin)
+
+		// WP-XFER-1 PR B: the Transfers page.
+		transfersTmpl := template.Must(baseTmpl.Clone())
+		template.Must(transfersTmpl.ParseFS(Templates, "templates/customer/transfers.html"))
+		xfer := handlers.TransferDeps{DB: deps.DB, Service: deps.Transfers, Logger: deps.Logger}
+		transfersPage := handlers.HandleTransfersPage(transfersTmpl, xfer)
+		dr.Get("/transfers", transfersPage)
+		dr.With(act("POST /transfers")).Post("/transfers", transfersPage)
+		dr.With(act("POST /transfers/{id}/cancel")).Post("/transfers/{id}/cancel", handlers.HandleTransferCancel(xfer))
+		dr.With(act("POST /transfers/{id}/resume")).Post("/transfers/{id}/resume", handlers.HandleTransferResume(xfer))
 
 		// Usage page.
 		usageTmpl := template.Must(baseTmpl.Clone())
