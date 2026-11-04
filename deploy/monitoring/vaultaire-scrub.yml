@@ -1,0 +1,44 @@
+# The blob scrub — install to /etc/prometheus/rules/ (see README).
+#
+# The blob_scrub job (internal/api/scrub.go, WP-VAULT-2 Part 2) reads every
+# hot blob of the tenants with the blob_scrub flag WHOLE on its recorded
+# backend once per SCRUB_CYCLE and checks it against its row. Series from
+# the app's /metrics:
+#
+#   vaultaire_scrub_checked_total{backend}                     blobs read whole and checked
+#   vaultaire_scrub_failed_total{backend}                      blobs found wrong: a mismatch with the row's digest,
+#                                                              unreadable, or missing (a repaired one counts: it was wrong)
+#   vaultaire_scrub_bytes_total{backend}                       bytes read (the scrub's egress on the backend; bounded by
+#                                                              the vendor's free egress — vendor_allowance in job_runs)
+#   vaultaire_scrub_cycle_completed_timestamp_seconds{backend} the last finished cycle over the backend (from job_runs)
+#   vaultaire_scrub_cycle_started_timestamp_seconds{backend}   the cycle in progress began (absent between cycles)
+#   vaultaire_scrub_cycle_seconds                              SCRUB_CYCLE
+#
+# Absent unless SCRUB_CYCLE is set (the job is dark). What a finding is and
+# what to do: docs/DURABILITY.md § The blob scrub; the rows are
+# scrub_findings (verdict mismatch | unreadable | missing | repaired).
+groups:
+  - name: vaultaire-scrub
+    rules:
+      # A blob that is not what its row says. A repaired one fires too: the
+      # backend lost or changed bytes and a second copy put them back —
+      # worth reading the finding, not a page.
+      - alert: ScrubFailing
+        expr: increase(vaultaire_scrub_failed_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The blob scrub found {{ $value | humanize }} blob(s) on {{ $labels.backend }} that are not what their row says"
+          description: "SELECT * FROM scrub_findings WHERE backend = '{{ $labels.backend }}' ORDER BY found_at DESC: mismatch / unreadable / missing (and repaired, with the mirror leg). A blob with no ready mirror copy stays wrong until the customer's own copy, the parity or the operator restores it (docs/DURABILITY.md)."
+      # A cycle that has run longer than one and a half cycles: the scrub is
+      # starved (the vendor allowance, an open breaker, a job that fails or
+      # never runs) and the promise "every blob read once a cycle" is broken.
+      - alert: ScrubCycleStale
+        expr: (time() - vaultaire_scrub_cycle_started_timestamp_seconds) > 1.5 * scalar(vaultaire_scrub_cycle_seconds)
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "The blob scrub's cycle over {{ $labels.backend }} has run {{ $value | humanizeDuration }} — past 1.5 cycles"
+          description: "job_runs WHERE job = 'blob_scrub': the backend's skipped (vendor_allowance, breaker_open) and the run's notes say why. Every blob is no longer read once a cycle."

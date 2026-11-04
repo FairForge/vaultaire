@@ -215,6 +215,9 @@ type Server struct {
 	dataPlaneTransport http.RoundTripper
 	// blobCopies is the blob_copies job (WP-EDGE-4).
 	blobCopies *BlobCopiesJob
+	// blobScrub reads every hot blob whole once per SCRUB_CYCLE (WP-VAULT-2
+	// Part 2, scrub.go); nil while SCRUB_CYCLE is unset.
+	blobScrub *BlobScrubJob
 	// mirrorLegs is MIRROR_LEGS (WP-EDGE-4): the edge mirror's legs in
 	// preference order.
 	mirrorLegs []string
@@ -556,6 +559,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// displaced whole-object blobs.
 	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, s.gci, logger)
 	s.blobCopies = newBlobCopiesJob(s)
+	s.blobScrub = newBlobScrubJob(s, blobScrubCycleFromEnv(os.Getenv, logger))
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
 	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,

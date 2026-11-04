@@ -55,6 +55,11 @@ func TestWholeObjectReads_GoThroughTheBlobAddress(t *testing.T) {
 			"rg.GetRange(ctx, container, artifact, first*stripe, (last-first)*stripe)": "a window of a parity shard (shardArtifact) on its recorded leg (WP-VAULT-3 D-V3-2)",
 			"rg.GetRangeInfo(fctx, container, artifact, off, want)":                    "a range of a parity shard (shardArtifact) on its recorded leg (WP-VAULT-3 D-V3-1)",
 		},
+		"scrub.go": {
+			"d.Get(actx, container, artifact)":                                     "the blob scrub's read at scrubItem.address: objectBlobAddress of the row's storage_key, or a chunk's one address (WP-VAULT-2 Part 2)",
+			"src.Get(cctx, container, artifact)":                                   "a mirror copy read at the same resolved address on its leg (blob_copies.storage_key) to repair it",
+			"d.Put(cctx, container, artifact, vr, engine.WithContentLength(size))": "the repair: the verified copy rewritten at the row's own resolved address (an address is never reused for other bytes)",
+		},
 		"backend_canary.go": {
 			"drv.Exists(cctx, probeCanaryContainer, key)":                                                                 "the probe canary, not a customer object",
 			"drv.Put(cctx, probeCanaryContainer, key, bytes.NewReader(body), engine.WithContentLength(int64(len(body))))": "the probe canary",

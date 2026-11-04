@@ -197,6 +197,12 @@ func (s *Server) initMetrics() {
 		}
 		// The weekly tape audit (WP-VAULT-2 A4).
 		reg.MustRegister(vaultTapeAudits)
+		// The blob scrub (WP-VAULT-2 Part 2): blobs read, found wrong, bytes
+		// read; the cycle's gauges from job_runs.
+		reg.MustRegister(scrubChecks, scrubFailures, scrubBytesRead)
+		if s.blobScrub != nil {
+			reg.MustRegister(newBlobScrubCollector(s.blobScrub))
+		}
 		if s.tapeAudit != nil {
 			reg.MustRegister(newTapeAuditCollector(s.tapeAudit))
 		}

@@ -1,0 +1,54 @@
+# promtool unit test of vaultaire-scrub.yml (Stage 1a Prompt 58 PR A).
+# Run by deploy/monitoring/promtool-test.sh (CI) — or on the box:
+#   scp deploy/monitoring/vaultaire-scrub.yml deploy/monitoring/tests/vaultaire-scrub_test.yml vaultaire-slc:/tmp/
+#   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-scrub_test.yml'
+rule_files:
+  - vaultaire-scrub.yml
+
+evaluation_interval: 1m
+
+tests:
+  # lyve finds one bad blob at 10m; idrive stays clean.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_scrub_failed_total{backend="lyve"}'
+        values: '0x9 1x50'
+      - series: 'vaultaire_scrub_failed_total{backend="idrive"}'
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ScrubFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ScrubFailing
+        exp_alerts:
+          - exp_labels:
+              backend: lyve
+              severity: warning
+            exp_annotations:
+              summary: "The blob scrub found 1 blob(s) on lyve that are not what their row says"
+              description: "SELECT * FROM scrub_findings WHERE backend = 'lyve' ORDER BY found_at DESC: mismatch / unreadable / missing (and repaired, with the mirror leg). A blob with no ready mirror copy stays wrong until the customer's own copy, the parity or the operator restores it (docs/DURABILITY.md)."
+
+  # A 1-day cycle: lyve's cycle began at t=0 and is still running at 37 h
+  # (past 1.5 × 24 h = 36 h, then the hour of `for`); idrive's began at 30 h.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_scrub_cycle_seconds'
+        values: '86400x2400'
+      - series: 'vaultaire_scrub_cycle_started_timestamp_seconds{backend="lyve"}'
+        values: '0x2400'
+      - series: 'vaultaire_scrub_cycle_started_timestamp_seconds{backend="idrive"}'
+        values: '108000x2400'
+    alert_rule_test:
+      - eval_time: 36h30m
+        alertname: ScrubCycleStale
+        exp_alerts: []
+      - eval_time: 37h30m
+        alertname: ScrubCycleStale
+        exp_alerts:
+          - exp_labels:
+              backend: lyve
+              severity: warning
+            exp_annotations:
+              summary: "The blob scrub's cycle over lyve has run 1d 13h 30m 0s — past 1.5 cycles"
+              description: "job_runs WHERE job = 'blob_scrub': the backend's skipped (vendor_allowance, breaker_open) and the run's notes say why. Every blob is no longer read once a cycle."
