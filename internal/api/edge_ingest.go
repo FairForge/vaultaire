@@ -192,6 +192,9 @@ type edgeAdmitAttrs struct {
 	PostStatus   int               `json:"post_status,omitempty"`
 	PostLocation string            `json:"post_location,omitempty"`
 	PostMeta     map[string]string `json:"post_meta,omitempty"`
+	// Origin is the client's Origin header (RP94-3): the commit's answer
+	// carries the bucket's CORS headers for it, as the origin's would.
+	Origin string `json:"origin,omitempty"`
 }
 
 // edgeAdmitRow is an edge_admits row.
@@ -385,6 +388,70 @@ type edgePost struct {
 // edgeAdmit is the decision. status is the HTTP status of the admit call
 // itself (200 for every decision; 5xx when the control plane failed).
 func (s *Server) edgeAdmit(ctx context.Context, req edgeAdmitRequest) (edgeAdmitResponse, int) {
+	resp, status := s.edgeAdmitDecide(ctx, req)
+	s.edgeRefusalCORS(ctx, req, &resp)
+	return resp, status
+}
+
+// edgeRefusalCORS gives a relayed refusal that carries no CORS header of
+// its own the pre-auth Allow-Origin the origin's applyS3CORSPreAuth would
+// (RP94-3): some same-named bucket's rule allows the origin and method, so
+// a page can read the error.
+func (s *Server) edgeRefusalCORS(ctx context.Context, req edgeAdmitRequest, resp *edgeAdmitResponse) {
+	if resp.Refusal == nil {
+		return
+	}
+	origin := ""
+	for k, v := range req.Headers {
+		if strings.EqualFold(k, "origin") {
+			origin = v
+		}
+	}
+	if origin == "" {
+		return
+	}
+	if resp.Refusal.Headers == nil {
+		resp.Refusal.Headers = map[string]string{}
+	}
+	if _, ok := resp.Refusal.Headers["Access-Control-Allow-Origin"]; ok {
+		return
+	}
+	rule := s.corsRuleForRequest(ctx, corsBucketFromPath(req.Path), origin, req.Method, nil, false)
+	if rule == nil {
+		return
+	}
+	if allow := corsAllowedOrigin(rule, origin); allow != "" {
+		resp.Refusal.Headers["Access-Control-Allow-Origin"] = allow
+		resp.Refusal.Headers["Vary"] = "Origin"
+	}
+}
+
+// edgeCommitCORS sets the bucket's CORS headers for the admitted request's
+// Origin on the commit's answer (RP94-3), as applyS3CORSForTenant does on
+// the origin's: a form's POST, a PUT's or a part's.
+func (s *Server) edgeCommitCORS(ctx context.Context, row edgeAdmitRow, relay *edgeRelay) {
+	if row.Attrs.Origin == "" {
+		return
+	}
+	method := http.MethodPut
+	if row.Attrs.Via == "post" {
+		method = http.MethodPost
+	}
+	rule := s.corsRuleForTenant(ctx, row.TenantID, row.Bucket, row.Attrs.Origin, method)
+	if rule == nil {
+		return
+	}
+	h := http.Header{}
+	setS3CORSHeaders(h, rule, row.Attrs.Origin, nil, false)
+	if relay.Headers == nil {
+		relay.Headers = map[string]string{}
+	}
+	for k, v := range h {
+		relay.Headers[k] = strings.Join(v, ", ")
+	}
+}
+
+func (s *Server) edgeAdmitDecide(ctx context.Context, req edgeAdmitRequest) (edgeAdmitResponse, int) {
 	if req.Op == edgeOpPost {
 		return s.edgeAdmitPost(ctx, req)
 	}
@@ -767,7 +834,7 @@ func (s *Server) edgeAdmitWrite(req edgeAdmitRequest, p edgePrelude) (edgeAdmitR
 		ContentLength: size, ContentMD5: contentMD5, ContentType: attrs.ContentType,
 		Attrs: edgeAdmitAttrs{Attrs: attrs, LockMode: sr.Header.Get("x-amz-object-lock-mode"),
 			LockUntil: sr.Header.Get("x-amz-object-lock-retain-until-date"), UserAgent: sr.Header.Get("User-Agent"), KeyID: attemptedAccessKey(sr),
-			ActingKey: writerKeyOf(sctx)},
+			ActingKey: writerKeyOf(sctx), Origin: sr.Header.Get("Origin")},
 		StorageClass: storageClass, Floor: floor, ClientIP: req.ClientIP, RequestID: req.RequestID}
 	row.Attrs.CheckLength = stream != nil && !streamProps.EnforcesDecodedLength
 	if p.post != nil {
@@ -1270,6 +1337,7 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	ctx = withWriterKey(ctx, row.Attrs.ActingKey)
 	state, bytes, after := s.settleEdgeAdmit(ctx, row, req, rec)
 	relay := rec.relay()
+	s.edgeCommitCORS(ctx, row, relay)
 	result, _ := json.Marshal(relay)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE edge_admits SET state = $2, backend_status = NULLIF($3, 0), backend_etag = NULLIF($4, ''), result = $5, finished_at = NOW()

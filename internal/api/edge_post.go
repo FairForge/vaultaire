@@ -78,6 +78,9 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 
 	// The inner PUT of the file part, as the origin builds it.
 	headers := map[string]string{"host": req.Host, "content-length": strconv.FormatInt(req.Form.FileSize, 10)}
+	if o := outer.Get("Origin"); o != "" {
+		headers["origin"] = o // the commit's CORS headers (RP94-3)
+	}
 	for k, v := range a.header {
 		headers[strings.ToLower(k)] = v[0]
 	}
