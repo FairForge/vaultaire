@@ -381,7 +381,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 				s.applyS3CORSPreAuth(w, r)
 				refused.write(w, r)
 				if refused.reason != "" {
-					recordAuthFailure(r, refused.reason, refused.keyKnown)
+					recordAuthFailureFor(refused.keyID, refused.reason, refused.keyKnown)
 				}
 				return
 			}

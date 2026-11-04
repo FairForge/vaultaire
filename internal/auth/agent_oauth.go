@@ -109,6 +109,17 @@ func oauthSHA256Hex(s string) string {
 // by its /64 (RP92-5). A peer that is no address (a test's, a unix socket)
 // is neither capped nor matched.
 func RegisterOAuthClient(ctx context.Context, db *sql.DB, name string, redirectURIs []string, peer string) (*OAuthClient, error) {
+	return RegisterOAuthClientPaced(ctx, db, name, redirectURIs, peer, nil)
+}
+
+// ErrOAuthRegisterPaced: allowNew refused a NEW client row (the per-minute
+// pace; RP94-6).
+var ErrOAuthRegisterPaced = errors.New("oauth: too many new clients from this address this minute")
+
+// RegisterOAuthClientPaced is RegisterOAuthClient with a pace consulted only
+// when a NEW row would be written — after the identical-registration match
+// (RP94-6): the same client answered again spends nothing. nil = no pace.
+func RegisterOAuthClientPaced(ctx context.Context, db *sql.DB, name string, redirectURIs []string, peer string, allowNew func() bool) (*OAuthClient, error) {
 	name = strings.TrimSpace(name)
 	if len([]rune(name)) > 100 {
 		return nil, fmt.Errorf("%w: client_name is longer than 100 characters", ErrOAuthInvalidClient)
@@ -163,6 +174,9 @@ func RegisterOAuthClient(ctx context.Context, db *sql.DB, name string, redirectU
 		if n >= OAuthClientsPerNetworkPerDay {
 			return nil, ErrOAuthClientCap
 		}
+	}
+	if allowNew != nil && !allowNew() {
+		return nil, ErrOAuthRegisterPaced
 	}
 	tok, err := randomToken(18)
 	if err != nil {

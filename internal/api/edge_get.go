@@ -331,6 +331,9 @@ func (s *Server) edgeAdmitGet(req edgeAdmitRequest, p edgePrelude) (edgeAdmitRes
 		respReqID = generateRequestID()
 	}
 	hrec.Header().Set("x-amz-request-id", respReqID)
+	// The bucket's CORS headers for the client's Origin, as the origin's
+	// GET answers them (RP94-3).
+	s.applyS3CORSForTenant(hrec, sr, tenantID)
 	responseHeaders := hrec.relay().Headers
 
 	// The row: nothing reserved, nothing minted — the admit remembers what

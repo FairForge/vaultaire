@@ -61,9 +61,17 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 		rec := newRelayRecorder()
 		refused.write(rec, errPath)
 		if refused.reason != "" {
-			recordAuthFailure(errPath, refused.reason, refused.keyKnown)
+			recordAuthFailureFor(refused.keyID, refused.reason, refused.keyKnown)
 		}
 		return refusalOf(rec)
+	}
+	for k := range a.header {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-checksum-") {
+			// The edge's link signs no checksum header (the backend would not
+			// verify it): a form naming one is the origin's, which does
+			// (RP94-4) — never admitted and left unchecked.
+			return passThrough("post_checksum")
+		}
 	}
 	_, max, bounded := a.policy.SizeRange()
 	if !bounded {
@@ -78,6 +86,9 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 
 	// The inner PUT of the file part, as the origin builds it.
 	headers := map[string]string{"host": req.Host, "content-length": strconv.FormatInt(req.Form.FileSize, 10)}
+	if o := outer.Get("Origin"); o != "" {
+		headers["origin"] = o // the commit's CORS headers (RP94-3)
+	}
 	for k, v := range a.header {
 		headers[strings.ToLower(k)] = v[0]
 	}
