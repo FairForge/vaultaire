@@ -1295,6 +1295,48 @@ Prod: the chain edition's proof.
 
 Done means: PRs 0 and A–D merged (C may be an open question); the proof has run on prod; the next prompt is written here.
 
+## Stage 1a Prompt 60: WP-EGRESS-1 — read from the free-egress copy (Part 0: RP98's findings)
+
+**From 59** (`docs/reviews/WP-STRIPE-11.md`; the post-merge review is RP98):
+- **Every row of plan § WP-STRIPE is built.** WP-XFER-1 runs on the origin's scheduler (migration 127, the `transfer` job through the S3 handlers, the source key wrapped and nulled at the end, `/dashboard/transfers`, the B2 guide); the node seam is an open question (OQ-XFER-1: the node relays only a customer-signed request — a node-run transfer needs a job-bound admit and the source key on the node, both access-widening; a plan decision, not this prompt's).
+- **Owed from 59:** the prod transfer proof's create (RB17-1: tenant zero's sign-in — password + the authenticator code — then the commands in `WP-STRIPE-11.md` § Prod proof; everything else is deployed); the capacity card's egress line after the 2026-11-05 08:30 `backend_capacity` run (Prompt 58's), into `WP-STRIPE-10.md`'s addendum.
+- **Why WP-EGRESS-1, and why now:** with § WP-STRIPE done, the next unbuilt rows of the plan's Stage 2 order are § WP-EGRESS's. The plan says it in its own words: "WP-EGRESS-1 is small, read-path only: next to the Stripe chain as soon as a session is free"; WP-EGRESS-2 waits for the app lane's traffic and WP-EGRESS-3 for F-45's B2 answer. Every mirrored object (WP-EDGE-4, `blob_copies` kind `mirror`) has two copies; today a GET always reads the primary first — so iDrive's 3× allowance, not Lyve's $0 egress, is what a download of tenant zero's mirrored objects spends.
+- **Next migration 128** (none expected: `backend_plans.egress_usd_per_gb` exists since 099).
+
+Read first: plan § WP-EGRESS (the WP-EGRESS-1 row and the facts table); `internal/api/edge_get.go` (the edge read admit and its mirror fallback: `admit.urls` = [primary, mirror]); the origin's mirror read fallback (`blob_copies` kind `mirror`, `ready`; grep `mirror` in `internal/api/s3.go` / `object_read*.go`); `internal/api/backend_plan.go` (`backend_plans`, `egress_usd_per_gb`); `internal/api/egress_account.go` (`planAccountOf`, `jobsEgressLeft` — one vendor ledger, RP96-7); `docs/reviews/WP-STRIPE-11.md` and RP98 (`docs/reviews/WP-STRIPE-11-REVIEW.md`).
+
+Part 0 — the findings of RP98, each test first, in the review's order. If RP98 is not on main, STOP and say so — never guess a review. (RP98 fills this paragraph.)
+
+Step 0 — answer in the closeout before PR A: (1) Which reads are in scope: a whole GET and a Range GET of a whole object with a `ready` mirror copy — and not a chunked object, a sealed one whose copy is of the sealed bytes (it is; RP96-9 copies them — say whether the origin's open of a sealed blob is address-agnostic), a version, a vault-floor object? (2) What is "the cheaper leg" when a plan row is missing (NULL = 0 per the plan row — so an unpriced leg would always win: say whether a missing row should rank as 0 or as unknown-last) and when both are 0 (a tie keeps the primary)? (3) How does the choice meet the breaker, the routing truth's `unreadable` verdict and the mirror copy's own etag check (a copy whose bytes no longer match the head row must never be served)? (4) The edge: the admit's `urls` order is the choice — what does the Worker 0.7.3 do with `urls[0]` failing, and does a mirror-first read need a Worker change?
+
+PR A — the read choice: the origin's GET and the edge read admit serve from the leg whose `backend_plans.egress_usd_per_gb` is lowest among the primary and a `ready` mirror copy whose etag is the head row's (the Step 0 answers decide the edges); the other copy is the fallback, as the mirror read is today; a tie keeps the primary; flag `egress_cheapest_leg` (default OFF, per tenant first). Metrics `vaultaire_reads_by_leg_total{leg,reason}` (`reason` = `cheapest`, `tie`, `fallback`, `no_copy`). Tests (red first): `TestRead_PrefersTheFreeEgressCopy`, `TestRead_FallsBackToThePrimary`, `TestRead_NeverServesACopyOfOtherBytes`, `TestEdgeRead_AdmitOrdersTheCheaperLegFirst`.
+
+PR B — docs: `docs/reviews/WP-STRIPE-12.md` (Step 0, D-EGRESS-n, residuals RB18-n), STATUS, the plan row, CLAUDE.md, the ledger row, the next prompt in both editions with Part 0 = RP100 (name the next unbuilt row of the plan's Stage order and why in its "From 60" block).
+
+Prod: the flag ON for tenant zero (an `operator_sql` row + its `flag.set` audit row, RE-5's route), one GET of a mirrored Lightroom object through the origin and one through `s3.stored.cloud` served from the cheaper leg (`vaultaire_reads_by_leg_total`, the access log's backend), MD5-equal; then the flag back OFF unless the owner says otherwise. Ultrathink
+
+## Stage 1a Prompt 60 — Opus edition
+
+**From 59:** see the chain edition's "From 59" block above.
+
+You are building plan § WP-EGRESS's WP-EGRESS-1 row in the Vaultaire repository: a GET of an object with a ready mirror copy reads from the copy whose vendor egress is cheapest, the other copy the fallback, behind a per-tenant flag. Read the Opus rules in `docs/reviews/WP-EDGE-PROMPTS.md` § "About the Opus editions". Worktree from `origin/main`, a private migrated test database (`make test-db TEST_DB=vaultaire_test_p60`, `DATABASE_URL` exported); no migration expected (next 128).
+
+Read before editing: the chain edition's "Read first" list. If RP98 (`docs/reviews/WP-STRIPE-11-REVIEW.md`) is not on main, STOP and say so.
+
+PR 0 — Branch `stage1a-p60-part0`: RP98's findings in its order, each test first.
+
+Step 0 — the four questions of the chain edition, answered in writing before PR A's first test.
+
+PR A — Branch `stage1a-p60-egress`.
+1. Tests first (red): the four named in the chain edition.
+2. The choice in ONE function both the origin's GET and the edge read admit call (never two rules); the flag; the metric.
+
+PR B — docs: as the chain edition's PR B.
+
+Prod: the chain edition's proof.
+
+Done means: PRs 0, A and B merged; the proof has run on prod; the next prompt is written here.
+
 ## The chain
 
 - **Prompt 49 — WP-PRICE-1 + WP-LOG-1 — DONE 2026-10-28/29** (`docs/reviews/WP-STRIPE-1.md`: #1038 Part 0, #1039 pricing, #1041 request log, #1040/#1042 the Worker 0.5.1→0.5.2). The post-merge review is RP78.
@@ -1346,3 +1388,5 @@ Done means: PRs 0 and A–D merged (C may be an open question); the proof has ru
 - **Prompt 58 — WP-VAULT-2 Part 2 — DONE 2026-11-04** (`docs/reviews/WP-STRIPE-10.md`; migration **125**). PRs: #1144 the Worker 0.7.1 (RP94-2 + the live 411 on every form handed to the origin; deployed `1017f1c8`), #1146 its row, #1145 RP94-3…6, #1147 RP94-7…16 (+ the Worker 0.7.2, deployed `09063a2d`; RP94-13's delete half an open question), #1150 its row, #1148 PR A the `blob_scrub` job + `scrub_findings`, #1149 PR B the verified line, PR C `docs/DURABILITY.md` + this closeout. Prod: `SCRUB_CYCLE=1d`, the flag ON for tenant zero (`operator_sql`, RE-5). The post-merge review is **RP96**.
 - **Prompt 58 reviewed by RP96 (2026-11-04, `docs/reviews/WP-STRIPE-10-REVIEW.md`): HOLDS at P2, four P2s, three LIVE, all fixed by #1152** — RP96-1 a healthy sealed (SSE-C/SSE-S3) object was a `mismatch` (the stored length against the PLAINTEXT size; prod's one finding, 27 → 72 bytes); RP96-2 a blob with no answer wedged the backend's walk at the same cursor for ever with its bytes as egress every run (a blob larger than the 9-minute run can read; now a finding after three runs, the ranged read across runs handed on); RP96-3 the verified line shown for a Vault (tape) bucket and for an empty or unknown one (now derived from the bucket's own rows); RP96-4 a POST form naming an unknown key id added a Prometheus series (R11-28's shape; 50 ids = 50 series); RP96-5 a stale backend's months-old date (2 × cycle bound); RP96-6…13 P3s (the stale alert blind to the skips, the vendor bound without a vendor view, region plan rows never spent, sealed objects never mirrored, the flag re-assert hiding the line, the Worker's `filename=` grammar and its CORS-less synthetic answers, files added after the cycle = D-SCRUB-11); ten P4s. The Worker's tail proof holds in workerd (715 cases). Prod: 26 runs by 13:07 UTC, every byte counted once, Lyve ~107 MB/s single-stream, idrive's cycle complete; the lyve cycle ends ~11-05 08:45.
 - **Prompt 59 — WP-XFER-1, transfer in, on the origin's scheduler** — WRITTEN by Prompt 58's closeout, both editions (the last unbuilt row of plan § WP-STRIPE; no data node is registered, so the origin runs it and the node is a lab seam); **Part 0 = RP96, FILLED 2026-11-04** (the Worker 0.7.3 first and alone; RP96-2's ranged read; RP96-6…10; the P4s one PR); migration **126**.
+- **Prompt 59 — WP-XFER-1 — BUILT 2026-11-04/05** (`docs/reviews/WP-STRIPE-11.md`; migrations **126** (Part 0's, RP96-15) and **127**; next 128). PRs: #1155 the Worker 0.7.3 (deployed `a8011109`, proven), #1157 its row, #1156 Part 0 RP96-2/6/7/8/9/10, #1158 the P4s + migration 126, #1159 PR A the `transfer` job + migration 127, #1160 PR B the dashboard + docs, PR C NOT built (OQ-XFER-1), PR D this closeout. `SCRUB_CYCLE=30d` on prod (RB16-6). The prod transfer proof's create is the owner's sign-in (RB17-1). The post-merge review is **RP98**.
+- **Prompt 60 — WP-EGRESS-1, read from the free-egress copy** — WRITTEN by Prompt 59's closeout, both editions (every row of § WP-STRIPE built; the plan's own words make WP-EGRESS-1 next); **Part 0 = RP98, to be filled by the review**; no migration expected (next 128).
