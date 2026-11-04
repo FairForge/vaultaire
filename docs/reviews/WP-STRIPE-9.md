@@ -26,7 +26,7 @@ Contract lines cited (`docs/ARCHITECTURE_CONTRACT.md`):
 
 - **RP92 on main?** Not when the session began: #1134 (the note) and #1133 (RP92-13's fix) were open, green, not queued. The session stopped and said so; on the owner's "Go" both were queued and merged; Part 0 was built from the merged note.
 - **The order of Part 0:** the review's own order (RP92-1, then 2…6, then the P4s); the Opus edition put RP92-4/5 (live in shape) with the P2 in the first PR and deployed it before PR A opened — done (`3648f3aa`, `created_ip inet` on prod, 3 clients from before 124).
-- **What a browser sends:** every field, then `file`, then `\r\n--<boundary>--\r\n` — Chrome, Firefox, curl `-F`, Python requests and Go's `mime/multipart` all close the same way. S3 ignores fields after `file`; so does Stored (never read).
+- **What a browser sends:** every field, then `file`, then `\r\n--<boundary>--\r\n` — Chrome, Firefox, curl `-F`, Python requests and Go's `mime/multipart` all close the same way. S3 ignores fields after `file`; ~~so does Stored (never read)~~ **Stored refuses them** (corrected by Prompt 58 PR C: since #1142 a part after the file is 400 `MalformedPOSTRequest` at the origin and, since the Worker 0.7.1, at the edge — RP94-1, D-POST-10; until then it was stored inside the object).
 - **The file's size:** never declared by a browser's part. It is the request's Content-Length less the bytes before the file and the closing delimiter (D-POST-2) — known before a byte of the file is read, the same number at the origin and the Worker.
 
 ## Decisions as built (D-POST-1…)
