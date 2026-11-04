@@ -22,3 +22,12 @@ var produceJSON []byte
 
 // ProduceJSON returns the embedded produce table's bytes.
 func ProduceJSON() []byte { return produceJSON }
+
+// durabilityJSON is the bucket page's verified line (WP-VAULT-2 Part 2):
+// read through internal/dashboard/handlers, never typed in a template.
+//
+//go:embed durability.json
+var durabilityJSON []byte
+
+// DurabilityJSON returns the embedded durability copy's bytes.
+func DurabilityJSON() []byte { return durabilityJSON }
