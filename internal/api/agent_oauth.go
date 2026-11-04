@@ -49,12 +49,6 @@ func (s *Server) registerAgentOAuthRoutes() {
 	s.router.Post("/oauth/token", s.handleOAuthToken)
 }
 
-// oauthLimited spends one of the client network's requests on l and
-// answers 429 when it is over (true = stop).
-func oauthLimited(w http.ResponseWriter, r *http.Request, l *dashmw.LoginRateLimiter, retryAfter string) bool {
-	return oauthLimitedKey(w, l, clientip.FromRequest(r), retryAfter)
-}
-
 // oauthLimitedKey is oauthLimited on an explicit key (the limiter folds an
 // address key to its network).
 func oauthLimitedKey(w http.ResponseWriter, l *dashmw.LoginRateLimiter, key, retryAfter string) bool {
