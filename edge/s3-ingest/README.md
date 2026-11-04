@@ -88,6 +88,8 @@ chunker costs ≈ 11 s of CPU per GiB.
 ## 0.7.2 — a filename* form is the origin's (Stage 1a Prompt 58 Part 0, RP94-11)
 
 - A file part whose `Content-Disposition` names an RFC 2231 `filename*` (`filename*=UTF-8''a%20b.txt`) makes `parseFormPrefix` throw, so the form goes to the origin whole (`rebuiltBody`), and the origin decodes the name (`mime.ParseMediaType`). Before this, the Worker described it with `filename: ""`, and with `${filename}` in the key the edge refused a form the origin accepts. Test "a filename* form goes to the origin whole".
+- **Deployed 2026-11-04 08:29 UTC** (version `09063a2d`, from `01565a69`; `src/index.js` = the manifest row `e67e5dfd…`). Proven on prod with tenant zero's policy forms through `s3.stored.cloud`: a 5 MiB form with `filename*=UTF-8''star%20file.bin` answered 201 `PostResponse`, ETag = the file's MD5, its head row on `lyve`, and NO `edge_admits` row (the origin stored it whole); a plain 5 MiB form in the same minute was admitted at the edge as before (`via = post`, `committed` on `lyve`).
+
 ## 0.7.1 — a form's tail proven before the backend has its last byte (Stage 1a Prompt 58 Part 0, RP94-2)
 
 - **The bug (RP94-2):** `servePost` pipes `fileStream` into a `FixedLengthStream` of the file part's size, and workerd's `FixedLengthStream` reports EOF on its readable the moment its byte count is reached. 0.7.0 enqueued the last file bytes and checked the closing delimiter only on the next pull, so a wrong tail (or bytes after it) errored a stream whose readable had already ended: the backend PUT completed and the commit landed. And a form with a part AFTER the file (a named submit button) stored that part inside the object (RP94-1, the origin's twin, fixed by #1142).
