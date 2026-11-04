@@ -331,7 +331,7 @@ func TestScrub_FindingsErasedWithTheAccount(t *testing.T) {
 	var email string
 	require.NoError(t, f.db.QueryRow(`SELECT email FROM tenants WHERE id = $1`, f.tenantID).Scan(&email))
 	f.exec(`UPDATE users SET status = 'pending_deletion', deletion_scheduled_at = NOW() - interval '1 minute' WHERE id = $1`, f.userID)
-	f.exec(`DELETE FROM object_versions WHERE tenant_id = $1`, f.tenantID) // the runner deletes the objects first
+	f.exec(`DELETE FROM object_versions WHERE tenant_id = $1`, f.tenantID)   // the runner deletes the objects first
 	f.exec(`DELETE FROM object_head_cache WHERE tenant_id = $1`, f.tenantID) // the runner erases only a scheduled account
 	_, err := account.NewService(f.db, zap.NewNop()).EraseRows(context.Background(), f.userID, f.tenantID, email, time.Now())
 	require.NoError(t, err)
