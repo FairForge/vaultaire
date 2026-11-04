@@ -73,6 +73,9 @@ const (
 	// ActionManagementKey: mint or revoke a management key (WP-KEY-1) —
 	// an admin's or the owner's, and a person's only (never a key's).
 	ActionManagementKey Action = "management_key.write"
+	// ActionTransfer: create, cancel or resume a transfer in (WP-XFER-1) —
+	// it names a key of another vendor and writes into the tenant's buckets.
+	ActionTransfer Action = "transfer.write"
 )
 
 // roleActions is the action table — THE rule every management and
@@ -83,10 +86,10 @@ var roleActions = map[Role]map[Action]bool{
 		ActionSandboxReset: true, ActionChildKey: true},
 	RoleAdmin: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true, ActionWebhookWrite: true,
 		ActionSandboxReset: true, ActionChildKey: true, ActionChildWrite: true, ActionMemberManage: true,
-		ActionManagementKey: true},
+		ActionManagementKey: true, ActionTransfer: true},
 	RoleOwner: {ActionRead: true, ActionBucketWrite: true, ActionKeyWrite: true, ActionWebhookWrite: true,
 		ActionSandboxReset: true, ActionChildKey: true, ActionChildWrite: true, ActionMemberManage: true,
-		ActionAccountExport: true, ActionAccountDelete: true, ActionBilling: true, ActionManagementKey: true},
+		ActionAccountExport: true, ActionAccountDelete: true, ActionBilling: true, ActionManagementKey: true, ActionTransfer: true},
 }
 
 // Can reports whether a member of role may do action.
@@ -95,7 +98,7 @@ func Can(role Role, action Action) bool { return roleActions[role][action] }
 // Actions lists every action the table names (tests walk it).
 func Actions() []Action {
 	return []Action{ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey,
-		ActionChildWrite, ActionMemberManage, ActionAccountExport, ActionAccountDelete, ActionBilling, ActionManagementKey}
+		ActionChildWrite, ActionMemberManage, ActionAccountExport, ActionAccountDelete, ActionBilling, ActionManagementKey, ActionTransfer}
 }
 
 // ErrNotMember: the user may not act on the tenant.

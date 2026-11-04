@@ -200,6 +200,11 @@ func (s *Server) initMetrics() {
 		// The blob scrub (WP-VAULT-2 Part 2): blobs read, found wrong, bytes
 		// read; the cycle's gauges from job_runs.
 		reg.MustRegister(scrubChecks, scrubFailures, scrubBytesRead)
+		// Transfer in (WP-XFER-1): items by outcome, bytes, jobs by state.
+		reg.MustRegister(transferItems, transferBytes)
+		if s.db != nil {
+			reg.MustRegister(newTransferJobsCollector(s.db))
+		}
 		if s.blobScrub != nil {
 			reg.MustRegister(newBlobScrubCollector(s.blobScrub))
 		}

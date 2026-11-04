@@ -256,6 +256,35 @@
       ]
     },
     {
+      "section": "transfers",
+      "label": "Transfers in from other storage (never the source's key)",
+      "fields": [
+        "id",
+        "bucket",
+        "source_endpoint",
+        "source_region",
+        "source_bucket",
+        "source_prefix",
+        "state",
+        "paused_reason",
+        "paused_error",
+        "list_cursor",
+        "listed_all",
+        "listed",
+        "copied",
+        "skipped",
+        "failed",
+        "bytes_copied",
+        "rate_bytes_per_sec",
+        "last_error",
+        "created_by",
+        "created_at",
+        "updated_at",
+        "started_at",
+        "finished_at"
+      ]
+    },
+    {
       "section": "management_keys",
       "label": "Management keys (never the secret or its hash)",
       "fields": [

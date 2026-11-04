@@ -154,6 +154,11 @@ type Server struct {
 	// sealed object is demoted.
 	allowUnsealedTape bool
 	tenantKeys        *crypto.TenantKeys // nil: no ENCRYPTION_MASTER_KEY (WP-R8-1)
+	// transfer is WP-XFER-1's runtime: the knobs and the origin's one token
+	// bucket (transfers()).
+	transfer     *transferRuntime
+	transferOnce sync.Once
+	transferJob  *TransferJob
 	// credentialScope limits credential_plaintext_drop's unwrapped count to
 	// one tenant (tests: the database is shared); "" in production.
 	credentialScope    string
@@ -563,6 +568,9 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	s.retiredBlobs = NewRetiredBlobCollector(s.db, s.engine, s.gci, logger)
 	s.blobCopies = newBlobCopiesJob(s)
 	s.blobScrub = newBlobScrubJob(s, blobScrubCycleFromEnv(os.Getenv, logger))
+	// WP-XFER-1: the transfer job and its rate caps.
+	s.transfer = newTransferRuntime(transferConfigFromEnv(os.Getenv, logger))
+	s.transferJob = newTransferJob(s)
 
 	// Routing truth (WP-R7-5): the boot check runs in Start, the sampled
 	// job daily. Knobs: ROUTING_TRUTH_SAMPLE, ROUTING_TRUTH_PERMAFROST_SAMPLE,
