@@ -164,6 +164,9 @@ func (s *Server) registerJobs() {
 	if s.blobCopies != nil {
 		s.jobs.Register(s.blobCopies.spec())
 	}
+	if s.blobScrub != nil {
+		s.jobs.Register(s.blobScrub.spec())
+	}
 	if s.siaPromoter != nil {
 		s.jobs.Register(s.siaPromoter.spec())
 	}

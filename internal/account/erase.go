@@ -122,6 +122,9 @@ var Deleted = []Rule{
 	// sweep walks every registered backend); a codec chunk's copy is sealed
 	// under the tenant's key (the crypto-shred covers it, as the primary's).
 	{"blob_copies", `DELETE FROM blob_copies WHERE tenant_id = $1`, ByTenant},
+	// What the blob scrub found wrong with the tenant's blobs and repaired
+	// (125, WP-VAULT-2 Part 2): ours, never exported, gone with the account.
+	{"scrub_findings", `DELETE FROM scrub_findings WHERE tenant_id = $1`, ByTenant},
 	{"artifacts", `DELETE FROM artifacts WHERE tenant_id = $1`, ByTenant},
 	{"bucket_notifications", `DELETE FROM bucket_notifications WHERE tenant_id = $1`, ByTenant},
 	{"buckets", `DELETE FROM buckets WHERE tenant_id = $1`, ByTenant},

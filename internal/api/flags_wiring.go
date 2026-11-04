@@ -157,6 +157,13 @@ const (
 	// falls back to the mirror before the origin. Default OFF, per tenant.
 	flagEdgeMirror = "edge_mirror"
 
+	// flagBlobScrub puts a tenant's blobs in the blob_scrub job's cycle
+	// (WP-VAULT-2 Part 2, scrub.go: every hot blob read whole on its
+	// recorded backend once per SCRUB_CYCLE, checked against its row,
+	// repaired from a ready mirror copy). Default OFF, per tenant; the job
+	// runs only with SCRUB_CYCLE set.
+	flagBlobScrub = "blob_scrub"
+
 	// flagRequestLog writes every S3 request of the tenant to the request
 	// log (WP-LOG-1, request_log.go: the Developers page, GET
 	// /api/v1/manage/requests, 7 days). Default ON; a global OFF row is the
@@ -198,6 +205,7 @@ func registerFlags(fl *flags.Service) {
 	fl.Register(flagEdgeCodec, false)
 	fl.Register(flagDataPlaneSLC, false)
 	fl.Register(flagEdgeMirror, false)
+	fl.Register(flagBlobScrub, false)
 	fl.Register(flagRequestLog, true)
 	fl.Register(flagEdgeRS, false)
 	fl.Register(flagParallelGet, false)

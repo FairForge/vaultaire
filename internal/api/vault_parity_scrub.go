@@ -124,6 +124,18 @@ func scrubCycleFromEnv(getenv func(string) string, logger *zap.Logger) time.Dura
 	if raw == "" {
 		return defaultScrubCycle
 	}
+	d, ok := parseScrubCycle(raw, 180*24*time.Hour)
+	if !ok {
+		logger.Warn("VAULT_PARITY_SCRUB_CYCLE rejected; default kept", zap.String("value", raw), zap.Duration("default", defaultScrubCycle))
+		return defaultScrubCycle
+	}
+	return d
+}
+
+// parseScrubCycle is a scrub cycle: a Go duration or whole days ("30d"),
+// at least one day, at most max. The parity scrub's and the blob scrub's
+// one parser (scrub.go).
+func parseScrubCycle(raw string, max time.Duration) (time.Duration, bool) {
 	var d time.Duration
 	var err error
 	if days, ok := strings.CutSuffix(raw, "d"); ok {
@@ -133,11 +145,7 @@ func scrubCycleFromEnv(getenv func(string) string, logger *zap.Logger) time.Dura
 	} else {
 		d, err = time.ParseDuration(raw)
 	}
-	if err != nil || d < 24*time.Hour || d > 180*24*time.Hour {
-		logger.Warn("VAULT_PARITY_SCRUB_CYCLE rejected; default kept", zap.String("value", raw), zap.Duration("default", defaultScrubCycle))
-		return defaultScrubCycle
-	}
-	return d
+	return d, err == nil && d >= 24*time.Hour && d <= max
 }
 
 // scrubBudget is the bytes one pass reads: the footprint's share of the
