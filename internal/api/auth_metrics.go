@@ -130,15 +130,20 @@ func attemptedAccessKey(r *http.Request) string {
 
 // recordAuthFailure increments the counters for one rejected request.
 func recordAuthFailure(r *http.Request, reason string, keyKnown bool) {
+	recordAuthFailureFor(attemptedAccessKey(r), reason, keyKnown)
+}
+
+// recordAuthFailureFor is recordAuthFailure for a credential the request's
+// headers do not carry — a POST policy form's x-amz-credential field
+// (RP94-5): the by-key series moves for a form as for a SigV4 request.
+func recordAuthFailureFor(accessKey, reason string, keyKnown bool) {
 	known := "false"
 	if keyKnown {
 		known = "true"
 	}
 	authFailures.WithLabelValues(reason, known).Inc()
-	if keyKnown {
-		if ak := attemptedAccessKey(r); ak != "" {
-			authFailuresByKey.WithLabelValues(accessKeyHash(ak)).Inc()
-		}
+	if keyKnown && accessKey != "" {
+		authFailuresByKey.WithLabelValues(accessKeyHash(accessKey)).Inc()
 	}
 }
 

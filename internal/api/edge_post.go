@@ -61,7 +61,7 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 		rec := newRelayRecorder()
 		refused.write(rec, errPath)
 		if refused.reason != "" {
-			recordAuthFailure(errPath, refused.reason, refused.keyKnown)
+			recordAuthFailureFor(refused.keyID, refused.reason, refused.keyKnown)
 		}
 		return refusalOf(rec)
 	}

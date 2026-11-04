@@ -379,6 +379,7 @@ type postRefusal struct {
 	message  string
 	reason   string // an auth failure's metric reason ("" = not one)
 	keyKnown bool
+	keyID    string // the form's x-amz-credential key id: the by-key series (RP94-5)
 }
 
 func (p *postRefusal) write(w http.ResponseWriter, r *http.Request) {
@@ -450,7 +451,9 @@ func (s *Server) admitPostForm(ctx context.Context, bucket string, fields map[st
 	fields["bucket"] = bucket
 	tenantID, scope, policy, err := s.s3Auth().ValidatePostPolicy(ctx, fields, clientIP)
 	if err != nil {
-		return nil, postAuthRefusal(err)
+		refused := postAuthRefusal(err)
+		refused.keyID = strings.SplitN(fields["x-amz-credential"], "/", 2)[0]
+		return nil, refused
 	}
 	if fields["success_action_redirect"] != "" || fields["redirect"] != "" {
 		return nil, &postRefusal{code: ErrInvalidArgument,
