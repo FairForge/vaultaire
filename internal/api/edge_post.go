@@ -41,6 +41,14 @@ func (s *Server) edgeAdmitPost(ctx context.Context, req edgeAdmitRequest) (edgeA
 	if bucket == "" {
 		return passThrough("no_bucket")
 	}
+	if req.Form.PreBytes > maxPostPreData {
+		// The origin's bound on the fields before the file (RP94-10): a form
+		// the origin refuses is refused here, with its answer.
+		rec := newRelayRecorder()
+		errPath := &http.Request{Method: http.MethodPost, URL: &url.URL{Path: "/" + bucket}}
+		(&postRefusal{code: ErrInvalidArgument, status: http.StatusBadRequest, message: errPostPreDataSize.Error()}).write(rec, errPath)
+		return refusalOf(rec)
+	}
 	if !req.Has(edgeFeaturePostTail) {
 		// A host that cannot prove the file part ends at the closing
 		// delimiter before the backend has its last bytes would commit a

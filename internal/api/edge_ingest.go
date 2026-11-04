@@ -96,7 +96,7 @@ var (
 	}, []string{"host", "op", "outcome"})
 	dataPlaneBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_bytes_total",
-		Help: "Object bytes a data-plane host moved and the control plane committed, by host and op.",
+		Help: "Object bytes a data-plane host moved and the control plane committed, by host and op. A POST policy form's file counts under op=put (its row's op; the admits count it under op=post).",
 	}, []string{"host", "op"})
 )
 

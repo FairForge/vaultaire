@@ -477,6 +477,14 @@ func (s *Server) admitPostForm(ctx context.Context, bucket string, fields map[st
 			return nil, &postRefusal{code: ErrNotImplemented, message: name + " in a POST form is not supported"}
 		}
 	}
+	for _, enc := range strings.Split(fields["content-encoding"], ",") {
+		if strings.EqualFold(strings.TrimSpace(enc), "aws-chunked") {
+			// Transport framing, never an object attribute: on a form it would
+			// switch the PUT path's decoder on for the raw file (RP94-8).
+			return nil, &postRefusal{code: ErrInvalidArgument, status: http.StatusBadRequest,
+				message: "Content-Encoding aws-chunked is a transfer framing, not an object attribute: a POST form cannot name it"}
+		}
+	}
 	key := fields["key"]
 	if key == "" {
 		return nil, &postRefusal{code: ErrInvalidArgument, message: "Bucket POST must contain a field named 'key'."}
@@ -547,6 +555,9 @@ func postAuthRefusal(err error) *postRefusal {
 		return &postRefusal{code: ErrInternalError}
 	case errors.Is(err, auth.ErrAccessKeyRevoked):
 		return &postRefusal{code: ErrInvalidAccessKeyId, reason: "revoked", keyKnown: true}
+	case errors.Is(err, auth.ErrUnknownAccessKey):
+		// AWS's answer to a key no one has (RP94-7).
+		return &postRefusal{code: ErrInvalidAccessKeyId, reason: "unknown_access_key"}
 	case errors.Is(err, auth.ErrSignatureMismatch):
 		reason, known := authFailureReason(err)
 		return &postRefusal{code: ErrSignatureDoesNotMatch, reason: reason, keyKnown: known}
