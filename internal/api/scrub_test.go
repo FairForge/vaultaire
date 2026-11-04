@@ -82,6 +82,7 @@ func (f *blobScrubFixture) findings() []scrubFindingRow {
 		require.NoError(f.t, rows.Scan(&r.bucket, &r.key, &r.address, &r.backend, &r.kind, &r.verdict, &r.source))
 		out = append(out, r)
 	}
+	require.NoError(f.t, rows.Err())
 	return out
 }
 
