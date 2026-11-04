@@ -5,7 +5,7 @@
 // declines, reaches the origin byte for byte.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import worker, { classify, boundaryOf, parseFormPrefix, fileStream, formTail } from "../src/index.js";
+import worker, { classify, boundaryOf, parseFormPrefix, fileStream, formTail, describe } from "../src/index.js";
 
 const env = { VAULTAIRE_ORIGIN: "https://origin.test", VAULTAIRE_EDGE_TOKEN: "tok" };
 const realFetch = globalThis.fetch;
@@ -136,4 +136,189 @@ test("a declined form reaches the origin byte for byte", async () => {
   const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
   assert.equal(resp.status, 204);
   assert.deepEqual(toOrigin, body);
+});
+
+// --- RP94-2 (0.7.1): the tail proven before the backend has its last byte ---
+
+/**
+ * FixedLengthStreamDouble behaves as workerd's FixedLengthStream does
+ * (identity-transform-stream.c++, tryReadInternal): its readable reports
+ * EOF the moment `limit` bytes have passed — whatever the writable side
+ * does after — and errors only when the writable is aborted or closed
+ * short. The plain TransformStream the node tests fall back to propagates
+ * the source's error after the last byte and hid RP94-2.
+ */
+class FixedLengthStreamDouble {
+  constructor(limit) {
+    let left = limit;
+    let ctrl;
+    let ended = false;
+    const end = (fn) => {
+      if (ended) return;
+      ended = true;
+      fn();
+    };
+    this.readable = new ReadableStream({
+      start(c) {
+        ctrl = c;
+        if (limit === 0) end(() => c.close());
+      },
+    });
+    this.writable = new WritableStream({
+      write(chunk) {
+        if (ended) return;
+        if (chunk.length > left) {
+          end(() => ctrl.error(new Error("FixedLengthStream: too many bytes")));
+          throw new Error("too many bytes");
+        }
+        left -= chunk.length;
+        ctrl.enqueue(chunk);
+        if (left === 0) end(() => ctrl.close()); // EOF at the limit
+      },
+      close() {
+        if (left > 0) end(() => ctrl.error(new Error("FixedLengthStream: closed short")));
+      },
+      abort(r) {
+        end(() => ctrl.error(r || new Error("aborted")));
+      },
+    });
+  }
+}
+
+function withFLS(t) {
+  const prior = globalThis.FixedLengthStream;
+  globalThis.FixedLengthStream = FixedLengthStreamDouble;
+  t.after(() => {
+    if (prior === undefined) delete globalThis.FixedLengthStream;
+    else globalThis.FixedLengthStream = prior;
+  });
+}
+
+/** throughFLS pipes a fileStream into the double, as servePost does, and reads it. */
+async function throughFLS(stream, size) {
+  const { readable, writable } = new FixedLengthStreamDouble(size);
+  stream.pipeTo(writable).catch(() => {});
+  return bytesOf(readable);
+}
+
+/** trailingForm is a form whose file is followed by another part (a named submit button). */
+function trailingForm(content) {
+  const { body } = form(fields, "cat.png", content);
+  const tail = formTail(B);
+  const extra = enc.encode(`\r\n--${B}\r\nContent-Disposition: form-data; name="submit"\r\n\r\nUpload`);
+  const fileEnd = body.length - tail.length;
+  const out = new Uint8Array(body.length + extra.length);
+  out.set(body.subarray(0, fileEnd));
+  out.set(extra, fileEnd);
+  out.set(tail, fileEnd + extra.length);
+  return out;
+}
+
+function edgeStub(seen, contentLength) {
+  return async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) {
+      seen.admit = JSON.parse(init.body);
+      return Response.json({ edge: true, admit_id: "a1", url: "https://backend.test/put", method: "PUT", send_headers: { "content-length": String(contentLength) } });
+    }
+    if (url === "https://backend.test/put") {
+      seen.put = await bytesOf(init.body); // rejects when the body errors
+      return new Response(null, { status: 200, headers: { etag: '"e"' } });
+    }
+    if (url.endsWith("/api/v1/edge/commit")) {
+      seen.commit = JSON.parse(init.body);
+      return Response.json(seen.commit.outcome === "ok"
+        ? { status: 204, headers: {}, body: "" }
+        : { status: 503, headers: { "content-type": "application/xml" }, body: "<Error><Code>SlowDown</Code></Error>" });
+    }
+    throw new Error("unexpected fetch " + url);
+  };
+}
+
+test("a part after the file errors the stream before its last bytes", async (t) => {
+  withFLS(t);
+  const content = enc.encode("z".repeat(3000));
+  const body = trailingForm(content);
+  const { fileStart } = parseFormPrefix(body, B);
+  const tail = formTail(B);
+  const size = body.length - fileStart - tail.length; // what the Worker computes: the trailing part inside
+  // Every split, the delimiter of the trailing part across reads too.
+  for (const cut of [1, 7, 3001, 3005, size - 1]) {
+    const rest = body.subarray(fileStart);
+    await assert.rejects(throughFLS(fileStream(rest.subarray(0, cut), readerOf([rest.subarray(cut)]), size, tail), size), /a part follows the file/, `cut ${cut}`);
+  }
+  // End to end: nothing committed, the form's own 400 to the client.
+  const seen = {};
+  globalThis.fetch = edgeStub(seen, size);
+  const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+  assert.equal(seen.put, undefined, "the backend never received a whole body");
+  assert.notEqual(seen.commit.outcome, "ok");
+  assert.equal(resp.status, 400);
+  const text = await resp.text();
+  assert.match(text, /<Code>MalformedPOSTRequest<\/Code>/);
+  assert.match(text, /a part follows the file/);
+});
+
+test("a wrong tail errors before the last bytes under a FixedLengthStream double", async (t) => {
+  withFLS(t);
+  const content = enc.encode("0123456789".repeat(100));
+  const tail = formTail(B);
+  const all = new Uint8Array(content.length + tail.length);
+  all.set(content);
+  all.set(tail, content.length);
+  // The good body: exactly the file's bytes, the readable ends cleanly.
+  assert.deepEqual(await throughFLS(fileStream(all.subarray(0, 9), readerOf([all.subarray(9)]), content.length, tail), content.length), content);
+  const bad = new Uint8Array(all);
+  bad[bad.length - 4] = 0x41;
+  await assert.rejects(throughFLS(fileStream(new Uint8Array(0), readerOf([bad]), content.length, tail), content.length), /closing delimiter/);
+  const extra = new Uint8Array(all.length + 3);
+  extra.set(all);
+  await assert.rejects(throughFLS(fileStream(new Uint8Array(0), readerOf([extra.subarray(0, 600), extra.subarray(600)]), content.length, tail), content.length), /after the closing delimiter/);
+  // End to end with a wrong tail: nothing committed, a 400.
+  const { body } = form(fields, "cat.png", enc.encode("w".repeat(4000)));
+  body[body.length - 3] = 0x41;
+  const seen = {};
+  globalThis.fetch = edgeStub(seen, 4000);
+  const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+  assert.equal(seen.put, undefined);
+  assert.notEqual(seen.commit.outcome, "ok");
+  assert.equal(resp.status, 400);
+  assert.match(await resp.text(), /MalformedPOSTRequest/);
+});
+
+test("the host names post-tail", () => {
+  const { body } = form(fields, "a.png", enc.encode("x"));
+  const d = describe(postRequest(body), "post", "rid");
+  assert.ok(d.features.includes("post-tail"), "the control plane's dataplane.FeaturePostTail");
+  assert.ok(d.features.includes("window"));
+});
+
+// Found by Prompt 58's prod baseline (0.7.0, live): a form the Worker hands
+// to the origin — declined, unreadable, or post_tail_unproven — was
+// re-streamed by rebuiltBody, a stream of no known length, so workerd sent
+// it chunked and the origin answered 411 MissingContentLength (a form needs
+// its length). The origin's body is a FixedLengthStream of the client's
+// Content-Length.
+test("a form handed to the origin keeps its Content-Length", async (t) => {
+  withFLS(t);
+  const made = [];
+  const Base = globalThis.FixedLengthStream;
+  globalThis.FixedLengthStream = class extends Base {
+    constructor(n) {
+      super(n);
+      made.push(n);
+    }
+  };
+  const { body } = form(fields, "cat.png", enc.encode("y".repeat(3000)));
+  let toOrigin = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) return Response.json({ edge: false, reason: "post_tail_unproven" });
+    toOrigin = await bytesOf(input.body);
+    return new Response(null, { status: 201 });
+  };
+  const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+  assert.equal(resp.status, 201);
+  assert.deepEqual(toOrigin, body, "byte for byte");
+  assert.ok(made.includes(body.length), `the origin's body is a FixedLengthStream of ${body.length} (made: ${made})`);
 });
