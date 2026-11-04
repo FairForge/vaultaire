@@ -6,6 +6,8 @@ import (
 	"crypto/md5" // #nosec G501 -- an S3 ETag is an MD5; the scrub compares the bytes to it
 	"crypto/sha256"
 	"database/sql"
+	"encoding"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -87,6 +89,10 @@ const (
 	// a row is a finding and the walk goes on (RP96-A-1: the slice stopped at
 	// it every run, for ever).
 	scrubNoAnswerRuns = 3
+	// scrubRangeSlack: a ranged read stops this long before the run's end.
+	scrubRangeSlack = 30 * time.Second
+	// scrubOpenRange: the length of a ranged read's request — to the end.
+	scrubOpenRange = int64(1) << 50
 )
 
 // The kinds of blob, in the order a cycle walks them.
@@ -111,6 +117,9 @@ const (
 	scrubNoVerdict = "error"
 	// scrubChanged: the row moved under the scrub (a write, a delete).
 	scrubChanged = "changed"
+	// scrubPartial: a ranged read the run's time cut; its state is saved
+	// and the next run goes on from it (RP96-2). Never a finding.
+	scrubPartial = "partial"
 )
 
 // scrubSkipBackends are never read: tape (the tape audit's).
@@ -157,6 +166,14 @@ type BlobScrubJob struct {
 	// onlyTenant limits a run to one tenant (tests share the database).
 	onlyTenant string
 	now        func() time.Time
+	// rangePart is the piece of a ranged read (RP96-2): a whole blob larger
+	// than it, on a backend with ranged reads, is read as one range per run
+	// from the offset reached, its time checked after every piece
+	// (LARGE_GET_PART_BYTES, 16 MiB). outOfTime reports that the run has no
+	// time for another piece (tests set it); readUntil is the run's end.
+	rangePart int64
+	outOfTime func() bool
+	readUntil time.Time
 }
 
 // newBlobScrubJob is the job of s; nil without a database, an engine or a
@@ -171,8 +188,13 @@ func newBlobScrubJob(s *Server, cycle time.Duration) *BlobScrubJob {
 		scrubFailures.WithLabelValues(b)
 		scrubBytesRead.WithLabelValues(b)
 	}
-	return &BlobScrubJob{s: s, JobName: blobScrubJobName, capacityJob: backendCapacityJobName, copiesJob: blobCopiesJobName,
-		Cycle: cycle, Every: defaultBlobScrubEvery, now: time.Now}
+	j := &BlobScrubJob{s: s, JobName: blobScrubJobName, capacityJob: backendCapacityJobName, copiesJob: blobCopiesJobName,
+		Cycle: cycle, Every: defaultBlobScrubEvery, now: time.Now, rangePart: s.largeGet.partBytes}
+	if j.rangePart <= 0 {
+		j.rangePart = 16 << 20
+	}
+	j.outOfTime = func() bool { return !time.Now().Before(j.readUntil) }
+	return j
 }
 
 func (j *BlobScrubJob) spec() jobSpec {
@@ -219,6 +241,9 @@ type BlobScrubBack struct {
 	// Stall: the blob at the cursor gave no answer, and for how many runs
 	// (RP96-A-1). Cleared by any verdict.
 	Stall *scrubStall `json:"stall,omitempty"`
+	// Resume: the blob at the cursor is being read as ranges across runs
+	// (RP96-2) — the offset reached, the MD5 state, the ETag pinned.
+	Resume *scrubResume `json:"resume,omitempty"`
 
 	// This run.
 	Checked      map[string]int `json:"checked,omitempty"`
@@ -233,6 +258,21 @@ type BlobScrubBack struct {
 type scrubStall struct {
 	Walk scrubWalk `json:"walk"`
 	Runs int       `json:"runs"`
+}
+
+// scrubResume is a ranged read in progress: the blob (its walk position),
+// the stored bytes read and hashed so far, the MD5 state after them
+// (base64 of hash.Hash's MarshalBinary), the backend ETag the first range
+// answered (every later range must answer it), the stored length the
+// backend reports and the length the row predicts (-1 = none), the ranges.
+type scrubResume struct {
+	Walk     scrubWalk `json:"walk"`
+	Offset   int64     `json:"offset"`
+	MD5      string    `json:"md5_state"`
+	ETag     string    `json:"etag"`
+	Total    int64     `json:"total"`
+	Expected int64     `json:"expected"`
+	Ranges   int       `json:"ranges"`
 }
 
 // scrubWalk is a position in a backend's walk: the kind, then the row key
@@ -342,6 +382,10 @@ func (j *BlobScrubJob) inScope(sc scrubScope, tenant string) bool {
 func (j *BlobScrubJob) RunOnce(ctx context.Context) (BlobScrubResult, error) {
 	now := j.now().UTC()
 	res := BlobScrubResult{At: now, Month: now.Format("2006-01"), Cycle: j.Cycle.String(), Backends: map[string]*BlobScrubBack{}}
+	j.readUntil = time.Now().Add(blobScrubMaxRunTime - scrubRangeSlack)
+	if dl, ok := ctx.Deadline(); ok && dl.Add(-scrubRangeSlack).Before(j.readUntil) {
+		j.readUntil = dl.Add(-scrubRangeSlack)
+	}
 	prev := j.loadPrev(ctx)
 	sc, err := j.scope(ctx)
 	if err != nil {
@@ -354,7 +398,7 @@ func (j *BlobScrubJob) RunOnce(ctx context.Context) (BlobScrubResult, error) {
 		st := &BlobScrubBack{}
 		if p, ok := prev.Backends[b]; ok && p != nil {
 			st.Cursor, st.CycleStartedAt, st.LastCycleStartedAt, st.CycleCompletedAt = p.Cursor, p.CycleStartedAt, p.LastCycleStartedAt, p.CycleCompletedAt
-			st.Stall = p.Stall
+			st.Stall, st.Resume = p.Stall, p.Resume
 			if prev.Month == res.Month {
 				st.MonthBytes = p.MonthBytes
 			}
@@ -426,62 +470,20 @@ func (a *scrubAllowance) spend(backend string, n int64) {
 	}
 }
 
-// vendorBudget reads the plans, the last capacity run, the blob copies'
-// month and this job's month: free − max(the vendor's month-to-date, what
-// this job and the copies read) per metered account.
-func (j *BlobScrubJob) vendorBudget(ctx context.Context, res *BlobScrubResult, prev BlobScrubResult) *scrubAllowance {
-	var capRes BackendCapacityResult
-	haveCap := false
-	var raw []byte
-	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.capacityJob).Scan(&raw); err == nil && len(raw) > 0 {
-		haveCap = json.Unmarshal(raw, &capRes) == nil
-	}
-	var copies BlobCopiesResult
-	raw = nil
-	if err := j.s.db.QueryRowContext(ctx, `SELECT result FROM job_runs WHERE job = $1`, j.copiesJob).Scan(&raw); err == nil && len(raw) > 0 {
-		_ = json.Unmarshal(raw, &copies)
-	}
-	ours := map[string]int64{} // this job's month, per account
-	if prev.Month == res.Month {
-		for b, st := range prev.Backends {
-			if st != nil {
-				ours[planAccountOf(b)] += st.MonthBytes
-			}
-		}
-	}
-	rows, err := j.s.db.QueryContext(ctx, `SELECT backend, capacity_bytes, egress_free_multiple FROM backend_plans WHERE egress_free_multiple IS NOT NULL`)
+// vendorBudget is the run's share of the ONE vendor ledger the scrub and
+// the blob copies spend (jobsEgressLeft, RP96-7): per account, the free
+// egress left this month — one multiple kept for the customers' own reads
+// while the vendor reports no month-to-date.
+func (j *BlobScrubJob) vendorBudget(ctx context.Context, res *BlobScrubResult, _ BlobScrubResult) *scrubAllowance {
+	left, notes, err := jobsEgressLeft(ctx, j.s.db, egressJobs{capacity: j.capacityJob, scrub: j.JobName, copies: j.copiesJob}, res.Month)
 	if err != nil {
 		res.note("vendor_allowance: the plans could not be read — no metered backend is read: " + err.Error())
 		return &scrubAllowance{}
 	}
-	defer func() { _ = rows.Close() }()
-	a := &scrubAllowance{left: map[string]int64{}}
-	for rows.Next() {
-		var p BackendPlan
-		var mult float64
-		if rows.Scan(&p.Backend, &p.CapacityBytes, &mult) != nil {
-			continue
-		}
-		p.EgressFreeMultiple = &mult
-		if !haveCap {
-			a.left[p.Backend] = 0 // unknown = no egress (the blob copies' rule)
-			continue
-		}
-		free := egressFreeBytes(p, capRes.Backends)
-		used := ours[p.Backend]
-		if copies.Egress != nil && copies.Egress.Month == res.Month {
-			used += copies.Egress.Spent[p.Backend]
-		}
-		if v, ok := capRes.Vendor[p.Backend]; ok && !v.EgressUnmetered {
-			used = max(used, v.EgressMonthBytes)
-		}
-		a.left[p.Backend] = max(0, free-used)
+	for _, n := range notes {
+		res.note("vendor_allowance: " + n)
 	}
-	if err := rows.Err(); err != nil {
-		res.note("vendor_allowance: the plans could not be read — no metered backend is read: " + err.Error())
-		return &scrubAllowance{}
-	}
-	return a
+	return &scrubAllowance{left: left}
 }
 
 // due reports whether the backend's walk has work this run: a cycle in
@@ -502,6 +504,20 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 	if !ok {
 		return nil
 	}
+	footprint, err := j.footprint(ctx, backend, sc)
+	if err != nil {
+		return err
+	}
+	if footprint == 0 && st.Cursor.zero() {
+		st.CycleStartedAt = time.Time{} // nothing to read: no cycle
+		return nil
+	}
+	// The cycle is in progress from here, read this run or skipped (RP96-6:
+	// a backend skipped every run had no cycle_started series, and
+	// ScrubCycleStale could not see its starvation).
+	if st.CycleStartedAt.IsZero() {
+		st.CycleStartedAt = now
+	}
 	if j.s.engine.GetFailoverStatus()[backend] == engine.StateOpen.String() {
 		st.Skipped = "breaker_open"
 		res.note(backend + ": its breaker is open — not read this run")
@@ -511,16 +527,6 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 		st.Skipped = "vendor_allowance"
 		res.note(backend + ": the month's free egress is spent — not read (vendor_allowance)")
 		return nil
-	}
-	footprint, err := j.footprint(ctx, backend, sc)
-	if err != nil {
-		return err
-	}
-	if footprint == 0 && st.Cursor.zero() {
-		return nil
-	}
-	if st.CycleStartedAt.IsZero() {
-		st.CycleStartedAt = now
 	}
 	budget := scrubBudget(footprint, j.Every, j.Cycle)
 	st.Checked = map[string]int{}
@@ -566,6 +572,14 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 			st.Bytes += n
 			st.MonthBytes += n
 			scrubBytesRead.WithLabelValues(backend).Add(float64(n))
+			if verdict == scrubPartial {
+				if st.Stall != nil && st.Stall.Walk == it.walk() {
+					st.Stall = nil
+				}
+				res.note(fmt.Sprintf("%s: %s %s read to %d of %d bytes — the next run goes on from there",
+					backend, it.kind, it.key, st.Resume.Offset, st.Resume.Total))
+				return nil
+			}
 			if verdict == scrubNoVerdict {
 				// Could not be asked: this blob is read again next run —
 				// up to scrubNoAnswerRuns runs in a row, then it is a
@@ -733,9 +747,15 @@ func isMD5Hex(s string) bool {
 // is not ok, and a repair tried. n = the bytes read; detail says why for a
 // verdict that is not ok (a no-answer's error too).
 func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult) (string, string, int64) {
-	verdict, detail, n := j.read(ctx, d, backend, it)
+	var verdict, detail string
+	var n int64
+	if rg, ok := d.(engine.VersionedRangeGetter); ok && it.kind != scrubKindChunk && (it.size > j.rangePart || (st.Resume != nil && st.Resume.Walk == it.walk())) {
+		verdict, detail, n = j.readRanged(ctx, rg, backend, it, st)
+	} else {
+		verdict, detail, n = j.read(ctx, d, backend, it)
+	}
 	switch verdict {
-	case scrubOK, scrubNoVerdict:
+	case scrubOK, scrubNoVerdict, scrubPartial, scrubChanged:
 		return verdict, detail, n
 	case scrubUnverifiable:
 		st.Unverifiable++
@@ -872,6 +892,145 @@ func (j *BlobScrubJob) read(ctx context.Context, d engine.Driver, backend string
 		return scrubMismatch, "md5 " + got + ", the row says " + it.digest, n
 	}
 	return scrubOK, "", n
+}
+
+// readRanged is read for a whole blob larger than one piece on a backend
+// with ranged reads (RP96-2): ONE range from the offset reached to the end,
+// its bytes through the MD5 state carried from the last run, the time
+// checked after every piece — out of time, the state is saved (st.Resume)
+// and the verdict is partial. The first range pins the backend's ETag; a
+// later range that answers another is read again from 0 (changed when the
+// row moved). A read that fails after some bytes saves them (partial); one
+// that read nothing is no verdict (the stall rule).
+func (j *BlobScrubJob) readRanged(ctx context.Context, rg engine.VersionedRangeGetter, backend string, it scrubItem, st *BlobScrubBack) (verdict, detail string, n int64) {
+	w := it.walk()
+	r := st.Resume
+	st.Resume = nil
+	if r != nil && r.Walk != w {
+		r = nil
+	}
+	sum := md5.New() // #nosec G401 -- the S3 ETag
+	if r != nil {
+		raw, derr := base64.StdEncoding.DecodeString(r.MD5)
+		u, _ := sum.(encoding.BinaryUnmarshaler)
+		if derr != nil || u == nil || u.UnmarshalBinary(raw) != nil {
+			r, sum = nil, md5.New() // #nosec G401
+		}
+	}
+	save := func(read int64) {
+		m, _ := sum.(encoding.BinaryMarshaler)
+		state, merr := m.MarshalBinary()
+		if merr != nil {
+			return
+		}
+		r.Offset += read
+		r.MD5 = base64.StdEncoding.EncodeToString(state)
+		st.Resume = r
+	}
+	restarted := false
+	for {
+		var offset int64
+		if r != nil {
+			offset = r.Offset
+		}
+		actx, container, artifact := it.address(ctx)
+		rc, info, err := rg.GetRangeInfo(actx, container, artifact, offset, scrubOpenRange)
+		if err != nil {
+			st.Resume = r // progress kept for the next run
+			return scrubReadVerdict(err), err.Error(), n
+		}
+		etag := strings.ToLower(strings.Trim(info.ETag, `"`))
+		if r != nil && etag != r.ETag {
+			_ = rc.Close()
+			same, serr := j.stillNamed(ctx, backend, it)
+			if serr != nil {
+				st.Resume = r
+				return scrubNoVerdict, serr.Error(), n
+			}
+			if !same {
+				return scrubChanged, "", n
+			}
+			if restarted {
+				return scrubNoVerdict, "the backend's ETag changed twice in one run", n
+			}
+			restarted, r, sum = true, nil, md5.New() // #nosec G401
+			continue
+		}
+		// Every byte CONSUMED is hashed and counted (cr): the buffer's
+		// read-ahead is not, so a stop saves exactly the bytes hashed.
+		br := bufio.NewReaderSize(rc, 64<<10)
+		cr := &countingReader{r: io.TeeReader(br, sum)}
+		if r == nil {
+			r = &scrubResume{Walk: w, ETag: etag, Total: info.Size, Expected: it.size}
+			if it.sealed {
+				r.Expected = -1
+				if lead, perr := br.Peek(1); perr == nil && (lead[0] == crypto.StreamFormat || lead[0] == crypto.StreamFormatV3) {
+					h, herr := crypto.ReadStreamHeader(cr)
+					if herr != nil {
+						_ = rc.Close()
+						return scrubMismatch, "a sealed blob whose header does not parse: " + herr.Error(), n + cr.n
+					}
+					r.Expected = crypto.StreamCiphertextLength(len(h.Raw), h.SegmentSize, it.size)
+				}
+			}
+			// The backend names the stored length up front: a wrong one is
+			// known before a byte more is read.
+			if r.Expected >= 0 && r.Total >= 0 && r.Total != r.Expected {
+				_ = rc.Close()
+				return scrubMismatch, lengthDetail(it, r.Total, r.Expected), n + cr.n
+			}
+		}
+		r.Ranges++
+		for {
+			_, cerr := io.CopyN(io.Discard, cr, j.rangePart)
+			if errors.Is(cerr, io.EOF) {
+				break
+			}
+			if cerr != nil {
+				_ = rc.Close()
+				n += cr.n
+				if cr.n > 0 {
+					save(cr.n)
+					return scrubPartial, cerr.Error(), n
+				}
+				st.Resume = r
+				return scrubReadVerdict(cerr), cerr.Error(), n
+			}
+			if ctx.Err() != nil || j.outOfTime() {
+				if _, perr := br.Peek(1); errors.Is(perr, io.EOF) {
+					break // the piece ended the blob: judge it now
+				}
+				_ = rc.Close()
+				n += cr.n
+				save(cr.n)
+				return scrubPartial, "", n
+			}
+		}
+		_ = rc.Close()
+		n += cr.n
+		total := r.Offset + cr.n
+		if r.Expected >= 0 && total != r.Expected {
+			return scrubMismatch, lengthDetail(it, total, r.Expected), n
+		}
+		if r.Expected < 0 && total < it.size {
+			return scrubMismatch, fmt.Sprintf("%d bytes, shorter than the row's %d plaintext", total, it.size), n
+		}
+		if it.digest == "" {
+			return scrubUnverifiable, "", n
+		}
+		if got := hex.EncodeToString(sum.Sum(nil)); got != it.digest {
+			return scrubMismatch, "md5 " + got + ", the row says " + it.digest, n
+		}
+		return scrubOK, "", n
+	}
+}
+
+// lengthDetail is a length mismatch's detail.
+func lengthDetail(it scrubItem, got, want int64) string {
+	if it.sealed {
+		return fmt.Sprintf("%d bytes, the row's %d seal to %d", got, it.size, want)
+	}
+	return fmt.Sprintf("%d bytes, the row says %d", got, it.size)
 }
 
 // legacyChunk opens a chunk at a legacy (uploader-prefix) address, the

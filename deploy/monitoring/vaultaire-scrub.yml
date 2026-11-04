@@ -34,11 +34,19 @@ groups:
       # A cycle that has run longer than one and a half cycles: the scrub is
       # starved (the vendor allowance, an open breaker, a job that fails or
       # never runs) and the promise "every blob read once a cycle" is broken.
+      # The second expression (RP96-6) sees the same from the completed
+      # gauge: the last cycle finished more than two cycles ago and none is
+      # in progress (a build before Prompt 59 set cycle_started only once a
+      # backend was read, so one skipped every run had no started series).
+      # $value is the time since the cycle began, or since the last ended.
       - alert: ScrubCycleStale
-        expr: (time() - vaultaire_scrub_cycle_started_timestamp_seconds) > 1.5 * scalar(vaultaire_scrub_cycle_seconds)
+        expr: >-
+          ((time() - vaultaire_scrub_cycle_started_timestamp_seconds) > 1.5 * scalar(vaultaire_scrub_cycle_seconds))
+          or
+          ((time() - vaultaire_scrub_cycle_completed_timestamp_seconds) > 2 * scalar(vaultaire_scrub_cycle_seconds) unless vaultaire_scrub_cycle_started_timestamp_seconds)
         for: 1h
         labels:
           severity: warning
         annotations:
-          summary: "The blob scrub's cycle over {{ $labels.backend }} has run {{ $value | humanizeDuration }} — past 1.5 cycles"
+          summary: "The blob scrub's cycle over {{ $labels.backend }} is stale: {{ $value | humanizeDuration }} since it began, or since the last one finished with none in progress"
           description: "job_runs WHERE job = 'blob_scrub': the backend's skipped (vendor_allowance, breaker_open) and the run's notes say why. Every blob is no longer read once a cycle."

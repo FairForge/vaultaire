@@ -397,7 +397,11 @@ func (s *Service) Set(ctx context.Context, key, tenantID string, enabled bool, u
 		INSERT INTO feature_flags (flag_key, tenant_id, enabled, updated_by, updated_at)
 		VALUES ($1, $2, $3, $4, now())
 		ON CONFLICT (flag_key, tenant_id)
-		DO UPDATE SET enabled = EXCLUDED.enabled, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+		DO UPDATE SET enabled = EXCLUDED.enabled, updated_by = EXCLUDED.updated_by, updated_at = now()
+		-- RP96-10: a same-value re-assert writes nothing — updated_at is
+		-- the row's "since" (the verified line reads it); the audit row
+		-- below still records the click.
+		WHERE feature_flags.enabled IS DISTINCT FROM EXCLUDED.enabled`,
 		key, tenantID, enabled, updatedBy)
 	if err != nil {
 		return err
