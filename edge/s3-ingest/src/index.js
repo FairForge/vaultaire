@@ -96,7 +96,7 @@ export function classify(request) {
   return { kind: "pass", reason: "query" };
 }
 
-// --- a browser's POST policy form (0.7.0, WP-POST-1 PR B) ---------------------
+// --- a browser's POST policy form (0.7.0, WP-POST-1 PR B; the tail proven 0.7.1) -
 
 /** FORM_PREFIX_MAX bounds what precedes the file part: AWS's 20 KB of
  * fields, plus the file part's own headers. */
@@ -235,58 +235,108 @@ export function rebuiltBody(prefix, reader) {
  * it, or the stream errors (the backend PUT fails, nothing commits). The
  * one place this Worker's JavaScript touches a write's bytes besides the
  * codec: the delimiter must be withheld from the backend.
+ *
+ * 0.7.1 (RP94-2): the readable is piped into a FixedLengthStream, whose
+ * readable ENDS at its byte count — an error after the last byte is lost
+ * and the backend PUT completes. So (a) the file bytes are scanned for
+ * "\r\n--<boundary>" across chunk edges (the last delim.length − 1 bytes
+ * held back until more arrive, as the origin's postFileReader does): a
+ * part after the file is an error, never a byte of the object; and (b) the
+ * LAST held bytes are given only once the closing delimiter has been read,
+ * matched and followed by the end of the body. The error is the stream's
+ * `formError` too (its S3 code in `.code`), for the client's answer.
  */
 export function fileStream(head, reader, size, tail) {
-  let left = size;
-  let carry = head;
+  const delim = tail.subarray(0, tail.length - 4); // "\r\n--" + boundary: a part after the file
+  const carry = delim.length - 1;
+  let left = size; // file bytes not yet taken
+  let first = head;
+  let hold = new Uint8Array(0); // file bytes taken, not yet given (≤ carry)
   const after = [];
   let afterLen = 0;
+  let stream = null;
+  const fail = (c, code, why) => {
+    const e = Object.assign(new Error(why), { code });
+    stream.formError = e;
+    c.error(e);
+  };
   const keepTail = (b) => {
     after.push(b);
     afterLen += b.length;
   };
-  return new ReadableStream({
+  stream = new ReadableStream({
     async pull(c) {
       for (;;) {
-        let chunk = carry;
-        carry = null;
+        let chunk = first;
+        first = null;
         if (!chunk) {
           const { value, done } = await reader.read();
           if (done) {
-            if (left > 0) return c.error(new Error("the body ended inside its file part"));
-            const got = new Uint8Array(afterLen);
-            let o = 0;
-            for (const b of after) {
-              got.set(b, o);
-              o += b.length;
-            }
+            if (left > 0) return fail(c, "IncompleteBody", "the body ended inside its file part");
+            const got = concatBytes(after);
             if (got.length !== tail.length || got.some((v, i) => v !== tail[i])) {
-              return c.error(new Error("the file part does not end at the closing delimiter"));
+              return fail(c, "MalformedPOSTRequest", "the file part does not end at the closing delimiter");
             }
+            // Proven: the last bytes now, then the end.
+            if (hold.length) c.enqueue(hold);
+            hold = new Uint8Array(0);
             return c.close();
           }
           chunk = value;
         }
+        if (!chunk.length) continue;
         if (left === 0) {
           keepTail(chunk);
-          if (afterLen > tail.length) return c.error(new Error("bytes after the closing delimiter"));
+          if (afterLen > tail.length) return fail(c, "MalformedPOSTRequest", "bytes after the closing delimiter");
           continue;
         }
-        if (chunk.length <= left) {
-          left -= chunk.length;
-          return c.enqueue(chunk);
+        const n = Math.min(left, chunk.length);
+        const mine = chunk.subarray(0, n);
+        if (n < chunk.length) keepTail(chunk.subarray(n));
+        left -= n;
+        const edge = concatBytes([hold, mine.subarray(0, Math.min(carry, mine.length))]);
+        if (indexOfBytes(edge, delim) >= 0 || indexOfBytes(mine, delim) >= 0) {
+          return fail(c, "MalformedPOSTRequest", "a part follows the file — the file must be the form's last field");
         }
-        const mine = chunk.subarray(0, left);
-        keepTail(chunk.subarray(left));
-        left = 0;
-        if (afterLen > tail.length) return c.error(new Error("bytes after the closing delimiter"));
-        return c.enqueue(mine);
+        if (afterLen > tail.length) return fail(c, "MalformedPOSTRequest", "bytes after the closing delimiter");
+        // Give all but the last `carry` bytes: a delimiter may begin there,
+        // and once the file is all in they wait for the proven tail.
+        const give = hold.length + mine.length - Math.min(hold.length + mine.length, carry);
+        const fromHold = Math.min(give, hold.length);
+        const fromMine = give - fromHold;
+        if (fromHold) c.enqueue(hold.subarray(0, fromHold));
+        if (fromMine) c.enqueue(mine.subarray(0, fromMine));
+        hold = concatBytes([hold.subarray(fromHold), mine.subarray(fromMine)]);
+        if (give) return;
       }
     },
     cancel(r) {
       return reader.cancel(r);
     },
   });
+  return stream;
+}
+
+function concatBytes(parts) {
+  let n = 0;
+  for (const p of parts) n += p.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+/** indexOfBytes is the first offset of `needle` in `hay`, or −1. */
+export function indexOfBytes(hay, needle) {
+  const last = hay.length - needle.length;
+  outer: for (let i = hay.indexOf(needle[0]); i >= 0 && i <= last; i = hay.indexOf(needle[0], i + 1)) {
+    for (let j = 1; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
 }
 
 // --- the description -------------------------------------------------------
@@ -316,8 +366,10 @@ export function describe(request, op, requestId) {
     client_ip: request.headers.get("cf-connecting-ip") || "",
     request_id: requestId,
     // What this Worker reads (0.4.0): the control plane never answers a
-    // shape an older Worker would misread (a windowed GET).
-    features: ["window"],
+    // shape an older Worker would misread (a windowed GET). 0.7.1: post-tail
+    // — a form's tail is proven before the backend has its last byte
+    // (dataplane.FeaturePostTail; without it a form is the origin's).
+    features: ["window", "post-tail"],
   };
 }
 
@@ -855,7 +907,8 @@ async function servePost(request, env, ctx, requestId, url) {
   const { form, prefix, reader } = read;
   const tail = formTail(boundary);
   const size = contentLength - form.fileStart - tail.length;
-  if (!(size >= 0)) return origin(prefix, reader);
+  // An empty file part cannot be held back until its tail is proven: the origin's.
+  if (!(size > 0)) return origin(prefix, reader);
   const description = describe(request, "post", requestId);
   description.form = { fields: form.fields, filename: form.filename, file_size: size, pre_bytes: form.fileStart };
   let admit;
@@ -879,12 +932,27 @@ async function servePost(request, env, ctx, requestId, url) {
     return origin(prefix, reader);
   }
   const { readable, writable } = fixedLength(size);
-  fileStream(prefix.subarray(form.fileStart), reader, size, tail).pipeTo(writable).catch(() => {});
+  const file$ = fileStream(prefix.subarray(form.fileStart), reader, size, tail);
+  file$.pipeTo(writable).catch(() => {});
   const file = { body: readable, headers: new Headers({ "content-length": String(size) }) };
   const { result: moved, mirror } = await moveBody(file, admit);
+  const formError = file$.formError;
+  if (formError && moved.outcome === "ok") {
+    // Never: the last bytes wait for the proven tail. Reported, not committed.
+    moved.outcome = "edge_error";
+    moved.backend_code = "form_error_after_ok";
+  }
   const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url);
-  console.log(JSON.stringify({ edge: "post", request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit }));
+  console.log(JSON.stringify({ edge: "post", request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit, form_error: formError ? formError.message : undefined }));
   if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
+  if (formError) {
+    // The form's own error, as the origin answers it (RP94-1): the commit
+    // above released the admission; nothing was stored.
+    return new Response(s3ErrorXML(formError.code, formError.code === "IncompleteBody" ? "You did not provide the number of bytes specified by the Content-Length HTTP header." : `The body of your POST request is not well-formed multipart/form-data: ${formError.message}.`, url.pathname, requestId), {
+      status: 400,
+      headers: { "content-type": "application/xml", "x-amz-request-id": requestId },
+    });
+  }
   if (!commit) return slowDown(url.pathname, requestId);
   return relayResponse(commit);
 }
