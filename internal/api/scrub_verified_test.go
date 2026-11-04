@@ -57,10 +57,9 @@ func TestDashboard_BucketSaysVerifiedAfterACleanCycle(t *testing.T) {
 	assert.Empty(t, line(), "the tenant joined the scrub after the cycle began")
 	f.exec(`UPDATE feature_flags SET updated_at = NOW() - interval '1 hour' WHERE flag_key = $1 AND tenant_id = $2`, flagBlobScrub, f.tenantID)
 
-	// Another bucket of the tenant is not this one's findings; a tenant
-	// without the flag gets nothing.
-	assert.Equal(t, "Every file here was read back and checked on "+date+".",
-		handlers.BucketVerifiedLine(context.Background(), f.db, f.tenantID, "other-bucket"))
+	// A bucket with no bytes claims nothing (RP96-B-1); a tenant without
+	// the flag gets nothing.
+	assert.Empty(t, handlers.BucketVerifiedLine(context.Background(), f.db, f.tenantID, "other-bucket"))
 	require.NoError(t, f.fl.Set(context.Background(), flagBlobScrub, f.tenantID, false, "test"))
 	assert.Empty(t, line(), "out of the scrub: nothing claimed")
 

@@ -188,7 +188,10 @@ func unsignedPolicyField(name string) bool {
 // is the caller's to hold the file to).
 func (a *Auth) ValidatePostPolicy(ctx context.Context, fields map[string]string, clientIP string) (string, *KeyScope, *PostPolicy, error) {
 	if fields["x-amz-algorithm"] == "" && fields["awsaccesskeyid"] != "" {
-		return "", nil, nil, fmt.Errorf("%w: a SigV2 POST policy (AWSAccessKeyId) is not supported", ErrSignatureMismatch)
+		// Refused before any lookup: a malformed form, never a "known key"
+		// (RP96-B-2 — ErrSignatureMismatch classified the id as known and
+		// hashed an attacker-chosen id into the by-key series, R11-28).
+		return "", nil, nil, fmt.Errorf("%w: a SigV2 POST policy (AWSAccessKeyId) is not supported", ErrPolicyFields)
 	}
 	for _, f := range []string{"x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-signature", "policy"} {
 		if fields[f] == "" {
