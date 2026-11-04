@@ -85,6 +85,14 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.7.3 — the origin's disposition grammar, CORS on the Worker's own answers (Stage 1a Prompt 59 Part 0, RP96-11/12/21/22)
+
+- **A part's `Content-Disposition` is read in one shape only** (`partDisposition`, RP96-11): `form-data`, then `name="…"` and at most one `filename="…"`, each a quoted string with no quoted-pair, and nothing else — one such header per part, no folded line. Anything that grammar does not consume whole (an unquoted `filename=a b.txt` the origin's `mime.ParseMediaType` refuses, an unquoted `filename=abc.txt` it decodes, a parameter given twice, a quoted-pair, another parameter, an RFC 2231 `filename*` — 0.7.2's rule, generalised) makes `parseFormPrefix` throw, and the form goes to the origin whole. Before: the edge STORED a form the origin refuses (`filename: ""`) and, with `${filename}` in the key, refused one it accepts. Test "an unquoted or repeated filename goes to the origin whole".
+- **The admit's `cors_origin`** (RP96-12 = RB16-1): the control plane answers an admitted request with the Allow-Origin its pre-auth CORS gives the request's `Origin` (`edgePreAuthCORSOrigin`, the refusals' computation since RP94-3); the Worker sets it (`Access-Control-Allow-Origin` + `Vary: Origin`, never credentials) on the answers it mints itself — a form's own 400 and every 503 `SlowDown` of a lost or expired commit — so a page on an allowed origin can read them. Test "the Worker's own 400 carries the admit's CORS origin"; Go `TestEdge_AdmitCarriesTheCORSOriginForTheHostsOwnAnswers`.
+- **A short pass-through body is `IncompleteBody`** (RP96-21): a form handed to the origin whose client body is shorter than its Content-Length errors the `FixedLengthStream` and the origin fetch rejects — an unhandled rejection, Cloudflare's 1101 page. Now the origin's own answer: 400 `IncompleteBody` XML. Test "a short pass-through body is IncompleteBody".
+- **`package.json` names the version** (RP96-22); `test/version.test.js` holds it to this README's newest heading and the manifest (no row past it).
+- The PUT path's commit uses `commitWrite` (the same loop it duplicated), so its expired-admission 503 carries the CORS origin too.
+
 ## 0.7.2 — a filename* form is the origin's (Stage 1a Prompt 58 Part 0, RP94-11)
 
 - A file part whose `Content-Disposition` names an RFC 2231 `filename*` (`filename*=UTF-8''a%20b.txt`) makes `parseFormPrefix` throw, so the form goes to the origin whole (`rebuiltBody`), and the origin decodes the name (`mime.ParseMediaType`). Before this, the Worker described it with `filename: ""`, and with `${filename}` in the key the edge refused a form the origin accepts. Test "a filename* form goes to the origin whole".

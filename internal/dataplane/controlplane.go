@@ -132,8 +132,14 @@ type AdmitResponse struct {
 	Edge    bool   `json:"edge"`
 	Reason  string `json:"reason,omitempty"` // why not (a pass-through), for the host's log line
 	Refusal *Relay `json:"refusal,omitempty"`
-	AdmitID string `json:"admit_id,omitempty"`
-	URL     string `json:"url,omitempty"`
+	// CORSOrigin (RP96-12, the Worker 0.7.3): the Access-Control-Allow-Origin
+	// the origin's pre-auth CORS would answer for the request's Origin
+	// (applyS3CORSPreAuth: some same-named bucket's rule allows it), for the
+	// answers the host mints ITSELF on an admitted request — a form's own 400,
+	// the 503 of a lost commit. Never "*" with credentials; "" = none.
+	CORSOrigin string `json:"cors_origin,omitempty"`
+	AdmitID    string `json:"admit_id,omitempty"`
+	URL        string `json:"url,omitempty"`
 	// URLs (WP-EDGE-4, edge_mirror): a mirrored write's links — [the
 	// placement's, the mirror leg's], the same signed headers on both; URL
 	// stays URLs[0] for a host that knows one link. A read: [the primary's,

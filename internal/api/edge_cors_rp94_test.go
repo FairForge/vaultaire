@@ -91,3 +91,32 @@ func TestEdge_AnswersCarryTheBucketsCORSHeaders(t *testing.T) {
 	assert.Equal(t, corsPageOrigin, resp.ResponseHeaders["Access-Control-Allow-Origin"], "%v", resp.ResponseHeaders)
 	assert.Equal(t, "ETag, Location", resp.ResponseHeaders["Access-Control-Expose-Headers"])
 }
+
+// RP96-12 (the Worker 0.7.3): the answers the HOST mints itself — a form's
+// own 400 (a bad tail, a part after the file), the 503 of a lost commit —
+// carried no CORS header, so a page on an allowed origin got an opaque
+// error. An admitted request's answer names the Allow-Origin the origin's
+// pre-auth CORS would give; none for an origin no rule allows, or no Origin.
+func TestEdge_AdmitCarriesTheCORSOriginForTheHostsOwnAnswers(t *testing.T) {
+	f := setupEdgeFixture(t)
+	f.setBucketCORS()
+	conds := []any{map[string]any{"bucket": f.bucket}, []any{"starts-with", "$key", "in/"},
+		map[string]any{"success_action_status": "201"}, []any{"content-length-range", 1, 10 << 20}}
+	fields := f.policyFields(time.Now().Add(time.Hour), conds, formField{"key", "in/${filename}"}, formField{"success_action_status", "201"})
+
+	req := f.postAdmit(fields, "page.png", 8192)
+	req.Headers["origin"] = corsPageOrigin
+	resp := f.admit(req)
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Equal(t, corsPageOrigin, resp.CORSOrigin)
+
+	req = f.postAdmit(fields, "page.png", 8192)
+	req.Headers["origin"] = "https://elsewhere.example"
+	resp = f.admit(req)
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Empty(t, resp.CORSOrigin, "an origin no rule allows")
+
+	resp = f.admit(f.postAdmit(fields, "page.png", 8192))
+	require.True(t, resp.Edge, "%+v", resp)
+	assert.Empty(t, resp.CORSOrigin, "no Origin, nothing")
+}
