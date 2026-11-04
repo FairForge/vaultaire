@@ -452,7 +452,11 @@ func (s *Server) admitPostForm(ctx context.Context, bucket string, fields map[st
 	tenantID, scope, policy, err := s.s3Auth().ValidatePostPolicy(ctx, fields, clientIP)
 	if err != nil {
 		refused := postAuthRefusal(err)
-		refused.keyID = strings.SplitN(fields["x-amz-credential"], "/", 2)[0]
+		if refused.keyKnown {
+			// The id names a key the lookup found (RP94-5); an id refused
+			// before or by the lookup is never a by-key series (RP96-B-2).
+			refused.keyID = strings.SplitN(fields["x-amz-credential"], "/", 2)[0]
+		}
 		return nil, refused
 	}
 	if fields["success_action_redirect"] != "" || fields["redirect"] != "" {
