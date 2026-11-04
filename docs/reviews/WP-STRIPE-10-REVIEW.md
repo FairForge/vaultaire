@@ -69,7 +69,7 @@
 - **RP96-3 / RP96-5 / RP96-23** — `bucket_verified.go`: the backends from the bucket's rows (`bucketBackendsSQL`), each with a finished cycle within 2 × the cycle; none = no line; `repaired` = distinct files. Test `TestDashboard_BucketLineNeedsEveryBackendOfTheBucketsBytes`; the worker's `other-bucket` assertion now expects nothing; `docs/DURABILITY.md` says a tape-holding or empty bucket gets no line.
 - **RP96-4** — `auth/post_policy.go` + `s3_post_policy.go`: the SigV2 refusal is `ErrPolicyFields`; the key id is stamped only on a known-key refusal. Test `TestPostPolicy_AnUnknownKeysFormAddsNoByKeySeries`.
 
-**Prod after the fix:** the false finding (`scrub_findings` id 1) stays a row — the next cycle writes none for that version, and its window excludes it; the operator may delete it. The cycle's end over `lyve` (~2026-11-05 08:45 UTC) and the `lightroom-backups` line are Prompt 59's "From 58" to read; the `mac-offload` 34 GB object will be read in one run (~320 s at the measured rate).
+**Prod after the fix** (#1152 deployed `e6cc8a27` 15:10 UTC; the new slot's first run found nothing due): the `lyve` cycle finished at **13:45:26 UTC** — 100,841,209,195 bytes, the footprint to the byte, in ~5 h over 30 runs (the one-blob overshoot read the 12.6 GB and 33 GB zips and the 34 GB VM image whole, one a run) — with no real finding; the false one (`scrub_findings` id 1) stays a row the next cycle does not rewrite. `lightroom-backups` and `mac-offload` satisfy every condition of the verified line now (`WP-STRIPE-10.md` § Proof addendum); `SCRUB_CYCLE=30d` (RB16-6) and the capacity card's line after 2026-11-05 08:30 are Prompt 59's.
 
 ## What RP96 hands on (Prompt 59 Part 0, in this order)
 
