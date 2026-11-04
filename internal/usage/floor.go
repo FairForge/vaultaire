@@ -204,7 +204,17 @@ func (m *QuotaManager) ClearHouse(ctx context.Context, tenantID string) error {
 // ClearHouseTx is ClearHouse inside the caller's transaction (WP-PAY-1: the
 // lapse job and the webhook's clearing branch mark the entitlement in the
 // same one).
+//
+// A sponsored family member is SKIPPED (RP94-14): its limit is 0 and the
+// pool decides; the free tier's limit set here would cap it inside the
+// pool. The caller lapses the entitlement row; no quota is touched.
 func ClearHouseTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
+	if err := RefuseSponsoredTx(ctx, tx, tenantID); err != nil {
+		if errors.Is(err, ErrInAFamily) {
+			return nil
+		}
+		return fmt.Errorf("clear house for tenant %s: %w", tenantID, err)
+	}
 	// The total first, as every writer takes it (ledger_tx.go): deleting the
 	// floor rows first deadlocked against a write committing meanwhile — it
 	// held the total and waited for the floor this held (Stage 1a Prompt 7,

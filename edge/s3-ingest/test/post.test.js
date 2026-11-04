@@ -322,3 +322,30 @@ test("a form handed to the origin keeps its Content-Length", async (t) => {
   assert.deepEqual(toOrigin, body, "byte for byte");
   assert.ok(made.includes(body.length), `the origin's body is a FixedLengthStream of ${body.length} (made: ${made})`);
 });
+
+// RP94-11 (0.7.2): an RFC 2231 filename* is the origin's — it decodes it
+// (mime.ParseMediaType), the Worker does not: with ${filename} in the key
+// the edge refused a form the origin accepts.
+test("a filename* form goes to the origin whole", async () => {
+  const head = enc.encode(`--${B}\r\nContent-Disposition: form-data; name="key"\r\n\r\nin/\${filename}\r\n` +
+    `--${B}\r\nContent-Disposition: form-data; name="file"; filename*=UTF-8''a%20b.txt\r\nContent-Type: text/plain\r\n\r\n`);
+  assert.throws(() => parseFormPrefix(head, B), /filename\*/);
+  const content = enc.encode("q".repeat(2000));
+  const t = formTail(B);
+  const body = new Uint8Array(head.length + content.length + t.length);
+  body.set(head);
+  body.set(content, head.length);
+  body.set(t, head.length + content.length);
+  let toOrigin = null;
+  let admitted = false;
+  globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) admitted = true;
+    toOrigin = await bytesOf(input.body);
+    return new Response(null, { status: 204 });
+  };
+  const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+  assert.equal(resp.status, 204);
+  assert.equal(admitted, false, "never described to the control plane");
+  assert.deepEqual(toOrigin, body);
+});

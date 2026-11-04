@@ -120,7 +120,7 @@ func CreateInvitation(ctx context.Context, db *sql.DB, tenantID, invitedBy, emai
 		                WHERE m.tenant_id = $1 AND lower(u.email) = $2)
 		    OR EXISTS (SELECT 1 FROM tenants t WHERE t.id = $1 AND lower(t.email) = $2),
 		       (SELECT COUNT(*) FROM tenant_invitations i
-		         WHERE i.tenant_id = $1 AND i.accepted_at IS NULL AND i.expires_at > $3 AND lower(i.email) <> $2),
+		         WHERE i.tenant_id = $1 AND i.kind = 'member' AND i.accepted_at IS NULL AND i.expires_at > $3 AND lower(i.email) <> $2),
 		       (SELECT COUNT(*) FROM audit_logs a
 		         WHERE a.tenant_id = $1 AND a.event_type = 'member' AND a.action = 'member.invited'
 		           AND a.timestamp > $3::timestamptz - INTERVAL '24 hours')`,

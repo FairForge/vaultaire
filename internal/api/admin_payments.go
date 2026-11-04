@@ -145,6 +145,9 @@ func adminMoneyError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, payments.ErrNoEntitlement), errors.Is(err, payments.ErrNoSuchPayment):
 		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, payments.ErrInAFamily):
+		// A sponsored member's house is the pool's (RP94-16).
+		http.Error(w, "in_a_family: a sponsored family member's storage is the family's — detach it first", http.StatusConflict)
 	case errors.Is(err, payments.ErrRefundExceeds), errors.Is(err, payments.ErrRefundShortened), errors.Is(err, payments.ErrRefundMismatch):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
@@ -179,7 +182,8 @@ func (s *Server) handleAdminManualPayment(w http.ResponseWriter, r *http.Request
 		TenantID: tenantID, AmountCents: req.AmountCents, Period: payments.Period(req.Period), Order: req.Order.order(),
 		Note: req.Note, Actor: actor, Reason: req.Reason})
 	if err != nil {
-		if !errors.Is(err, payments.ErrOrderRequired) && !errors.Is(err, payments.ErrInvalidOrder) && !errors.Is(err, payments.ErrReasonRequired) {
+		if !errors.Is(err, payments.ErrOrderRequired) && !errors.Is(err, payments.ErrInvalidOrder) && !errors.Is(err, payments.ErrReasonRequired) &&
+			!errors.Is(err, payments.ErrInAFamily) {
 			s.logger.Error("admin manual payment", zap.String("tenant", tenantID), zap.Error(err))
 		}
 		adminMoneyError(w, err)

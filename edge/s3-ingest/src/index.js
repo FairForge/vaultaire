@@ -161,6 +161,9 @@ export function parseFormPrefix(bytes, boundary) {
     if (!name) fail("a part with no name");
     const fieldName = name[1].toLowerCase();
     if (fieldName === "file") {
+      // An RFC 2231 filename* (RP94-11): the origin decodes it, this Worker
+      // does not — the form is the origin's, whole.
+      if (/(?:^|;)\s*filename\*\s*=/i.test(disposition[1])) fail("an RFC 2231 filename* (the origin's)");
       const fn = /(?:^|;)\s*filename\s*=\s*"([^"]*)"/i.exec(disposition[1]);
       return { fields, filename: fn ? utf8.decode(Uint8Array.from(fn[1], (c) => c.charCodeAt(0))) : "", fileStart: hdrEnd + 4 };
     }

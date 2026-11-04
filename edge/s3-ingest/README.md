@@ -85,6 +85,9 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.7.2 — a filename* form is the origin's (Stage 1a Prompt 58 Part 0, RP94-11)
+
+- A file part whose `Content-Disposition` names an RFC 2231 `filename*` (`filename*=UTF-8''a%20b.txt`) makes `parseFormPrefix` throw, so the form goes to the origin whole (`rebuiltBody`), and the origin decodes the name (`mime.ParseMediaType`). Before this, the Worker described it with `filename: ""`, and with `${filename}` in the key the edge refused a form the origin accepts. Test "a filename* form goes to the origin whole".
 ## 0.7.1 — a form's tail proven before the backend has its last byte (Stage 1a Prompt 58 Part 0, RP94-2)
 
 - **The bug (RP94-2):** `servePost` pipes `fileStream` into a `FixedLengthStream` of the file part's size, and workerd's `FixedLengthStream` reports EOF on its readable the moment its byte count is reached. 0.7.0 enqueued the last file bytes and checked the closing delimiter only on the next pull, so a wrong tail (or bytes after it) errored a stream whose readable had already ended: the backend PUT completed and the commit landed. And a form with a part AFTER the file (a named submit button) stored that part inside the object (RP94-1, the origin's twin, fixed by #1142).

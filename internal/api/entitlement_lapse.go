@@ -313,6 +313,9 @@ func (r *EntitlementLapseRunner) reconcile(ctx context.Context, res *Entitlement
 		  LEFT JOIN tenant_floor_quotas fs ON fs.tenant_id = e.tenant_id AND fs.floor = 'standard'
 		  LEFT JOIN tenant_floor_quotas fv ON fv.tenant_id = e.tenant_id AND fv.floor = 'vault'
 		 WHERE e.lapsed_at IS NULL
+		   -- A sponsored member's house is the pool's (RP94-15): its heal is
+		   -- refused for ever (ErrInAFamily), so it is never a drift.
+		   AND NOT EXISTS (SELECT 1 FROM tenants t WHERE t.id = e.tenant_id AND t.child_kind = 'sponsored')
 		   AND (fs.storage_limit_bytes IS DISTINCT FROM e.std_tb::bigint * $1
 		     OR fv.storage_limit_bytes IS DISTINCT FROM e.vault_tb::bigint * $1
 		     OR q.pin_hot_bytes IS DISTINCT FROM e.pin_hot_tb::bigint * $1
