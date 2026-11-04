@@ -895,8 +895,16 @@ async function serveWindow(request, env, ctx, admit, requestId) {
 async function servePost(request, env, ctx, requestId, url) {
   const boundary = boundaryOf(request.headers.get("content-type") || "");
   const contentLength = Number(request.headers.get("content-length"));
-  const origin = (prefix, reader) =>
-    fetch(new Request(request, { body: rebuiltBody(prefix, reader), duplex: "half" }), { cache: "no-store" });
+  // The client's body whole again, through a FixedLengthStream of its
+  // Content-Length: a stream of no known length goes chunked, and the origin
+  // answers a form with no length 411 MissingContentLength (0.7.0's
+  // pass-through, found by Prompt 58's prod baseline). A body that is not
+  // its declared length errors the stream: the origin's request fails.
+  const origin = (prefix, reader) => {
+    const { readable, writable } = fixedLength(contentLength);
+    rebuiltBody(prefix, reader).pipeTo(writable).catch(() => {});
+    return fetch(new Request(request, { body: readable, duplex: "half" }), { cache: "no-store" });
+  };
   let read;
   try {
     read = await readFormPrefix(request.body, boundary);

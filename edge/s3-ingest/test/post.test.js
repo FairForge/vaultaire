@@ -292,3 +292,33 @@ test("the host names post-tail", () => {
   assert.ok(d.features.includes("post-tail"), "the control plane's dataplane.FeaturePostTail");
   assert.ok(d.features.includes("window"));
 });
+
+// Found by Prompt 58's prod baseline (0.7.0, live): a form the Worker hands
+// to the origin — declined, unreadable, or post_tail_unproven — was
+// re-streamed by rebuiltBody, a stream of no known length, so workerd sent
+// it chunked and the origin answered 411 MissingContentLength (a form needs
+// its length). The origin's body is a FixedLengthStream of the client's
+// Content-Length.
+test("a form handed to the origin keeps its Content-Length", async (t) => {
+  withFLS(t);
+  const made = [];
+  const Base = globalThis.FixedLengthStream;
+  globalThis.FixedLengthStream = class extends Base {
+    constructor(n) {
+      super(n);
+      made.push(n);
+    }
+  };
+  const { body } = form(fields, "cat.png", enc.encode("y".repeat(3000)));
+  let toOrigin = null;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.endsWith("/api/v1/edge/admit")) return Response.json({ edge: false, reason: "post_tail_unproven" });
+    toOrigin = await bytesOf(input.body);
+    return new Response(null, { status: 201 });
+  };
+  const resp = await worker.fetch(postRequest(body), env, { waitUntil() {} });
+  assert.equal(resp.status, 201);
+  assert.deepEqual(toOrigin, body, "byte for byte");
+  assert.ok(made.includes(body.length), `the origin's body is a FixedLengthStream of ${body.length} (made: ${made})`);
+});
