@@ -84,6 +84,9 @@ type edgeFakeDriver struct {
 	// answerHook, when set, runs before a presigned PUT is answered (after
 	// its body is read): a test holds a leg's answer.
 	answerHook func()
+	// getHook, when set, may fail a driver Get (RP96-A-1: a read that never
+	// answers).
+	getHook func(artifact string) error
 }
 
 func newEdgeFakeDriver() *edgeFakeDriver {
@@ -103,6 +106,11 @@ func (d *edgeFakeDriver) Get(ctx context.Context, container, artifact string) (i
 	k, err := d.key(ctx, container, artifact)
 	if err != nil {
 		return nil, err
+	}
+	if d.getHook != nil {
+		if herr := d.getHook(artifact); herr != nil {
+			return nil, herr
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()

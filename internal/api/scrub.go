@@ -83,6 +83,10 @@ const (
 	// object that references it).
 	maxScrubChunkFindings = 1000
 	maxBlobScrubNotes     = 20
+	// scrubNoAnswerRuns: a blob with no verdict (no answer) this many runs in
+	// a row is a finding and the walk goes on (RP96-A-1: the slice stopped at
+	// it every run, for ever).
+	scrubNoAnswerRuns = 3
 )
 
 // The kinds of blob, in the order a cycle walks them.
@@ -212,6 +216,9 @@ type BlobScrubBack struct {
 	CycleCompletedAt   time.Time `json:"cycle_completed_at,omitempty"`
 	// MonthBytes: what the scrub read from it this UTC month.
 	MonthBytes int64 `json:"month_bytes"`
+	// Stall: the blob at the cursor gave no answer, and for how many runs
+	// (RP96-A-1). Cleared by any verdict.
+	Stall *scrubStall `json:"stall,omitempty"`
 
 	// This run.
 	Checked      map[string]int `json:"checked,omitempty"`
@@ -220,6 +227,12 @@ type BlobScrubBack struct {
 	Repaired     int            `json:"repaired"`
 	Unverifiable int            `json:"unverifiable"`
 	Skipped      string         `json:"skipped,omitempty"`
+}
+
+// scrubStall is a blob that gave no answer: its position and the runs it did.
+type scrubStall struct {
+	Walk scrubWalk `json:"walk"`
+	Runs int       `json:"runs"`
 }
 
 // scrubWalk is a position in a backend's walk: the kind, then the row key
@@ -341,6 +354,7 @@ func (j *BlobScrubJob) RunOnce(ctx context.Context) (BlobScrubResult, error) {
 		st := &BlobScrubBack{}
 		if p, ok := prev.Backends[b]; ok && p != nil {
 			st.Cursor, st.CycleStartedAt, st.LastCycleStartedAt, st.CycleCompletedAt = p.Cursor, p.CycleStartedAt, p.LastCycleStartedAt, p.CycleCompletedAt
+			st.Stall = p.Stall
 			if prev.Month == res.Month {
 				st.MonthBytes = p.MonthBytes
 			}
@@ -547,15 +561,29 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 				st.Cursor = it.walk()
 				continue
 			}
-			verdict, n := j.check(ctx, d, backend, it, st, res)
+			verdict, detail, n := j.check(ctx, d, backend, it, st, res)
 			allow.spend(backend, n)
 			st.Bytes += n
 			st.MonthBytes += n
 			scrubBytesRead.WithLabelValues(backend).Add(float64(n))
 			if verdict == scrubNoVerdict {
-				// Could not be asked: this blob is read again next run.
-				res.note(fmt.Sprintf("%s: %s %s could not be read (no answer) — the slice stops here", backend, it.kind, it.key+it.hash))
-				return nil
+				// Could not be asked: this blob is read again next run —
+				// up to scrubNoAnswerRuns runs in a row, then it is a
+				// finding and the walk goes on (RP96-A-1: a blob the run
+				// could never finish reading held the cursor for ever).
+				if st.Stall == nil || st.Stall.Walk != it.walk() {
+					st.Stall = &scrubStall{Walk: it.walk()}
+				}
+				st.Stall.Runs++
+				if st.Stall.Runs < scrubNoAnswerRuns {
+					res.note(fmt.Sprintf("%s: %s %s could not be read (no answer, run %d of %d) — the slice stops here",
+						backend, it.kind, it.key+it.hash, st.Stall.Runs, scrubNoAnswerRuns))
+					return nil
+				}
+				verdict = j.recordNoAnswer(ctx, backend, it, st, res, fmt.Sprintf("no answer in %d runs: %s", st.Stall.Runs, detail))
+				st.Stall = nil
+			} else if st.Stall != nil && st.Stall.Walk == it.walk() {
+				st.Stall = nil
 			}
 			st.Cursor = it.walk()
 			if verdict == scrubChanged {
@@ -702,25 +730,40 @@ func isMD5Hex(s string) bool {
 }
 
 // check reads one blob whole and judges it; a finding is written for what
-// is not ok, and a repair tried. n = the bytes read.
-func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult) (string, int64) {
+// is not ok, and a repair tried. n = the bytes read; detail says why for a
+// verdict that is not ok (a no-answer's error too).
+func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult) (string, string, int64) {
 	verdict, detail, n := j.read(ctx, d, backend, it)
 	switch verdict {
 	case scrubOK, scrubNoVerdict:
-		return verdict, n
+		return verdict, detail, n
 	case scrubUnverifiable:
 		st.Unverifiable++
-		return verdict, n
+		return verdict, "", n
 	}
 	// Not ok: is the row still the one read? A write or a delete that moved
 	// it while the blob was read is no finding.
-	if same, err := j.stillNamed(ctx, backend, it); err != nil || !same {
-		if err != nil {
-			res.note(fmt.Sprintf("%s: the row of %s could not be read again: %v", backend, it.key+it.hash, err))
-			return scrubNoVerdict, n
-		}
-		return scrubChanged, n
+	same, err := j.stillNamed(ctx, backend, it)
+	if err != nil {
+		res.note(fmt.Sprintf("%s: the row of %s could not be read again: %v", backend, it.key+it.hash, err))
+		return scrubNoVerdict, err.Error(), n
 	}
+	if !same {
+		return scrubChanged, "", n
+	}
+	j.finding(ctx, backend, it, st, res, verdict, detail)
+	_, _, artifact := it.address(ctx)
+	if leg, ok := j.repair(ctx, d, backend, it); ok {
+		st.Repaired++
+		j.record(ctx, it, backend, artifact, scrubRepaired, leg, "rewritten from the mirror copy on "+leg, res)
+		j.s.log().Info("blob scrub: repaired from the mirror", zap.String("backend", backend), zap.String("leg", leg),
+			zap.String("tenant_id", it.tenant), zap.String("key", it.key), zap.String("chunk", shortScrubHash(it.hash)))
+	}
+	return verdict, detail, n
+}
+
+// finding counts and writes a blob that is not what its row says.
+func (j *BlobScrubJob) finding(ctx context.Context, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult, verdict, detail string) {
 	st.Failed++
 	scrubFailures.WithLabelValues(backend).Inc()
 	_, _, artifact := it.address(ctx)
@@ -728,13 +771,21 @@ func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend strin
 		zap.String("tenant_id", it.tenant), zap.String("bucket", it.bucket), zap.String("key", it.key), zap.String("chunk", shortScrubHash(it.hash)),
 		zap.String("verdict", verdict), zap.String("detail", detail))
 	j.record(ctx, it, backend, artifact, verdict, "", detail, res)
-	if leg, ok := j.repair(ctx, d, backend, it); ok {
-		st.Repaired++
-		j.record(ctx, it, backend, artifact, scrubRepaired, leg, "rewritten from the mirror copy on "+leg, res)
-		j.s.log().Info("blob scrub: repaired from the mirror", zap.String("backend", backend), zap.String("leg", leg),
-			zap.String("tenant_id", it.tenant), zap.String("key", it.key), zap.String("chunk", shortScrubHash(it.hash)))
+}
+
+// recordNoAnswer is a blob that gave no answer scrubNoAnswerRuns runs in a
+// row: `unreadable` to us (the detail says why — a read longer than the run,
+// a timeout, an archived answer), a finding the walk goes past. No repair: the
+// bytes may well be whole. The verdict returned is the loop's (changed when
+// the row moved meanwhile).
+func (j *BlobScrubJob) recordNoAnswer(ctx context.Context, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult, detail string) string {
+	same, err := j.stillNamed(ctx, backend, it)
+	if err != nil || !same {
+		return scrubChanged
 	}
-	return verdict, n
+	j.finding(ctx, backend, it, st, res, scrubUnreadable, detail)
+	res.note(fmt.Sprintf("%s: %s %s gave no answer in %d runs — recorded unreadable, the walk goes on", backend, it.kind, it.key+it.hash, scrubNoAnswerRuns))
+	return scrubUnreadable
 }
 
 func shortScrubHash(h string) string {

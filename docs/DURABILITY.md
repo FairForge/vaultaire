@@ -25,7 +25,7 @@ The `blob_scrub` job (`internal/api/scrub.go`) reads every hot blob **whole** on
 
 **Findings and repair:** only what is not ok is written (`scrub_findings`, migration 125: mismatch, unreadable, missing, repaired). A bad blob with a ready mirror copy is rewritten from it at the same address after the copy's bytes match the copy row's MD5 and size as they stream — a copy that does not match is never written over the blob. The repair is its own finding, with the leg it came from. A blob with no second copy stays a finding for the operator.
 
-**What the customer sees:** the bucket page says *"Every file here was read back and checked on &lt;date&gt;"* once a full cycle over every backend holding the tenant's bytes finished and nothing it found in the bucket is left unrepaired (*"…; N files were repaired from a second copy"* when some were); nothing while a cycle runs.
+**What the customer sees:** the bucket page says *"Every file here was read back and checked on &lt;date&gt;"* once a full cycle over every backend holding the BUCKET's bytes finished within the last two cycles and nothing it found in the bucket is left unrepaired (*"…; N files were repaired from a second copy"* when some were); nothing while a cycle runs.
 
 **Alerts:** `ScrubFailing` (any blob found wrong in the last hour) and `ScrubCycleStale` (a cycle running past 1.5 cycles) — `deploy/monitoring/vaultaire-scrub.yml`.
 
@@ -40,3 +40,4 @@ The `blob_scrub` job (`internal/api/scrub.go`) reads every hot blob **whole** on
 - A blob the scrub found wrong with no second copy is not repaired by Stored; the finding names it.
 - The vendor's internal redundancy is not read by us and not counted here.
 - An object's first cycle has not run until a cycle over its backend finished: until then the bucket page says nothing.
+- A bucket holding an object on tape (a Vault object on `geyser`) gets no line: this scrub never reads tape — the parity scrub and the tape audit cover it. An empty bucket gets no line either.
