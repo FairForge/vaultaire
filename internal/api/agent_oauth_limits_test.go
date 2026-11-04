@@ -29,9 +29,13 @@ func TestOAuth_RegisterAndTokenAreRateLimited(t *testing.T) {
 	f := setupPlatformFixture(t).withManagement().withAgents()
 	f.s.registerAgentOAuthRoutes()
 	t.Cleanup(func() { _, _ = f.db.Exec(`DELETE FROM agent_oauth_clients WHERE client_name LIKE 'rp90-3%'`) })
+	// Each registration a NEW client: since RP94-6 an identical one is the
+	// same client and spends no token of the minute.
+	n := 0
 	register := func(ip string) *httptest.ResponseRecorder {
+		n++
 		r := httptest.NewRequest(http.MethodPost, "/oauth/register",
-			strings.NewReader(`{"client_name":"rp90-3","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`))
+			strings.NewReader(fmt.Sprintf(`{"client_name":"rp90-3-%d","redirect_uris":["https://claude.ai/api/mcp/auth_callback"]}`, n)))
 		r.RemoteAddr = ip + ":40000"
 		w := httptest.NewRecorder()
 		f.s.router.ServeHTTP(w, r)

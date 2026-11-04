@@ -99,9 +99,6 @@ func oauthError(w http.ResponseWriter, status int, code, description string) {
 // handleOAuthRegister is RFC 7591's registration: a public client (no
 // secret: PKCE is its proof).
 func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
-	if oauthLimited(w, r, s.oauthRegisterLimiter, "60") {
-		return
-	}
 	if s.db == nil {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "no database")
 		return
@@ -114,7 +111,16 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_client_metadata", "the body must be a JSON client registration")
 		return
 	}
-	c, err := auth.RegisterOAuthClient(r.Context(), s.db, req.ClientName, req.RedirectURIs, clientip.FromRequest(r))
+	// The minute's token is spent only on a NEW client row (RP94-6): an
+	// identical registration — every claude.ai user from one egress — is
+	// answered the same client without touching the limiter.
+	peer := clientip.FromRequest(r)
+	allowNew := func() bool { return s.oauthRegisterLimiter == nil || s.oauthRegisterLimiter.Allow(peer) }
+	c, err := auth.RegisterOAuthClientPaced(r.Context(), s.db, req.ClientName, req.RedirectURIs, peer, allowNew)
+	if errors.Is(err, auth.ErrOAuthRegisterPaced) {
+		oauthTooMany(w, "60")
+		return
+	}
 	if errors.Is(err, auth.ErrOAuthInvalidClient) {
 		oauthError(w, http.StatusBadRequest, "invalid_redirect_uri", err.Error())
 		return
