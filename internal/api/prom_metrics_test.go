@@ -69,6 +69,10 @@ func TestMetricsEndpoint_KeepsLegacySeries(t *testing.T) {
 	assert.Contains(t, body, "vaultaire_edge_codec_index_calls_total")
 	// The permafrost drive verdict is REGISTERED (WP-FLEET-1, D-F1-2).
 	assert.Contains(t, body, `vaultaire_permafrost_drive_mismatch{account="tenant-metrics-test"}`)
+	// And the probe's quota gauges (WP-FLEET-2, D-F1-6): the state series
+	// exist from the account's registration, the byte series with the first
+	// probe — both vecs are drivers.Collectors() (TestProbe_TheQuotaGaugesAreCollected).
+	assert.Contains(t, body, `vaultaire_permafrost_quota_state{account="tenant-metrics-test",state="normal"} 0`)
 	// The egress caps' counters are REGISTERED too (WP-KEY-1, RP88-4: the
 	// same shape — declared and pre-created in key_caps.go, never registered;
 	// prod's scrape of 93679a1b had the holder-drift gauges and no

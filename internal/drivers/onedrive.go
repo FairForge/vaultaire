@@ -609,15 +609,10 @@ func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string)
 			continue
 		}
 
-		u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
-		req, _ := http.NewRequestWithContext(ctx, "DELETE", u, nil)
-		resp, err := t.graphDo(ctx, req)
-		if err != nil {
+		if err := t.deleteItem(ctx, driveID, itemID); err != nil {
 			hardErr = fmt.Errorf("onedrive delete %s: %w", path, err)
 			continue
 		}
-		odPooledDrain(resp.Body)
-		_ = resp.Body.Close()
 		deleted = true
 		if i > 0 {
 			d.logFallbackHit("delete", path, t)
@@ -712,8 +707,8 @@ func (t *odTenant) walkFiles(ctx context.Context, driveID, base, prefix string, 
 // under it too, whose names are the keys' prefixes — on every account, when
 // no account holds a key in it (List is empty): ErrDirNotEmpty otherwise.
 // The account-erasure sweep calls it after deleting every key List returned
-// (a Graph folder DELETE is recursive: what a write landed between that List
-// and the DELETE goes with it — an erased tenant's). A folder missing
+// (a folder's permanentDelete is recursive: what a write landed between that
+// List and the delete goes with it — an erased tenant's). A folder missing
 // everywhere is fine.
 func (d *OneDriveDriver) RemoveContainerTree(ctx context.Context, container string) error {
 	tenantID, tErr := requireTenant(ctx, d.Name(), "RemoveContainerTree", "", d.logger)
@@ -743,20 +738,35 @@ func (d *OneDriveDriver) RemoveContainerTree(ctx context.Context, container stri
 		if err != nil {
 			return fmt.Errorf("onedrive remove container %s: %w", container, err)
 		}
-		u := fmt.Sprintf("%s/drives/%s/items/%s", graphBase, driveID, itemID)
-		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
-		if err != nil {
-			return fmt.Errorf("onedrive remove container request: %w", err)
-		}
-		resp, err := t.graphDo(ctx, req)
-		if err != nil && !odIsNotFound(err) {
+		if err := t.deleteItem(ctx, driveID, itemID); err != nil {
 			return fmt.Errorf("onedrive remove container %s on %s: %w", container, t.name, err)
 		}
-		if resp != nil {
-			odPooledDrain(resp.Body)
-			_ = resp.Body.Close()
-		}
 	}
+	return nil
+}
+
+// deleteItem removes the item for good (WP-FLEET-2, D-F1-5): POST
+// …/permanentDelete — no recycle-bin entry. A Graph DELETE parked the file in
+// the user's recycle bin for 93 days against the drive's quota (68 / 23 /
+// 21 GiB on the three fleet drives after one bench day). A folder goes with
+// everything under it. A 404 is already gone; a 403 or a 5xx past the
+// retries is the error it always was. Every delete the driver makes goes
+// through here (TestPermanentDelete_NoGraphDeleteRequestInTheDriver).
+func (t *odTenant) deleteItem(ctx context.Context, driveID, itemID string) error {
+	u := fmt.Sprintf("%s/drives/%s/items/%s/permanentDelete", graphBase, driveID, itemID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("onedrive permanent delete request: %w", err)
+	}
+	resp, err := t.graphDo(ctx, req)
+	if odIsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	odPooledDrain(resp.Body)
+	_ = resp.Body.Close()
 	return nil
 }
 
@@ -792,9 +802,9 @@ func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (di
 // of the fleet holds anything in it (one listing per account, the union),
 // then deletes it on every account that has it (Delete sweeps the fleet).
 // ErrDirNotEmpty when an account holds something; a folder missing
-// everywhere is fine; the container itself is refused. A Graph folder DELETE
-// is recursive: the caller makes the window between the listing and the
-// DELETE empty — the vault parity reconcile, the only writer and the only
+// everywhere is fine; the container itself is refused. A folder's
+// permanentDelete is recursive: the caller makes the window between the
+// listing and the delete empty — the vault parity reconcile, the only writer and the only
 // remover of its folders, under the job's lock (Prompt 2a.3 H1: emptied
 // permafrost folders were listed again on every walk, forever).
 func (d *OneDriveDriver) RemoveEmptyDir(ctx context.Context, container, dir string) error {
@@ -962,13 +972,14 @@ func (d *OneDriveDriver) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-// probe is one account's health: its drive's metadata.
+// probe is one account's health: its drive's quota, one call, exported as
+// the account's quota gauges (WP-FLEET-2, D-F1-6).
 func (t *odTenant) probe(ctx context.Context) error {
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/drives/%s", graphBase, driveID), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/drives/%s?$select=quota", graphBase, driveID), nil)
 	if err != nil {
 		return fmt.Errorf("probe request: %w", err)
 	}
@@ -976,8 +987,14 @@ func (t *odTenant) probe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = resp.Body.Close() }()
+	var out struct {
+		Quota *odQuota `json:"quota"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err == nil && out.Quota != nil {
+		out.Quota.export(t.name)
+	}
 	odPooledDrain(resp.Body)
-	_ = resp.Body.Close()
 	return nil
 }
 

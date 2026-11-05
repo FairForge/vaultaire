@@ -102,12 +102,12 @@ func TestOneDriveDelete_SweepsAllFleetCopies(t *testing.T) {
 	for idx, id := range map[int]string{home: "ID-HOME", dup: "ID-DUP"} {
 		tn := d.tenants[idx]
 		stubs[idx].routes["GET "+itemURL(tn, path)] = odRoute{200, `{"id":"` + id + `"}`}
-		stubs[idx].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/"+id] = odRoute{204, ""}
+		stubs[idx].routes["POST "+permaURL(tn, id)] = odRoute{204, ""}
 	}
 
 	require.NoError(t, d.Delete(ctx, "bkt", "obj"))
-	assert.True(t, stubs[home].sawMethod("DELETE"), "home copy must be deleted")
-	assert.True(t, stubs[dup].sawMethod("DELETE"),
+	assert.Contains(t, stubs[home].calls, "POST "+permaURL(d.tenants[home], "ID-HOME"), "home copy must be deleted")
+	assert.Contains(t, stubs[dup].calls, "POST "+permaURL(d.tenants[dup], "ID-DUP"),
 		"duplicate on account %q survived — next Get resurrects the object", d.tenants[dup].name)
 }
 
@@ -204,7 +204,7 @@ func TestOneDriveSweepShape_ListsEveryKeyAndDeletesEachOnEveryAccount(t *testing
 	for i, tn := range []*odTenant{a, b} {
 		id := "FILE-" + tn.name
 		stubs[i].routes["GET "+itemURL(tn, "t-x/c/photos/a.jpg")] = odRoute{200, `{"id":"` + id + `"}`}
-		stubs[i].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/"+id] = odRoute{204, ""}
+		stubs[i].routes["POST "+permaURL(tn, id)] = odRoute{204, ""}
 	}
 
 	// Act
@@ -216,7 +216,7 @@ func TestOneDriveSweepShape_ListsEveryKeyAndDeletesEachOnEveryAccount(t *testing
 	assert.ElementsMatch(t, []string{"k.txt", "photos/a.jpg", "photos/b.jpg"}, names, "every key, relative to the container, the union of the fleet")
 	require.NoError(t, delErr)
 	for i, tn := range []*odTenant{a, b} {
-		assert.Contains(t, stubs[i].calls, "DELETE "+graphBase+"/drives/"+tn.driveID+"/items/FILE-"+tn.name,
+		assert.Contains(t, stubs[i].calls, "POST "+permaURL(tn, "FILE-"+tn.name),
 			"the file is deleted on account %s", tn.name)
 	}
 	for i := range stubs {
@@ -265,12 +265,12 @@ func TestOneDriveRemoveEmptyDir_RemovesAFolderEmptyOnEveryAccount(t *testing.T) 
 	for i, tn := range d.tenants {
 		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID+"/items/root:/"+odEscapePath(odRootFolder+"/"+path)+":/children?$top=999"] = odRoute{200, `{"value":[]}`}
 		stubs[i].routes["GET "+itemURL(tn, path)] = odRoute{200, `{"id":"F` + tn.name + `"}`}
-		stubs[i].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/F"+tn.name] = odRoute{204, ""}
+		stubs[i].routes["POST "+permaURL(tn, "F"+tn.name)] = odRoute{204, ""}
 	}
 
 	require.NoError(t, d.RemoveEmptyDir(ctx, "c__parity", "d1/e1"))
-	assert.True(t, stubs[0].sawMethod("DELETE"))
-	assert.True(t, stubs[1].sawMethod("DELETE"))
+	assert.True(t, stubs[0].sawMethod("POST"))
+	assert.True(t, stubs[1].sawMethod("POST"))
 }
 
 func TestOneDriveRemoveEmptyDir_NeverDeletesWhatOneAccountHolds(t *testing.T) {
@@ -283,8 +283,8 @@ func TestOneDriveRemoveEmptyDir_NeverDeletesWhatOneAccountHolds(t *testing.T) {
 	err := d.RemoveEmptyDir(ctx, "c__parity", "d1/e1")
 
 	require.ErrorIs(t, err, ErrDirNotEmpty)
-	assert.False(t, stubs[0].sawMethod("DELETE"))
-	assert.False(t, stubs[1].sawMethod("DELETE"))
+	assert.False(t, stubs[0].sawMethod("POST"))
+	assert.False(t, stubs[1].sawMethod("POST"))
 }
 
 func TestOneDriveRemoveEmptyDir_MissingIsFineAndNeverTheContainer(t *testing.T) {

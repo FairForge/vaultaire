@@ -1,5 +1,5 @@
-# promtool unit test of vaultaire-drivers.yml's PermafrostFleetMismatch
-# (WP-R7-4, Stage 1a Prompt 16 Part A).
+# promtool unit tests of vaultaire-drivers.yml: PermafrostFleetMismatch and PermafrostAccountNearFull
+# (WP-R7-4, Stage 1a Prompt 16 Part A; WP-FLEET-2). Also run by deploy/monitoring/promtool-test.sh.
 # Run on the box (promtool is there):
 #   scp deploy/monitoring/vaultaire-drivers.yml deploy/monitoring/tests/vaultaire-drivers_test.yml vaultaire-slc:/tmp/
 #   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-drivers_test.yml'
@@ -29,3 +29,35 @@ tests:
             exp_annotations:
               summary: "The permafrost fleet's account order changed since its markers were written"
               description: "At boot the OneDrive fleet driver found an account order (TENANT_N slots, gaps skipped) other than the one its accounts' markers recorded: a TENANT_N was removed, reordered or appended. Every object whose home account moved is read through the fleet walk. The boot's Error line 'permafrost fleet fingerprint mismatch' names the diff and the current fingerprint. Restore the TENANT_N order and restart, or rebalance and accept the new order with PERMAFROST_FLEET_ACCEPT=<fingerprint> (internal/drivers/onedrive_README.md § Fleet fingerprint)."
+
+  # WP-FLEET-2: the fill is (total − remaining) / total — the recycle bin
+  # included (remaining = total − used − deleted). tenant-1 at 70 % live +
+  # 15 % bin = 85 % for over an hour fires; tenant-2 at 85 % for 30 min
+  # only, then 50 %, never; used alone (70 %) would never have fired.
+  - interval: 5m
+    input_series:
+      - series: 'vaultaire_permafrost_quota_bytes{instance="slc",job="vaultaire",account="tenant-1",kind="total"}'
+        values: '1000x30'
+      - series: 'vaultaire_permafrost_quota_bytes{instance="slc",job="vaultaire",account="tenant-1",kind="used"}'
+        values: '700x30'
+      - series: 'vaultaire_permafrost_quota_bytes{instance="slc",job="vaultaire",account="tenant-1",kind="remaining"}'
+        values: '150x30'
+      - series: 'vaultaire_permafrost_quota_bytes{instance="slc",job="vaultaire",account="tenant-2",kind="total"}'
+        values: '1000x30'
+      - series: 'vaultaire_permafrost_quota_bytes{instance="slc",job="vaultaire",account="tenant-2",kind="remaining"}'
+        values: '150x6 500x24'
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: PermafrostAccountNearFull
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: PermafrostAccountNearFull
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: slc
+              job: vaultaire
+              account: tenant-1
+            exp_annotations:
+              summary: "Permafrost account tenant-1 is 85% full"
+              description: "The OneDrive drive of permafrost account tenant-1 has been more than 80 % full for an hour (Graph drive.quota: total − remaining, the recycle bin included — vaultaire_permafrost_quota_bytes{kind=\"deleted\"} is the bin). The driver's deletes are permanentDelete since WP-FLEET-2, so a large bin is from before it or from another app: the operator purge (fleet-admin/fleet-recyclebin.py, SharePoint RecycleBin/DeleteAll) is the owner's decision. Otherwise the drive is full of live shards: add accounts (WP-FLEET-7) or move a parity leg (VAULT_PARITY_LEGS). internal/drivers/onedrive_README.md § OneDrive Gotchas."
