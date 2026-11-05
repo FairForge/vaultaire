@@ -39,7 +39,7 @@
 // row; the wasm is loaded at the first codec request (dynamic import), so
 // every other request costs nothing new.
 
-import { ISOLATE_BYTES, isolateBudget, putTwo, runCodec, s3ErrorXML, setIsolateBudget } from "./codec.js";
+import { ISOLATE_BYTES, isolateBudget, putTwo, runCodec, s3ErrorXML, setEventSink, setIsolateBudget } from "./codec.js";
 
 const ORIGIN_TIMEOUT_MS = 10_000; // an admit that does not answer → the origin takes the request
 const COMMIT_RETRY_MS = 2_000; // one more try of a lost commit answer (idempotent on the admit id)
@@ -543,13 +543,13 @@ function loadCodec() {
  * SlowDown — the body is gone, the request can never be passed on.
  */
 async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
-  const log = (o) => console.log(JSON.stringify(o));
+  const log = codecLog(env, ctx);
   const cp = (path, body) => controlPlane(env, path, body, ORIGIN_TIMEOUT_MS);
   let mods;
   try {
     mods = await loadCodec();
   } catch (e) {
-    log({ edge: "codec_unavailable", error: String(e && e.message ? e.message : e), request_id: requestId });
+    emit(env, ctx, "codec_unavailable", { error: errorText(e), request_id: requestId, admit_id: admit.admit_id });
     try {
       const r = await cp("/api/v1/edge/commit", { admit_id: admit.admit_id, outcome: "edge_error" });
       await r.body?.cancel();
@@ -562,7 +562,7 @@ async function serveCodec(request, env, ctx, admit, requestId, url, tamper) {
   try {
     commit = await runCodec(request, admit, env, ctx, { ...mods, controlPlane: cp, log, requestId, tamper });
   } catch (e) {
-    log({ edge: "codec_failed", error: String(e && e.message ? e.message : e), request_id: requestId });
+    emit(env, ctx, "codec_failed", { error: errorText(e), request_id: requestId, admit_id: admit.admit_id });
     return slowDown(url.pathname, requestId, admit);
   }
   if (!commit) return slowDown(url.pathname, requestId, admit);
@@ -613,6 +613,98 @@ async function controlPlane(env, path, body, timeoutMs) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   });
+}
+
+// --- what the Worker says (0.8.0, WP-LOG-2) -----------------------------------
+
+/**
+ * A data-plane host keeps no record of a request after it ends; the control
+ * plane's rows are the record (plan 40.10, D-LOG-1). The Worker writes no
+ * line by default and sends its FAILURES to the origin as reports
+ * (POST /api/v1/edge/report — one Warn line and one counter there, D-LOG-2).
+ * REPORT_KINDS is the origin's closed list (dataplane.ReportKinds); every
+ * other kind is a normal line (pass, get, put, part, post, mirror_settled,
+ * codec, codec_index).
+ */
+export const REPORT_KINDS = new Set(["admit_failed", "admit_unavailable", "commit_failed", "codec_unavailable", "codec_failed",
+  "mirror_settle_failed", "post_short_body", "post_unread", "refused", "catalogue_unavailable", "exception"]);
+const LOG_MODES = new Set(["report", "errors", "all", "off"]);
+const REPORTS_PER_MINUTE = 20;
+const REPORT_DETAIL_MAX = 300;
+const REPORT_TIMEOUT_MS = 5_000;
+
+// The isolate's report bucket: 20 a minute; the rest counted and sent as
+// `suppressed` with the next report.
+let reportWindow = 0;
+let reportsSent = 0;
+let reportsSuppressed = 0;
+
+/** resetReports empties the bucket (tests); keepSuppressed keeps the count. */
+export function resetReports({ keepSuppressed = false } = {}) {
+  reportWindow = 0;
+  reportsSent = 0;
+  if (!keepSuppressed) reportsSuppressed = 0;
+}
+
+/** logMode is env.EDGE_LOG: report (also when unset or unknown), errors, all, off. */
+export function logMode(env) {
+  const m = env && env.EDGE_LOG;
+  return LOG_MODES.has(m) ? m : "report";
+}
+
+/** reportItem is a failure as the origin takes it: exactly six fields. */
+export function reportItem(kind, fields) {
+  const s = (v) => (v === undefined || v === null ? "" : String(v));
+  const detail = s(fields.detail !== undefined ? fields.detail : fields.error);
+  return { kind, request_id: s(fields.request_id), admit_id: s(fields.admit_id), op: s(fields.op), status: Number(fields.status) || 0,
+    detail: detail.slice(0, REPORT_DETAIL_MAX) };
+}
+
+/**
+ * emit is the ONE place a line or a report leaves the Worker. A line is
+ * written per env.EDGE_LOG (report: none; errors: failures; all: every
+ * kind; off: none); a failure is also reported to the origin unless the
+ * mode is off — on ctx.waitUntil when there is a ctx, never on the
+ * request's path. Verbose logging is a deploy-time var (`wrangler deploy
+ * --var EDGE_LOG:all`), never committed (D-LOG-1).
+ */
+export function emit(env, ctx, kind, fields = {}) {
+  const mode = logMode(env);
+  const failure = REPORT_KINDS.has(kind);
+  if (mode === "all" || (mode === "errors" && failure)) console.log(JSON.stringify({ edge: kind, ...fields }));
+  if (!failure || mode === "off" || !env || !env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return;
+  const now = Date.now();
+  if (now - reportWindow >= 60_000) {
+    reportWindow = now;
+    reportsSent = 0;
+  }
+  if (reportsSent >= REPORTS_PER_MINUTE) {
+    reportsSuppressed++;
+    return;
+  }
+  reportsSent++;
+  const body = { reports: [reportItem(kind, fields)] };
+  if (reportsSuppressed > 0) {
+    body.suppressed = reportsSuppressed;
+    reportsSuppressed = 0;
+  }
+  const sent = controlPlane(env, "/api/v1/edge/report", body, REPORT_TIMEOUT_MS).then((r) => r.body?.cancel(), () => {});
+  if (ctx && typeof ctx.waitUntil === "function") ctx.waitUntil(sent);
+}
+
+/** errorText is an error's message (never its stack). */
+const errorText = (e) => String(e && e.message ? e.message : e);
+
+// codec.js's events (catalogue_unavailable) go through emit too.
+setEventSink((env, kind, fields) => emit(env, null, kind, fields));
+
+/** codecEvents maps runCodec's log objects onto emit's kinds. */
+function codecLog(env, ctx) {
+  const kinds = { commit_unauthorized: "commit_failed", commit_refused: "commit_failed", commit_failed: "commit_failed", codec_checksum_mismatch: "codec_failed" };
+  return (o) => {
+    const { edge, ...fields } = o;
+    emit(env, ctx, kinds[edge] || edge, kinds[edge] && kinds[edge] !== edge ? { ...fields, detail: `${edge}: ${fields.error || fields.status || ""}` } : fields);
+  };
 }
 
 /**
@@ -686,14 +778,14 @@ async function moveBody(request, admit) {
  * ctx.waitUntil — the client has its answer; a settle that is lost leaves
  * the copy pending, the blob_copies job's.
  */
-export async function settleMirror(env, admitId, mirror, requestId, cp = controlPlane) {
+export async function settleMirror(env, admitId, mirror, requestId, cp = controlPlane, ctx = null) {
   const { etag, cut } = await mirror.settle;
   try {
     const r = await cp(env, "/api/v1/edge/mirror", cut || !etag ? { admit_id: admitId, cut: !!cut } : { admit_id: admitId, etag }, ORIGIN_TIMEOUT_MS);
-    console.log(JSON.stringify({ edge: "mirror_settled", request_id: requestId, status: r.status, cut: !!cut }));
+    emit(env, ctx, "mirror_settled", { request_id: requestId, admit_id: admitId, status: r.status, cut: !!cut });
     await r.body?.cancel();
   } catch (e) {
-    console.log(JSON.stringify({ edge: "mirror_settle_failed", error: String(e && e.message ? e.message : e), request_id: requestId }));
+    emit(env, ctx, "mirror_settle_failed", { error: errorText(e), request_id: requestId, admit_id: admitId, op: "put" });
   }
 }
 
@@ -701,7 +793,7 @@ export async function settleMirror(env, admitId, mirror, requestId, cp = control
  * commitRead reports a read's outcome; a lost answer is retried once. The
  * client is not waiting on it (ctx.waitUntil), so no answer is relayed.
  */
-async function commitRead(env, body, requestId) {
+async function commitRead(env, body, requestId, ctx) {
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
     try {
@@ -712,7 +804,7 @@ async function commitRead(env, body, requestId) {
       }
       await r.body?.cancel();
     } catch (e) {
-      console.log(JSON.stringify({ edge: "commit_failed", op: "get", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
+      emit(env, ctx, "commit_failed", { op: "get", attempt, error: errorText(e), request_id: requestId, admit_id: body.admit_id });
     }
   }
 }
@@ -755,8 +847,8 @@ async function serveRead(request, env, ctx, admit, requestId) {
       backend = null;
     }
   }
-  ctx.waitUntil(commitRead(env, commit, requestId));
-  console.log(JSON.stringify({ edge: "get", request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, bytes: commit.backend_content_length, ms: commit.duration_ms }));
+  ctx.waitUntil(commitRead(env, commit, requestId, ctx));
+  emit(env, ctx, "get", { request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, bytes: commit.backend_content_length, ms: commit.duration_ms });
   if (commit.outcome !== "served") {
     if (backend) await backend.body?.cancel();
     return passThrough(request);
@@ -843,8 +935,8 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     budget.release(lengthOf(0));
     const commit = readCommit(admit, first, error, started);
     if (commit.outcome === "served") commit.outcome = "fallback"; // a 206 of another length
-    ctx.waitUntil(commitRead(env, commit, requestId));
-    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, ms: commit.duration_ms }));
+    ctx.waitUntil(commitRead(env, commit, requestId, ctx));
+    emit(env, ctx, "get", { window: true, request_id: requestId, backend_status: commit.backend_status, outcome: commit.outcome, ms: commit.duration_ms });
     if (first) await first.body?.cancel();
     return passThrough(request);
   }
@@ -922,8 +1014,8 @@ async function serveWindow(request, env, ctx, admit, requestId) {
     const commit = { admit_id: admit.admit_id, outcome: failure && !clientGone ? "error" : "served", backend_status: failure && !clientGone ? failure.status || 0 : 206,
       backend_code: failure ? String(failure.code || failure.message || failure).slice(0, 120) : "", backend_content_length: sent, bytes_sent: sent,
       duration_ms: Date.now() - started };
-    console.log(JSON.stringify({ edge: "get", window: true, request_id: requestId, ranges: n, outcome: commit.outcome, backend_status: commit.backend_status, bytes: sent, ms: commit.duration_ms }));
-    await commitRead(env, commit, requestId);
+    emit(env, ctx, "get", { window: true, request_id: requestId, ranges: n, outcome: commit.outcome, backend_status: commit.backend_status, bytes: sent, ms: commit.duration_ms });
+    await commitRead(env, commit, requestId, ctx);
   };
   ctx.waitUntil(pump());
   return new Response(readable, { status: admit.status || admit.expect_status, headers: admit.response_headers || {} });
@@ -968,7 +1060,7 @@ async function servePost(request, env, ctx, requestId, url) {
       return await fetch(new Request(request, { body: readable, duplex: "half" }), { cache: "no-store" });
     } catch (e) {
       if (!(ended && sent < contentLength)) throw e;
-      console.log(JSON.stringify({ edge: "post_short_body", sent, content_length: contentLength, request_id: requestId }));
+      emit(env, ctx, "post_short_body", { sent, content_length: contentLength, request_id: requestId, op: "post", detail: `${sent} of ${contentLength} bytes` });
       return new Response(s3ErrorXML("IncompleteBody", "You did not provide the number of bytes specified by the Content-Length HTTP header.", url.pathname, requestId), {
         status: 400,
         headers: { "content-type": "application/xml", "x-amz-request-id": requestId },
@@ -979,7 +1071,7 @@ async function servePost(request, env, ctx, requestId, url) {
   try {
     read = await readFormPrefix(request.body, boundary);
   } catch (e) {
-    console.log(JSON.stringify({ edge: "post_unread", error: String(e && e.message ? e.message : e), request_id: requestId }));
+    emit(env, ctx, "post_unread", { error: errorText(e), request_id: requestId, op: "post" });
     return origin(e.prefix || new Uint8Array(0), e.reader);
   }
   const { form, prefix, reader } = read;
@@ -998,7 +1090,7 @@ async function servePost(request, env, ctx, requestId, url) {
     }
     admit = await r.json();
   } catch (e) {
-    console.log(JSON.stringify({ edge: "admit_failed", op: "post", error: String(e && e.message ? e.message : e), request_id: requestId }));
+    emit(env, ctx, "admit_failed", { op: "post", error: errorText(e), request_id: requestId });
     return origin(prefix, reader);
   }
   if (admit.refusal) {
@@ -1006,7 +1098,7 @@ async function servePost(request, env, ctx, requestId, url) {
     return relayResponse(admit.refusal);
   }
   if (!admit.edge || admit.codec || admit.rs) {
-    console.log(JSON.stringify({ edge: "pass", op: "post", reason: admit.reason || "", request_id: requestId }));
+    emit(env, ctx, "pass", { op: "post", reason: admit.reason || "", request_id: requestId });
     return origin(prefix, reader);
   }
   const { readable, writable } = fixedLength(size);
@@ -1020,9 +1112,9 @@ async function servePost(request, env, ctx, requestId, url) {
     moved.outcome = "edge_error";
     moved.backend_code = "form_error_after_ok";
   }
-  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit);
-  console.log(JSON.stringify({ edge: "post", request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit, form_error: formError ? formError.message : undefined }));
-  if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
+  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit, ctx);
+  emit(env, ctx, "post", { request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, bytes: size, ms: moved.duration_ms, committed: !!commit, form_error: formError ? formError.message : undefined });
+  if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId, controlPlane, ctx));
   if (formError) {
     // The form's own error, as the origin answers it (RP94-1): the commit
     // above released the admission; nothing was stored.
@@ -1036,7 +1128,7 @@ async function servePost(request, env, ctx, requestId, url) {
 }
 
 /** commitWrite reports a write's outcome; a lost answer is retried once. */
-async function commitWrite(env, commitBody, requestId, url, admit) {
+async function commitWrite(env, commitBody, requestId, url, admit, ctx) {
   let commit = null;
   for (let attempt = 0; attempt < 2 && !commit; attempt++) {
     if (attempt > 0) await new Promise((res) => setTimeout(res, COMMIT_RETRY_MS));
@@ -1047,56 +1139,85 @@ async function commitWrite(env, commitBody, requestId, url, admit) {
         commit = { status: 503, headers: withCORS({ "content-type": "application/xml", "retry-after": SLOWDOWN_RETRY_AFTER }, admit), body: s3ErrorXML("SlowDown", "The edge admission of this upload expired before it was committed. Retry the upload.", url.pathname, requestId) };
       }
     } catch (e) {
-      console.log(JSON.stringify({ edge: "commit_failed", attempt, error: String(e && e.message ? e.message : e), request_id: requestId }));
+      emit(env, ctx, "commit_failed", { attempt, error: errorText(e), request_id: requestId, admit_id: commitBody.admit_id });
     }
   }
   return commit;
 }
 
-export default {
-  async fetch(request, env, ctx) {
-    const kind = classify(request);
-    if (kind.kind === "pass") return passThrough(request);
-    if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return passThrough(request);
-    let tamper;
-    try {
-      tamper = codecTamper(env);
-    } catch (e) {
-      console.log(JSON.stringify({ edge: "refused", error: e.message }));
-      return passThrough(request);
-    }
-
+/**
+ * guarded runs the handler; a throw is never Cloudflare's HTML 1101 page
+ * (0.8.0): it is reported (kind exception: the message and the first stack
+ * frame), then the request goes to the origin when its body is unread, else
+ * the Worker's own 503 SlowDown (the body is gone — the client retries).
+ */
+export async function guarded(handler, request, env, ctx) {
+  try {
+    return await handler(request, env, ctx);
+  } catch (e) {
+    const frame = String((e && e.stack) || "").split("\n").map((l) => l.trim()).find((l) => l.startsWith("at ")) || "";
     const requestId = crypto.randomUUID();
-    const url = new URL(request.url);
-    if (kind.kind === "post") return servePost(request, env, ctx, requestId, url);
-    const description = describe(request, kind.kind, requestId);
-
-    let admit;
-    try {
-      const r = await controlPlane(env, "/api/v1/edge/admit", description, ORIGIN_TIMEOUT_MS);
-      if (r.status !== 200) {
-        console.log(JSON.stringify({ edge: "admit_unavailable", status: r.status, request_id: requestId }));
-        return passThrough(request);
+    emit(env, ctx, "exception", { request_id: requestId, op: request.method, detail: `${errorText(e)}${frame ? ` ${frame}` : ""}` });
+    if (!request.bodyUsed) {
+      try {
+        return await passThrough(request);
+      } catch {
+        // the origin did not answer either: the Worker's own 503
       }
-      admit = await r.json();
-    } catch (e) {
-      console.log(JSON.stringify({ edge: "admit_failed", error: String(e && e.message ? e.message : e), request_id: requestId }));
-      return passThrough(request);
     }
-    if (admit.refusal) return relayResponse(admit.refusal);
-    if (!admit.edge) {
-      console.log(JSON.stringify({ edge: "pass", op: kind.kind, reason: admit.reason || "", request_id: requestId }));
-      return passThrough(request);
-    }
+    return slowDown(new URL(request.url).pathname, requestId, null);
+  }
+}
 
-    if (kind.kind === "get") return admit.window ? serveWindow(request, env, ctx, admit, requestId) : serveRead(request, env, ctx, admit, requestId);
-    if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
-
-    const { result: moved, mirror } = await moveBody(request, admit);
-    const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit);
-    console.log(JSON.stringify({ edge: kind.kind, request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, ms: moved.duration_ms, committed: !!commit }));
-    if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId));
-    if (!commit) return slowDown(url.pathname, requestId, admit);
-    return relayResponse(commit);
+export default {
+  fetch(request, env, ctx) {
+    return guarded(handle, request, env, ctx);
   },
 };
+
+/** handle is one request (the Worker's fetch, under guarded). */
+async function handle(request, env, ctx) {
+  const kind = classify(request);
+  if (kind.kind === "pass") return passThrough(request);
+  if (!env.VAULTAIRE_ORIGIN || !env.VAULTAIRE_EDGE_TOKEN) return passThrough(request);
+  let tamper;
+  try {
+    tamper = codecTamper(env);
+  } catch (e) {
+    emit(env, ctx, "refused", { error: errorText(e) });
+    return passThrough(request);
+  }
+
+  const requestId = crypto.randomUUID();
+  const url = new URL(request.url);
+  if (kind.kind === "post") return servePost(request, env, ctx, requestId, url);
+  const description = describe(request, kind.kind, requestId);
+
+  let admit;
+  try {
+    const r = await controlPlane(env, "/api/v1/edge/admit", description, ORIGIN_TIMEOUT_MS);
+    if (r.status !== 200) {
+      emit(env, ctx, "admit_unavailable", { status: r.status, op: kind.kind, request_id: requestId });
+      return passThrough(request);
+    }
+    admit = await r.json();
+  } catch (e) {
+    emit(env, ctx, "admit_failed", { op: kind.kind, error: errorText(e), request_id: requestId });
+    return passThrough(request);
+  }
+  if (admit.refusal) return relayResponse(admit.refusal);
+  if (!admit.edge) {
+    emit(env, ctx, "pass", { op: kind.kind, reason: admit.reason || "", request_id: requestId });
+    return passThrough(request);
+  }
+
+  if (kind.kind === "get") return admit.window ? serveWindow(request, env, ctx, admit, requestId) : serveRead(request, env, ctx, admit, requestId);
+  if (admit.codec) return serveCodec(request, env, ctx, admit, requestId, url, tamper);
+
+  const { result: moved, mirror } = await moveBody(request, admit);
+  const commit = await commitWrite(env, { admit_id: admit.admit_id, ...moved }, requestId, url, admit, ctx);
+  emit(env, ctx, kind.kind, { request_id: requestId, backend_status: moved.backend_status, outcome: moved.outcome, ms: moved.duration_ms, committed: !!commit });
+  if (mirror) ctx.waitUntil(settleMirror(env, admit.admit_id, mirror, requestId, controlPlane, ctx));
+  if (!commit) return slowDown(url.pathname, requestId, admit);
+  return relayResponse(commit);
+}

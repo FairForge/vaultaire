@@ -490,10 +490,25 @@ export async function catalogueFilter(env, e2ee, doFetch = fetch, now = Date.now
       catalogue.at = now; // keep it; ask again after the TTL
       return catalogue;
     }
-    console.log(JSON.stringify({ edge: "catalogue_unavailable", error: String(e && e.message ? e.message : e) }));
+    event(env, "catalogue_unavailable", { error: String(e && e.message ? e.message : e) });
     return null;
   }
   return catalogue;
+}
+
+// The event sink (0.8.0, WP-LOG-2): this module writes no line of its own;
+// index.js sets the sink to its emit (the Worker's ONE exit for a line or a
+// report). Unset = nothing.
+let eventSink = () => {};
+
+/** setEventSink sets where this module's events go: f(env, kind, fields). */
+export function setEventSink(f) {
+  eventSink = typeof f === "function" ? f : () => {};
+}
+
+/** event hands one event to the sink. */
+export function event(env, kind, fields) {
+  eventSink(env, kind, fields);
 }
 
 function val(r, what) {
