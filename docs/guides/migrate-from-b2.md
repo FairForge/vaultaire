@@ -37,7 +37,8 @@ In the dashboard, **Transfers → Start a transfer**: the endpoint
 (`https://s3.us-west-004.backblazeb2.com`), the region, your B2 bucket, an
 optional prefix, the keyID and the applicationKey, and the Stored bucket.
 
-Or through the management API (a management key, or your account's JWT):
+Or through the management API, signed in as the account's owner or an admin
+(a management key cannot start a transfer):
 
 ```sh
 curl -X POST https://stored.cloud/api/v1/manage/transfers \
@@ -62,11 +63,12 @@ key or endpoint is an immediate `400` (`source_denied` names B2's answer).
 The Transfers page (or `GET /api/v1/manage/transfers/{id}`) shows what was
 listed, copied, already here, and failed. Files keep their names, content
 types and metadata. When the last file is copied the transfer is
-`completed`, your key is deleted from Stored, and a `transfer.completed`
-event goes to your webhooks.
+`completed`, your key is deleted from Stored's database, and a
+`transfer.completed` event goes to your webhooks.
 
-Then **delete the read-only key in B2** — Stored no longer has it, and you no
-longer need it. Point your applications at Stored
+Then **delete the read-only key in B2** — you no longer need it, and a
+database backup taken while the transfer ran still holds it until that
+backup ages out (up to 30 days). Point your applications at Stored
 (`https://s3.stored.cloud`, your Stored access key) and, once you are sure,
 delete the B2 bucket.
 
@@ -76,3 +78,8 @@ every file already copied and copies only what is new or changed.
 **What B2 charges:** reading from B2 is B2's download traffic, priced by B2
 (free up to three times what you store there, a month, at the time of
 writing). Large buckets move at up to 25 MiB/s per transfer.
+
+**Large files:** a file larger than what the transfer's rate moves in about
+a minute — 1.4 GiB at the default 25 MiB/s — is not copied yet. It is marked
+`failed` with that reason, before any of it is read, and the rest goes on;
+copy those files with an S3 client (`rclone copy`, `aws s3 cp`) for now.

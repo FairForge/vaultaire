@@ -28,6 +28,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
+	"github.com/FairForge/vaultaire/internal/tenant"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
 
@@ -147,7 +148,13 @@ func (s *Server) createTransfer(ctx context.Context, tenantID, actor string, in 
 		return bad("invalid_rate", fmt.Sprintf("rate_bytes_per_sec is 1 MiB/s to %d", rateCap), "rate_bytes_per_sec")
 	}
 	// The destination: the caller's own bucket, never Private (the job holds
-	// no customer key), never the vault floor (D-XFER-2).
+	// no customer key), never the vault floor (D-XFER-2), never a system
+	// bucket (RP98-11: `_exports` is a buckets row no S3, management or
+	// dashboard route lists — the dashboard's select left it out, the API
+	// took it).
+	if tenant.IsSystemBucket(in.Bucket) {
+		return transferView{}, http.StatusNotFound, ErrTypeNotFound, "bucket_not_found", "no such bucket of yours", "bucket"
+	}
 	var ssecRequired bool
 	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(ssec_required, false) FROM buckets WHERE tenant_id = $1 AND name = $2`, tenantID, in.Bucket).Scan(&ssecRequired)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -168,12 +175,15 @@ func (s *Server) createTransfer(ctx context.Context, tenantID, actor string, in 
 	// One signed listing page: the source answers, and to this key.
 	srcClient := newTransferSource(endpoint, src.Region, src.Bucket, src.Prefix, src.AccessKey, src.SecretKey)
 	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	_, _, lerr := srcClient.list(lctx, "", 1)
+	_, _, _, lerr := srcClient.list(lctx, "", 1)
 	cancel()
 	if lerr != nil {
 		class, why := classifySourceError(lerr)
 		if class == sourceDenied {
 			return bad("source_denied", "the source refused this key: "+why, "source.access_key")
+		}
+		if class == sourceCut {
+			why = "no answer in 20 seconds"
 		}
 		return bad("source_unreachable", "the source did not answer a listing: "+why, "source.endpoint")
 	}

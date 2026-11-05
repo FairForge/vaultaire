@@ -882,9 +882,22 @@ POST /api/v1/manage/transfers
   `paused_code: "QuotaExceeded"`); make room, then
   `POST /api/v1/manage/transfers/{id}/resume`. A source that refuses a read
   pauses it too (`source_denied`). An object the source fails to serve three
-  times is `failed` and the transfer goes on.
+  times — each try a run, about a minute, apart — is `failed` and the
+  transfer goes on. A failure of Stored's own storage is tried again every
+  run and fails no object for half an hour.
+- **Large objects:** one object is copied inside one run of the job. An
+  object larger than `rate_bytes_per_sec` moves in 58 seconds — about
+  1.4 GiB at the default rate — is not copied yet: it is `failed` at once
+  with that reason, before a byte of it is read, and the transfer goes on.
+  An object the source serves too slowly to finish inside a run is `failed`
+  after three tries.
+- **Byte ranges:** the source is read in byte ranges pinned to the listed
+  ETag (`If-Match`). It must answer each with the range asked (`206` and its
+  `Content-Range`); any other answer fails the object rather than storing
+  other bytes.
 - **Speed:** at most `rate_bytes_per_sec` (default and ceiling 25 MiB/s);
-  every transfer shares the service's own cap.
+  every transfer shares the service's own cap, and the transfers of several
+  accounts take turns inside each run.
 - **Progress:** `GET /api/v1/manage/transfers` (newest first) and
   `GET /api/v1/manage/transfers/{id}`: `state` (`pending`, `running`,
   `paused`, `completed`, `failed`, `cancelled`), `listed`, `copied`,

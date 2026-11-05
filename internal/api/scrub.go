@@ -181,6 +181,10 @@ type BlobScrubJob struct {
 	rangePart int64
 	outOfTime func() bool
 	readUntil time.Time
+	// fairShare is the time a read must have had before the run's end for
+	// its cut to count as "no answer" (RP98-5): half a run. A backend walked
+	// after a ranged read that used the run gets its last seconds only.
+	fairShare time.Duration
 }
 
 // newBlobScrubJob is the job of s; nil without a database, an engine or a
@@ -196,7 +200,7 @@ func newBlobScrubJob(s *Server, cycle time.Duration) *BlobScrubJob {
 		scrubBytesRead.WithLabelValues(b)
 	}
 	j := &BlobScrubJob{s: s, JobName: blobScrubJobName, capacityJob: backendCapacityJobName, copiesJob: blobCopiesJobName,
-		Cycle: cycle, Every: defaultBlobScrubEvery, now: time.Now, rangePart: s.largeGet.partBytes}
+		Cycle: cycle, Every: defaultBlobScrubEvery, now: time.Now, rangePart: s.largeGet.partBytes, fairShare: blobScrubMaxRunTime / 2}
 	if j.rangePart <= 0 {
 		j.rangePart = 16 << 20
 	}
@@ -574,6 +578,11 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 				st.Cursor = it.walk()
 				continue
 			}
+			// What the run had left when this read began (RP98-5).
+			hadTime := time.Duration(1<<62 - 1)
+			if dl, ok := ctx.Deadline(); ok {
+				hadTime = time.Until(dl)
+			}
 			verdict, detail, n := j.check(ctx, d, backend, it, st, res)
 			allow.spend(backend, n)
 			st.Bytes += n
@@ -588,6 +597,14 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 				return nil
 			}
 			if verdict == scrubNoVerdict {
+				// A read the RUN's end cut before it had a fair share of
+				// the run says nothing of the blob (RP98-5): it is not a
+				// run without an answer, and the slice stops here.
+				if ctx.Err() != nil && hadTime < j.fairShare {
+					res.note(fmt.Sprintf("%s: %s %s was cut by the run's end %s after it began — read again next run, not counted",
+						backend, it.kind, it.key+it.hash, hadTime.Round(time.Second)))
+					return nil
+				}
 				// Could not be asked: this blob is read again next run —
 				// up to scrubNoAnswerRuns runs in a row, then it is a
 				// finding and the walk goes on (RP96-A-1: a blob the run
@@ -602,6 +619,13 @@ func (j *BlobScrubJob) scrubBackend(ctx context.Context, backend string, sc scru
 					return nil
 				}
 				verdict = j.recordNoAnswer(ctx, backend, it, st, res, fmt.Sprintf("no answer in %d runs: %s", st.Stall.Runs, detail))
+				if verdict == scrubNoVerdict {
+					// The row could not be re-read: the stall stays, the
+					// cursor does not move, the next run asks again.
+					res.note(fmt.Sprintf("%s: %s %s gave no answer in %d runs and its row could not be re-read — asked again next run",
+						backend, it.kind, it.key+it.hash, st.Stall.Runs))
+					return nil
+				}
 				st.Stall = nil
 			} else if st.Stall != nil && st.Stall.Walk == it.walk() {
 				st.Stall = nil
@@ -812,12 +836,24 @@ func (j *BlobScrubJob) finding(ctx context.Context, backend string, it scrubItem
 // a timeout, an archived answer), a finding the walk goes past. No repair: the
 // bytes may well be whole. The verdict returned is the loop's (changed when
 // the row moved meanwhile).
+//
+// The third no-answer is as a rule the run's own deadline cutting the read,
+// so ctx is OVER here (RP98-5): the re-read of the row and the finding's
+// write run on a detached, short context. On the run's dead one the re-read
+// failed, the failure read as "the row moved", and the walk went past a blob
+// no run had read with no finding — the cycle then completed over it. A row
+// that cannot be re-read is no verdict: the stall stays.
 func (j *BlobScrubJob) recordNoAnswer(ctx context.Context, backend string, it scrubItem, st *BlobScrubBack, res *BlobScrubResult, detail string) string {
-	same, err := j.stillNamed(ctx, backend, it)
-	if err != nil || !same {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	same, err := j.stillNamed(dctx, backend, it)
+	if err != nil {
+		return scrubNoVerdict
+	}
+	if !same {
 		return scrubChanged
 	}
-	j.finding(ctx, backend, it, st, res, scrubUnreadable, detail)
+	j.finding(dctx, backend, it, st, res, scrubUnreadable, detail)
 	res.note(fmt.Sprintf("%s: %s %s gave no answer in %d runs — recorded unreadable, the walk goes on", backend, it.kind, it.key+it.hash, scrubNoAnswerRuns))
 	return scrubUnreadable
 }
