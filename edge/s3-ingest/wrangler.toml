@@ -34,6 +34,13 @@ cpu_ms = 300000
 [observability]
 enabled = true
 
+# WP-LOG-2 (D-LOG-1): no invocation event per request — it carried the URL
+# (bucket and key in clear), the client's IP, postal code, coordinates and
+# user agent, kept 7 days at Cloudflare. A data-plane host keeps no record of
+# a request after it ends; the control plane's rows are the record.
+[observability.logs]
+invocation_logs = false
+
 [vars]
 VAULTAIRE_ORIGIN = "https://stored.ge"
 # The codec refuses CODEC_TAMPER (a lab switch) on this environment.
