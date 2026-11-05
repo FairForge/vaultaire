@@ -140,6 +140,17 @@ type odTenant struct {
 	driveID      string
 	rootFolderID string
 
+	// pinnedDriveID is TENANT_N_DRIVE_ID: used without a listing (D-F1-1).
+	// otherDrives are the user's drives the listing did NOT choose (empty
+	// with a pin): the fingerprint check looks for the fleet's tree there
+	// when the chosen drive has no marker (onedrive_fleet.go).
+	pinnedDriveID string
+	otherDrives   []odDrive
+
+	// driveMismatch is the account's last drive verdict (0 none yet, 1
+	// match, 2 mismatch): an Error line on a change only.
+	driveMismatch atomic.Int32
+
 	// Token cache with mutex to prevent concurrent refresh storms.
 	// Azure throttles parallel token requests from the same client.
 	tokenMu   sync.Mutex
@@ -176,6 +187,7 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 		clientID := os.Getenv(p + "CLIENT_ID")
 		secret := os.Getenv(p + "SECRET")
 		userUPN := os.Getenv(p + "USER")
+		pinned := strings.TrimSpace(os.Getenv(p + "DRIVE_ID"))
 		if clientID == "" || secret == "" || userUPN == "" {
 			logger.Warn("incomplete OneDrive tenant config, skipping",
 				zap.Int("tenant", i))
@@ -192,19 +204,23 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 		dial := odCachedDialContext()
 
 		t := &odTenant{
-			name:       fmt.Sprintf("tenant-%d", i),
-			tenantID:   tid,
-			clientID:   clientID,
-			secret:     secret,
-			userUPN:    userUPN,
-			cred:       cred,
-			graphHTTP:  &http.Client{Transport: odGraphTransport(dial, odTLSSessionCache)},
-			cdnHTTP:    &http.Client{Transport: odCDNTransport(dial, odTLSSessionCache)},
-			uploadHTTP: &http.Client{Transport: odUploadTransport(dial, odTLSSessionCache)},
+			name:          fmt.Sprintf("tenant-%d", i),
+			tenantID:      tid,
+			clientID:      clientID,
+			secret:        secret,
+			userUPN:       userUPN,
+			pinnedDriveID: pinned,
+			cred:          cred,
+			graphHTTP:     &http.Client{Transport: odGraphTransport(dial, odTLSSessionCache)},
+			cdnHTTP:       &http.Client{Transport: odCDNTransport(dial, odTLSSessionCache)},
+			uploadHTTP:    &http.Client{Transport: odUploadTransport(dial, odTLSSessionCache)},
 		}
 		tenants = append(tenants, t)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	tenants = initFleetDrives(ctx, logger, tenants)
 	if len(tenants) == 0 {
 		return nil, fmt.Errorf("onedrive: no valid tenant configurations found")
 	}
@@ -213,24 +229,46 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 		tenants: tenants,
 		logger:  logger,
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	for _, t := range tenants {
-		driveID, err := t.getDriveID(ctx)
-		if err != nil {
-			logger.Warn("OneDrive tenant init failed — will retry on first use",
-				zap.String("tenant", t.name), zap.Error(err))
-			continue
-		}
-		if _, err := t.ensureRootFolder(ctx, driveID); err != nil {
-			logger.Warn("OneDrive root folder creation failed",
-				zap.String("tenant", t.name), zap.Error(err))
-		}
-	}
-
 	logger.Info("OneDrive fleet initialized", zap.Int("tenants", len(tenants)))
 	return d, nil
+}
+
+// initFleetDrives chooses every account's drive and creates its root folder
+// (D-F1-1). An account whose listing names no OneDrive library (and no pin)
+// is SKIPPED with an Error naming the drives found — as an incomplete slot
+// is; an account Graph could not answer for is kept and retried on first use,
+// as before. One Info line per kept account names its drive. Every kept
+// account's drive-mismatch series starts at 0.
+func initFleetDrives(ctx context.Context, logger *zap.Logger, tenants []*odTenant) []*odTenant {
+	kept := make([]*odTenant, 0, len(tenants))
+	for _, t := range tenants {
+		driveID, err := t.getDriveID(ctx)
+		var none *odNoLibraryError
+		switch {
+		case errors.As(err, &none):
+			logger.Error("permafrost account skipped: its user has no drive named OneDrive and TENANT_N_DRIVE_ID is not set — set it to the drive that holds vaultaire/ (onedrive_README.md § Drive selection)",
+				zap.String("account", t.name), zap.String("user", t.userUPN), zap.Strings("drives", none.names()))
+			continue
+		case err != nil:
+			logger.Warn("OneDrive tenant init failed — will retry on first use",
+				zap.String("tenant", t.name), zap.Error(err))
+		default:
+			others := make([]string, 0, len(t.otherDrives))
+			for _, o := range t.otherDrives {
+				others = append(others, o.Name)
+			}
+			logger.Info("permafrost account drive", zap.String("account", t.name),
+				zap.String("drive_id", driveID), zap.Bool("pinned", t.pinnedDriveID != ""),
+				zap.Strings("other_drives", others))
+			if _, err := t.ensureRootFolder(ctx, driveID); err != nil {
+				logger.Warn("OneDrive root folder creation failed",
+					zap.String("tenant", t.name), zap.Error(err))
+			}
+		}
+		InitPermafrostAccountSeries(t.name)
+		kept = append(kept, t)
+	}
+	return kept
 }
 
 // Name is the registration key main.go uses ("permafrost"). The engine records
@@ -1131,6 +1169,71 @@ func (t *odTenant) trackRateLimit(resp *http.Response) {
 	}
 }
 
+// odDrive is one of a user's drives as Graph lists it.
+type odDrive struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	DriveType string `json:"driveType"`
+}
+
+// odOneDriveLibrary is the name of the user's own document library — the
+// default drive (/users/{upn}/drive). A user can have others: a hidden
+// PersonalCacheLibrary is listed FIRST for two of prod's three fleet users.
+const odOneDriveLibrary = "OneDrive"
+
+// odNoLibraryError is a listing that names no drive to choose.
+type odNoLibraryError struct {
+	user   string
+	drives []odDrive
+}
+
+func (e *odNoLibraryError) Error() string {
+	return fmt.Sprintf("no drive named %s for %s (drives: %s)", odOneDriveLibrary, e.user, strings.Join(e.names(), ", "))
+}
+
+func (e *odNoLibraryError) names() []string {
+	out := make([]string, len(e.drives))
+	for i, d := range e.drives {
+		out[i] = d.Name
+	}
+	return out
+}
+
+// chooseDrive is the account's drive among its user's drives (D-F1-1):
+// one listed = that drive; else the one named OneDrive; else the one
+// business drive when exactly one is; never drives[0] — Graph's order is
+// not pinned and differs per account.
+func chooseDrive(user string, drives []odDrive) (chosen odDrive, others []odDrive, err error) {
+	pick := func(i int) (odDrive, []odDrive, error) {
+		rest := make([]odDrive, 0, len(drives)-1)
+		rest = append(rest, drives[:i]...)
+		return drives[i], append(rest, drives[i+1:]...), nil
+	}
+	if len(drives) == 1 {
+		return pick(0)
+	}
+	named, business := -1, -1
+	nNamed, nBusiness := 0, 0
+	for i, d := range drives {
+		if d.Name == odOneDriveLibrary {
+			named, nNamed = i, nNamed+1
+		}
+		if d.DriveType == "business" {
+			business, nBusiness = i, nBusiness+1
+		}
+	}
+	switch {
+	case nNamed == 1:
+		return pick(named)
+	case nNamed == 0 && nBusiness == 1:
+		return pick(business)
+	}
+	return odDrive{}, nil, &odNoLibraryError{user: user, drives: drives}
+}
+
+// getDriveID is the account's drive: TENANT_N_DRIVE_ID when set (no
+// listing), else chooseDrive over /users/{upn}/drives — cached for the life
+// of the process.
 func (t *odTenant) getDriveID(ctx context.Context) (string, error) {
 	t.mu.Lock()
 	if t.driveID != "" {
@@ -1138,9 +1241,14 @@ func (t *odTenant) getDriveID(ctx context.Context) (string, error) {
 		t.mu.Unlock()
 		return d, nil
 	}
+	if t.pinnedDriveID != "" {
+		t.driveID = t.pinnedDriveID
+		t.mu.Unlock()
+		return t.pinnedDriveID, nil
+	}
 	t.mu.Unlock()
 
-	u := fmt.Sprintf("%s/users/%s/drives", graphBase, url.PathEscape(t.userUPN))
+	u := fmt.Sprintf("%s/users/%s/drives?$select=id,name,driveType", graphBase, url.PathEscape(t.userUPN))
 	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	resp, err := t.graphDo(ctx, req)
 	if err != nil {
@@ -1149,9 +1257,7 @@ func (t *odTenant) getDriveID(ctx context.Context) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	var out struct {
-		Value []struct {
-			ID string `json:"id"`
-		} `json:"value"`
+		Value []odDrive `json:"value"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", fmt.Errorf("decode drives [%s]: %w", t.name, err)
@@ -1159,11 +1265,15 @@ func (t *odTenant) getDriveID(ctx context.Context) (string, error) {
 	if len(out.Value) == 0 {
 		return "", fmt.Errorf("no drives for %s", t.userUPN)
 	}
+	chosen, others, err := chooseDrive(t.userUPN, out.Value)
+	if err != nil {
+		return "", fmt.Errorf("choose drive [%s]: %w", t.name, err)
+	}
 
 	t.mu.Lock()
-	t.driveID = out.Value[0].ID
+	t.driveID, t.otherDrives = chosen.ID, others
 	t.mu.Unlock()
-	return t.driveID, nil
+	return chosen.ID, nil
 }
 
 func (t *odTenant) ensureRootFolder(ctx context.Context, driveID string) (string, error) {

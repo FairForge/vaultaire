@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/usage"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -47,6 +48,7 @@ func TestMetricsEndpoint_KeepsLegacySeries(t *testing.T) {
 	atomic.StoreInt64(&s.requestCount, 5)
 	atomic.StoreInt64(&s.errorCount, 2)
 	s.initMetrics()
+	drivers.InitPermafrostAccountSeries("tenant-metrics-test") // what the fleet driver does per account
 
 	// Act
 	rr := httptest.NewRecorder()
@@ -65,6 +67,8 @@ func TestMetricsEndpoint_KeepsLegacySeries(t *testing.T) {
 	assert.Contains(t, body, `vaultaire_edge_codec_chunks_total{outcome="hit"}`)
 	assert.Contains(t, body, `vaultaire_edge_codec_bytes_total{kind="sealed"}`)
 	assert.Contains(t, body, "vaultaire_edge_codec_index_calls_total")
+	// The permafrost drive verdict is REGISTERED (WP-FLEET-1, D-F1-2).
+	assert.Contains(t, body, `vaultaire_permafrost_drive_mismatch{account="tenant-metrics-test"}`)
 	// The egress caps' counters are REGISTERED too (WP-KEY-1, RP88-4: the
 	// same shape — declared and pre-created in key_caps.go, never registered;
 	// prod's scrape of 93679a1b had the holder-drift gauges and no

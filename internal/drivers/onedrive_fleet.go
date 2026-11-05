@@ -39,18 +39,63 @@ import (
 // t-<tenant>/ tree).
 const fleetMarkerPath = "_fleet/fingerprint.json"
 
+// permafrostDriveMismatch is the per-account drive verdict (WP-FLEET-1,
+// D-F1-2): 1 when the fleet's tree is not on the drive the account uses —
+// the marker there records another drive_id, or the chosen drive holds no
+// marker while another drive of the same user does.
+var permafrostDriveMismatch = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "vaultaire_permafrost_drive_mismatch",
+	Help: "1 when a permafrost account's fleet marker names another drive than the one the account uses (TENANT_N_DRIVE_ID, else the user's drive named OneDrive), or sits on another drive of the same user: every object of that account is off its drive. Never switched automatically (WP-FLEET-1; onedrive_README.md § Drive selection). 0 otherwise.",
+}, []string{"account"})
+
+// InitPermafrostAccountSeries creates an account's per-account permafrost
+// series at 0 (the driver calls it for every account it keeps), so the
+// first 1 is a change a rule can see.
+func InitPermafrostAccountSeries(account string) {
+	permafrostDriveMismatch.WithLabelValues(account).Set(0)
+}
+
 var permafrostFleetMismatch = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "vaultaire_permafrost_fleet_mismatch",
 	Help: "1 when the permafrost fleet's order (TENANT_1..15, gaps skipped) differs from the order its accounts' markers recorded (read at boot): placement is hash % fleet size over that order, so remapped objects are read through the fleet walk. 0 otherwise, also when the markers could not be read (WP-R7-4, R7-09).",
 })
 
-// fleetMarker is one account's marker.
+// fleetMarker is one account's marker. DriveID (WP-FLEET-1, additive) is the
+// drive the account's tree lives on; a marker written before reads as
+// before. MovedTo is set on the OLD drive's marker by the migration tool's
+// -switch (cmd/tools/permafrost-migrate-drive): the tree's new drive.
 type fleetMarker struct {
 	Version   int       `json:"version"`
 	Index     int       `json:"index"`
 	Fleet     []string  `json:"fleet"`
 	Digest    string    `json:"digest"`
 	WrittenAt time.Time `json:"written_at"`
+	DriveID   string    `json:"drive_id,omitempty"`
+	MovedTo   string    `json:"moved_to,omitempty"`
+
+	foundOn string // the drive the marker was read on, when not the account's (never encoded)
+}
+
+// FleetMarkerPath is the marker's path under vaultaire/ (the migration tool
+// reads and rewrites it).
+const FleetMarkerPath = fleetMarkerPath
+
+// RewriteFleetMarker is a marker with its drive_id (and moved_to, "" = left
+// as it is) set, every other field kept — the migration tool's -switch.
+func RewriteFleetMarker(b []byte, driveID, movedTo string) ([]byte, error) {
+	var m fleetMarker
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("marker decode: %w", err)
+	}
+	if m.Version == 0 || len(m.Fleet) == 0 {
+		return nil, fmt.Errorf("marker decode: not a fleet marker")
+	}
+	m.DriveID = driveID
+	if movedTo != "" {
+		m.MovedTo = movedTo
+	}
+	m.WrittenAt = time.Now().UTC()
+	return json.Marshal(m)
 }
 
 // FleetState is the outcome of a fingerprint check.
@@ -165,8 +210,10 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 	out := FleetFingerprint{Digest: fleetDigest(ids)}
 
 	markers := make([]*fleetMarker, len(d.tenants))
+	elsewhere := make([]bool, len(d.tenants)) // the marker read is on another drive of the user
 	for i, t := range d.tenants {
-		m, err := t.readFleetMarker(ctx)
+		m, onOther, err := t.readFleetMarkerAnyDrive(ctx)
+		elsewhere[i] = onOther
 		if err != nil {
 			out.State = FleetUnknown
 			if d.fleetVerdictChanged(out.State) {
@@ -177,6 +224,7 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 		}
 		markers[i] = m
 	}
+	d.checkDrives(ctx, markers, elsewhere)
 
 	present := 0
 	recorded := map[string][]string{} // recorded digest → recorded fleet
@@ -230,6 +278,9 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 
 	var failed []string
 	for _, i := range write {
+		if elsewhere[i] {
+			continue // the tree is on another drive: never a fresh marker on this one
+		}
 		if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", d.tenants[i].name, err))
 		}
@@ -277,12 +328,71 @@ func allIndexes(n int) []int {
 	return out
 }
 
-// readFleetMarker is the account's marker, nil when it has none.
-func (t *odTenant) readFleetMarker(ctx context.Context) (*fleetMarker, error) {
+// checkDrives is the per-account drive verdict (D-F1-2): a marker that
+// names another drive, or one found only on another drive of the user, is
+// one Error line per account (on a change of verdict) and the gauge 1. Never
+// a switch, never a block of boot: the pin, or the migration tool, moves it.
+func (d *OneDriveDriver) checkDrives(ctx context.Context, markers []*fleetMarker, elsewhere []bool) {
+	for i, t := range d.tenants {
+		m := markers[i]
+		chosen, _ := t.getDriveID(ctx) // cached: the marker was read on it
+		mismatch := m != nil && (elsewhere[i] || (m.DriveID != "" && m.DriveID != chosen))
+		state := int32(1)
+		if mismatch {
+			state = 2
+		}
+		changed := t.driveMismatch.Swap(state) != state
+		if !mismatch {
+			permafrostDriveMismatch.WithLabelValues(t.name).Set(0)
+			continue
+		}
+		permafrostDriveMismatch.WithLabelValues(t.name).Set(1)
+		if !changed {
+			continue
+		}
+		markerDrive := m.DriveID
+		if elsewhere[i] && markerDrive == "" {
+			markerDrive = m.foundOn
+		}
+		d.logger.Error("permafrost account drive mismatch: the fleet's tree is not on the drive this account uses — every object of the account is off its drive. Pin TENANT_N_DRIVE_ID to the marker's drive, or move the tree with cmd/tools/permafrost-migrate-drive (onedrive_README.md § Drive selection)",
+			zap.String("account", t.name), zap.String("drive_id", chosen),
+			zap.String("marker_drive_id", markerDrive), zap.String("moved_to", m.MovedTo),
+			zap.Bool("marker_on_other_drive", elsewhere[i]))
+	}
+}
+
+// readFleetMarkerAnyDrive is the account's marker on its drive; when that
+// drive has none and the listing named other drives of the user (no pin),
+// the marker on one of those — onOther true. A deploy that chose a new
+// drive for an account would otherwise find no marker, write a fresh one
+// and call the fleet repaired.
+func (t *odTenant) readFleetMarkerAnyDrive(ctx context.Context) (m *fleetMarker, onOther bool, err error) {
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	m, err = t.readFleetMarkerOn(ctx, driveID)
+	if err != nil || m != nil {
+		return m, false, err
+	}
+	t.mu.Lock()
+	others := append([]odDrive(nil), t.otherDrives...)
+	t.mu.Unlock()
+	for _, o := range others {
+		om, err := t.readFleetMarkerOn(ctx, o.ID)
+		if err != nil {
+			return nil, false, fmt.Errorf("marker on drive %s: %w", o.Name, err)
+		}
+		if om != nil {
+			om.foundOn = o.ID
+			return om, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// readFleetMarkerOn is the marker on driveID, nil when it has none.
+func (t *odTenant) readFleetMarkerOn(ctx context.Context, driveID string) (*fleetMarker, error) {
 	dlURL, _, err := t.getDownloadURL(ctx, driveID, fleetMarkerPath)
 	if odIsNotFound(err) {
 		return nil, nil
@@ -319,7 +429,7 @@ func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, di
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC()})
+	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC(), DriveID: driveID})
 	if err != nil {
 		return fmt.Errorf("marker encode: %w", err)
 	}
