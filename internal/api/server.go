@@ -2170,5 +2170,7 @@ func (s *Server) dashboardDeps() dashboard.Deps {
 		// label, never the secret itself (WP-R12-5).
 		CSRFKey: dashboard.CSRFKeyFromSecret(os.Getenv("JWT_SECRET")),
 		Lockout: s.loginLockout,
+		// WP-XFER-1: the Transfers page writes through the API's logic.
+		Transfers: transferDashboard{s},
 	}
 }

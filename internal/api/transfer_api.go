@@ -27,6 +27,7 @@ import (
 
 	"github.com/FairForge/vaultaire/internal/audit"
 	"github.com/FairForge/vaultaire/internal/auth"
+	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/usage"
 )
 
@@ -289,4 +290,59 @@ func (s *Server) handleMgmtResumeTransfer(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, viewOf(t))
+}
+
+// transferDashboard is the dashboard's door to the same logic
+// (handlers.TransferService): create, cancel and resume exactly as the
+// management API does.
+type transferDashboard struct{ s *Server }
+
+func (d transferDashboard) CreateTransfer(ctx context.Context, tenantID, actor string, f handlers.TransferForm, secret string) (string, string, error) {
+	var in transferCreate
+	in.Source.Endpoint, in.Source.Region, in.Source.Bucket, in.Source.Prefix = f.Endpoint, f.Region, f.SourceBucket, f.Prefix
+	in.Source.AccessKey, in.Source.SecretKey, in.Bucket = f.AccessKey, secret, f.Bucket
+	v, status, errType, _, msg, _ := d.s.createTransfer(ctx, tenantID, actor, in)
+	switch {
+	case errType == "":
+		return v.ID, "", nil
+	case status >= 500 && status != http.StatusNotImplemented:
+		return "", "", fmt.Errorf("create a transfer: %s", msg)
+	}
+	return "", msg, nil
+}
+
+func (d transferDashboard) CancelTransfer(ctx context.Context, tenantID, actor, id string) (bool, error) {
+	t, err := d.s.loadTransfer(ctx, tenantID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	res, err := d.s.db.ExecContext(ctx, transferEndSQL, t.ID, transferCancelled, "")
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n > 0 {
+		audit.Record(ctx, d.s.db, audit.Entry{TenantID: tenantID, UserID: actor, Action: "transfer.cancelled", Resource: "transfer:" + t.ID})
+	}
+	return n > 0, nil
+}
+
+func (d transferDashboard) ResumeTransfer(ctx context.Context, tenantID, _ string, id string) (bool, error) {
+	t, err := d.s.loadTransfer(ctx, tenantID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	res, err := d.s.db.ExecContext(ctx, `UPDATE transfer_jobs SET state = 'running', paused_reason = '', paused_error = '', updated_at = NOW()
+		WHERE id = $1 AND state = 'paused'`, t.ID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
