@@ -23,9 +23,10 @@ import (
 
 // fakeCP answers one admit and records the commit.
 type fakeCP struct {
-	admit  AdmitResponse
-	mu     sync.Mutex
-	commit *CommitRequest
+	admit   AdmitResponse
+	mu      sync.Mutex
+	commit  *CommitRequest
+	reports []HostReport
 }
 
 func (c *fakeCP) Admit(context.Context, AdmitRequest) (AdmitResponse, error) { return c.admit, nil }
@@ -44,6 +45,13 @@ func (c *fakeCP) Commit(_ context.Context, r CommitRequest) (CommitResponse, err
 
 func (c *fakeCP) Mirror(context.Context, MirrorSettle) (MirrorSettleResponse, error) {
 	return MirrorSettleResponse{State: "pending"}, nil
+}
+
+func (c *fakeCP) Report(_ context.Context, rep HostReport) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reports = append(c.reports, rep)
+	return nil
 }
 
 // A backend that takes the body and never answers (Lyve us-east-1, 1–3 %

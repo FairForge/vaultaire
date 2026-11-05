@@ -700,6 +700,8 @@ func (f *edgeFixture) call(path string, body any, token string) *httptest.Respon
 		f.srv.handleEdgeAdmit(w, r)
 	case "/api/v1/edge/mirror":
 		f.srv.handleEdgeMirror(w, r)
+	case "/api/v1/edge/report":
+		f.srv.handleEdgeReport(w, r)
 	default:
 		f.srv.handleEdgeCommit(w, r)
 	}
@@ -872,7 +874,7 @@ func TestEdgeRoutes_NeverCapturedByTheS3Gate(t *testing.T) {
 	// today — so the four edge routes must answer on an s3. host too, never
 	// captured by the S3 gate (which owns every other request there).
 	*hits = nil
-	for _, path := range []string{"/api/v1/edge/admit", "/api/v1/edge/commit", "/api/v1/edge/index", "/api/v1/edge/heartbeat"} {
+	for _, path := range []string{"/api/v1/edge/admit", "/api/v1/edge/commit", "/api/v1/edge/index", "/api/v1/edge/heartbeat", "/api/v1/edge/report"} {
 		rs := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
 		rs.Host = "s3.stored.test"
 		rs.Header.Set(edgeTokenHeader, edgeTestToken)

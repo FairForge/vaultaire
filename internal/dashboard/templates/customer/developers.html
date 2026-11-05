@@ -42,7 +42,7 @@
 <div class="card" style="overflow-x:auto">
     <table class="table">
         <thead>
-            <tr><th>Time (UTC)</th><th>Key</th><th>Operation</th><th>Bucket / key</th><th>Status</th><th>Request id</th><th>In / out</th><th>Served by</th></tr>
+            <tr><th>Time (UTC)</th><th>Key</th><th>Operation</th><th>Bucket / key</th><th>Status</th><th>Request id</th><th>In / out</th><th>ms</th><th>Served by</th></tr>
         </thead>
         <tbody>
             {{range .Requests}}
@@ -57,6 +57,7 @@
                 </td>
                 <td><code>{{.RequestID}}</code></td>
                 <td style="white-space:nowrap">{{.BytesIn}} / {{.BytesOut}} B</td>
+                <td style="white-space:nowrap">{{if .DurationMS}}{{.DurationMS}}{{else}}-{{end}}</td>
                 <td>{{.Host}}</td>
             </tr>
             {{end}}

@@ -122,6 +122,9 @@ func (r *EdgeAdmitReaper) RunOnce(ctx context.Context) (EdgeAdmitReapResult, err
 		}
 		res.Expired++
 		edgeAdmitReaperTotal.WithLabelValues("expired").Inc()
+		// The customer's row for a transfer whose commit never came
+		// (WP-LOG-2, D-LOG-3) — after the expiry's transaction, never in it.
+		r.s.recordEdgeNoCommit(row)
 		switch {
 		case row.Codec:
 			// An edge-codec admit holds no whole blob: its expiry dropped

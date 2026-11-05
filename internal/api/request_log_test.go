@@ -101,6 +101,7 @@ func TestRequestLog_EveryErrorCarriesItsSuggestion(t *testing.T) {
 	}
 	for code := range requestSuggestions {
 		_, known := errorStatusCodes[code]
+		known = known || requestLogOnlyCodes[code] // EdgeNoCommit (WP-LOG-2): a row's, never a response's
 		assert.True(t, known, "suggestion for %s, which the API never answers", code)
 	}
 
@@ -141,8 +142,10 @@ func TestRequestLog_NeverHoldsAnSSECKeyOrASecret(t *testing.T) {
 	}
 	require.NoError(t, rows.Err())
 	_ = rows.Close()
+	// duration_ms (WP-LOG-2, D-LOG-4): how long the request took, in
+	// milliseconds — a number the request already showed its client.
 	assert.ElementsMatch(t, []string{"id", "tenant_id", "key_id", "logged_at", "op", "bucket", "object_key", "status",
-		"error_code", "request_id", "bytes_in", "bytes_out", "host"}, cols, "a new column must be argued here first")
+		"error_code", "request_id", "bytes_in", "bytes_out", "host", "duration_ms"}, cols, "a new column must be argued here first")
 	for _, c := range cols {
 		for _, bad := range []string{"secret", "sse", "signature", "authorization", "header", "body", "ip", "agent", "password", "token"} {
 			if c == "key_id" || c == "object_key" {
@@ -152,7 +155,7 @@ func TestRequestLog_NeverHoldsAnSSECKeyOrASecret(t *testing.T) {
 		}
 	}
 	// The writer names those columns and nothing else.
-	for _, c := range []string{"tenant_id", "key_id", "logged_at", "op", "bucket", "object_key", "status", "error_code", "request_id", "bytes_in", "bytes_out", "host"} {
+	for _, c := range []string{"tenant_id", "key_id", "logged_at", "op", "bucket", "object_key", "status", "error_code", "request_id", "bytes_in", "bytes_out", "host", "duration_ms"} {
 		assert.Contains(t, requestLogInsertSQL, c)
 	}
 

@@ -93,6 +93,25 @@ type Host struct {
 	Budget Budget
 	// mirrors counts the settles running (WaitMirrors).
 	mirrors sync.WaitGroup
+	// Reports sends this host's failures to the control plane (WP-LOG-2:
+	// a host keeps no log; nil = none — host=slc, whose failures are the
+	// origin's own lines).
+	Reports *Reporter
+}
+
+// reportFailure reports one failure of a request (never its URL, path or
+// headers: the request id, the admit id, the op, the status of a
+// control-plane answer, the error's message).
+func (h *Host) reportFailure(kind string, desc AdmitRequest, admitID string, err error) {
+	if h.Reports == nil || err == nil {
+		return
+	}
+	status := 0
+	var se *StatusError
+	if errors.As(err, &se) {
+		status = se.Status
+	}
+	h.Reports.Send(HostReportItem{Kind: kind, RequestID: desc.RequestID, AdmitID: admitID, Op: desc.Op, Status: status, Detail: err.Error()})
 }
 
 // settleBound is a settle call's own clock.
@@ -241,6 +260,7 @@ func (h *Host) Write(ctx context.Context, req *http.Request, body io.Reader, siz
 	desc := h.Describe(req, WriteOp(req))
 	admit, err := h.CP.Admit(ctx, desc)
 	if err != nil {
+		h.reportFailure(ReportAdmitFailed, desc, "", err)
 		return nil, fmt.Errorf("admit: %w", err)
 	}
 	res := &Result{Admit: admit}
@@ -737,6 +757,9 @@ func (h *Host) commitWrite(ctx context.Context, req CommitRequest, desc AdmitReq
 			}
 		}
 		h.log().Warn("data plane: commit failed", zap.Int("attempt", attempt), zap.Error(err), zap.String("admit_id", req.AdmitID))
+		if attempt == 1 {
+			h.reportFailure(ReportCommitFailed, desc, req.AdmitID, err)
+		}
 	}
 	return slowDown(path, desc.RequestID, "the data plane could not report your upload. Retry.")
 }
@@ -746,6 +769,7 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 	desc := h.Describe(req, OpGet)
 	admit, err := h.CP.Admit(ctx, desc)
 	if err != nil {
+		h.reportFailure(ReportAdmitFailed, desc, "", err)
 		return nil, fmt.Errorf("admit: %w", err)
 	}
 	res := &ReadResult{Admit: admit}
@@ -818,6 +842,7 @@ func (h *Host) Read(ctx context.Context, req *http.Request) (*ReadResult, error)
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitBound)
 	if _, cErr := h.CP.Commit(cctx, commit); cErr != nil {
 		h.log().Warn("data plane: read commit failed — the reaper meters the admitted size", zap.Error(cErr), zap.String("admit_id", admit.AdmitID))
+		h.reportFailure(ReportCommitFailed, desc, admit.AdmitID, cErr)
 	}
 	cancel()
 	h.log().Info("data plane: read", zap.String("admit_id", admit.AdmitID), zap.String("outcome", commit.Outcome),

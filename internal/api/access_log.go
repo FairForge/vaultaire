@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,6 +35,26 @@ type s3AccessEvent struct {
 	// key id that signed the request (never its secret) and what served it.
 	keyID string
 	host  string
+	// durationMS is how long the request took (WP-LOG-2, D-LOG-4): the
+	// origin's from the top of its dispatcher, an edge row's the host's
+	// own commit report; -1 = not measured (NULL in both logs).
+	durationMS int64
+}
+
+// durationOrNull is the column's value: NULL when not measured.
+func (e s3AccessEvent) durationOrNull() sql.NullInt64 {
+	if e.durationMS < 0 {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: e.durationMS, Valid: true}
+}
+
+// msSince is a duration measured from started (-1 when started is zero).
+func msSince(started time.Time) int64 {
+	if started.IsZero() {
+		return -1
+	}
+	return time.Since(started).Milliseconds()
 }
 
 // S3AccessLogTracker buffers S3 access events and flushes them to the
@@ -129,9 +150,11 @@ func (at *S3AccessLogTracker) refreshLoggingEnabled(ctx context.Context) {
 }
 
 // shouldRecord applies the logging_enabled gate. Until the set has been
-// loaded (boot, or no DB) every event is recorded, as before.
+// loaded (boot, or no DB) every event is recorded, as before. An event with
+// an error code is an error row whatever its status (WP-LOG-2: an edge
+// transfer whose commit never came is status 0, EdgeNoCommit).
 func (at *S3AccessLogTracker) shouldRecord(event s3AccessEvent) bool {
-	if event.statusCode >= 400 {
+	if event.statusCode >= 400 || event.errorCode != "" {
 		return true
 	}
 	at.enabledMu.RLock()
@@ -218,10 +241,10 @@ func (at *S3AccessLogTracker) Flush() {
 	for _, e := range events {
 		_, err := at.db.ExecContext(ctx, `
 			INSERT INTO s3_access_log (tenant_id, bucket, object_key, operation, status_code,
-				bytes_sent, bytes_received, source_ip, user_agent, request_id, error_code, logged_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+				bytes_sent, bytes_received, source_ip, user_agent, request_id, error_code, logged_at, duration_ms)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		`, e.tenantID, e.bucket, e.objectKey, e.operation, e.statusCode,
-			e.bytesSent, e.bytesReceived, e.sourceIP, e.userAgent, e.requestID, e.errorCode, e.loggedAt)
+			e.bytesSent, e.bytesReceived, e.sourceIP, e.userAgent, e.requestID, e.errorCode, e.loggedAt, e.durationOrNull())
 		if err != nil && at.logger != nil {
 			at.logger.Error("flush s3 access log",
 				zap.String("tenant_id", e.tenantID), zap.Error(err))
@@ -229,7 +252,9 @@ func (at *S3AccessLogTracker) Flush() {
 	}
 }
 
-// formatAccessLogLine formats a single access log record in S3 server access log format.
+// formatAccessLogLine formats a single access log record in S3 server access
+// log format. The request's duration in milliseconds is the LAST field (`-`
+// when not measured; WP-LOG-2, D-LOG-4): every earlier field is as before.
 func formatAccessLogLine(e s3AccessEvent) string {
 	ts := e.loggedAt.UTC().Format("02/Jan/2006:15:04:05 -0700")
 	key := e.objectKey
@@ -244,9 +269,13 @@ func formatAccessLogLine(e s3AccessEvent) string {
 	if ua == "" {
 		ua = "-"
 	}
-	return fmt.Sprintf("%s %s [%s] %s %s %s %d %s %d %d %s \"%s\"",
+	dur := "-"
+	if e.durationMS >= 0 {
+		dur = strconv.FormatInt(e.durationMS, 10)
+	}
+	return fmt.Sprintf("%s %s [%s] %s %s %s %d %s %d %d %s \"%s\" %s",
 		e.tenantID, e.bucket, ts, e.sourceIP, e.operation, key,
-		e.statusCode, errCode, e.bytesSent, e.bytesReceived, e.requestID, ua)
+		e.statusCode, errCode, e.bytesSent, e.bytesReceived, e.requestID, ua, dur)
 }
 
 func randomHex6() string {
@@ -369,7 +398,7 @@ const accessLogDeliveryBatch = 1000
 func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, tenantID, bucket, targetBucket, prefix string) (int, error) {
 	rows, err := at.db.QueryContext(ctx, `
 		SELECT id, tenant_id, bucket, object_key, operation, status_code,
-			bytes_sent, bytes_received, source_ip, user_agent, request_id, error_code, logged_at
+			bytes_sent, bytes_received, source_ip, user_agent, request_id, error_code, logged_at, COALESCE(duration_ms, -1)
 		FROM s3_access_log
 		WHERE tenant_id = $1 AND bucket = $2
 		ORDER BY logged_at ASC
@@ -389,7 +418,7 @@ func (at *S3AccessLogTracker) deliverBucketLogs(ctx context.Context, tenantID, b
 		var id int64
 		var e s3AccessEvent
 		if err := rows.Scan(&id, &e.tenantID, &e.bucket, &e.objectKey, &e.operation, &e.statusCode,
-			&e.bytesSent, &e.bytesReceived, &e.sourceIP, &e.userAgent, &e.requestID, &e.errorCode, &e.loggedAt); err != nil {
+			&e.bytesSent, &e.bytesReceived, &e.sourceIP, &e.userAgent, &e.requestID, &e.errorCode, &e.loggedAt, &e.durationMS); err != nil {
 			if at.logger != nil {
 				at.logger.Error("scan access log row", zap.Error(err))
 			}

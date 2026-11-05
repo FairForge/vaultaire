@@ -73,6 +73,14 @@ func (c *HTTPControlPlane) Mirror(ctx context.Context, req MirrorSettle) (Mirror
 	return resp, c.call(ctx, "/api/v1/edge/mirror", req, &resp)
 }
 
+// Report is POST /api/v1/edge/report (WP-LOG-2), on reportTimeout.
+func (c *HTTPControlPlane) Report(ctx context.Context, rep HostReport) error {
+	cctx, cancel := context.WithTimeout(ctx, reportTimeout)
+	defer cancel()
+	var ack map[string]any
+	return c.call(cctx, "/api/v1/edge/report", rep, &ack)
+}
+
 // Heartbeat is POST /api/v1/edge/heartbeat: the node says it is alive.
 func (c *HTTPControlPlane) Heartbeat(ctx context.Context, hb Heartbeat) error {
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)

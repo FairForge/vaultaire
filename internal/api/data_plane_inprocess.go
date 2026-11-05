@@ -91,3 +91,9 @@ func (c inProcessControlPlane) Mirror(ctx context.Context, req dataplane.MirrorS
 	}
 	return resp, nil
 }
+
+// Report records a host=slc failure report as the route does (WP-LOG-2).
+func (c inProcessControlPlane) Report(_ context.Context, rep dataplane.HostReport) error {
+	c.s.recordHostReport(c.host.Name, rep)
+	return nil
+}

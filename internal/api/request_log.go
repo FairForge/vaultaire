@@ -23,6 +23,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -36,6 +37,15 @@ import (
 	"github.com/FairForge/vaultaire/internal/auth"
 	"github.com/FairForge/vaultaire/internal/requestlog"
 )
+
+// ErrEdgeNoCommit is the request log's own code for a transfer admitted at
+// the edge whose result never reached the control plane (WP-LOG-2, D-LOG-3:
+// the reaper expired its admit; status 0). No response ever carries it.
+const ErrEdgeNoCommit = "EdgeNoCommit"
+
+// requestLogOnlyCodes are the codes a row may carry that no S3 response
+// answers.
+var requestLogOnlyCodes = map[string]bool{ErrEdgeNoCommit: true}
 
 // requestSuggestions is the suggestion shown beside each S3 error code on
 // the Developers page: what a developer can do about it. Every code the S3
@@ -92,6 +102,7 @@ var requestSuggestions = map[string]string{
 	ErrInvalidTag:                        "Tags are at most 10 per object, keys up to 128 and values up to 256 characters.",
 	ErrInvalidObjectState:                "The object is archived: restore it first (RestoreObject), then read it.",
 	ErrRestoreAlreadyInProgress:          "A restore of this object is already running: wait for it to finish.",
+	ErrEdgeNoCommit:                      "The transfer was admitted at the edge and its result never reached us: the client may have disconnected, or the edge host failed. A download is metered for its admitted size.",
 }
 
 // requestSuggestion is the code's suggestion ("" for an unknown code).
@@ -100,9 +111,9 @@ func requestSuggestion(code string) string { return requestSuggestions[code] }
 // requestLogInsertSQL is the ONE statement that writes request_log: the
 // columns it names are everything a row may hold.
 const requestLogInsertSQL = `
-	INSERT INTO request_log (tenant_id, key_id, logged_at, op, bucket, object_key, status, error_code, request_id, bytes_in, bytes_out, host)
+	INSERT INTO request_log (tenant_id, key_id, logged_at, op, bucket, object_key, status, error_code, request_id, bytes_in, bytes_out, host, duration_ms)
 	SELECT * FROM unnest($1::text[], $2::text[], $3::timestamptz[], $4::text[], $5::text[], $6::text[],
-	                     $7::smallint[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::text[])`
+	                     $7::smallint[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::text[], $13::integer[])`
 
 // writeRequestLog inserts a batch of events in one statement, then the
 // suggestion of each error code this process has not stored yet.
@@ -110,16 +121,18 @@ func (at *S3AccessLogTracker) writeRequestLog(ctx context.Context, events []s3Ac
 	n := len(events)
 	tenant, key, at_, op, bucket, obj := make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n)
 	status, code, reqID, in, out, host := make([]int64, n), make([]string, n), make([]string, n), make([]int64, n), make([]int64, n), make([]string, n)
+	dur := make([]sql.NullInt64, n) // NULL = not measured (D-LOG-4)
 	codes := map[string]bool{}
 	for i, e := range events {
 		tenant[i], key[i], at_[i], op[i], bucket[i], obj[i] = e.tenantID, e.keyID, e.loggedAt.UTC().Format(time.RFC3339Nano), e.operation, e.bucket, e.objectKey
 		status[i], code[i], reqID[i], in[i], out[i], host[i] = int64(e.statusCode), e.errorCode, e.requestID, e.bytesReceived, e.bytesSent, e.host
+		dur[i] = e.durationOrNull()
 		if e.errorCode != "" {
 			codes[e.errorCode] = true
 		}
 	}
 	if _, err := at.db.ExecContext(ctx, requestLogInsertSQL, pq.Array(tenant), pq.Array(key), pq.Array(at_), pq.Array(op), pq.Array(bucket),
-		pq.Array(obj), pq.Array(status), pq.Array(code), pq.Array(reqID), pq.Array(in), pq.Array(out), pq.Array(host)); err != nil {
+		pq.Array(obj), pq.Array(status), pq.Array(code), pq.Array(reqID), pq.Array(in), pq.Array(out), pq.Array(host), pq.Array(dur)); err != nil {
 		return fmt.Errorf("write %d request log rows: %w", n, err)
 	}
 	for c := range codes {
@@ -268,6 +281,7 @@ func (s *Server) logManagementRequest(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		started := time.Now()
 		lw := &mgmtLogWriter{ResponseWriter: w}
 		var in int64
 		if r.ContentLength > 0 {
@@ -288,6 +302,6 @@ func (s *Server) logManagementRequest(next http.Handler) http.Handler {
 		}
 		s.accessLogTracker.Record(r.Context(), s3AccessEvent{tenantID: tenantID, operation: op, statusCode: status,
 			bytesSent: lw.bytes, bytesReceived: in, requestID: w.Header().Get("X-Request-Id"), errorCode: lw.errCode,
-			keyID: keyID, host: "api", loggedAt: time.Now()})
+			keyID: keyID, host: "api", loggedAt: time.Now(), durationMS: msSince(started)})
 	})
 }

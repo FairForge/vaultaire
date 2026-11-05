@@ -30,6 +30,10 @@ type Row struct {
 	BytesIn    int64     `json:"bytes_in"`
 	BytesOut   int64     `json:"bytes_out"`
 	Host       string    `json:"host"`
+	// DurationMS is how long the request took, in milliseconds (WP-LOG-2):
+	// the origin's own measure, or the data-plane host's for an edge row;
+	// absent when not measured (a row written before, an EdgeNoCommit row).
+	DurationMS *int64 `json:"duration_ms,omitempty"`
 }
 
 // Query filters a tenant's request log.
@@ -104,7 +108,7 @@ func Read(ctx context.Context, db *sql.DB, q Query) ([]Row, string, error) {
 	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT l.id, l.logged_at, l.key_id, l.op, l.bucket, l.object_key, l.status, l.error_code,
-		       COALESCE(s.suggestion, ''), l.request_id, l.bytes_in, l.bytes_out, l.host
+		       COALESCE(s.suggestion, ''), l.request_id, l.bytes_in, l.bytes_out, l.host, l.duration_ms
 		  FROM request_log l
 		  LEFT JOIN request_suggestions s ON s.error_code = l.error_code AND l.error_code <> ''
 		 WHERE l.tenant_id = $1
@@ -123,9 +127,13 @@ func Read(ctx context.Context, db *sql.DB, q Query) ([]Row, string, error) {
 	var out []Row
 	for rows.Next() {
 		var r Row
+		var dur sql.NullInt64
 		if err := rows.Scan(&r.ID, &r.LoggedAt, &r.KeyID, &r.Op, &r.Bucket, &r.Key, &r.Status, &r.ErrorCode,
-			&r.Suggestion, &r.RequestID, &r.BytesIn, &r.BytesOut, &r.Host); err != nil {
+			&r.Suggestion, &r.RequestID, &r.BytesIn, &r.BytesOut, &r.Host, &dur); err != nil {
 			return nil, "", fmt.Errorf("read the request log: %w", err)
+		}
+		if dur.Valid {
+			r.DurationMS = &dur.Int64
 		}
 		out = append(out, r)
 	}
