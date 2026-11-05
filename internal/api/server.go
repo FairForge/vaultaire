@@ -245,6 +245,10 @@ type Server struct {
 	backendCapacity *BackendCapacityRunner
 	// catalogueFilter is the catalogue_filter job (WP-EDGE-4 PR D).
 	catalogueFilter *CatalogueFilterJob
+	// edgeWorkerMetrics is the edge_worker_metrics job (WP-LOG-2,
+	// edge_worker_metrics.go); nil without both Cloudflare settings or a
+	// database.
+	edgeWorkerMetrics *EdgeWorkerMetricsJob
 	// multipartMaxUploadBytes caps a single multipart upload's accumulated
 	// in-flight part bytes (0 = unlimited). Part data lives unbilled on local
 	// disk until complete — without a cap one upload can fill the disk.
@@ -616,6 +620,11 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	// set-but-unusable = a refused boot, never "vendor view off").
 	s.backendCapacity = NewBackendCapacityRunner(s.db, s.engine, logger)
 	s.catalogueFilter = newCatalogueFilterJob(s)
+	// The Worker's health from Cloudflare's free GraphQL metrics (WP-LOG-2,
+	// D-LOG-5): the Worker keeps no log, so the origin pulls its counts.
+	if s.db != nil {
+		s.edgeWorkerMetrics = setupEdgeWorkerMetrics(os.Getenv, os.ReadFile, logger)
+	}
 	if s.backendCapacity != nil {
 		key, err := idrive.LoadResellerKey(os.Getenv, os.ReadFile)
 		if err != nil {

@@ -160,6 +160,11 @@ func (s *Server) initMetrics() {
 		if s.backendCapacity != nil && s.db != nil {
 			reg.MustRegister(newCapacityCollector(s.db, s.backendCapacity.JobName, s.logger))
 		}
+		// WP-LOG-2: the Worker's invocations and CPU p99 by script and
+		// status — the last edge_worker_metrics run, on scrape.
+		if s.edgeWorkerMetrics != nil && s.db != nil {
+			reg.MustRegister(newEdgeWorkerCollector(s.db, s.edgeWorkerMetrics.JobName, s.logger))
+		}
 		// Invalid houses from Stripe, acknowledged not retried (RP20-4).
 		reg.MustRegister(billing.Collectors()...)
 		reg.MustRegister(entitlementsLapsed)

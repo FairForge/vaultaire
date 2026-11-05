@@ -1,0 +1,51 @@
+# promtool unit test of vaultaire-synthetic.yml (WP-LOG-2: the edge leg).
+# Run: bash deploy/monitoring/promtool-test.sh
+rule_files:
+  - vaultaire-synthetic.yml
+
+evaluation_interval: 1m
+
+tests:
+  # The edge leg failing for 70 minutes fires at 65; the small cycle is green throughout.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '1x80'
+      - series: 'vaultaire_synthetic_check_edge_success'
+        values: '0x80'
+      - series: 'vaultaire_synthetic_check_success'
+        values: '1x80'
+      - series: 'vaultaire_synthetic_check_last_success_timestamp_seconds'
+        values: '0+60x80'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SyntheticEdgeLegFailing
+        exp_alerts:
+          - exp_labels:
+
+              severity: warning
+            exp_annotations:
+              summary: "The canary's edge leg has failed for an hour"
+              description: "The 4 MiB PUT → GET → DELETE through the public endpoint (the size the edge takes) has failed for 65 minutes while the small cycle may be green. journalctl -u 'vaultaire@*' | grep 'edge leg FAILED' names the op; vaultaire_synthetic_check_failures_total{op=~\"edge_.*\"}."
+      - eval_time: 60m
+        alertname: SyntheticEdgeLegFailing
+        exp_alerts: []
+  # A failed leg that recovers within the hour, and a leg not configured: silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '1x80'
+      - series: 'vaultaire_synthetic_check_edge_success'
+        values: '0x30 1x50'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SyntheticEdgeLegFailing
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: SyntheticEdgeLegFailing
+        exp_alerts: []
