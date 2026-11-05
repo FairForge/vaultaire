@@ -101,6 +101,9 @@ func (s *Server) initMetrics() {
 		// The edge mover (WP-EDGE-1 Part A): admits by outcome, bytes by
 		// data-plane host, the admit reaper.
 		reg.MustRegister(dataPlaneAdmits, dataPlaneBytes, edgeAdmitReaperTotal)
+		// WP-LOG-2: commits by outcome, pass-throughs by reason, the hosts'
+		// failure reports.
+		reg.MustRegister(dataPlaneCommits, dataPlanePassThrough, dataPlaneHostReports)
 		if s.db != nil {
 			reg.MustRegister(newDataPlaneHostsCollector(s.db, s.log()))
 			// The pool counter's drift (RP82-3).

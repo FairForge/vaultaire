@@ -312,6 +312,7 @@ func (p *S3Parser) parseHeaders(req *S3Request, r *http.Request) {
 
 // handleS3Request handles S3-compatible API requests
 func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
+	started := time.Now() // the request log's duration_ms (WP-LOG-2)
 	// An unsigned non-GET of an operational path answers an empty 200, as it
 	// always has; a SIGNED request there is a bucket's (RP56-1: the four are
 	// valid bucket names, and the credential gate sends them here).
@@ -471,7 +472,7 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 	if tenantID != "" {
 		cw = &countingResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
 		w = cw
-		defer func() { s.recordS3Access(cw, r, tenantID, s3Req, ingressBytes) }()
+		defer func() { s.recordS3Access(cw, r, tenantID, s3Req, ingressBytes, started) }()
 	}
 
 	// WP-DX-1: a test-mode (sandbox) tenant — a VLT_TEST_ key's — is
@@ -793,7 +794,8 @@ func (s *Server) handleS3Request(w http.ResponseWriter, r *http.Request) {
 // status, the bytes, the S3 error code and the request id answered — and
 // what the request named. Deferred by handleS3Request from the moment the
 // tenant is known, so a refusal after authentication is recorded too.
-func (s *Server) recordS3Access(cw *countingResponseWriter, r *http.Request, tenantID string, req *S3Request, ingress int64) {
+// started is the top of the dispatcher: the row's duration_ms (WP-LOG-2).
+func (s *Server) recordS3Access(cw *countingResponseWriter, r *http.Request, tenantID string, req *S3Request, ingress int64, started time.Time) {
 	if s.accessLogTracker == nil || tenantID == "" || tenantID == "default" {
 		return
 	}
@@ -810,7 +812,7 @@ func (s *Server) recordS3Access(cw *countingResponseWriter, r *http.Request, ten
 		bytesSent: cw.bytesWritten, bytesReceived: ingress,
 		sourceIP: extractClientIP(r), userAgent: r.UserAgent(),
 		requestID: reqID, errorCode: cw.errCode,
-		keyID: attemptedAccessKey(r), host: "origin", loggedAt: time.Now(),
+		keyID: attemptedAccessKey(r), host: "origin", loggedAt: time.Now(), durationMS: msSince(started),
 	}
 	if req != nil {
 		ev.bucket, ev.objectKey, ev.operation = req.Bucket, req.Object, req.Operation

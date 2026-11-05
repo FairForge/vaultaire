@@ -94,6 +94,20 @@ var (
 		Name: "vaultaire_data_plane_admits_total",
 		Help: "Edge admit decisions by host, op (put, part, get) and outcome: admitted, admitted_unverified (an aws-chunked write to a backend that does not verify its trailer, with no Content-MD5 — D-EDGE-30), pass_through (the origin takes the request), pass_through_small, refused (an S3 error relayed to the client), error (the control plane could not decide).",
 	}, []string{"host", "op", "outcome"})
+	// dataPlaneCommits counts every accepted commit call (WP-LOG-2): the
+	// host's reported outcome from the closed list, `other` for any other
+	// value, `replay` for a commit of a row already terminal.
+	dataPlaneCommits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_data_plane_commits_total",
+		Help: "Accepted edge commit calls by host, op (put, part, get) and outcome: the host's report (ok, backend_error, edge_error, checksum_mismatch for a write; served, fallback, error for a read), other (any other value), replay (a commit of an admit already settled — a retry).",
+	}, []string{"host", "op", "outcome"})
+	// dataPlanePassThrough counts the admits answered {edge:false} by their
+	// reason (WP-LOG-2): every reason is a constant of the code; a family
+	// with a variable suffix ("backend:<driver>") is labelled by its family.
+	dataPlanePassThrough = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "vaultaire_data_plane_pass_through_total",
+		Help: "Edge admits the origin takes ({edge:false}) by host, op and reason (the admit's reason; a reason of the form family:name is labelled by its family; unknown when empty).",
+	}, []string{"host", "op", "reason"})
 	dataPlaneBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_data_plane_bytes_total",
 		Help: "Object bytes a data-plane host moved and the control plane committed, by host and op. A POST policy form's file counts under op=put (its row's op; the admits count it under op=post).",
@@ -104,6 +118,11 @@ func init() {
 	for _, op := range []string{edgeOpPut, edgeOpPart, edgeOpGet, edgeOpPost} {
 		for _, outcome := range []string{"admitted", "admitted_unverified", "pass_through", "pass_through_small", "refused", "error"} {
 			dataPlaneAdmits.WithLabelValues(edgeHost, op, outcome)
+		}
+		if op != edgeOpPost { // a form's commit is its row's op, put
+			for _, outcome := range edgeCommitOutcomeLabels {
+				dataPlaneCommits.WithLabelValues(edgeHost, op, outcome)
+			}
 		}
 		dataPlaneBytes.WithLabelValues(edgeHost, op)
 	}
@@ -230,6 +249,10 @@ type edgeAdmitRow struct {
 	// migration 112): edge (the Worker), a node's registry name, slc (the
 	// origin in-process); "" on a row written before = edge.
 	Host string
+	// HostDurationMS is the host's own duration_ms from the commit call
+	// (WP-LOG-2, D-LOG-4) — never a column of edge_admits: set at the
+	// commit's entrance, read by recordEdgeAccess; -1 = none reported.
+	HostDurationMS int64
 }
 
 // admitHost is the host an admit is made for: the caller on ctx (the gate
@@ -251,7 +274,8 @@ func (s *Server) registerEdgeRoutes() {
 	s.router.Post("/api/v1/edge/index", s.handleEdgeIndex)
 	s.router.Post("/api/v1/edge/heartbeat", s.handleEdgeHeartbeat)
 	s.router.Post("/api/v1/edge/mirror", s.handleEdgeMirror)
-	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index, /api/v1/edge/heartbeat, /api/v1/edge/mirror")
+	s.router.Post("/api/v1/edge/report", s.handleEdgeReport)
+	s.logger.Info("edge ingest routes mounted: /api/v1/edge/admit, /api/v1/edge/commit, /api/v1/edge/index, /api/v1/edge/heartbeat, /api/v1/edge/mirror, /api/v1/edge/report")
 }
 
 // edgeNotFound answers a call that is not the Worker's: the route does not
@@ -350,9 +374,45 @@ func countEdgeAdmit(host, op string, resp edgeAdmitResponse, status int) {
 		dataPlaneAdmits.WithLabelValues(host, op, "admitted").Inc()
 	case resp.Reason == edgeReasonSmall:
 		dataPlaneAdmits.WithLabelValues(host, op, "pass_through_small").Inc()
+		dataPlanePassThrough.WithLabelValues(host, op, passThroughLabel(resp.Reason)).Inc()
 	default:
 		dataPlaneAdmits.WithLabelValues(host, op, "pass_through").Inc()
+		dataPlanePassThrough.WithLabelValues(host, op, passThroughLabel(resp.Reason)).Inc()
 	}
+}
+
+// passThroughLabel is a pass-through reason as a metric label: the reason,
+// cut at its first ':' (the family of "backend:<driver>"), unknown when
+// empty. TestEdgePassThroughReasonsAreConstants holds every call site.
+func passThroughLabel(reason string) string {
+	if family, _, ok := strings.Cut(reason, ":"); ok {
+		reason = family
+	}
+	if reason == "" {
+		return "unknown"
+	}
+	return reason
+}
+
+// edgeCommitOutcomeLabels are the commit counter's outcomes: the hosts'
+// closed list, then other and replay.
+var edgeCommitOutcomeLabels = []string{edgeOutcomeOK, edgeOutcomeBackendError, edgeOutcomeEdgeError, edgeOutcomeChecksumMismatch,
+	edgeGetServed, edgeGetFallback, edgeGetError, "other", "replay"}
+
+// countEdgeCommit counts one accepted commit call: outcome is the host's
+// report (other when outside the closed list) or replay.
+func countEdgeCommit(row edgeAdmitRow, outcome string) {
+	switch outcome {
+	case edgeOutcomeOK, edgeOutcomeBackendError, edgeOutcomeEdgeError, edgeOutcomeChecksumMismatch,
+		edgeGetServed, edgeGetFallback, edgeGetError, "replay":
+	default:
+		outcome = "other"
+	}
+	host := row.Host
+	if host == "" {
+		host = edgeHost
+	}
+	dataPlaneCommits.WithLabelValues(host, row.Op, outcome).Inc()
 }
 
 // passThrough is the {edge:false} answer with its reason.
@@ -1327,12 +1387,14 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	row.HostDurationMS = req.DurationMS // the host's own measure (WP-LOG-2)
 	switch row.State {
 	case "committed", "failed":
 		var replay edgeRelay
 		if jErr := json.Unmarshal(row.Result, &replay); jErr != nil {
 			return nil, http.StatusInternalServerError, fmt.Errorf("replay the admit's result: %w", jErr)
 		}
+		countEdgeCommit(row, "replay")
 		return &replay, http.StatusOK, nil
 	case "expired":
 		return nil, http.StatusGone, errEdgeAdmitExpired
@@ -1371,6 +1433,7 @@ func (s *Server) edgeCommit(ctx context.Context, req edgeCommitRequest) (*edgeRe
 	if state == "committed" {
 		dataPlaneBytes.WithLabelValues(row.Host, row.Op).Add(float64(bytes))
 	}
+	countEdgeCommit(row, req.Outcome)
 	s.logger.Info("edge commit", zap.String("op", row.Op), zap.String("tenant_id", row.TenantID), zap.String("bucket", row.Bucket),
 		zap.String("key", row.Key), zap.String("backend", row.Backend), zap.String("state", state), zap.Int("status", relay.Status),
 		zap.Int64("bytes", bytes), zap.Int("backend_status", req.BackendStatus), zap.Int64("duration_ms", req.DurationMS),
@@ -1399,6 +1462,7 @@ func lockEdgeAdmit(ctx context.Context, tx *sql.Tx, id string) (edgeAdmitRow, er
 	row.UploadID, row.PartNumber = uploadID.String, int(partNumber.Int64)
 	row.ContentMD5, row.ReservedFloor = md5.String, reservedFloor.String
 	row.Result = result
+	row.HostDurationMS = -1 // the commit's entrance sets the host's report
 	if len(attrs) > 0 {
 		_ = json.Unmarshal(attrs, &row.Attrs)
 	}
@@ -1782,16 +1846,7 @@ func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOu
 		// host=slc: the origin's own dispatch writes the request's row.
 		return
 	}
-	op := auth.OpPutObject
-	if row.Attrs.Via == "post" {
-		op = auth.OpPostObject
-	}
-	switch row.Op {
-	case edgeOpPart:
-		op = auth.OpUploadPart
-	case edgeOpGet:
-		op = auth.OpGetObject
-	}
+	op := edgeAccessOp(row)
 	if status == 0 {
 		status = http.StatusOK
 	}
@@ -1806,6 +1861,49 @@ func (s *Server) recordEdgeAccess(row edgeAdmitRow, status int, bytesIn, bytesOu
 	s.accessLogTracker.Record(context.Background(), s3AccessEvent{
 		tenantID: row.TenantID, bucket: row.Bucket, objectKey: row.Key, operation: op, statusCode: status,
 		bytesSent: bytesOut, bytesReceived: bytesIn, sourceIP: row.ClientIP, userAgent: ua, requestID: row.RequestID, loggedAt: time.Now(),
-		host: host, keyID: row.Attrs.KeyID,
+		host: host, keyID: row.Attrs.KeyID, durationMS: row.HostDurationMS,
+	})
+}
+
+// edgeAccessOp is the S3 operation an admit row's request was.
+func edgeAccessOp(row edgeAdmitRow) string {
+	switch row.Op {
+	case edgeOpPart:
+		return auth.OpUploadPart
+	case edgeOpGet:
+		return auth.OpGetObject
+	}
+	if row.Attrs.Via == "post" {
+		return auth.OpPostObject
+	}
+	return auth.OpPutObject
+}
+
+// recordEdgeNoCommit writes the customer's row for an admit that expired
+// without a commit (WP-LOG-2, D-LOG-3): status 0 — no answer is known —
+// error code EdgeNoCommit, the bytes a GET's expiry metered (its admitted
+// size; a write's 0), no duration. recordEdgeAccess's status rule (0 →
+// 200) is a commit's and stays. host=slc writes none: the origin's own
+// dispatch wrote the request's row.
+func (s *Server) recordEdgeNoCommit(row edgeAdmitRow) {
+	if s.accessLogTracker == nil || row.Host == dataplane.HostSLC {
+		return
+	}
+	var out int64
+	if row.Op == edgeOpGet {
+		out = row.ContentLength
+	}
+	ua := row.Attrs.UserAgent
+	if ua == "" {
+		ua = "edge"
+	}
+	host := row.Host
+	if host == "" {
+		host = edgeHost
+	}
+	s.accessLogTracker.Record(context.Background(), s3AccessEvent{
+		tenantID: row.TenantID, bucket: row.Bucket, objectKey: row.Key, operation: edgeAccessOp(row), statusCode: 0,
+		errorCode: ErrEdgeNoCommit, bytesSent: out, sourceIP: row.ClientIP, userAgent: ua, requestID: row.RequestID,
+		loggedAt: time.Now(), host: host, keyID: row.Attrs.KeyID, durationMS: -1,
 	})
 }

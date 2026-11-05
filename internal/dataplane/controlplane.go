@@ -35,6 +35,9 @@ type ControlPlane interface {
 	Commit(ctx context.Context, req CommitRequest) (CommitResponse, error)
 	// Mirror settles a mirrored PUT's mirror after its commit (RP78-2).
 	Mirror(ctx context.Context, req MirrorSettle) (MirrorSettleResponse, error)
+	// Report sends the host's failures (WP-LOG-2, report.go): the host
+	// keeps no log; the origin writes one line and one counter.
+	Report(ctx context.Context, rep HostReport) error
 }
 
 // MirrorSettle is POST /api/v1/edge/mirror: what a mirror that outlived the
