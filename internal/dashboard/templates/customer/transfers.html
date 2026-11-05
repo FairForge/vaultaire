@@ -44,7 +44,7 @@
     <label>Secret key <input type="password" name="secret_key" autocomplete="new-password" required></label>
     <label>Into your bucket <select name="bucket" required>{{range .Buckets}}<option value="{{.}}"{{if eq . $.Form.Bucket}} selected{{end}}>{{.}}</option>{{end}}</select></label>
     <button class="btn btn-primary" type="submit">Start</button>
-    <p class="text-muted">Use a <strong>read-only</strong> key made for this. Stored keeps it only while the transfer runs, sealed under your account's key, and deletes it when the transfer ends or you cancel it. The copied files count against your storage like any upload; a transfer pauses when your storage is full and resumes when you say so.</p>
+    <p class="text-muted">Use a <strong>read-only</strong> key made for this. Stored keeps it only while the transfer runs and deletes it when the transfer ends or you cancel it. The copied files count against your storage like any upload; a transfer pauses when your storage is full and resumes when you say so. A file larger than about 1.4 GiB is not copied yet: it is marked failed and the rest goes on.</p>
 </form>
 {{end}}
 {{end}}

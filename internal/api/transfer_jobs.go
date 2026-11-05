@@ -57,6 +57,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
@@ -70,8 +71,21 @@ const (
 	transferListPage     = 1000
 	transferMaxParts     = 10000
 	transferItemAttempts = 3
+	// transferDestAttempts: tries of an item the DESTINATION answered a 5xx /
+	// 503 to — ours, not the customer's: a run apart each, so half an hour of
+	// an outage of ours costs one item, never the listing (RP98-2).
+	transferDestAttempts = 30
 	transferRunTime      = 50 * time.Second
-	transferItemBatch    = 100
+	// transferMaxRunTime is the scheduler's bound on a run: a copy lives
+	// inside one run (RB17-2 — nothing of an object is kept across runs), so
+	// it is also the longest one object's copy may take (RP98-1).
+	transferMaxRunTime = 58 * time.Second
+	// transferFreshStart: a copy that began this soon after the run did had
+	// the whole run; only such a copy's cut counts as a try.
+	transferFreshStart = 5 * time.Second
+	// transferMinSlice: the least time a due job gets of a run (RP98-3).
+	transferMinSlice  = 5 * time.Second
+	transferItemBatch = 100
 	// The knobs' defaults (Step 0 answer 3).
 	defaultTransferRateMax     = 25 << 20
 	defaultTransferOriginShare = 50 << 20
@@ -240,7 +254,17 @@ type TransferJob struct {
 	// database); runTime bounds a run's copying.
 	JobName    string
 	onlyTenant string
-	runTime    time.Duration
+	// onlyTenants is onlyTenant for a test of several tenants' jobs.
+	onlyTenants []string
+	runTime     time.Duration
+	// maxRun is the scheduler's bound on a run (transferMaxRunTime): the
+	// longest one object's copy may take.
+	maxRun time.Duration
+	// minSlice is the least time a due job gets of a run (transferMinSlice).
+	minSlice time.Duration
+	// turn picks which of n due tenants goes first this run (RP98-3): the
+	// minute of the clock, so the first slice rotates run by run.
+	turn func(n int) int
 	// stopAfter, when set, ends a run after that many settled items (a
 	// test's restart).
 	stopAfter int
@@ -253,53 +277,86 @@ func newTransferJob(s *Server) *TransferJob {
 	for _, o := range []string{itemCopied, itemSkipped, itemFailed} {
 		transferItems.WithLabelValues(o)
 	}
-	return &TransferJob{s: s, JobName: transferJobName, runTime: transferRunTime}
+	return &TransferJob{s: s, JobName: transferJobName, runTime: transferRunTime, maxRun: transferMaxRunTime, minSlice: transferMinSlice,
+		turn: func(n int) int { return int((time.Now().Unix() / 60) % int64(n)) }}
 }
 
 func (j *TransferJob) spec() jobSpec {
-	return jobSpec{Name: j.JobName, Every: time.Minute, BootDelay: 3 * time.Minute, MaxRunTime: 58 * time.Second,
+	return jobSpec{Name: j.JobName, Every: time.Minute, BootDelay: 3 * time.Minute, MaxRunTime: transferMaxRunTime,
 		Run: func(ctx context.Context) (jobReport, error) {
 			n, err := j.RunOnce(ctx)
 			return jobReport{Rows: int64(n)}, err
 		}}
 }
 
-// RunOnce works the due jobs, oldest first, each under its tenant's lock,
-// until the run's time is spent; the items it settled.
+// transferRun is one run's clock: when it began, when THIS job's slice of it
+// ends, and the run's hard end (the scheduler's bound — a copy in flight is
+// cut there).
+type transferRun struct {
+	start, sliceEnd, hardEnd time.Time
+}
+
+// RunOnce works the due jobs — one job a tenant per run, each tenant a slice
+// of the run's time, the first slice rotating run by run (RP98-3: the oldest
+// job used to take every run whole, and no other tenant's job began until it
+// had finished) — each under its tenant's lock; the items it settled.
 func (j *TransferJob) RunOnce(ctx context.Context) (int, error) {
-	until := time.Now().Add(j.runTime)
-	q := `SELECT id, tenant_id FROM transfer_jobs WHERE state IN ('pending', 'running')`
+	start := time.Now()
+	until := start.Add(j.runTime)
+	hardEnd := start.Add(j.maxRun)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(hardEnd) {
+		hardEnd = dl
+	}
+	// Each tenant's oldest due job (DISTINCT ON: a tenant with hundreds of
+	// due jobs cannot fill the list and hide the others'), in a stable order.
+	q := `SELECT DISTINCT ON (tenant_id) id, tenant_id FROM transfer_jobs WHERE state IN ('pending', 'running')`
 	args := []any{}
-	if j.onlyTenant != "" {
+	switch {
+	case len(j.onlyTenants) > 0:
+		q += ` AND tenant_id = ANY($1)`
+		args = append(args, pq.Array(j.onlyTenants))
+	case j.onlyTenant != "":
 		q += ` AND tenant_id = $1`
 		args = append(args, j.onlyTenant)
 	}
-	rows, err := j.s.db.QueryContext(ctx, q+` ORDER BY created_at LIMIT 50`, args...)
+	rows, err := j.s.db.QueryContext(ctx, q+` ORDER BY tenant_id, created_at, id LIMIT 500`, args...)
 	if err != nil {
 		return 0, fmt.Errorf("transfer: the due jobs: %w", err)
 	}
 	type due struct{ id, tenant string }
-	var list []due
+	var turns []due
 	for rows.Next() {
 		var d due
 		if err := rows.Scan(&d.id, &d.tenant); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
-		list = append(list, d)
+		turns = append(turns, d)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	if len(turns) == 0 {
+		return 0, nil
+	}
+	first := j.turn(len(turns)) % len(turns)
+	turns = append(turns[first:], turns[:first]...)
 	settled := 0
-	busy := map[string]bool{}
-	for _, d := range list {
-		if time.Now().After(until) || ctx.Err() != nil || busy[d.tenant] {
-			continue
+	for i, d := range turns {
+		now := time.Now()
+		if !now.Before(until) || ctx.Err() != nil {
+			break
 		}
-		busy[d.tenant] = true // one job a tenant per run
-		n, err := j.runTenantJob(ctx, d.id, d.tenant, until)
+		slice := until.Sub(now) / time.Duration(len(turns)-i)
+		if slice < j.minSlice {
+			slice = j.minSlice
+		}
+		sliceEnd := now.Add(slice)
+		if sliceEnd.After(until) {
+			sliceEnd = until
+		}
+		n, err := j.runTenantJob(ctx, d.id, d.tenant, transferRun{start: start, sliceEnd: sliceEnd, hardEnd: hardEnd})
 		settled += n
 		if err != nil {
 			j.s.log().Warn("transfer: a job's run failed", zap.String("job", d.id), zap.String("tenant_id", d.tenant), zap.Error(err))
@@ -313,7 +370,7 @@ func (j *TransferJob) RunOnce(ctx context.Context) (int, error) {
 
 // runTenantJob takes the tenant's lock (a session lock on its own
 // connection) and works the job.
-func (j *TransferJob) runTenantJob(ctx context.Context, id, tenantID string, until time.Time) (int, error) {
+func (j *TransferJob) runTenantJob(ctx context.Context, id, tenantID string, run transferRun) (int, error) {
 	conn, err := j.s.db.Conn(ctx)
 	if err != nil {
 		return 0, err
@@ -329,16 +386,17 @@ func (j *TransferJob) runTenantJob(ctx context.Context, id, tenantID string, unt
 	defer func() {
 		_, _ = conn.ExecContext(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(hashtext('transfer'), hashtext($1))`, tenantID)
 	}()
-	return j.work(ctx, id, until)
+	return j.work(ctx, id, run)
 }
 
 func (j *TransferJob) load(ctx context.Context, id string) (*transferRow, error) {
 	return scanTransfer(j.s.db.QueryRowContext(ctx, `SELECT `+transferColumns+` FROM transfer_jobs WHERE id = $1`, id))
 }
 
-// work lists and copies until the job is done, paused, or the run's time
-// is spent.
-func (j *TransferJob) work(ctx context.Context, id string, until time.Time) (int, error) {
+// work lists and copies until the job is done, paused, or its slice of the
+// run is spent.
+func (j *TransferJob) work(ctx context.Context, id string, run transferRun) (int, error) {
+	until := run.sliceEnd
 	t, err := j.load(ctx, id)
 	if err != nil {
 		return 0, err
@@ -392,7 +450,7 @@ func (j *TransferJob) work(ctx context.Context, id string, until time.Time) (int
 			if time.Now().After(until) || ctx.Err() != nil || (j.stopAfter > 0 && settled >= j.stopAfter) {
 				return settled, nil
 			}
-			stop, err := j.copyItem(ctx, t, src, jobLimit, it)
+			stop, err := j.copyItem(ctx, t, src, jobLimit, it, run)
 			if err != nil {
 				return settled, err
 			}
@@ -408,7 +466,7 @@ func (j *TransferJob) work(ctx context.Context, id string, until time.Time) (int
 // listPage lists one page after the cursor into transfer_items; stop = the
 // job paused or ended.
 func (j *TransferJob) listPage(ctx context.Context, t *transferRow, src *transferSource) (bool, error) {
-	page, more, err := src.list(ctx, t.Cursor, transferListPage)
+	page, last, more, err := src.list(ctx, t.Cursor, transferListPage)
 	if err != nil {
 		class, code := classifySourceError(err)
 		switch class {
@@ -417,6 +475,8 @@ func (j *TransferJob) listPage(ctx context.Context, t *transferRow, src *transfe
 		case sourceGone, sourceUnreachable:
 			_, err := j.s.db.ExecContext(ctx, transferEndSQL, t.ID, transferFailed, "the source listing: "+code)
 			return true, err
+		case sourceCut:
+			return true, nil // the run's end: listed next run
 		}
 		_, _ = j.s.db.ExecContext(ctx, `UPDATE transfer_jobs SET last_error = $2, updated_at = NOW() WHERE id = $1`, t.ID, "the source listing: "+code)
 		return true, nil // retried next run
@@ -432,10 +492,16 @@ func (j *TransferJob) listPage(ctx context.Context, t *transferRow, src *transfe
 			ON CONFLICT DO NOTHING`, t.ID, t.TenantID, it.Key, it.ETag, it.Size); err != nil {
 			return false, err
 		}
-		cursor = it.Key
+	}
+	// The cursor is the last key the SOURCE listed, a folder marker included,
+	// and the listing ends when the source says so (RP98-6): a page of nothing
+	// but markers used to read as "listed all", and every object behind it was
+	// never listed while the job said completed.
+	if last != "" {
+		cursor = last
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE transfer_jobs SET list_cursor = $2, listed = listed + $3, listed_all = $4, updated_at = NOW() WHERE id = $1`,
-		t.ID, cursor, len(page), !more || len(page) == 0); err != nil {
+		t.ID, cursor, len(page), !more || last == ""); err != nil {
 		return false, err
 	}
 	return false, tx.Commit()
@@ -559,14 +625,33 @@ func (j *TransferJob) alreadyThere(ctx context.Context, t *transferRow, it trans
 	return n > 0, err
 }
 
-// copyItem copies one item; stop = the job paused (the run moves on).
-func (j *TransferJob) copyItem(ctx context.Context, t *transferRow, src *transferSource, jobLimit *rate.Limiter, it transferItem) (bool, error) {
+// copyItem copies one item; stop = this job's slice of the run ends here
+// (it paused, was cut, or a failure is to be retried a run later).
+func (j *TransferJob) copyItem(ctx context.Context, t *transferRow, src *transferSource, jobLimit *rate.Limiter, it transferItem, run transferRun) (bool, error) {
 	there, err := j.alreadyThere(ctx, t, it)
 	if err != nil {
 		return false, err
 	}
 	if there {
 		return false, j.settle(ctx, t, it, itemSkipped, "", "", 0)
+	}
+	// One object's copy lives inside one run (RB17-2: nothing of it is kept
+	// across runs). So an object the rate cannot move inside a run can never
+	// be copied (RP98-1): it used to be read again from its first byte every
+	// minute, for ever, its attempts never counted and every item behind it
+	// waiting. It fails at once, before a byte of it is read.
+	need := time.Duration(float64(it.Size) / float64(max(t.Rate, 1)) * float64(time.Second))
+	if need > j.maxRun {
+		return false, j.settle(ctx, t, it, itemFailed, fmt.Sprintf(
+			"%d bytes cannot be copied inside one run at this transfer's rate (%d bytes a second): copying one object across runs is not built yet",
+			it.Size, t.Rate), "", 0)
+	}
+	// A copy that began with the run had the whole run; a later one starts
+	// only when the rate can finish it before the run's end — else it is the
+	// first of a later run, and nothing of it is read twice.
+	fresh := time.Since(run.start) <= transferFreshStart
+	if !fresh && need > time.Until(run.hardEnd) {
+		return true, nil
 	}
 	// A cancel or pause under the copy cuts it: the body stops, the write
 	// commits nothing.
@@ -588,11 +673,12 @@ func (j *TransferJob) copyItem(ctx context.Context, t *transferRow, src *transfe
 		}
 	}()
 	out := j.s.transferCopy(cctx, t, src, jobLimit, it)
-	if ctx.Err() != nil {
-		return true, nil // the run's end: the item stays pending
-	}
-	if cctx.Err() != nil {
+	switch {
+	case ctx.Err() == nil && cctx.Err() != nil:
 		return true, nil // cancelled or paused: nothing written, nothing settled
+	case ctx.Err() != nil || out.cut:
+		// The run's end. A stop of the process (Canceled) is nobody's try.
+		return true, j.cut(ctx, t, it, fresh && !errors.Is(ctx.Err(), context.Canceled))
 	}
 	switch {
 	case out.err == nil:
@@ -605,12 +691,48 @@ func (j *TransferJob) copyItem(ctx context.Context, t *transferRow, src *transfe
 		return true, err
 	case out.sourceDenied:
 		return true, j.pause(ctx, t.ID, "source_denied", out.code)
-	case out.permanent || it.Attempts+1 >= transferItemAttempts:
+	case out.permanent:
 		return false, j.settle(ctx, t, it, itemFailed, out.err.Error(), "", 0)
 	}
-	_, err = j.s.db.ExecContext(ctx, `UPDATE transfer_items SET attempts = attempts + 1, last_error = $3, updated_at = NOW()
-		WHERE job_id = $1 AND source_key = $2`, t.ID, it.Key, out.err.Error())
-	return false, err
+	// A transient failure (RP98-2): the try is spent and this job's slice
+	// ends, so the next try is a run later. The tries used to follow each
+	// other in the same second — a minute of a 503 of ours, or of the source's
+	// throttle, failed the whole listing for good and the job said completed.
+	limit := transferItemAttempts
+	if out.ours {
+		limit = transferDestAttempts
+	}
+	if it.Attempts+1 >= limit {
+		return false, j.settle(ctx, t, it, itemFailed, out.err.Error(), "", 0)
+	}
+	if _, err := j.s.db.ExecContext(ctx, `UPDATE transfer_items SET attempts = attempts + 1, last_error = $3, updated_at = NOW()
+		WHERE job_id = $1 AND source_key = $2`, t.ID, it.Key, out.err.Error()); err != nil {
+		return true, err
+	}
+	_, err = j.s.db.ExecContext(ctx, `UPDATE transfer_jobs SET last_error = $2, updated_at = NOW() WHERE id = $1`,
+		t.ID, out.err.Error()+" — tried again next run")
+	return true, err
+}
+
+// cut is a copy the run's end stopped: nothing was written. When the copy
+// had the whole run (counts), it is a try — the third fails the item, so an
+// object the source serves too slowly for one run stops being read again
+// from its first byte every minute (RP98-1). The run's context is over: the
+// row is written on a detached one.
+func (j *TransferJob) cut(ctx context.Context, t *transferRow, it transferItem, counts bool) error {
+	if !counts {
+		return nil
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if it.Attempts+1 >= transferItemAttempts {
+		return j.settle(dctx, t, it, itemFailed, fmt.Sprintf(
+			"%d bytes were not copied inside one run in %d tries: copying one object across runs is not built yet", it.Size, transferItemAttempts), "", 0)
+	}
+	_, err := j.s.db.ExecContext(dctx, `UPDATE transfer_items SET attempts = attempts + 1, last_error = $3, updated_at = NOW()
+		WHERE job_id = $1 AND source_key = $2 AND state = 'pending'`, t.ID, it.Key,
+		fmt.Sprintf("the copy did not finish inside one run (try %d of %d)", it.Attempts+1, transferItemAttempts))
+	return err
 }
 
 // copyOutcome is one copy's answer.
@@ -620,6 +742,8 @@ type copyOutcome struct {
 	quota        bool // the destination's quota refused it
 	sourceDenied bool
 	permanent    bool // retrying cannot help (a destination's 4xx, the source object gone)
+	ours         bool // the destination's 5xx / 503 / 408: our failure, tried again a run later
+	cut          bool // the run's end stopped the copy: nobody's failure
 	code         string
 }
 
@@ -743,6 +867,12 @@ func (s *Server) transferS3(ctx context.Context, tenantID, method, bucket, key s
 	r.Header.Set("User-Agent", "stored-transfer/1")
 	tn := &tenant.Tenant{ID: tenantID, Namespace: fmt.Sprintf("tenant/%s/", tenantID), Plan: "starter", Status: "active"}
 	r = r.WithContext(tenant.WithTenant(common.WithTenantID(ctx, tenantID), tn))
+	if tenant.IsSystemBucket(bucket) {
+		// handleS3Request's gate (systemBucketRefused), which a direct call
+		// of the handlers is past (RP98-11).
+		WriteS3Error(rec, ErrNoSuchBucket, u.Path, generateRequestID())
+		return rec
+	}
 	if s.db != nil && isTenantSuspended(r.Context(), s.db, tenantID) {
 		WriteS3Error(rec, ErrAccountSuspended, u.Path, generateRequestID())
 		return rec
@@ -785,6 +915,8 @@ func destOutcome(rec *relayRecorder) copyOutcome {
 		out.quota = true
 	case rec.status >= 400 && rec.status < 500 && rec.status != http.StatusRequestTimeout && code != "SlowDown":
 		out.permanent = true
+	default:
+		out.ours = true
 	}
 	return out
 }
@@ -799,6 +931,11 @@ func sourceOutcome(err error) copyOutcome {
 	case sourceGone:
 		out.permanent = true
 		out.err = fmt.Errorf("the source object is gone or changed: %s", code)
+	case sourceWrongRange:
+		out.permanent = true
+		out.err = errors.New(code)
+	case sourceCut:
+		out.cut = true
 	}
 	return out
 }
@@ -841,7 +978,11 @@ func (r *transferRanges) open() (transferObjectAttrs, error) {
 	if n <= 0 {
 		n = 1 // an empty object: one byte asked, none given
 	}
-	body, out, err := r.src.rangeGet(r.ctx, r.key, r.etag, 0, n)
+	total := r.size
+	if total == 0 {
+		total = -1 // an empty object's one-byte probe: any answer is no bytes
+	}
+	body, out, err := r.src.rangeGet(r.ctx, r.key, r.etag, 0, n, total)
 	if err != nil {
 		if r.size == 0 {
 			// An empty object answers 416 to any range: its attributes are
@@ -878,7 +1019,7 @@ func (r *transferRanges) Read(p []byte) (int, error) {
 				r.first = nil
 			}
 			n := min(transferRangeBytes, r.size-r.off)
-			body, _, err := r.src.rangeGet(r.ctx, r.key, r.etag, r.off, n)
+			body, _, err := r.src.rangeGet(r.ctx, r.key, r.etag, r.off, n, r.size)
 			if err != nil {
 				r.err = err
 				return 0, err
@@ -890,7 +1031,12 @@ func (r *transferRanges) Read(p []byte) (int, error) {
 	for _, l := range r.limits {
 		if l != nil {
 			if err := l.WaitN(r.ctx, int(want)); err != nil {
-				return 0, err
+				// The bucket will not wait past the run's end (it refuses
+				// BEFORE the deadline): the run cut the copy — not the
+				// destination's failure, which an unset err used to read
+				// as (400 IncompleteBody, the item failed for good; RP98-1).
+				r.err = fmt.Errorf("%w: %w", errTransferCut, err)
+				return 0, r.err
 			}
 		}
 	}
