@@ -860,9 +860,14 @@ name (a base name only: a name with `/`, `\` or `..` is 400). Object fields:
 the XML `PostResponse` (`Location`, `Bucket`, `Key`, `ETag`); every success
 carries `ETag` and `Location`, and echoes the `x-amz-meta-*` fields.
 
-**Not supported** (400): `success_action_redirect` (an open redirect —
-answer with a status and redirect in your page), `acl` other than `private`
-(a bucket's mode decides who reads it), `tagging`, SigV2 policies.
+**Not supported:** `success_action_redirect` (an open redirect — answer
+with a status and redirect in your page) and `acl` other than `private` (a
+bucket's mode decides who reads it) are 400 `InvalidArgument`; a SigV2
+policy (`AWSAccessKeyId`, no `x-amz-algorithm`) is 400 `InvalidArgument`;
+`Content-Encoding: aws-chunked` (a transfer framing, never an object
+attribute) is 400 `InvalidArgument`; `tagging`, the legal hold and any other
+`x-amz-*` field a PUT would not apply (a grant, …) are 501 `NotImplemented`
+— never accepted and dropped.
 
 **Errors**: a file over the policy's `content-length-range` is 400
 `EntityTooLarge` (under it `EntityTooSmall`) and nothing is written or

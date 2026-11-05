@@ -106,6 +106,10 @@ the design above WITH these changes; where they disagree, this section wins.
   10 TB on a 30 d cycle is ~333 GB/day, ~4 MB/s — nothing for Lyve (no egress fee).
   `VaultParityScrubBacklog` then means what it says: a row unscrubbed for longer than
   the cycle + 7 d.
+  *The blob scrub (Part 2) reuses this rule per backend:* each run reads the footprint's
+  share, **or one blob, whichever is larger** (RP96-14: the check runs before each read,
+  so a run's overshoot is one whole blob); since Stage 1a Prompt 59 a blob larger than one
+  piece on a backend with ranged reads is read across runs (RP96-2).
 - **A2 — prove the copy rebuilds, not only that the shards are unchanged.** Digests
   recorded at protect time match whatever protect wrote; a parity computed wrong passes
   every digest check. `protect` already reads the whole stored object to compute the

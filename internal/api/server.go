@@ -120,10 +120,13 @@ type Server struct {
 	egress           *egressMeter // per-tenant month egress counter + throttle (WP-R10-9)
 	// The public OAuth endpoints' per-IP limits (RP90-3, agent_oauth.go).
 	oauthRegisterLimiter, oauthTokenLimiter *dashmw.LoginRateLimiter
-	googleOAuth                             *oauth2.Config
-	githubOAuth                             *oauth2.Config
-	mfaService                              *auth.MFAService
-	mfaPendingStore                         *dashboard.MFAPendingStore
+	// oauthRegisterPreLimiter paces /oauth/register per network BEFORE any
+	// database work (RP96-19); generous — claude.ai's users share one egress.
+	oauthRegisterPreLimiter *dashmw.LoginRateLimiter
+	googleOAuth             *oauth2.Config
+	githubOAuth             *oauth2.Config
+	mfaService              *auth.MFAService
+	mfaPendingStore         *dashboard.MFAPendingStore
 	// loginLockout is the ONE per-account sign-in lockout of both surfaces
 	// (Stage 1a Prompt 41 item 1, RP57-2): the dashboard's forms through
 	// dashboard.Deps.Lockout and POST /auth/login here.

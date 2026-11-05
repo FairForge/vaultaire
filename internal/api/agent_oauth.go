@@ -34,6 +34,9 @@ import (
 const (
 	oauthPerMinute          = 10
 	oauthClientsPerIPPerDay = auth.OAuthClientsPerNetworkPerDay
+	// oauthRegisterPrePerMinute bounds every /oauth/register request of a
+	// network, identical ones included, before the database (RP96-19).
+	oauthRegisterPrePerMinute = 600
 )
 
 func (s *Server) registerAgentOAuthRoutes() {
@@ -42,6 +45,9 @@ func (s *Server) registerAgentOAuthRoutes() {
 	}
 	if s.oauthTokenLimiter == nil {
 		s.oauthTokenLimiter = dashmw.NewRateLimiter(time.Minute, oauthPerMinute)
+	}
+	if s.oauthRegisterPreLimiter == nil {
+		s.oauthRegisterPreLimiter = dashmw.NewRateLimiter(time.Minute, oauthRegisterPrePerMinute)
 	}
 	s.router.Get("/.well-known/oauth-authorization-server", s.handleOAuthMetadata)
 	s.router.Post("/oauth/register", s.handleOAuthRegister)
@@ -93,6 +99,9 @@ func oauthError(w http.ResponseWriter, status int, code, description string) {
 // handleOAuthRegister is RFC 7591's registration: a public client (no
 // secret: PKCE is its proof).
 func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	if oauthLimitedKey(w, s.oauthRegisterPreLimiter, clientip.FromRequest(r), "60") {
+		return
+	}
 	if s.db == nil {
 		oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "no database")
 		return

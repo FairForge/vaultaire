@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/FairForge/vaultaire/internal/common"
+	"github.com/FairForge/vaultaire/internal/crypto"
 	"github.com/FairForge/vaultaire/internal/drivers"
 )
 
@@ -180,4 +181,78 @@ func (f *edgeFixture) storedBytes(key string) []byte {
 	b, err := io.ReadAll(rc)
 	require.NoError(f.t, err)
 	return b
+}
+
+// RP96-15: a wrong blob with no mirror wrote one row per cycle for ever (×
+// up to 1,000 for a chunk). A finding is one row per (tenant, address,
+// verdict, file): found again, its found_at is the last sighting (the
+// verified line's query reads it, unchanged), first_found_at the first,
+// times the count.
+func TestScrub_AFindingFoundAgainIsOneRow(t *testing.T) {
+	f := setupBlobScrubFixture(t, 24*time.Hour)
+	f.job.Every = 24 * time.Hour
+	f.putObject("bad.bin", testBytes(1000), nil)
+	f.drv.mu.Lock()
+	for k, b := range f.drv.objects {
+		if len(b) == 1000 {
+			f.drv.objects[k] = b[:999]
+		}
+	}
+	f.drv.mu.Unlock()
+	f.run()
+	require.Len(t, f.findings(), 1)
+	f.exec(`UPDATE scrub_findings SET found_at = NOW() - interval '2 days', first_found_at = NOW() - interval '2 days' WHERE tenant_id = $1`, f.tenantID)
+
+	f.job.now = func() time.Time { return time.Now().Add(25 * time.Hour) } // the next cycle
+	f.run()
+	rows := f.findings()
+	require.Len(t, rows, 1, "the same finding again is the same row")
+	var times int
+	var first, last time.Time
+	require.NoError(t, f.db.QueryRow(`SELECT times, first_found_at, found_at FROM scrub_findings WHERE tenant_id = $1`, f.tenantID).Scan(&times, &first, &last))
+	assert.Equal(t, 2, times)
+	assert.True(t, first.Before(time.Now().Add(-47*time.Hour)), "first_found_at is the first sighting")
+	assert.True(t, last.After(time.Now().Add(-time.Minute)), "found_at is the last")
+}
+
+// RP96-16: an edge-codec chunk that does not open was a `mismatch` — a key
+// problem labelled as corrupt bytes, and "repaired" from a copy of the same
+// bytes. Its stored MD5 (the row's ciphertext_hash, the backend's ETag of
+// the sealed bytes) is compared first: wrong bytes are a mismatch; right
+// bytes that do not open are labelled apart, and never repaired.
+func TestScrub_ACodecChunkThatDoesNotOpenIsNotAMismatch(t *testing.T) {
+	f := setupCodecFixture(t)
+	j := newBlobScrubJob(f.srv, 24*time.Hour)
+	require.NotNil(t, j)
+	blob := testBytes(4096) // no 0x06 blob: it cannot open
+	sum := md5.Sum(blob)    // #nosec G401
+	it := scrubItem{kind: scrubKindChunk, scope: f.tenantID, hash: strings.Repeat("ab", 32), storageKey: "_chunks/x",
+		encrypted: true, encAlgo: crypto.EdgeChunkEncryptionAlgo, ciphertextHash: hex.EncodeToString(sum[:]), keyVersion: 1}
+	v, detail := j.verifyChunk(context.Background(), it, blob)
+	assert.Equal(t, scrubUnopenable, v, detail)
+	assert.Contains(t, detail, "its stored MD5 is the row's")
+
+	other := append([]byte(nil), blob...)
+	other[0] ^= 0xff
+	v, _ = j.verifyChunk(context.Background(), it, other)
+	assert.Equal(t, scrubMismatch, v, "wrong bytes are a mismatch")
+}
+
+// RP96-17: sia is never read by the scrub — read whole through the driver it
+// bypassed hydrate-before-serve and spent the sia.storage read budget the
+// customers share. Its rows are no cycle (so a bucket on sia gets no line).
+func TestScrub_SiaIsNeverRead(t *testing.T) {
+	f := setupBlobScrubFixture(t, 24*time.Hour)
+	f.job.Every = 24 * time.Hour
+	sia := newEdgeFakeDriver()
+	sia.name = "sia"
+	f.srv.engine.AddDriver("sia", sia)
+	f.putObject("s.bin", testBytes(1000), nil)
+	f.exec(`UPDATE object_head_cache SET backend_name = 'sia' WHERE tenant_id = $1 AND bucket = $2 AND object_key = 's.bin'`, f.tenantID, f.bucket)
+	sia.getHook = func(string) error { t.Error("the scrub read sia"); return nil }
+	st := f.run().Backends["sia"]
+	require.NotNil(t, st, "its state is carried")
+	assert.Empty(t, st.Checked)
+	assert.True(t, st.CycleStartedAt.IsZero())
+	assert.Zero(t, sia.ranges.Load())
 }

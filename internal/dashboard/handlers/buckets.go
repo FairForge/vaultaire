@@ -258,7 +258,7 @@ func HandleBucketObjects(tmpl *template.Template, db *sql.DB, logger *zap.Logger
 			}
 			populateBucketObjects(r.Context(), db, sd.TenantID, bucketName, prefix, cdnBase, data)
 			if n, _ := data["ObjectCount"].(int); n > 0 || prefix != "" {
-				data["VerifiedLine"] = BucketVerifiedLine(r.Context(), db, sd.TenantID, bucketName)
+				data["VerifiedLine"] = CachedBucketVerifiedLine(r.Context(), db, sd.TenantID, bucketName)
 			}
 		} else {
 			data["ObjectCount"] = 0

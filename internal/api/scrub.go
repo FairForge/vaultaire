@@ -117,13 +117,20 @@ const (
 	scrubNoVerdict = "error"
 	// scrubChanged: the row moved under the scrub (a write, a delete).
 	scrubChanged = "changed"
+	// scrubUnopenable: a codec chunk whose stored bytes are the row's (their
+	// MD5) but do not open — a key problem, not corrupt bytes (RP96-16).
+	// Written as `unreadable` with the detail saying so; never repaired (a
+	// copy of the same bytes opens no better).
+	scrubUnopenable = "unopenable"
 	// scrubPartial: a ranged read the run's time cut; its state is saved
 	// and the next run goes on from it (RP96-2). Never a finding.
 	scrubPartial = "partial"
 )
 
-// scrubSkipBackends are never read: tape (the tape audit's).
-var scrubSkipBackends = map[string]bool{"geyser": true}
+// scrubSkipBackends are never read: tape (the tape audit's), and sia
+// (RP96-17: read whole through the driver it would bypass hydrate-before-
+// serve and spend the sia.storage read budget the customers share).
+var scrubSkipBackends = map[string]bool{"geyser": true, "sia": true}
 
 var (
 	scrubChecks = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -761,6 +768,10 @@ func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend strin
 		st.Unverifiable++
 		return verdict, "", n
 	}
+	repairable := true
+	if verdict == scrubUnopenable {
+		verdict, repairable = scrubUnreadable, false
+	}
 	// Not ok: is the row still the one read? A write or a delete that moved
 	// it while the blob was read is no finding.
 	same, err := j.stillNamed(ctx, backend, it)
@@ -772,6 +783,9 @@ func (j *BlobScrubJob) check(ctx context.Context, d engine.Driver, backend strin
 		return scrubChanged, "", n
 	}
 	j.finding(ctx, backend, it, st, res, verdict, detail)
+	if !repairable {
+		return verdict, detail, n
+	}
 	_, _, artifact := it.address(ctx)
 	if leg, ok := j.repair(ctx, d, backend, it); ok {
 		st.Repaired++
@@ -1069,7 +1083,12 @@ func (j *BlobScrubJob) verifyChunk(ctx context.Context, it scrubItem, blob []byt
 			desc := chunkDesc{scope: it.scope, storageKey: it.storageKey, plaintextHash: it.hash, encrypted: true,
 				encAlgo: crypto.EdgeChunkEncryptionAlgo, ciphertextHash: it.ciphertextHash, keyVersion: it.keyVersion}
 			if _, err := openEdgeCodecBlob(ctx, j.s.tenantKeys, desc, it.scope, blob); err != nil {
-				return scrubMismatch, "does not open: " + err.Error()
+				// The stored MD5 first (RP96-16): wrong bytes are a
+				// mismatch; right bytes that do not open are a key problem.
+				if v, why := compareDigest(md5.New(), blob, it.ciphertextHash); v != scrubOK { // #nosec G401
+					return v, why
+				}
+				return scrubUnopenable, "its stored MD5 is the row's, but it does not open (a key problem, not corrupt bytes): " + err.Error()
 			}
 			return scrubOK, ""
 		}
@@ -1127,20 +1146,28 @@ func (j *BlobScrubJob) record(ctx context.Context, it scrubItem, backend, addres
 		src = source
 	}
 	if it.kind != scrubKindChunk {
-		if _, err := j.s.db.ExecContext(ctx, `INSERT INTO scrub_findings (tenant_id, bucket, object_key, address, backend, kind, verdict, source, detail)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, it.tenant, it.bucket, it.key, address, backend, it.kind, verdict, src, detail); err != nil {
+		if _, err := j.s.db.ExecContext(ctx, `INSERT INTO scrub_findings (tenant_id, bucket, object_key, address, backend, kind, verdict, source, detail, first_found_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`+scrubFindingAgain, it.tenant, it.bucket, it.key, address, backend, it.kind, verdict, src, detail); err != nil {
 			res.note("a finding could not be written: " + err.Error())
 		}
 		return
 	}
-	if _, err := j.s.db.ExecContext(ctx, `INSERT INTO scrub_findings (tenant_id, bucket, object_key, address, backend, kind, verdict, source, detail)
-		SELECT r.tenant_id, r.bucket_name, r.object_key, $3, $4, 'chunk', $5, $6, $7
+	if _, err := j.s.db.ExecContext(ctx, `INSERT INTO scrub_findings (tenant_id, bucket, object_key, address, backend, kind, verdict, source, detail, first_found_at)
+		SELECT DISTINCT r.tenant_id, r.bucket_name, r.object_key, $3, $4, 'chunk', $5, $6, $7, NOW()
 		  FROM tenant_chunk_refs r WHERE r.dedup_scope = $1 AND r.plaintext_hash = $2
-		 ORDER BY r.tenant_id, r.bucket_name, r.object_key LIMIT $8`,
+		 ORDER BY r.tenant_id, r.bucket_name, r.object_key LIMIT $8`+scrubFindingAgain,
 		it.scope, it.hash, address, backend, verdict, src, detail, maxScrubChunkFindings); err != nil {
 		res.note("a chunk's findings could not be written: " + err.Error())
 	}
 }
+
+// scrubFindingAgain makes a finding found again the same row (RP96-15,
+// migration 126): found_at the last sighting — the verified line reads it —
+// first_found_at kept, times counted.
+const scrubFindingAgain = `
+	ON CONFLICT (tenant_id, address, verdict, bucket, object_key) DO UPDATE SET
+		found_at = NOW(), times = scrub_findings.times + 1,
+		backend = EXCLUDED.backend, source = EXCLUDED.source, detail = EXCLUDED.detail`
 
 // repair rewrites a bad blob from its ready mirror copy, at the same
 // address on the recorded backend. The copy's bytes are checked against the
