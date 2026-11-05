@@ -166,6 +166,7 @@ var sweepBucketSources = []struct{ table, query string }{
 // are not a source, and why.
 var sweepBucketTablesExcluded = map[string]string{
 	"s3_access_log":        "a log of what requests named — any string, existing or not",
+	"transfer_jobs":        "a transfer's destination (WP-XFER-1, 127): every object it wrote has its head row, and its blobs sit under the tenant's prefix, which the walk covers whole",
 	"scrub_findings":       "the blob scrub's findings (125): a finding names a bucket that has its head rows (or had, before an erasure) — the blobs themselves are under the tenant's prefix, which the walk covers whole",
 	"request_log":          "the developers' request log (WP-LOG-1): what requests named — any string, existing or not",
 	"s3_long_op_incidents": "a long operation a stopping slot cut (082): a bucket that holds bytes also has its buckets row or head rows",

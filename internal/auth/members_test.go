@@ -86,7 +86,7 @@ func TestCan_TheActionTable(t *testing.T) {
 		RoleViewer:    {ActionRead},
 		RoleDeveloper: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey},
 		RoleAdmin: {ActionRead, ActionBucketWrite, ActionKeyWrite, ActionWebhookWrite, ActionSandboxReset, ActionChildKey, ActionChildWrite, ActionMemberManage,
-			ActionManagementKey},
+			ActionManagementKey, ActionTransfer},
 		RoleOwner: Actions(),
 	}
 	for role, allowed := range want {

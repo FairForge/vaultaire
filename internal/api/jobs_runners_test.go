@@ -296,6 +296,7 @@ func TestRegisterJobs_EveryLoopIsAJobAndDailyTimesDoNotCollide(t *testing.T) {
 		"vault_parity":      "every 2m0s",
 		"vault_tape_audit":  "every 1h0m0s",
 		"webhook_retry":     "every 30s",
+		"transfer":          "every 1m0s",
 		"inventory":         "daily 00:30 UTC",
 		"chunk_orphans":     "daily 01:30 UTC",
 		"dedup_gc":          "daily 02:30 UTC",

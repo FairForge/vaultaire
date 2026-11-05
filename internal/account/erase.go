@@ -208,6 +208,10 @@ var Deleted = []Rule{
 	// bytes they name are in the tenant's prefix and went with the sweep.
 	{"retired_blobs", `DELETE FROM retired_blobs WHERE tenant_id = $1`, ByTenant},
 	{"sts_tokens", `DELETE FROM sts_tokens WHERE tenant_id = $1`, ByTenant},
+	// WP-XFER-1 (127): the transfers and their items — the source key with
+	// them (D-XFER-1). Items first (the job's FK cascades anyway).
+	{"transfer_items", `DELETE FROM transfer_items WHERE tenant_id = $1`, ByTenant},
+	{"transfer_jobs", `DELETE FROM transfer_jobs WHERE tenant_id = $1`, ByTenant},
 	// A key is the TENANT's (D-STRIPE-40): the tenant's erasure takes every
 	// key of the tenant, whichever member made it (RP84-1 a — the maker's
 	// rule alone left a developer's key live for the erased tenant). A

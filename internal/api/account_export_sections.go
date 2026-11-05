@@ -84,6 +84,7 @@ var exportExcludedTables = map[string]string{
 	"idempotency_cache": "24-hour request cache",
 	// credentials and key material
 	"sts_tokens":             "temporary credentials (secret_key); expire within hours",
+	"transfer_items":         "a transfer's per-object progress (WP-XFER-1, 127): the copied objects are exported as objects, the job as transfers",
 	"tenant_encryption_keys": "key material (read by nothing since 084)",
 	"tenant_key_versions":    "key material (wrapped tenant keys, WP-R8-1)",
 	"translog_subjects":      "key material: the salt of the transparency log's admin-read commitments (104, K4c-1); the tenant reads its entries at GET /api/v1/manage/account/transparency, never the salt",
@@ -133,6 +134,10 @@ var exportNeverColumns = map[string]string{
 	"api_keys.secret_hash":                 "credential",
 	"api_keys.secret_key":                  "credential",
 	"api_keys.secret_wrapped":              "credential (the secret wrapped under the tenant's key, 108, plan 43.7)",
+	"transfer_jobs.access_key_id":          "credential (a transfer's source key id, WP-XFER-1: another vendor's key, never exported)",
+	"transfer_jobs.secret_key":             "credential (a transfer's source secret, D-XFER-1)",
+	"transfer_jobs.secret_wrapped":         "credential (a transfer's source secret wrapped under the tenant's key, D-XFER-1)",
+	"transfer_jobs.secret_key_version":     "credential (the wrap's key version)",
 	"api_keys.secret_key_version":          "credential bookkeeping: the key version the wrapped secret needs (108)",
 	"management_keys.key_hash":             "credential: the sha256 of a management key's secret (121, WP-KEY-1)",
 	"agent_oauth_codes.code_hash":          "credential: the sha256 of a single-use OAuth code (122, WP-AGENT-1); the table is excluded as a whole",
@@ -458,6 +463,12 @@ const (
 	sqlExportAPIKeys = `
 		SELECT id, key_id, is_primary, name, permissions, bucket_scope, ip_allowlist, expires_at, revoked_at, last_used, created_at
 		  FROM api_keys WHERE user_id::text = $1 ORDER BY created_at, id`
+	// WP-XFER-1 (127): the tenant's transfers — never a key column.
+	sqlExportTransfers = `
+		SELECT id, bucket, source_endpoint, source_region, source_bucket, source_prefix, state, paused_reason, paused_error,
+		       list_cursor, listed_all, listed, copied, skipped, failed, bytes_copied, rate_bytes_per_sec, last_error,
+		       created_by, created_at, updated_at, started_at, finished_at
+		  FROM transfer_jobs WHERE tenant_id = $1 ORDER BY created_at, id`
 	// WP-KEY-1 (121): the tenant's management keys — never the hash; the
 	// hint is four characters of a secret that is 43.
 	sqlExportManagementKeys = `
@@ -641,6 +652,12 @@ var exportSections = []exportSection{
 		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
 			return j.array("api_keys", func(emit func(any)) error {
 				return streamQuery(ctx, db, emit, nil, sqlExportAPIKeys, sub.UserID)
+			})
+		}},
+	{Name: "transfers", Tables: []string{"transfer_jobs"}, SQL: []string{sqlExportTransfers},
+		render: func(ctx context.Context, db *sql.DB, j *jsonStream, sub exportSubject, _ int) error {
+			return j.array("transfers", func(emit func(any)) error {
+				return streamQuery(ctx, db, emit, nil, sqlExportTransfers, sub.TenantID)
 			})
 		}},
 	{Name: "management_keys", Tables: []string{"management_keys"}, SQL: []string{sqlExportManagementKeys},

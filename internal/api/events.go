@@ -33,8 +33,9 @@ var validEventTypes = []string{
 	"sts.token_created",
 	"webhook.test",
 	"bandwidth.alert",
-	"tenant.created",  // WP-PLAT-1: a platform made a child tenant
-	"key.cap_warning", // WP-KEY-1: a key's or a bucket's egress cap at 80 / 95 %
+	"tenant.created",     // WP-PLAT-1: a platform made a child tenant
+	"key.cap_warning",    // WP-KEY-1: a key's or a bucket's egress cap at 80 / 95 %
+	"transfer.completed", // WP-XFER-1: a transfer's last item settled (the counters, never the key)
 }
 
 func isValidEventType(t string) bool {

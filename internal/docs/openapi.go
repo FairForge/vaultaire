@@ -1258,6 +1258,42 @@ func generateManagementPaths() map[string]*PathItem {
 					"404": errResp("`app_not_found`"),
 				})),
 		},
+		// WP-XFER-1 (Stage 1a Prompt 59): transfer in (docs/API.md § Transfers).
+		"/api/v1/manage/transfers": {
+			Get: mgmt(jsonOp("Management", "List transfers", "ManageListTransfers",
+				"The account's transfers, newest first (100): state, the counters, the cursor. Never the source key, its id included.",
+				map[string]Response{
+					"200": jsonResp("Transfers", objectPtr("", map[string]*Schema{"transfers": arrayOf(transferSchema())})),
+				})),
+			Post: mut(withBody(jsonOp("Management", "Start a transfer", "ManageCreateTransfer",
+				"Copies every object of an S3-compatible source (endpoint, region, bucket, prefix, a read-only key you made) into a bucket of the account, through the upload path: resumable, idempotent on (source ETag, size), metered on the quota (paused when it is full). The source is checked with one signed listing first. The key is kept only while the transfer runs (sealed under the account's key with a master key) and deleted when it ends. An owner or admin. Audited `transfer.created`.",
+				map[string]Response{
+					"201": jsonResp("The transfer", transferSchema()),
+					"400": errResp("`invalid_source_endpoint`, `missing_source_bucket`, `missing_source_key`, `invalid_rate`, `source_denied` or `source_unreachable`"),
+					"403": errResp("`role_forbidden`"),
+					"404": errResp("`bucket_not_found`"),
+					"409": errResp("`destination_private`"),
+					"501": errResp("`NotImplemented` (a Vault bucket, D-XFER-2)"),
+				}),
+				jsonBody("The transfer", objectPtr("", map[string]*Schema{"bucket": str("The destination, a bucket of the account"),
+					"source": objectPtr("", map[string]*Schema{"endpoint": str("https://host[:port]"), "region": str(""), "bucket": str(""), "prefix": str(""),
+						"access_key": str(""), "secret_key": str("")}),
+					"rate_bytes_per_sec": integer("1 MiB/s to TRANSFER_RATE_MAX (the default)")})))),
+		},
+		"/api/v1/manage/transfers/{id}": {
+			Parameters: []Parameter{pathParam("id", "Transfer id")},
+			Get: mgmt(jsonOp("Management", "Read a transfer", "ManageGetTransfer", "One transfer's progress.",
+				map[string]Response{"200": jsonResp("The transfer", transferSchema()), "404": errResp("`transfer_not_found`")})),
+			Delete: mut(jsonOp("Management", "Cancel a transfer", "ManageCancelTransfer",
+				"The key is deleted at once and nothing is written after; what was copied stays. Audited `transfer.cancelled`.",
+				map[string]Response{"200": jsonResp("The transfer", transferSchema()), "404": errResp("`transfer_not_found`")})),
+		},
+		"/api/v1/manage/transfers/{id}/resume": {
+			Parameters: []Parameter{pathParam("id", "Transfer id")},
+			Post: mut(jsonOp("Management", "Resume a transfer", "ManageResumeTransfer",
+				"A paused transfer (`quota`, `source_denied`) runs again.",
+				map[string]Response{"200": jsonResp("The transfer", transferSchema()), "404": errResp("`transfer_not_found`"), "409": errResp("`transfer_not_paused`")})),
+		},
 		// WP-FAMILY-1 (Stage 1a Prompt 56): the family — a pool of personal
 		// accounts (docs/API.md § Family). Dark behind `family` (404).
 		"/api/v1/manage/family": {
@@ -3110,4 +3146,15 @@ func approvalSchema() *Schema {
 		"decision":     str("approved | denied | empty while pending"),
 		"used_at":      nullable(str("")),
 	})
+}
+
+// transferSchema is a transfer as the management API shows it.
+func transferSchema() *Schema {
+	return objectPtr("A transfer (never its key)", map[string]*Schema{"id": str(""), "bucket": str(""),
+		"source":        objectPtr("", map[string]*Schema{"endpoint": str(""), "region": str(""), "bucket": str(""), "prefix": str("")}),
+		"state":         strEnum("", "pending", "running", "paused", "completed", "failed", "cancelled"),
+		"paused_reason": strEnum("", "quota", "source_denied"), "paused_code": str("The refusal's code"),
+		"listed": integer(""), "copied": integer(""), "skipped": integer(""), "failed": integer(""), "bytes": integer(""),
+		"cursor": str("The last source key listed"), "listed_all": boolean(""), "rate_bytes_per_sec": integer(""),
+		"last_error": str(""), "source_key_held": boolean("The source key is still kept")})
 }

@@ -103,6 +103,8 @@ func (s *Server) registerMemberManagementRoutes(r chi.Router, rl *ManagementRate
 		s.registerAppRoutes(r)
 		// WP-FAMILY-1: the family (family.go).
 		s.registerFamilyRoutes(r)
+		// WP-XFER-1: transfer in (transfer_api.go).
+		s.registerTransferRoutes(r)
 	}
 }
 
