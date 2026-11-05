@@ -45,3 +45,8 @@ invocation_logs = false
 VAULTAIRE_ORIGIN = "https://stored.ge"
 # The codec refuses CODEC_TAMPER (a lab switch) on this environment.
 ENVIRONMENT = "production"
+# 0.8.0 (WP-LOG-2, D-LOG-1): the Worker writes no line; its failures are
+# reported to the origin (POST /api/v1/edge/report). Verbose logging during an
+# incident is a deploy-time var — `wrangler deploy --var EDGE_LOG:all` (or
+# `errors`) — never committed; a deploy without it restores silence.
+EDGE_LOG = "report"

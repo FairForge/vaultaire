@@ -85,6 +85,17 @@ hit gives its bytes back at once. (0.3.0 bounded 4 CHUNKS — RP70-1.) Measured:
 in `wrangler dev` (WP-EDGE-2B.md § Step 0). `limits.cpu_ms = 300000`: the
 chunker costs ≈ 11 s of CPU per GiB.
 
+## 0.8.0 — silent by default, failures reported to the origin (WP-LOG-2)
+
+A data-plane host keeps no record of a request after it ends; the control
+plane's rows are the record (plan 40.10, `docs/reviews/WP-LOG-2.md`).
+
+- **`emit(env, ctx, kind, fields)` is the ONE place a line or a report leaves the Worker** (D-LOG-1/2): every former `console.log` (the request lines `pass`, `get`, `put`, `part`, `post`, `mirror_settled`, the codec's `codec` / `codec_index`, and every failure) goes through it, and `console.` occurs once in `src/index.js` and nowhere in `codec.js`, `seal.js` or `awschunked.js` (`test/observability.test.js`). `codec.js` hands its events to a sink (`setEventSink`, set by `index.js` to `emit`).
+- **`EDGE_LOG`** (a var, committed as `"report"`): `report` (also when unset) — failures are reported, nothing is written; `errors` — failures reported and written; `all` — every kind written, failures also reported; `off` — nothing. Verbose logging is a deploy-time var (`wrangler deploy --var EDGE_LOG:all`), never committed. With `[observability.logs] invocation_logs = false` (0.7.3's config, WP-LOG-2 PR 1) Cloudflare keeps no event of a request.
+- **A failure is a report** to `POST /api/v1/edge/report`: `{reports:[{kind, request_id, admit_id, op, status, detail}]}` — exactly these six fields, `detail` the error's message cut to 300 characters, never the URL, the path or a header — on `ctx.waitUntil` (5 s), never on the request's path. Kinds: `admit_failed`, `admit_unavailable`, `commit_failed` (the codec's `commit_unauthorized` / `commit_refused` too), `codec_unavailable`, `codec_failed` (the codec's checksum mismatch too), `mirror_settle_failed`, `post_short_body`, `post_unread`, `refused`, `catalogue_unavailable`, `exception`. 20 reports a minute per isolate; the rest are counted and sent as `suppressed` with the next. The origin writes one Warn line and one counter (`vaultaire_data_plane_host_reports_total{host,kind}`); a build without the route answers 404, ignored.
+- **A throw is no longer Cloudflare's HTML 1101 page**: `fetch` runs the handler under `guarded` — a throw is reported (`exception`: the message and the first stack frame), then the request passes to the origin when its body is unread, else the Worker's own 503 `SlowDown` XML with its `x-amz-request-id`.
+- Tests: `test/emit.test.js` (the mode × kind table, the six-field shape, the cap and `suppressed`, the sink from `codec.js`, the catch), `test/observability.test.js`.
+
 ## 0.7.3 — the origin's disposition grammar, CORS on the Worker's own answers (Stage 1a Prompt 59 Part 0, RP96-11/12/21/22)
 
 - **A part's `Content-Disposition` is read in one shape only** (`partDisposition`, RP96-11): `form-data`, then `name="…"` and at most one `filename="…"`, each a quoted string with no quoted-pair, and nothing else — one such header per part, no folded line. Anything that grammar does not consume whole (an unquoted `filename=a b.txt` the origin's `mime.ParseMediaType` refuses, an unquoted `filename=abc.txt` it decodes, a parameter given twice, a quoted-pair, another parameter, an RFC 2231 `filename*` — 0.7.2's rule, generalised) makes `parseFormPrefix` throw, and the form goes to the origin whole. Before: the edge STORED a form the origin refuses (`filename: ""`) and, with `${filename}` in the key, refused one it accepts. Test "an unquoted or repeated filename goes to the origin whole".
@@ -245,9 +256,10 @@ origin.
 - `lab/codec-proof.sh` — the codec's lab proof (`up` / `run <case>` / `down`);
   `lab/goldenbody.go` writes `crypto.GoldenBody` bodies for it.
 - `wrangler.toml` — name `stored-s3-edge`, route `s3.stored.cloud/*` on the
-  stored.cloud zone of the PRODUCTION account, observability on, vars
-  `VAULTAIRE_ORIGIN` and `ENVIRONMENT = "production"`, the module rules and
-  `limits.cpu_ms`.
+  stored.cloud zone of the PRODUCTION account, observability on with
+  invocation logs OFF (WP-LOG-2), vars `VAULTAIRE_ORIGIN`,
+  `ENVIRONMENT = "production"` and `EDGE_LOG = "report"`, the module rules
+  and `limits.cpu_ms`.
 
 ## Configuration
 
@@ -255,6 +267,7 @@ origin.
 |---|---|
 | `VAULTAIRE_ORIGIN` (var) | where admit and commit go: `https://stored.ge` — the SLC host whose certificate is valid, NOT `s3.stored.cloud` (a call to the route's own host would loop into this Worker) |
 | `VAULTAIRE_EDGE_TOKEN` (secret) | the `EDGE_SERVICE_TOKEN` of the box's `.env`, set with `wrangler secret put VAULTAIRE_EDGE_TOKEN < file` — never on a command line |
+| `EDGE_LOG` (var, 0.8.0) | `report` (committed; also when unset): the Worker writes no line and reports its failures to the origin (`POST /api/v1/edge/report`); `errors`: failures also written; `all`: every request's line written too; `off`: nothing. During an incident: `npx -y wrangler@4.151.3 deploy --var EDGE_LOG:all` — Cloudflare then keeps each line for up to 7 days (with the request's URL attached: the bucket, the key, a presigned link's query); a plain deploy restores `report` |
 
 The control plane accepts the token only from a Cloudflare peer
 (`clientip.PeerIsCloudflare`) unless `EDGE_TRUST_ANY_PEER=true` (labs).
