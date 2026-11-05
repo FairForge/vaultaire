@@ -92,6 +92,7 @@ chunker costs ≈ 11 s of CPU per GiB.
 - **A short pass-through body is `IncompleteBody`** (RP96-21): a form handed to the origin whose client body is shorter than its Content-Length errors the `FixedLengthStream` and the origin fetch rejects — an unhandled rejection, Cloudflare's 1101 page. Now the origin's own answer: 400 `IncompleteBody` XML. Test "a short pass-through body is IncompleteBody".
 - **`package.json` names the version** (RP96-22); `test/version.test.js` holds it to this README's newest heading and the manifest (no row past it).
 - The PUT path's commit uses `commitWrite` (the same loop it duplicated), so its expired-admission 503 carries the CORS origin too.
+- **Deployed 2026-11-04 23:51 UTC** (version `a8011109`, from `d9204eed`; `src/index.js` = the manifest row `5b7162f9…`; the codec modules rebuilt by `make edge-wasm`, each its existing row). Proven on prod with tenant zero's policy forms through `s3.stored.cloud`: a plain 5 MiB form committed at the edge (`edge_admits` `via = post`, `committed`, `lyve`, ETag = the file's MD5); a form with an unquoted `filename=a b.txt` answered the origin's 400 `MalformedPOSTRequest` with NO `edge_admits` row; a bad-tail form from `Origin: https://page.example` (the proof bucket's CORS rule allows it) answered the Worker's own 400 `MalformedPOSTRequest` WITH `Access-Control-Allow-Origin: https://page.example`, its admit `failed`, nothing stored.
 
 ## 0.7.2 — a filename* form is the origin's (Stage 1a Prompt 58 Part 0, RP94-11)
 
