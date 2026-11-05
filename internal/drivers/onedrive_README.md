@@ -7,12 +7,27 @@ it's a **durability layer** for async background replication from iDrive/Quotale
 Customers never read from OneDrive directly. Value proposition: "15+ independent
 copies across Microsoft's infrastructure" at $0 cost.
 
-## Pricing
+## Pricing and capacity (corrected 2026-11-05)
 
-- Cost: **$0** (Microsoft 365 Business Basic, 1TB per user expandable to 5TB)
-- Free for 3 years per tenant (existing subscriptions)
-- 15 tenants × 5TB = **75TB free storage**
-- No egress fees, no API call charges
+- Plan: Microsoft 365 Business Basic seats, **300 users maximum per Business tenant** (Microsoft's
+  plan-options page). Owner 2026-11-05: 300 seats per tenant; Graph shows ONE licensed, provisioned
+  user per tenant today, each drive **5.00 TiB** (the 5 TB per-user quota is an admin setting that needs
+  5+ licensed users; 25 TB per user is a support request for "eligible enterprise and government"
+  customers — not Business plans). Capacity = licensed AND provisioned users × 5 TB; the three live
+  drives hold 15 TiB together, ~34 GiB used.
+- Cost: list ≈ $6 per seat-month (annual), i.e. ≈ $1.20 per TB-month at 5 TB a seat. The current seats
+  are promotional (owner: free for 3 years) — put the renewal date on the calendar: an **unlicensed**
+  OneDrive goes read-only after 60 days, is archived after 93 and billed $0.05/GB-month in Microsoft 365
+  Archive ($0.60/GB to reactivate); from 2026-07-01 a 365-day non-payment clock ends in deletion
+  (Microsoft Learn "Manage unlicensed OneDrive user accounts", MC836942).
+- No egress fees, no API call charges — the API is metered in resource units instead (below).
+- **Terms (what the fleet may hold):** the OneDrive service description says per-user storage "is
+  designed to serve the needs of individuals"; "storage of data other than an individual's personal work
+  files, including system back-ups and departmental and organizational level data, is not supported,
+  nor is the assignment of a per user license to a bot, department, or other non-human entity"; the
+  Product Terms forbid "commercial hosting services to third parties". So the fleet holds the licence
+  holders' OWN data (and its parity) as of right; customer data needs Microsoft's written consent (the
+  Sync precedent) — never 299 synthetic users per tenant. Research: `research_notes/ONEDRIVE-FLEET-LIMITS-2026-11-05.md`.
 
 ## Tier Architecture
 
@@ -78,24 +93,27 @@ env vars in `.env.bench` (gitignored).
 - On 404: session expired, restart entire upload
 - On 416: query upload status with GET to find missing bytes
 
-### Throttling Limits
+### Throttling Limits (Microsoft Learn, "Avoid getting throttled or blocked in SharePoint Online", read 2026-11-05)
 
-Per-app (0-1,000 licenses):
+Resource-unit (RU) costs per Graph request: 1 = a single-item query, delta with a token, a download-URL
+fetch; 2 = list children, create, update, delete, **each upload fragment**; 5 = permission operations.
 
-| Scope | Limit |
-|-------|-------|
-| Resource units per minute | **1,250** |
-| Resource units per 24 hours | 1,200,000 |
-| Tenant RU per 5 minutes | 18,750 |
-| Requests per user per 5 min | 3,000 |
-| Ingress per user per hour | 50 GB |
-| Egress per user per hour | 100 GB |
-| App ingress+egress per hour | 400 GB |
+| Scope | Window | Limit (0–1,000 licences; the RU rows grow with licence count) | What it means |
+|-------|--------|-------|-------|
+| Per app per tenant | 1 min | **1,250 RU** | ≈ 625 writes/min ≈ **10 writes/s per tenant** |
+| Per app per tenant | 24 h | 1,200,000 RU | ≈ 600k writes a day per tenant |
+| Per app per tenant | 1 h | **400 GB ingress AND 400 GB egress** (separate rows, no licence bound) | ≈ **111 MB/s each way per tenant**, whatever the user count |
+| Tenant, all apps | 5 min | 18,750 RU | three apps' worth; apps share the tenant bucket |
+| Per user | 5 min | 3,000 requests | |
+| Per user | 1 h | 50 GB ingress, 100 GB egress | **14 MB/s in, 28 MB/s out sustained per drive** — the fleet's ceiling while each tenant has one user |
 
-**RateLimit headers** (returned when usage >= 80% of limit):
-- `RateLimit-Limit`: resource unit cap for current window
-- `RateLimit-Remaining`: remaining resource units
-- `RateLimit-Reset`: seconds until quota refills
+Microsoft: don't register several AppIDs for the same job (they share the tenant bucket); limits are
+per geo under Multi-Geo; "Microsoft reserves the right to lower limits on Unpaid/Unlicensed usage".
+
+**Retry-After is the contract.** The same page now says SharePoint Online "does not return or support
+IETF RateLimit headers" and that apps "should instead honor the Retry-After header" — while another
+section still describes `RateLimit-Limit` / `-Remaining` / `-Reset` as early signals. Treat the three
+headers as optional hints when present; never depend on them.
 
 ### Throttle Handling
 
@@ -534,6 +552,55 @@ account added):
 Restoring the old `TENANT_N` order instead is a plain restart: the markers
 match again.
 
+### Drive selection (WP-FLEET-1, 2026-11-05)
+
+A fleet user can have more than one drive. `GET /users/{upn}/drives` lists the
+user's own library, named **`OneDrive`** (also `/users/{upn}/drive`, the
+default), and on two of prod's three users a hidden system library,
+**`PersonalCacheLibrary`**, *before* it — in an order Graph does not pin and
+that differs per account. The driver took `drives[0]` until WP-FLEET-1, so on
+those two accounts (`vierafun@viera.fun`, `fromhis@fromhis.com`) the whole
+`vaultaire/` tree and its fingerprint marker were written into the cache
+library; on `vierapics@viera.pics` the `OneDrive` library is listed first and
+holds it.
+
+The account's drive is now, in order (`getDriveID`, `chooseDrive`):
+
+1. **`TENANT_N_DRIVE_ID`** when set — used as is, no listing (a pin);
+2. else the one drive listed, when the user has one (new accounts);
+3. else the drive named `OneDrive`;
+4. else the one `driveType: business` drive when exactly one is;
+5. else nothing: one **Error** line `permafrost account skipped` naming the
+   drives found, and the slot is **skipped** — as an incomplete slot is, so
+   the fleet's order changes and the fingerprint reports the mismatch.
+
+A listing Graph cannot answer at boot keeps the slot (retried on first use,
+as before). Every kept slot logs one Info line `permafrost account drive`:
+`account`, `drive_id`, `pinned`, `other_drives` (the names the listing did
+not choose). A drive id (`b!…`, 66 characters) is not a secret.
+
+**The marker records its drive.** A marker written since carries `drive_id`
+(additive: a marker without it reads as before). At every fingerprint check
+(boot, then the probe — hourly) each account gets a drive verdict:
+
+| Found | Outcome |
+|---|---|
+| the marker's `drive_id` is the chosen drive, or absent | 0 |
+| the marker's `drive_id` names another drive | **one Error line per account** `permafrost account drive mismatch` (`drive_id`, `marker_drive_id`, `moved_to`), `vaultaire_permafrost_drive_mismatch{account}` 1 |
+| the chosen drive has no marker, but another drive of the same user does (no pin: the listing named it) | the same Error line with `marker_on_other_drive: true` and the gauge 1; the fleet's ORDER is judged from that marker, and **no fresh marker is written** on the chosen drive — a deploy that changed an account's drive used to look like a first boot there |
+
+Never an automatic switch, never a block of boot. The marker's `drive_id` is
+rewritten only through `PERMAFROST_FLEET_ACCEPT` (the existing door rewrites
+every marker, now with the drive) or `cmd/tools/permafrost-migrate-drive
+-switch`. The line is logged on a change of verdict, the gauge follows every
+check.
+
+**Prod (D-F1-3):** before the build that chooses by name was deployed, every
+slot's `TENANT_N_DRIVE_ID` was pinned to the drive that held its `vaultaire/`
+that day — the cache library on slots 1 and 3, `OneDrive` on slot 2 — so the
+deploy moved nothing; the migration tool then moves slots 1 and 3 one at a
+time (below).
+
 ### Bench caveat
 
 No `permafrost-*` tool goes through this driver — they hand-roll their own
@@ -557,15 +624,17 @@ Key patterns in `snapshelter/src/services/storage-providers/onedrive.js`:
 
 ## OneDrive Gotchas
 
-1. **Personal vs Business**: `driveType` field from `/me/drive`. Personal allows 250MB simple upload; Business limits to 4MB
+1. **Simple upload is 250 MB on both drive types** (Graph `PUT …/content`, read 2026-11-05) — the driver's `simpleUploadMax` of 4 MB predates that and is a to-do: one PUT for most parity shards instead of create-session + fragments. Upload-session fragments must be **less than 60 MiB**; the driver's `odChunkSize` is exactly 60 MiB (it has worked; 180 × 320 KiB = 58,982,400 B is the value inside the bound)
 2. **No intermediate folder creation**: Must create folders explicitly before uploading
 3. **File name restrictions**: `" * : < > ? / \ |` invalid. Business also restricts `# %`
 4. **Path encoding**: Use `encodeURIComponent` per segment. Better: use item IDs after initial upload
 5. **Upload session chunks**: MUST be multiples of 320 KiB. Non-aligned chunks silently fail
 6. **Upload session auth**: Do NOT send `Authorization` header on chunk PUT requests
-7. **Download URLs expire**: `@microsoft.graph.downloadUrl` valid ~1 hour, do not cache
+7. **Download URLs expire**: `@microsoft.graph.downloadUrl` is pre-authenticated (no `Authorization` header, Range honoured) and Microsoft says it "might expire within minutes" — fetch per read, never cache
 8. **409 on folder create**: Expected when folder exists — not an error
-9. **Tenant-2**: Client secret was expired as of March 2026. Rotate at Azure portal
+9. **Tenant-2**: Client secret was expired as of March 2026. Rotate at Azure portal — secrets live ≤ 24 months; certificate credentials (`azidentity.NewClientCertificateCredential`) are the fix, and `Application.Read.All` would let the probe export the expiry (the app registrations cannot read it today, 2026-11-05)
+10. **Delete goes to the recycle bin and keeps counting**: `DELETE /drives/{id}/items/{id}` (what the driver does) parks the file in the user's recycle bin for 93 days, and recycle-bin contents AND file versions count against the drive's quota. `driveItem: permanentDelete` (Graph v1.0, `Files.ReadWrite.All`) removes it at once — a to-do for shard churn. Every in-place rewrite makes a version (the driver's `conflictBehavior: fail` + new addresses avoid that for objects; the fingerprint marker is rewritten in place)
+11. **Hard limits**: 250 GB per file (a parity shard is object/4 → objects over 1 TB cannot be protected here), 400 decoded characters per path (Stored keys up to 857 bytes do not fit — generated names do), listing a folder fails near 100,000 files (rclone; fine at 50,000) — fan folders out before that
 
 ## References
 
