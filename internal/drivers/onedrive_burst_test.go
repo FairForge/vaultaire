@@ -258,7 +258,7 @@ func TestPutChunk_AFragmentThrottledTwiceIsRiddenOut(t *testing.T) {
 	tn := scriptedTenant(rt, wl)
 
 	// Act
-	err := tn.putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
+	_, err := tn.putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
 
 	// Assert
 	require.NoError(t, err)
@@ -279,7 +279,10 @@ func TestPutChunk_HonoursRetryAfterToTheBurstCap(t *testing.T) {
 	wl := &waitLog{}
 	tn := scriptedTenant(rt, wl)
 
-	require.NoError(t, tn.putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3))
+	require.NoError(t, func() error {
+		_, err := tn.putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
+		return err
+	}())
 
 	waits := wl.all()
 	require.Len(t, waits, 2)

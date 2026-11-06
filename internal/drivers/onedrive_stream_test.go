@@ -3,7 +3,9 @@ package drivers
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -102,9 +104,10 @@ func patternSum(size int64) [32]byte {
 }
 
 func TestOneDriveGet_RangesStreamThroughABoundedWindow(t *testing.T) {
-	// Arrange: a 128 MiB object (8 streams).
+	// Arrange: a 512 MiB object (8 streams of 32 MiB since WP-FLEET-4: the
+	// window is 256 MiB, half the object).
 	ctx := common.WithTenantID(context.Background(), "x")
-	const size = 128 << 20
+	const size = 512 << 20
 	cdn := &rangeCDN{size: size}
 	d := fleetWithCDN(ctx, t, size, cdn)
 
@@ -173,11 +176,18 @@ type uploadSink struct {
 	fragments []string
 	bad       error
 	received  int64
+	// hash is the quickXorHash of the current session's bytes in order: the
+	// final fragment is answered with the item, as Graph does (WP-FLEET-4).
+	hash    hash.Hash
+	session int64
 }
 
 func (u *uploadSink) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch {
 	case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, ":/createUploadSession"):
+		u.mu.Lock()
+		u.hash, u.session = NewQuickXorHash(), 0
+		u.mu.Unlock()
 		return odResp(req, 200, `{"uploadUrl":"https://upload.example.test/session"}`, nil), nil
 	case req.Method == http.MethodPut && req.URL.Host == "upload.example.test":
 		cr := req.Header.Get("Content-Range")
@@ -185,8 +195,14 @@ func (u *uploadSink) RoundTrip(req *http.Request) (*http.Response, error) {
 		_, _ = fmt.Sscanf(cr, "bytes %d-%d/%d", &s, &e, &total)
 		buf := make([]byte, 1<<20)
 		off := s
+		u.mu.Lock()
+		h := u.hash
+		u.mu.Unlock()
 		for {
 			n, err := req.Body.Read(buf)
+			if h != nil {
+				_, _ = h.Write(buf[:n])
+			}
 			for i := 0; i < n; i++ {
 				if buf[i] != odPattern(off+int64(i)) {
 					u.mu.Lock()
@@ -203,7 +219,16 @@ func (u *uploadSink) RoundTrip(req *http.Request) (*http.Response, error) {
 		u.mu.Lock()
 		u.fragments = append(u.fragments, cr)
 		u.received += off - s
+		u.session += off - s
+		final := e+1 == total && h != nil
+		var item string
+		if final {
+			item = fmt.Sprintf(`{"id":"ITEM","size":%d,"file":{"hashes":{"quickXorHash":%q}}}`, u.session, base64.StdEncoding.EncodeToString(h.Sum(nil)))
+		}
 		u.mu.Unlock()
+		if final {
+			return odResp(req, 201, item, nil), nil
+		}
 		return odResp(req, 202, `{}`, nil), nil
 	}
 	return odResp(req, 404, `{"error":{"code":"itemNotFound"}}`, nil), nil
@@ -237,13 +262,13 @@ func TestOneDrivePut_AnUnknownLengthUploadsFromTheSpooledBodyWithoutASecondCopy(
 	require.NoError(t, err)
 	require.NoError(t, sink.bad)
 	assert.Equal(t, int64(size), sink.received)
-	assert.Len(t, sink.fragments, 7, "6 × 60 MiB + 40 MiB")
+	assert.Len(t, sink.fragments, 8, "7 × 58,982,400 B (180 × 320 KiB, WP-FLEET-4) + the rest")
 	assert.Equal(t, fmt.Sprintf("bytes 0-%d/%d", odChunkSize-1, size), sink.fragments[0])
 	// What the whole Put allocated: materialize's one 64 MiB spool (RP17-2:
 	// it grew a bytes.Buffer to ~256 MiB, ~512 under -race, to hold 64 MiB)
 	// plus one 60 MiB fragment buffer (pooled), never the body (a
 	// whole-body copy alone is >= size).
-	assert.Less(t, totalAlloc()-before, uint64(140<<20), "the spool and one fragment, no whole-body buffer")
+	assert.Less(t, totalAlloc()-before, uint64(200<<20), "the spool and two fragments (double-buffered, WP-FLEET-4), no whole-body buffer")
 }
 
 func TestOneDrivePut_AKnownLengthStreamsToo(t *testing.T) {

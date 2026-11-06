@@ -113,7 +113,7 @@ func TestPermafrostPace_AnUploadIsPacedOnItsSourceAndARetryTakesNoBytesAgain(t *
 	// on the SOURCE, and the source was read exactly once: the refused
 	// fragment was re-sent from its buffer, so its bytes were never taken
 	// from the bucket again (a wall-clock upper bound flaked on a loaded
-	// CI runner, 2026-11-06).
+	// CI runner, 2026-11-06, and would measure the quickXorHash too).
 	require.NoError(t, err)
 	require.NoError(t, sink.bad)
 	assert.GreaterOrEqual(t, time.Since(start), 1500*time.Millisecond, "the source was read at the bucket's rate")
@@ -259,6 +259,7 @@ func TestPermafrostRangeHedge_OffAtZero(t *testing.T) {
 type sessionSink struct {
 	uploadSink
 	failAt   int64 // the fragment start refused on every attempt (-1 none)
+	landed   bool  // the refused fragment's bytes DID land (its answer was lost)
 	expected string
 	status   int
 	queries  atomic.Int32
@@ -278,7 +279,12 @@ func (s *sessionSink) RoundTrip(req *http.Request) (*http.Response, error) {
 		var st int64
 		_, _ = fmt.Sscanf(req.Header.Get("Content-Range"), "bytes %d-", &st)
 		if st == s.failAt {
-			_, _ = io.Copy(io.Discard, req.Body)
+			if s.landed {
+				s.landed = false // once: the session holds it now
+				_, _ = s.uploadSink.RoundTrip(req)
+			} else {
+				_, _ = io.Copy(io.Discard, req.Body)
+			}
 			return odResp(req, 503, "", nil), nil
 		}
 		s.seen.Store(st, true)
@@ -315,16 +321,14 @@ func TestPermafrostResume_AFragmentThatExhaustedItsAttemptsIsResentFromTheSessio
 func TestPermafrostResume_AFragmentTheSessionAlreadyHoldsIsSkipped(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	const size = 130 << 20
-	s := &sessionSink{failAt: odChunkSize, expected: fmt.Sprintf("%d-", 2*odChunkSize)}
+	s := &sessionSink{failAt: odChunkSize, expected: fmt.Sprintf("%d-", 2*odChunkSize), landed: true}
 	d := sessionFleet(s)
-	// The session's view: the refused fragment landed (its answer was lost).
-	s.received += odChunkSize
 
 	err := d.Put(ctx, "bkt", "big.bin", &odPatternReader{0, size, nil}, engine.WithContentLength(size))
 
 	require.NoError(t, err)
 	_, resent := s.seen.Load(int64(odChunkSize))
-	assert.False(t, resent, "the session's view wins: nothing re-sent")
+	assert.False(t, resent, "the session's view wins: nothing re-sent after it")
 	assert.Equal(t, int64(size), s.received)
 }
 
@@ -346,7 +350,10 @@ func TestPermafrostResume_AGoneSessionRestartsOnlyARewindableBody(t *testing.T) 
 		_, _ = io.ReadFull(&odPatternReader{0, size, nil}, body)
 		restarted := testutil.ToFloat64(permafrostFragmentResumes.WithLabelValues("restarted"))
 
-		err := d.Put(ctx, "bkt", "big.bin", bytes.NewReader(body), engine.WithContentLength(size))
+		// Seekable but no io.ReaderAt: a re-readable body ≤ 200 MiB would be
+		// one simple PUT (WP-FLEET-4), never a session to restart.
+		seekable := struct{ io.ReadSeeker }{bytes.NewReader(body)}
+		err := d.Put(ctx, "bkt", "big.bin", seekable, engine.WithContentLength(size))
 
 		require.NoError(t, err)
 		require.NoError(t, s.bad)
@@ -380,7 +387,10 @@ func TestPermafrost_EveryRequestCarriesTheISVUserAgent(t *testing.T) {
 
 	_, _, err := burstRead(ctx, t, d)
 	require.NoError(t, err)
-	require.NoError(t, d.tenants[0].putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3))
+	require.NoError(t, func() error {
+		_, err := d.tenants[0].putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
+		return err
+	}())
 
 	mu.Lock()
 	defer mu.Unlock()

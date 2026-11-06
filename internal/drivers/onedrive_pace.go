@@ -191,6 +191,7 @@ func InitPermafrostPaceSeries(account string) {
 	for _, dir := range odPaceDirs {
 		permafrostPaced.WithLabelValues(account, dir)
 	}
+	permafrostHashMismatch.WithLabelValues(account)
 }
 
 // errODThrottled is a request given up on because the account is held past
