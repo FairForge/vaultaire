@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -217,10 +218,21 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 
 	markers := make([]*fleetMarker, len(d.tenants))
 	elsewhere := make([]bool, len(d.tenants)) // the marker read is on another drive of the user
+	readErrs := make([]error, len(d.tenants))
+	sem := make(chan struct{}, odBootConcurrency) // WP-FLEET-11: 900 markers in a boot
+	var wg sync.WaitGroup
 	for i, t := range d.tenants {
-		m, onOther, err := t.readFleetMarkerAnyDrive(ctx)
-		elsewhere[i] = onOther
-		if err != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			markers[i], elsewhere[i], readErrs[i] = t.readFleetMarkerAnyDrive(ctx)
+		}()
+	}
+	wg.Wait()
+	for i, t := range d.tenants {
+		if err := readErrs[i]; err != nil {
 			out.State = FleetUnknown
 			if d.fleetVerdictChanged(out.State) {
 				d.logger.Warn("permafrost fleet fingerprint: a marker could not be read — no verdict; re-checked at the next probe",
@@ -228,7 +240,6 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 			}
 			return out, fmt.Errorf("permafrost fleet fingerprint: read %s: %w", t.name, err)
 		}
-		markers[i] = m
 	}
 	d.checkDrives(ctx, markers, elsewhere)
 
@@ -282,15 +293,30 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 	}
 	permafrostFleetMismatch.Set(0)
 
-	var failed []string
+	var (
+		failed []string
+		fmu    sync.Mutex
+	)
+	wsem := make(chan struct{}, odBootConcurrency) // WP-FLEET-11: 900 markers in a boot
+	var wwg sync.WaitGroup
 	for _, i := range write {
 		if elsewhere[i] {
 			continue // the tree is on another drive: never a fresh marker on this one
 		}
-		if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest); err != nil {
-			failed = append(failed, fmt.Sprintf("%s: %v", d.tenants[i].name, err))
-		}
+		wwg.Add(1)
+		go func() {
+			defer wwg.Done()
+			wsem <- struct{}{}
+			defer func() { <-wsem }()
+			if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest); err != nil {
+				fmu.Lock()
+				failed = append(failed, fmt.Sprintf("%s: %v", d.tenants[i].name, err))
+				fmu.Unlock()
+			}
+		}()
 	}
+	wwg.Wait()
+	slices.Sort(failed)
 	fields := []zap.Field{zap.String("state", string(out.State)), zap.String("fingerprint", out.Digest),
 		zap.Int("accounts", len(ids)), zap.Int("written", len(write)-len(failed))}
 	switch {
