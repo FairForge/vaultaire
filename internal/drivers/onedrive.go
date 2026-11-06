@@ -40,7 +40,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/parfetch"
@@ -141,6 +140,10 @@ type OneDriveDriver struct {
 
 	// The fleet fingerprint's last verdict (onedrive_fleet.go, RP18-1): the
 	// probe re-checks after an unknown one and hourly.
+	// probeNext is the rotation cursor of the sampled probe (D-F11-5).
+	probeMu   sync.Mutex
+	probeNext int
+
 	fleetMu        sync.Mutex
 	fleetState     FleetState
 	fleetAccept    string
@@ -204,6 +207,12 @@ type odTenant struct {
 	// wait waits between attempts (nil = odWait); tests record the waits.
 	wait func(ctx context.Context, d time.Duration) error
 
+	// tokenOwner, when set, is the account of the same tenant and app whose
+	// token this one uses (D-F11-2: one token per tenant, not per drive).
+	tokenOwner *odTenant
+	// probeErr is the last probe's outcome (an odProbeOutcome).
+	probeErr atomic.Value
+
 	// pace is the account's buckets and its tenant's (onedrive_pace.go,
 	// WP-FLEET-3 D-F3-5); nil = none (the 429 hold still applies).
 	pace *odPace
@@ -212,61 +221,18 @@ type odTenant struct {
 	rangeHedgeAfter time.Duration
 }
 
-// NewOneDriveFleetDriver creates a multi-tenant OneDrive driver.
-// Reads TENANT_N_ID, TENANT_N_CLIENT_ID, TENANT_N_SECRET, TENANT_N_USER
-// environment variables for N=1..15.
+// NewOneDriveFleetDriver creates a multi-tenant OneDrive driver from
+// PERMAFROST_FLEET_FILE, else the TENANT_N_ID, TENANT_N_CLIENT_ID,
+// TENANT_N_SECRET, TENANT_N_USER (and TENANT_N_DRIVE_ID) slots, N=1..15
+// (onedrive_scale.go, WP-FLEET-11). Both set = an error.
 func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
-	var tenants []*odTenant
+	specs, err := odFleetSpecs(os.Getenv, logger)
+	if err != nil {
+		return nil, err
+	}
 	paceCfg := odPaceFromEnv(os.Getenv, logger)
 	hedgeAfter := odRangeHedgeFromEnv(os.Getenv, logger)
-	paces := map[string]*odPace{} // by identity: two slots of one user share one drive's buckets
-	for i := 1; i <= 15; i++ {
-		p := fmt.Sprintf("TENANT_%d_", i)
-		tid := os.Getenv(p + "ID")
-		if tid == "" {
-			continue
-		}
-		clientID := os.Getenv(p + "CLIENT_ID")
-		secret := os.Getenv(p + "SECRET")
-		userUPN := os.Getenv(p + "USER")
-		pinned := strings.TrimSpace(os.Getenv(p + "DRIVE_ID"))
-		if clientID == "" || secret == "" || userUPN == "" {
-			logger.Warn("incomplete OneDrive tenant config, skipping",
-				zap.Int("tenant", i))
-			continue
-		}
-
-		cred, err := azidentity.NewClientSecretCredential(tid, clientID, secret, nil)
-		if err != nil {
-			logger.Warn("failed to create OneDrive credential",
-				zap.Int("tenant", i), zap.Error(err))
-			continue
-		}
-
-		dial := odCachedDialContext()
-
-		t := &odTenant{
-			name:          fmt.Sprintf("tenant-%d", i),
-			tenantID:      tid,
-			clientID:      clientID,
-			secret:        secret,
-			userUPN:       userUPN,
-			pinnedDriveID: pinned,
-			cred:          cred,
-			graphHTTP:     &http.Client{Transport: odGraphTransport(dial, odTLSSessionCache)},
-			cdnHTTP:       &http.Client{Transport: odCDNTransport(dial, odTLSSessionCache)},
-			uploadHTTP:    &http.Client{Transport: odUploadTransport(dial, odTLSSessionCache)},
-
-			rangeHedgeAfter: hedgeAfter,
-		}
-		if p, ok := paces[t.identity()]; ok {
-			t.pace = p
-		} else {
-			t.pace = newODPace(t.name, tid, paceCfg)
-			paces[t.identity()] = t.pace
-		}
-		tenants = append(tenants, t)
-	}
+	tenants := buildAccounts(specs, paceCfg, hedgeAfter, newODClients, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -293,36 +259,56 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 // as before. One Info line per kept account names its drive. Every kept
 // account's drive-mismatch series starts at 0.
 func initFleetDrives(ctx context.Context, logger *zap.Logger, tenants []*odTenant) []*odTenant {
+	keep := make([]bool, len(tenants))
+	sem := make(chan struct{}, odBootConcurrency) // WP-FLEET-11: 900 drives in a boot
+	var wg sync.WaitGroup
+	for idx, t := range tenants {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			keep[idx] = initFleetDrive(ctx, logger, t)
+		}()
+	}
+	wg.Wait()
 	kept := make([]*odTenant, 0, len(tenants))
-	for _, t := range tenants {
-		driveID, err := t.getDriveID(ctx)
-		var none *odNoLibraryError
-		switch {
-		case errors.As(err, &none):
-			logger.Error("permafrost account skipped: its user has no drive named OneDrive and TENANT_N_DRIVE_ID is not set — set it to the drive that holds vaultaire/ (onedrive_README.md § Drive selection)",
-				zap.String("account", t.name), zap.String("user", t.userUPN), zap.Strings("drives", none.names()))
-			continue
-		case err != nil:
-			logger.Warn("OneDrive tenant init failed — will retry on first use",
-				zap.String("tenant", t.name), zap.Error(err))
-		default:
-			others := make([]string, 0, len(t.otherDrives))
-			for _, o := range t.otherDrives {
-				others = append(others, o.Name)
-			}
-			logger.Info("permafrost account drive", zap.String("account", t.name),
-				zap.String("drive_id", driveID), zap.Bool("pinned", t.pinnedDriveID != ""),
-				zap.Strings("other_drives", others))
-			if _, err := t.ensureRootFolder(ctx, driveID); err != nil {
-				logger.Warn("OneDrive root folder creation failed",
-					zap.String("tenant", t.name), zap.Error(err))
-			}
+	for idx, t := range tenants {
+		if keep[idx] {
+			InitPermafrostAccountSeries(t.name)
+			InitPermafrostPaceSeries(t.name)
+			kept = append(kept, t)
 		}
-		InitPermafrostAccountSeries(t.name)
-		InitPermafrostPaceSeries(t.name)
-		kept = append(kept, t)
 	}
 	return kept
+}
+
+// initFleetDrive is one account's boot: false = skip it.
+func initFleetDrive(ctx context.Context, logger *zap.Logger, t *odTenant) bool {
+	driveID, err := t.getDriveID(ctx)
+	var none *odNoLibraryError
+	switch {
+	case errors.As(err, &none):
+		logger.Error("permafrost account skipped: its user has no drive named OneDrive and TENANT_N_DRIVE_ID is not set — set it to the drive that holds vaultaire/ (onedrive_README.md § Drive selection)",
+			zap.String("account", t.name), zap.String("user", t.userUPN), zap.Strings("drives", none.names()))
+		return false
+	case err != nil:
+		logger.Warn("OneDrive tenant init failed — will retry on first use",
+			zap.String("tenant", t.name), zap.Error(err))
+	default:
+		others := make([]string, 0, len(t.otherDrives))
+		for _, o := range t.otherDrives {
+			others = append(others, o.Name)
+		}
+		logger.Info("permafrost account drive", zap.String("account", t.name),
+			zap.String("drive_id", driveID), zap.Bool("pinned", t.pinnedDriveID != ""),
+			zap.Strings("other_drives", others))
+		if _, err := t.ensureRootFolder(ctx, driveID); err != nil {
+			logger.Warn("OneDrive root folder creation failed",
+				zap.String("tenant", t.name), zap.Error(err))
+		}
+	}
+	return true
 }
 
 // Name is the registration key main.go uses ("permafrost"). The engine records
@@ -349,15 +335,20 @@ func (d *OneDriveDriver) homeTenantIndex(path string) int {
 // deterministic home tenant first, then the rest as fallbacks. The fallback
 // probe exists for data written before deterministic placement (the old
 // round-robin Put scattered objects across accounts) — reads walk the fleet
-// on 404 instead of failing.
+// on 404 instead of failing — and since WP-FLEET-11 only while the fleet's
+// order is not settled, at most odFallbackWalkMax accounts (the home and
+// the ones after it).
 func (d *OneDriveDriver) tenantsFor(path string) []*odTenant {
 	home := d.homeTenantIndex(path)
-	ordered := make([]*odTenant, 0, len(d.tenants))
-	ordered = append(ordered, d.tenants[home])
-	for i, t := range d.tenants {
-		if i != home {
-			ordered = append(ordered, t)
-		}
+	if d.authoritative() {
+		// WP-FLEET-11 D-F11-3: the order is settled — the home account is
+		// the only one that can hold it; a miss is a miss.
+		return []*odTenant{d.tenants[home]}
+	}
+	n := min(len(d.tenants), odFallbackWalkMax)
+	ordered := make([]*odTenant, 0, n)
+	for i := 0; i < n; i++ {
+		ordered = append(ordered, d.tenants[(home+i)%len(d.tenants)])
 	}
 	return ordered
 }
@@ -487,6 +478,9 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 	)
 	var lastErr, downErr error
 	for i, cand := range d.tenantsFor(path) {
+		if i == 1 {
+			noteWalk("get")
+		}
 		driveID, err := cand.getDriveID(ctx)
 		if err != nil {
 			downErr = fmt.Errorf("onedrive get drive: %w", err)
@@ -709,6 +703,9 @@ func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string)
 	var hardErr error  // an account we could not fully check — a copy may survive there
 	var probeErr error // 404s from the sweep, reported only if nothing was deleted
 	for i, t := range d.tenantsFor(path) {
+		if i == 1 {
+			noteWalk("delete")
+		}
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
 			hardErr = fmt.Errorf("onedrive get drive: %w", err)
@@ -1020,6 +1017,9 @@ func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string)
 	}
 	var downErr error // an account we could not check — absence is not provable past it
 	for i, t := range d.tenantsFor(path) {
+		if i == 1 {
+			noteWalk("exists")
+		}
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
 			// A down account must not abort the probe (same as Get) — the
@@ -1052,31 +1052,56 @@ func (d *OneDriveDriver) Exists(ctx context.Context, container, artifact string)
 	return false, nil
 }
 
-// HealthCheck asks EVERY account for its drive metadata, odProbeConcurrency
-// at once, within the caller's (the probe's 15 s) context, and reports the
-// worst: an error naming each failing account (R7-18: one rotating account
-// per call saw a dead one 1/N of the time). An account whose outcome changed
-// since its last probe is logged — the first probe after a boot names every
-// account.
+// HealthCheck probes a batch of accounts (probeBatch, WP-FLEET-11 D-F11-5:
+// a small fleet every account, a large one a rotating sample with every
+// account within the hour, plus the failing ones again), odProbeConcurrency
+// at once, within the caller's (the probe's 15 s) context, asks each
+// tenant's token once, and reports every account whose LAST probe (or whose
+// tenant's token) failed, by name (R7-18). An account whose outcome changed
+// since its last probe is logged.
 func (d *OneDriveDriver) HealthCheck(ctx context.Context) error {
-	errs := make([]error, len(d.tenants))
+	batch := d.probeBatch()
+	errs := make([]error, len(batch))
 	sem := make(chan struct{}, odProbeConcurrency)
 	var wg sync.WaitGroup
-	for i, t := range d.tenants {
+	for bi, idx := range batch {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			errs[i] = t.probe(ctx)
+			errs[bi] = d.tenants[idx].probe(ctx)
 		}()
 	}
+	// Each tenant's token once per interval (D-F11-5): a dead app
+	// registration is seen at once, whichever drives were sampled.
+	tokenErr := map[*odTenant]error{}
+	for _, t := range d.tenants {
+		owner := t
+		if t.tokenOwner != nil {
+			owner = t.tokenOwner
+		}
+		if _, done := tokenErr[owner]; !done {
+			_, tokenErr[owner] = owner.token(ctx)
+		}
+	}
 	wg.Wait()
+	for bi, idx := range batch {
+		t := d.tenants[idx]
+		d.logProbeChange(t, errs[bi])
+		t.probeErr.Store(odProbeOutcome{errs[bi]})
+	}
 	var failing []string
-	for i, t := range d.tenants {
-		d.logProbeChange(t, errs[i])
-		if errs[i] != nil {
-			failing = append(failing, fmt.Sprintf("%s: %v", t.name, errs[i]))
+	for _, t := range d.tenants {
+		owner := t
+		if t.tokenOwner != nil {
+			owner = t.tokenOwner
+		}
+		switch o, _ := t.probeErr.Load().(odProbeOutcome); {
+		case tokenErr[owner] != nil:
+			failing = append(failing, fmt.Sprintf("%s: %v", t.name, tokenErr[owner]))
+		case o.err != nil:
+			failing = append(failing, fmt.Sprintf("%s: %v", t.name, o.err))
 		}
 	}
 	d.recheckFleet(ctx)
@@ -1086,6 +1111,9 @@ func (d *OneDriveDriver) HealthCheck(ctx context.Context) error {
 	}
 	return nil
 }
+
+// odProbeOutcome is an account's last probe outcome (nil err = up).
+type odProbeOutcome struct{ err error }
 
 // probe is one account's health: its drive's quota, one call, exported as
 // the account's quota gauges (WP-FLEET-2, D-F1-6).
@@ -1142,6 +1170,9 @@ const odTokenRenewPause = 15 * time.Second
 // becomes a renewal per request (WP-FLEET-3 D-F3-10, the Share-one-Drive
 // 3.10.5 pattern).
 func (t *odTenant) token(ctx context.Context) (string, error) {
+	if t.tokenOwner != nil && t.tokenOwner != t {
+		return t.tokenOwner.token(ctx) // one token per tenant and app (D-F11-2)
+	}
 	for {
 		t.tokenMu.Lock()
 		now := time.Now()

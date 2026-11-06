@@ -597,6 +597,44 @@ finds them) but every remapped read pays the fleet-walk penalty. A rebalance
 or consistent-hashing scheme is a prerequisite for growing the fleet to 15 —
 planned, not built.
 
+### The fleet file and the driver at scale (WP-FLEET-11, 2026-11-06; `onedrive_scale.go`)
+
+Past 15 drives the env slots cannot hold the fleet. **`PERMAFROST_FLEET_FILE`** names a JSON file:
+
+```json
+{"tenants": [
+  {"tenant_id": "<directory id>", "client_id": "<app id>",
+   "secret": {"credential": "fleet_vierafun"},
+   "drives": [{"index": 1, "user": "vierafun@viera.fun", "drive_id": "b!…"},
+              {"index": 4, "user": "stored-fleet-001@vierafun.onmicrosoft.com", "drive_id": "b!…"}]}
+]}
+```
+
+- `secret` or `certificate` (exactly one per tenant): `{"credential": "<systemd credential name>"}` or `{"file": "<path>"}`, never the value. A certificate is a PEM holding the certificate and its key (WP-FLEET-6).
+- Unknown fields are refused, so a `client_secret` typed into the file is an error.
+- **Index N is `tenant-N`, in the same place as env slot N.** Moving from the slots to a file changes neither placement nor the metric labels.
+- Placement is by ascending index. Indexes are unique and append-only: a new drive takes a new, higher index, and `PERMAFROST_FLEET_ACCEPT` blesses a changed order as before.
+- The file and `TENANT_N_*` together are refused at boot. Without a file, the slots are read as before.
+
+**One credential, one token and one transport set per tenant** (D-F11-2). This holds for slots of one directory and app too: the tenant's first account renews the token, and the others ask it.
+
+**Placement-authoritative reads** (D-F11-3). Once the fingerprint is settled (`match`, `recorded`, `repaired`, `accepted`), `Get`, `Exists` and `Delete` ask the home account only, so a miss is a miss and costs one request (at 300 drives it was 300). While the fingerprint is `mismatch` or `unknown`, the walk stays, capped at 8 accounts (the home and the 7 after it), each walk counted in `vaultaire_permafrost_fallback_walks_total{op}`.
+
+**The probe samples** (D-F11-5). A HealthCheck probes:
+
+- `max(min(n, 8), ceil(n / 240))` accounts in rotation, so a fleet of up to 8 accounts is probed in full each time, and every account within an hour of 15 s intervals;
+- plus up to 8 accounts whose last probe failed;
+- and each tenant's token, once.
+
+It reports every account whose **last** probe failed, or whose tenant's token failed.
+
+**Boot:** the drives are initialised, and the fingerprint markers read and written, 16 at a time. 300 drives at 50 ms a call boot in about 3 s (one after the other: 45 s).
+
+**Not done, and why:**
+
+- `List` / `ListDir` from "the drives placement names" (D-F11-4). Placement hashes the full path, so one folder's files (a parity folder's `p0..p3`) sit on different drives, and no drive can be named for a prefix until WP-FLEET-5's placement over (tenant, drive). They stay the fleet's union.
+- The fingerprint by `$batch`. A `$batch` answers a `/content` read with a redirect, so it saves only the metadata calls. The concurrent read bounds the boot instead; `$batch` is WP-FLEET-9's.
+
 ### Fleet fingerprint (WP-R7-4, R7-09)
 
 The rule above is now checked. Every account carries a marker,

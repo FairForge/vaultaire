@@ -360,7 +360,7 @@ func main() {
 	}
 
 	// 7. Add Permafrost (OneDrive fleet) — internal parity tier, not customer-facing
-	if os.Getenv("TENANT_1_ID") != "" {
+	if os.Getenv("TENANT_1_ID") != "" || os.Getenv("PERMAFROST_FLEET_FILE") != "" {
 		drivers.SetPermafrostBuild(api.BuildSHA) // the fleet's User-Agent (WP-FLEET-3 D-F3-7)
 		onedriveDriver, err := drivers.NewOneDriveFleetDriver(logger)
 		if err != nil {

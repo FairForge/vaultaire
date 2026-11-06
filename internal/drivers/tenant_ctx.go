@@ -40,7 +40,7 @@ func Collectors() []prometheus.Collector {
 	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries, geyserPutMaterialized, geyserPutMultipart, geyserPutBytesPerSecond,
 		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads, webdavDeleteElsewhere, webdavFolderFilesMax, webdavFolderFull,
 		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans, driverHedges, driverHedgesWon, driverDNSRefreshes, lyveBucketLockEnabled, permafrostFleetMismatch, permafrostDriveMismatch, permafrostQuotaBytes, permafrostQuotaState,
-		permafrostThrottles, permafrostPaced, permafrostRangeHedges, permafrostFragmentResumes, permafrostHashMismatch,
+		permafrostThrottles, permafrostPaced, permafrostRangeHedges, permafrostFragmentResumes, permafrostHashMismatch, permafrostFallbackWalks,
 		swiftRequests, swiftRetries, swiftAuths, siaReadResumes, siaReadBudgetRate, siaReadBudgetWait,
 		siaWriteBudgetRate, siaWriteBudgetWait,
 		swiftSegmentGCGenerations, swiftSegmentGCDeleted}
