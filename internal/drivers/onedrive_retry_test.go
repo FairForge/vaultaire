@@ -195,13 +195,13 @@ func TestPutChunk_RetriesAreBoundedAndWaitOnCtx(t *testing.T) {
 	err := tn.putChunk(context.Background(), "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
 
 	require.Error(t, err)
-	assert.Equal(t, 2, rt.calls(), "a fragment on a request path: two attempts")
-	assert.Len(t, wl.all(), 1)
+	assert.Equal(t, 6, rt.calls(), "a fragment on a request path: the burst attempts (WP-FLEET-3 D-F3-2)")
+	assert.Len(t, wl.all(), 5)
 
 	rt2 := &odScriptRT{fn: func(_ int, req *http.Request) (*http.Response, error) { return odResp(req, 503, "", nil), nil }}
 	tn2 := scriptedTenant(rt2, &waitLog{})
 	require.Error(t, tn2.putChunk(common.WithJob(context.Background()), "https://upload.example.test/s", []byte("abc"), 0, 2, 3))
-	assert.Equal(t, 3, rt2.calls(), "under a job: three")
+	assert.Equal(t, 8, rt2.calls(), "under a job: eight")
 }
 
 func TestPutChunk_ACallerGoneMidWaitStopsAtOnce(t *testing.T) {
@@ -214,7 +214,7 @@ func TestPutChunk_ACallerGoneMidWaitStopsAtOnce(t *testing.T) {
 	err := tn.putChunk(ctx, "https://upload.example.test/s", []byte("abc"), 0, 2, 3)
 
 	require.Error(t, err)
-	assert.Less(t, time.Since(start), 500*time.Millisecond, "the 1 s backoff selects on ctx")
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "the 2 s backoff selects on ctx")
 }
 
 // R7-18 / Prompt 2b.5 F1.1: a Graph error is typed — status and Graph code —

@@ -57,7 +57,7 @@ var allocationSites = map[string]string{
 	"drivers/onedrive.go:newODChunkBuffer":         "per upload in flight: one 60 MiB Graph upload fragment (permafrost, the fleet's chunk size), pooled (odChunkPool) — no process budget: permafrost is written only by the vault parity job (one protect at a time; WP-R7-4)",
 	"drivers/geyser_multipart.go:take":             "Geyser's PUT budget (GEYSER_PUT_BUDGET, 4 GiB, process-wide semaphore taken before the buffer): one part of a multipart Put ≥ 1 GiB (64–256 MiB, a power of two, more only past 10,000 parts), pooled per size; GEYSER_PUT_CONCURRENCY parts per upload",
 	"drivers/swift.go:pieceBuffer":                 "Blomp's PUT budget (BLOMP_PUT_BUDGET, 1 GiB, process-wide semaphore taken before the buffer): one piece of a large object (64 MiB, more only past 1000 pieces), pooled; BLOMP_PUT_CONCURRENCY pieces per upload",
-	"drivers/onedrive.go:fetchRange":               "per GET ≤ odAdaptiveStreams × 8 MiB (64 MiB): permafrost's ordered ranges through parfetch's window (WP-R7-4, R7-07: every range was read whole before)",
+	"drivers/onedrive.go:fetchRangeOnce":           "per GET ≤ odAdaptiveStreams × 8 MiB (64 MiB): permafrost's ordered ranges through parfetch's window, one attempt's buffer at a time (WP-R7-4, R7-07: every range was read whole before; WP-FLEET-3: the attempts)",
 	// The unknown-length spool of Geyser, the fixed-bucket S3 driver and
 	// permafrost (RP17-2): rare on the data path — every S3 PUT carries its
 	// length; the Vault writes pass it (WP-R7-2).

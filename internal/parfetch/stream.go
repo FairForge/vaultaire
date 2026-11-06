@@ -133,6 +133,23 @@ type Config struct {
 // ErrPartSize is a part whose bytes are not its declared size (StrictSizes).
 var ErrPartSize = errors.New("parfetch: part is not its declared size")
 
+// ErrPartCut is a part whose fetch failed with an error that wraps io.EOF —
+// io.ReadFull of an empty body, a connection the server closed. It never
+// wraps io.EOF itself: the only io.EOF a Stream hands out is its own end, so
+// a refused part can never read as a short clean body (WP-FLEET-3 D-F3-1:
+// io.Copy over a fleet GET returned (0, nil) 135 times in the 2026-11-06
+// soak). The fetch's words are kept in the message.
+var ErrPartCut = errors.New("parfetch: a part ended early")
+
+// partErr is the error an attempt at part i reports: err, unless it wraps
+// io.EOF — then ErrPartCut with err's text, the chain to io.EOF cut.
+func partErr(i int, err error) error {
+	if err == nil || !errors.Is(err, io.EOF) {
+		return err
+	}
+	return fmt.Errorf("%w: part %d: %s", ErrPartCut, i, err.Error())
+}
+
 // FetchFunc returns part i's bytes. It must honour ctx: a hedge loser and a
 // closed stream are ended by cancelling it.
 type FetchFunc func(ctx context.Context, i int) ([]byte, error)
@@ -352,6 +369,7 @@ func (s *Stream) runPart(i int) {
 			}
 			start := time.Now()
 			data, err := s.fetch(pctx, i)
+			err = partErr(i, err)
 			if err == nil && s.cfg.StrictSizes && int64(len(data)) != s.sizes[i] {
 				data, err = nil, fmt.Errorf("%w: part %d is %d bytes, declared %d", ErrPartSize, i, len(data), s.sizes[i])
 			}
@@ -456,7 +474,8 @@ func (s *Stream) runPart(i int) {
 	}
 }
 
-// Next returns the next part in order, io.EOF after the last. The bytes
+// Next returns the next part in order, io.EOF after the last — that io.EOF
+// itself, never an error wrapping it, and never for a part that failed. The bytes
 // returned are the caller's until it calls Next again or Close: only then is
 // the part's room in the window given back. An error is sticky.
 func (s *Stream) Next() ([]byte, error) {
@@ -497,7 +516,9 @@ func (s *Stream) Close() {
 }
 
 // Reader adapts a Stream to an io.ReadCloser: the parts' bytes in order, a
-// part's failure as a read error (never a clean EOF).
+// part's failure as a read error (never a clean EOF). The end is the
+// Stream's own io.EOF, compared by identity (an error that merely wraps it
+// is a failure).
 type Reader struct {
 	s   *Stream
 	buf []byte
@@ -549,7 +570,7 @@ func (r *Reader) WriteTo(w io.Writer) (int64, error) {
 			return total, err
 		}
 	}
-	if errors.Is(r.err, io.EOF) {
+	if r.err == io.EOF { //nolint:errorlint // the Stream's own end, by identity
 		return total, nil
 	}
 	return total, r.err
@@ -557,14 +578,14 @@ func (r *Reader) WriteTo(w io.Writer) (int64, error) {
 
 // Err is the stream's failure, nil when it ended cleanly or is still open.
 func (r *Reader) Err() error {
-	if r.err == nil || errors.Is(r.err, io.EOF) {
+	if r.err == nil || r.err == io.EOF { //nolint:errorlint // the Stream's own end, by identity
 		return nil
 	}
 	return r.err
 }
 
 // Done reports whether every part was read.
-func (r *Reader) Done() bool { return errors.Is(r.err, io.EOF) && len(r.buf) == 0 }
+func (r *Reader) Done() bool { return r.err == io.EOF && len(r.buf) == 0 } //nolint:errorlint // the Stream's own end, by identity
 
 // Close ends the stream.
 func (r *Reader) Close() error {
