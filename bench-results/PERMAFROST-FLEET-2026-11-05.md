@@ -105,3 +105,41 @@ DELETE 14.8/s, one 429 in 1,000.
 - then slot 1 the same way (`-copy` → `-switch` → `TENANT_1_DRIVE_ID` → restart → read-back → 24 h → `-retire`);
 - slot 2 needs no move: its `-switch` only records `drive_id`;
 - the one-time purge of the three bins (~112 GiB) is the owner's decision (D-F1-6).
+
+## Evening additions (2026-11-05 22:00 → 2026-11-06 07:00 UTC) — the gate rehearsals
+
+**Worker ↔ fleet, no origin bytes (a throwaway Worker on the bench account, deleted after; bodies synthesised in the Worker).**
+Writes, one upload session, 96 MiB: 20 MiB fragments ≈ 13 MB/s serial or pipelined; **56.25 MiB fragments (180 × 320 KiB) ≈ 25 MB/s**; a streamed fragment needs a known length (`FixedLengthStream`; a plain stream is refused by Graph) and performs like a buffered one. Pipelining pays only against a client's upload: with a client body through the Worker, pipelined 20 MiB fragments wrote 24.6 MB/s against 7.6 read-then-send. Parallel sessions on one drive: 8 × 96 MiB → **171 MB/s** aggregate, 12–16 × 96 → ~123, 24 × 64 → 4 MB/s each (throttled). Cloudflare answered **413 to a 256 MiB request body** (the plan's 100 MB limit).
+Reads from the download URL inside a Worker, 96 MiB: 1 range 150–172 MB/s, 4 → 258–278, **8 → 278–351**, 16 → 214–284, 32 → 126–159. The URL stayed valid 60 min and answered 401 at 70.
+RS(4,4) decode in plain JavaScript, stripe-wise (4 × 1 MiB in, 4 × 1 MiB out, buffers reused): 64 MiB 0.64 s, 256 MiB 2.4 s, **1 GiB 9.9 s ≈ 110 MB/s**; a whole-object decode of 256 MiB exceeded the isolate (error 1102).
+
+**Six drives as the Vault parity leg THROUGH Vaultaire** (the 2026-11-04 parity lab, same binary, `VAULT_PARITY_LEGS=permafrost`, slots 4–6 = the three new drives): protect 64 MiB 10.6 s / 256 MiB 14.6 s / 1 GiB 53.4 s (unchanged from three drives — Geyser's read-back); parity-serve reads 64 MiB 36–63 MB/s, 256 MiB 71–84, 1 GiB 78–101 with one run at 17 (a straggler shard); **two concurrent 1 GiB 115 MB/s aggregate, four concurrent 298 MB/s** (three drives on 2026-11-04: 62–77).
+
+**Migration primitive:** a Graph cross-drive `copy` of a 3-file sandbox folder from the PersonalCacheLibrary to the OneDrive library of the same user completed in 6.4 s; every size and `quickXorHash` matched.
+
+**Small objects, raw** (1 MiB simple PUTs, one drive, 300 per step): concurrency 8 → 8.8 writes/s, 16 → 17, **32 → 33**, 64 → 25; 1,200 writes, no 429, no `RateLimit-*` header. The 10.6 writes/s per tenant in the morning table was the bench's latency at 8 in flight, not a budget.
+
+**Two-hour soak, two drives in two tenants** (48 × 256 MB PUT then GET per round, concurrency 24; 111 rounds): **666 GB written and 666 GB read per drive** (6.7× / 3.3× the published hourly rates). Clean rounds PUT median 436 MB/s, GET median 642 (both drives). 19 rounds (17 %) lost ≥ 20 of 48 objects to `HTTP 429` on 8 MiB ranges — about one burst every five rounds (gaps 5,3,2,1,5,5,5,10,10,6,5,5,11,6,6,6,4,1), each about one round long, the next round always clean; 44 rounds lost 1–14 objects; 9 rounds had write failures (fragment 429s, the driver's retries exhausted). Error kinds over the soak: 574 range `HTTP 429`, **135 `size mismatch: got 0`** (the driver ended a body cleanly after 0 bytes when its ranges were refused), 63 connect/TLS errors to the `-my.sharepoint.com` host, 9 resets. Microsoft's response to over-rate traffic is periodic bursts, not a cap.
+
+**Driver-level erasure bench with the six-drive fleet** (`cmd/tools/erasure-bench`, RS(4,4), data shards on Geyser LA1, parity on the fleet, read-back hashed; a concurrent soak was loading one of the six drives' tenant, which is what the 429 lines are):
+
+| Object | Protect (4 shards to the fleet) | Read, first 4 of 8 | Read, Geyser lost (fleet alone) | Read, fleet lost (Geyser alone) |
+|---|---|---|---|---|
+| 256 MiB | 5.2 s (99 MB/s wire) | 127 MB/s | 79 MB/s | 66 MB/s |
+| 1 GiB | 12.4–14.9 s (138–166 MB/s wire) | 118 MB/s | 97 MB/s | 62–79 MB/s |
+| 1 GiB, **hedged** reads | 12.6–13.0 s | 92–152 MB/s | **124–131 MB/s** | 79–80 MB/s |
+
+Under the neighbouring tenant's 429 burst one shard PUT failed its retries and two parity-only reads failed with "only 3/4" / "only 2/4 shards" — the same lesson as the soak: a burst must be ridden (WP-FLEET-3), and a hedge lifts the fleet-only read by a third (97 → 124–131 MB/s on 1 GiB).
+
+**Multi-leg layouts with the six-drive fleet** (erasure-bench, data on Geyser, nothing else on the fleet; the Sync bridge was not configured in the lab, so the stack is Geyser + Lyve + fleet):
+
+| Layout | Object | Protect (all shards landed) | Read first 4 of N | Lose Geyser | Lose Lyve | Lose fleet |
+|---|---|---|---|---|---|---|
+| stacked RS(4,8): geyser:4 + lyve:4 + permafrost:4 | 256 MiB | 4.6–6.4 s | 102–107 MB/s | 94–111 | 69–110 | 87–100 |
+| stacked, same | 1 GiB | 12.5–13.6 s (fleet slowest, 226–246 MB/s wire) | **140–160 MB/s** | **158–204** | 157–158 | 115–164 |
+| spread RS(4,4): geyser:4 + lyve:2 + permafrost:2 | 256 MiB | 4.3–4.4 s | 74–87 | 72–83 | 70–81 | 73–81 |
+| spread, same | 1 GiB | 10.7–12.9 s | 105–110 | 92–129 | 73–78 | 77–83 |
+
+The 2026-11-04 verdict holds with six drives: a full parity set on each leg races the legs (any one leg lost still reads at 115–204 MB/s) and costs 2× parity bytes here (3× with Sync); a spread layout needs every leg for a fast read and loses a third of its speed when any one is gone. Every read hashed clean; no 429 with the fleet otherwise idle.
+
+**Single tenant, two drives, 30 min, nothing else on the fleet** (the viera.pics test drives; same round shape as the two-hour soak): 21 rounds, **12 lost ≥ 20 of 48 reads and 7 lost writes** (two rounds wrote nothing); only 2 rounds read clean (690 MB/s). The two-tenant soak's first 30 minutes, at the same per-drive rate, lost reads in 5 of 30 rounds and writes in none. Each drive moved ≈ 420 GB/h, so the tenant carried ≈ 840 GB/h against Microsoft's 400 GB/h per app per tenant: **the per-tenant budget is what binds a dense tenant, and it binds writes too.** Design: pace per tenant, spread any job's drives across tenants.
