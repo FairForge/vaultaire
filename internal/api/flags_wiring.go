@@ -366,3 +366,20 @@ func allowUnsealedSiaFromEnv(getenv func(string) string, logger *zap.Logger) boo
 	}
 	return on
 }
+
+// allowUnsealedPermafrostFromEnv reads PERMAFROST_ALLOW_UNSEALED
+// (`true`/`1`): lets the Vault parity job write an UNSEALED object's shards
+// to the permafrost fleet (WP-FLEET D-F-SEAL-1). Off (the default), the
+// fleet takes ciphertext shards only. Set = one Warn line at boot; anything
+// else is false (a Warn for a value that is neither).
+func allowUnsealedPermafrostFromEnv(getenv func(string) string, logger *zap.Logger) bool {
+	v := strings.TrimSpace(getenv("PERMAFROST_ALLOW_UNSEALED"))
+	on := v == "true" || v == "1"
+	if v != "" && !on && v != "false" && v != "0" {
+		logger.Warn("PERMAFROST_ALLOW_UNSEALED: not true/false — unsealed Vault parity shards stay off the fleet", zap.String("value", v))
+	}
+	if on {
+		logger.Warn("PERMAFROST_ALLOW_UNSEALED is set: Vault parity shards of UNSEALED objects may go to the permafrost fleet, where four of them rebuild the object under the tenant's data-app credential (labs only)")
+	}
+	return on
+}

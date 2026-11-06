@@ -205,6 +205,7 @@ func setupParityFixture(t *testing.T) *parityFixture {
 	f.svc.Stripe = f.stripe
 	f.svc.ReconcileEvery = time.Nanosecond        // every run reconciles (the 30 min spacing has its own test)
 	f.svc.ProtectOverhead = 10 * time.Millisecond // the fixture's objects are small; the estimate has its own tests
+	f.svc.AllowUnsealedPermafrost = true          // the fixture's objects are unsealed; the sealed-only rule has its own tests (vault_parity_seal_test.go)
 	return f
 }
 
