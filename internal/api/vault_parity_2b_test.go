@@ -30,6 +30,7 @@ func TestVaultParity_TheReconcileRunsFirstAndNoProtectStartsThatCannotFinish(t *
 	f.eng.AddDriver("permafrost", &slowLeg{flakyLegDriver: f.leg, delay: 1500 * time.Millisecond})
 	f.svc.ReconcileSlice = time.Second
 	f.svc.ProtectOverhead = 1500 * time.Millisecond // the size estimate of one of these protects
+	f.svc.ProtectConcurrency = 1                    // the deadline rule, one protect at a time (the concurrent case: vault_parity_concurrency_test.go)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

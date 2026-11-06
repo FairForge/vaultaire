@@ -224,6 +224,7 @@ func TestVaultParity_ReconcileRunsWhenProtectUsesTheRun(t *testing.T) {
 	// -race on a loaded runner). 40 objects × ≥ 100 ms (4 s) still exceed
 	// the 3 s run, so the pass always stops at its share.
 	f.svc.ProtectOverhead = 500 * time.Millisecond
+	f.svc.ProtectConcurrency = 1 // the deadline rule, one protect at a time (the concurrent case: vault_parity_concurrency_test.go)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

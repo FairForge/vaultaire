@@ -47,10 +47,20 @@ type flakyGetDriver struct {
 	// the encoder fails mid-object.
 	truncateGet atomic.Bool
 	rangeGets   atomic.Int32
-	dir         string
+	// getDelay: every Get waits this long before answering (a tape read's
+	// fixed latency, the parallel-protect test).
+	getDelay atomic.Int64
+	dir      string
 }
 
 func (d *flakyGetDriver) Get(ctx context.Context, container, artifact string) (io.ReadCloser, error) {
+	if w := time.Duration(d.getDelay.Load()); w > 0 {
+		select {
+		case <-time.After(w):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if d.failGet.Load() {
 		return nil, errors.New("geyser: connection reset by peer")
 	}

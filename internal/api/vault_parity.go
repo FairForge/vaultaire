@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -296,6 +297,11 @@ type VaultParity struct {
 	// before the run's deadline (VAULT_PARITY_PROTECT_RATE).
 	ProtectRate     int64
 	ProtectOverhead time.Duration
+	// ProtectConcurrency is the protects one run has in flight at once
+	// (VAULT_PARITY_PROTECT_CONCURRENCY, D-F-PROT-1; ≤ 1 = one at a time):
+	// each is started only when its own estimate fits before the run's
+	// deadline, and the run's byte budget is shared.
+	ProtectConcurrency int
 
 	// Legs is the parity-leg preference order (VAULT_PARITY_LEGS, else
 	// vaultParityLegs).
@@ -372,8 +378,9 @@ func NewVaultParity(db *sql.DB, eng engine.Engine, fl flagChecker, logger *zap.L
 		JobName:  "vault_parity", Every: 2 * time.Minute, BootDelay: 45 * time.Second, MaxRunTime: time.Hour,
 		MaxObjectsPerRun: 500, MaxBytesPerRun: 256 << 30, Stripe: vaultParityStripe, now: time.Now,
 		ProtectRate: protectRateFromEnv(os.Getenv, logger), ProtectOverhead: defaultProtectOverhead,
-		Legs:        parityLegsFromEnv(os.Getenv),
-		OrphanGrace: orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
+		ProtectConcurrency: protectConcurrencyFromEnv(os.Getenv, logger),
+		Legs:               parityLegsFromEnv(os.Getenv),
+		OrphanGrace:        orphanGraceFromEnv(os.Getenv, logger), MaxOrphanCandidatesPerRun: defaultMaxOrphanCandidatesPerRun,
 		MaxReconcileTenantsPerRun: defaultMaxReconcileTenantsPerRun,
 		ReconcileEvery:            reconcileEveryFromEnv(os.Getenv, logger), ReconcileSlice: defaultReconcileSlice,
 		MaxReconcileListingsPerRun: defaultMaxReconcileListingsPerRun,
@@ -697,45 +704,77 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 	}
 	var budget int64
 	deadline, hasDeadline := ctx.Deadline()
+	slots := make(chan struct{}, max(p.ProtectConcurrency, 1))
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex // res, from the protects in flight
+	)
+	defer wg.Wait()
 	for _, c := range cands {
 		if ctx.Err() != nil {
+			wg.Wait()
 			return ctx.Err()
 		}
 		if p.MaxBytesPerRun > 0 && budget+c.size > p.MaxBytesPerRun && budget > 0 {
 			break
 		}
+		// A free slot first, then the estimate against the time left: a
+		// protect that waited for a slot is judged on the time it will have.
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return ctx.Err()
+		}
 		if est := p.protectEstimate(c.size); hasDeadline && time.Until(deadline) < est {
+			<-slots
+			mu.Lock()
 			res.WorkStopped = true
+			mu.Unlock()
 			continue
 		}
 		budget += c.size
-		state, written, err := p.protect(ctx, c)
-		res.BytesWritten += written
-		switch {
-		case err == nil && state == "gone":
-			res.DeletedMeanwhile++
-			vaultParityObjects.WithLabelValues("erased").Inc()
-		case err == nil && state == "requested":
-			res.RestoresRequested++
-		case err == nil && state == "in_progress":
-			res.RestoresWaiting++
-		case err == nil:
-			res.Protected++
-			vaultParityObjects.WithLabelValues("complete").Inc()
-		case state == "skipped":
-			res.Skipped++
-			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (skipped, its earlier shards are not erased): %v", c.bucket, c.key, err))
-		case state == "partial":
-			res.Partial++
-			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (partial): %v", c.bucket, c.key, err))
-			vaultParityObjects.WithLabelValues("partial").Inc()
-		default:
-			res.Failed++
-			res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s: %v", c.bucket, c.key, err))
-			vaultParityObjects.WithLabelValues("failed").Inc()
-		}
+		wg.Add(1)
+		go func(c parityCandidate) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			state, written, err := p.protect(ctx, c)
+			mu.Lock()
+			defer mu.Unlock()
+			p.recordProtect(res, c, state, written, err)
+		}(c)
 	}
+	wg.Wait()
 	return nil
+}
+
+// recordProtect adds one protect's outcome to the run's result (under the
+// caller's lock).
+func (p *VaultParity) recordProtect(res *VaultParityResult, c parityCandidate, state string, written int64, err error) {
+	res.BytesWritten += written
+	switch {
+	case err == nil && state == "gone":
+		res.DeletedMeanwhile++
+		vaultParityObjects.WithLabelValues("erased").Inc()
+	case err == nil && state == "requested":
+		res.RestoresRequested++
+	case err == nil && state == "in_progress":
+		res.RestoresWaiting++
+	case err == nil:
+		res.Protected++
+		vaultParityObjects.WithLabelValues("complete").Inc()
+	case state == "skipped":
+		res.Skipped++
+		res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (skipped, its earlier shards are not erased): %v", c.bucket, c.key, err))
+	case state == "partial":
+		res.Partial++
+		res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s (partial): %v", c.bucket, c.key, err))
+		vaultParityObjects.WithLabelValues("partial").Inc()
+	default:
+		res.Failed++
+		res.Errors = append(res.Errors, fmt.Sprintf("protect %s/%s: %v", c.bucket, c.key, err))
+		vaultParityObjects.WithLabelValues("failed").Inc()
+	}
 }
 
 // vaultParityCandidatePages bounds the pages of candidates one run reads
@@ -1538,4 +1577,26 @@ func (p *VaultParity) newParityRead(ctx context.Context, r parityRow, dataPiece 
 		return nil, err
 	}
 	return rb, nil
+}
+
+// defaultProtectConcurrency is VAULT_PARITY_PROTECT_CONCURRENCY's default
+// (D-F-PROT-1): one protect is bound by its tape read-back (~20 MB/s), not
+// by the leg — four concurrent 1 GiB rebuilds read 298 MB/s from six fleet
+// drives (2026-11-05).
+const defaultProtectConcurrency = 4
+
+// protectConcurrencyFromEnv is VAULT_PARITY_PROTECT_CONCURRENCY (1–16),
+// else the default; a rejected value is logged at Warn and the default kept.
+func protectConcurrencyFromEnv(getenv func(string) string, logger *zap.Logger) int {
+	raw := strings.TrimSpace(getenv("VAULT_PARITY_PROTECT_CONCURRENCY"))
+	if raw == "" {
+		return defaultProtectConcurrency
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 16 {
+		logger.Warn("VAULT_PARITY_PROTECT_CONCURRENCY rejected (need 1..16); default kept",
+			zap.String("value", raw), zap.Int("default", defaultProtectConcurrency))
+		return defaultProtectConcurrency
+	}
+	return n
 }
