@@ -53,6 +53,11 @@ var permafrostDriveMismatch = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 // first 1 is a change a rule can see.
 func InitPermafrostAccountSeries(account string) {
 	permafrostDriveMismatch.WithLabelValues(account).Set(0)
+	// The quota's state series at 0 = no probe has read it yet; the byte
+	// series appear with the first probe (a 0 total would be a lie).
+	for _, st := range odQuotaStates {
+		permafrostQuotaState.WithLabelValues(account, st)
+	}
 }
 
 var permafrostFleetMismatch = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -434,4 +439,45 @@ func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, di
 		return fmt.Errorf("marker encode: %w", err)
 	}
 	return t.simpleUpload(ctx, driveID, rootID, fleetMarkerPath, b)
+}
+
+// The account's drive quota as Graph reports it (WP-FLEET-2, D-F1-6), read by
+// every probe. `used` EXCLUDES the recycle bin; `deleted` is the bin;
+// `remaining` = total − used − deleted, so the bin counts against it (prod
+// 2026-11-05: 5120 − 20.61 − 68.37 = 5031.02 GiB on tenant-1).
+var (
+	permafrostQuotaBytes = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vaultaire_permafrost_quota_bytes",
+		Help: "A permafrost account's drive quota from Graph drive.quota, read by every probe: kind = total | used (live files, the recycle bin excluded) | deleted (the recycle bin) | remaining (total − used − deleted). WP-FLEET-2; onedrive_README.md § OneDrive Gotchas.",
+	}, []string{"account", "kind"})
+	permafrostQuotaState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vaultaire_permafrost_quota_state",
+		Help: "1 for a permafrost account's current Graph drive.quota.state (normal | nearing | critical | exceeded), 0 for the others. WP-FLEET-2.",
+	}, []string{"account", "state"})
+)
+
+// odQuotaStates are Graph's drive.quota.state values.
+var odQuotaStates = []string{"normal", "nearing", "critical", "exceeded"}
+
+// odQuota is Graph's drive.quota.
+type odQuota struct {
+	Total     int64  `json:"total"`
+	Used      int64  `json:"used"`
+	Remaining int64  `json:"remaining"`
+	Deleted   int64  `json:"deleted"`
+	State     string `json:"state"`
+}
+
+func (q *odQuota) export(account string) {
+	permafrostQuotaBytes.WithLabelValues(account, "total").Set(float64(q.Total))
+	permafrostQuotaBytes.WithLabelValues(account, "used").Set(float64(q.Used))
+	permafrostQuotaBytes.WithLabelValues(account, "remaining").Set(float64(q.Remaining))
+	permafrostQuotaBytes.WithLabelValues(account, "deleted").Set(float64(q.Deleted))
+	for _, s := range odQuotaStates {
+		v := 0.0
+		if s == q.State {
+			v = 1
+		}
+		permafrostQuotaState.WithLabelValues(account, s).Set(v)
+	}
 }

@@ -358,13 +358,13 @@ func TestOneDriveRemoveContainerTree_RemovesTheEmptiedFolderOnEveryAccount(t *te
 	for i, tn := range d.tenants {
 		odTree{"": {"photos/"}, "photos": {}}.install(stubs[i], tn)
 		stubs[i].routes["GET "+itemURL(tn, "t-x/c")] = odRoute{200, `{"id":"C-` + tn.name + `"}`}
-		stubs[i].routes["DELETE "+graphBase+"/drives/"+tn.driveID+"/items/C-"+tn.name] = odRoute{204, ""}
+		stubs[i].routes["POST "+permaURL(tn, "C-"+tn.name)] = odRoute{204, ""}
 	}
 
 	require.NoError(t, d.RemoveContainerTree(ctx, "c"))
 
 	for i, tn := range d.tenants {
-		assert.Contains(t, stubs[i].calls, "DELETE "+graphBase+"/drives/"+tn.driveID+"/items/C-"+tn.name)
+		assert.Contains(t, stubs[i].calls, "POST "+permaURL(tn, "C-"+tn.name))
 	}
 }
 
@@ -376,8 +376,8 @@ func TestOneDriveRemoveContainerTree_NeverWhileAKeyRemains(t *testing.T) {
 	err := d.RemoveContainerTree(ctx, "c")
 
 	require.ErrorIs(t, err, ErrDirNotEmpty)
-	assert.False(t, stubs[0].sawMethod("DELETE"))
-	assert.False(t, stubs[1].sawMethod("DELETE"))
+	assert.False(t, stubs[0].sawMethod("POST"), "no delete")
+	assert.False(t, stubs[1].sawMethod("POST"), "no delete")
 }
 
 // R7-18: HealthCheck probed ONE rotating account per call, so a dead account
@@ -390,7 +390,7 @@ func TestOneDriveHealthCheck_ADeadAccountFailsEveryProbeAndIsNamed(t *testing.T)
 		if i == 1 {
 			status, body = 401, `{"error":{"code":"InvalidAuthenticationToken"}}`
 		}
-		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID] = odRoute{status, body}
+		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID+"?$select=quota"] = odRoute{status, body}
 	}
 
 	for i := 0; i < 3; i++ {
@@ -407,14 +407,14 @@ func TestOneDriveHealthCheck_ADeadAccountFailsEveryProbeAndIsNamed(t *testing.T)
 func TestOneDriveHealthCheck_AllHealthyIsNil(t *testing.T) {
 	d, stubs := stubFleet(3, zap.NewNop())
 	for i, tn := range d.tenants {
-		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID] = odRoute{200, `{}`}
+		stubs[i].routes["GET "+graphBase+"/drives/"+tn.driveID+"?$select=quota"] = odRoute{200, `{}`}
 	}
 	require.NoError(t, d.HealthCheck(context.Background()))
 }
 
 func TestOneDriveHealthCheck_AHungAccountIsBoundedByTheProbe(t *testing.T) {
 	d, stubs := stubFleet(2, zap.NewNop())
-	stubs[0].routes["GET "+graphBase+"/drives/"+d.tenants[0].driveID] = odRoute{200, `{}`}
+	stubs[0].routes["GET "+graphBase+"/drives/"+d.tenants[0].driveID+"?$select=quota"] = odRoute{200, `{}`}
 	d.tenants[1].graphHTTP = &http.Client{Transport: &odScriptRT{fn: func(_ int, req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
