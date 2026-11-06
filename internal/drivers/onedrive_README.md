@@ -601,6 +601,28 @@ that day — the cache library on slots 1 and 3, `OneDrive` on slot 2 — so the
 deploy moved nothing; the migration tool then moves slots 1 and 3 one at a
 time (below).
 
+State on 2026-11-06: slot 3 moved (`-copy` → `-switch` → its pin set to the
+`OneDrive` library → restart; read back whole through the driver, 0 fallback
+hits); its old tree is retired after 24 h; slot 1 next; slot 2 stays (its
+`-switch` only records `drive_id`). The procedure, per slot, with
+`cmd/tools/permafrost-migrate-drive -slot N` on SLC (`.env.bench`):
+
+1. `-dry-run` — which drive holds `vaultaire/`, how much;
+2. `-copy` — Graph's `copy` to the `OneDrive` library, then the verify (count,
+   bytes, `quickXorHash`); exit 2 = a difference, nothing switched;
+3. `-switch` — verify again (it refuses while the still-pinned old drive holds
+   writes the copy lacks: re-run `-copy`), `drive_id` on both markers, the old
+   one `moved_to`; it prints the `TENANT_N_DRIVE_ID` line;
+4. prod `.env` (backup first) gets that line, `sudo vaultaire-switch restart`;
+   the boot's `permafrost account drive` line names the new drive and
+   `vaultaire_permafrost_drive_mismatch` stays 0 (a 1 = the marker names
+   another drive: set the old pin back and restart);
+5. read back through the driver (`blob-verify -driver permafrost -list …`
+   with prod's pins) and, where prod has rows on `permafrost`, `routing_truth`;
+6. after 24 h green, `-retire -confirm-retire` — the old tree
+   `permanentDelete`d once its marker names the move and the new tree holds
+   every old item.
+
 ### Bench caveat
 
 No `permafrost-*` tool goes through this driver — they hand-roll their own
