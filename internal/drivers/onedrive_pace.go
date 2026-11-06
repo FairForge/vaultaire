@@ -292,6 +292,7 @@ func (t *odTenant) hold(op string, d time.Duration) {
 	if op != "" { // "" = RateLimit back-pressure, not a throttle
 		t.throttleCount.Add(1)
 		permafrostThrottles.WithLabelValues(t.name, op).Inc()
+		t.countThrottleAt(time.Now())
 	}
 	if t.pace != nil {
 		t.pace.req.drain()

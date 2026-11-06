@@ -212,6 +212,11 @@ type odTenant struct {
 	tokenOwner *odTenant
 	// probeErr is the last probe's outcome (an odProbeOutcome).
 	probeErr atomic.Value
+	// lastQuota is the last probe's drive.quota (an odQuota), and throttles
+	// the 429/503s per minute of the last hour — the System page's fleet
+	// card (WP-FLEET-10, onedrive_observe.go).
+	lastQuota atomic.Value
+	throttles odThrottleRing
 
 	// pace is the account's buckets and its tenant's (onedrive_pace.go,
 	// WP-FLEET-3 D-F3-5); nil = none (the 429 hold still applies).
@@ -1136,6 +1141,7 @@ func (t *odTenant) probe(ctx context.Context) error {
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&out); err == nil && out.Quota != nil {
 		out.Quota.export(t.name)
+		t.lastQuota.Store(*out.Quota)
 	}
 	odPooledDrain(resp.Body)
 	return nil

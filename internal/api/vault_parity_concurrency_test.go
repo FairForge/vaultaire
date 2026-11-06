@@ -1,9 +1,12 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -80,5 +83,49 @@ func TestProtectConcurrencyFromEnv(t *testing.T) {
 		assert.Equal(t, want, got, "%q", v)
 		rejected := v == "0" || v == "17" || v == "x"
 		require.Equal(t, rejected, logs.Len() == 1, "%q", v)
+	}
+}
+
+// WP-FLEET-10: the protects in flight are a gauge, back at 0 after a run.
+func TestVaultParity_ProtectsInFlightIsAGaugeThatReturnsToZero(t *testing.T) {
+	f := setupParityFixture(t)
+	f.svc.ProtectConcurrency = 4
+	for _, k := range []string{"a.bin", "b.bin", "c.bin"} {
+		f.object(k, 256<<10)
+	}
+	f.geyser.getDelay.Store(int64(300 * time.Millisecond))
+	peak := make(chan float64, 1)
+	go func() {
+		var m float64
+		for i := 0; i < 40; i++ {
+			m = max(m, promtest.ToFloat64(vaultParityProtectsInFlight))
+			time.Sleep(10 * time.Millisecond)
+		}
+		peak <- m
+	}()
+
+	res := f.run()
+
+	assert.Equal(t, 3, res.Protected, "%+v", res)
+	assert.GreaterOrEqual(t, <-peak, float64(2), "protects at once while the reads ran")
+	assert.Equal(t, float64(0), promtest.ToFloat64(vaultParityProtectsInFlight))
+}
+
+// WP-FLEET-10: the gauge and the fleet's new driver series reach /metrics of
+// a fresh server (declared is not registered — be9d044d). Presence only.
+func TestMetrics_FleetObservabilityRegistered(t *testing.T) {
+	s := &Server{startTime: time.Now(), healthChecker: NewBackendHealthChecker(), logger: zap.NewNop()}
+	s.initMetrics()
+	rr := httptest.NewRecorder()
+	s.handleMetrics(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	for _, want := range []string{
+		"# TYPE vaultaire_vault_parity_protects_in_flight gauge",
+		`vaultaire_permafrost_fallback_walks_total{op="get"}`,
+		`vaultaire_permafrost_range_hedges_total{outcome="won"}`,
+		`vaultaire_permafrost_fragment_resumes_total{outcome="resumed"}`,
+	} {
+		assert.Contains(t, body, want)
 	}
 }

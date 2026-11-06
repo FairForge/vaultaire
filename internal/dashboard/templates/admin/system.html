@@ -150,6 +150,34 @@
 </div>
 {{end}}
 
+{{if .Fleet}}
+<div class="card">
+    <div class="card-title">Permafrost Fleet</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>Account</th><th>Drive</th><th>Used</th><th>Recycle bin</th><th>Total</th><th>Throttles (1 h)</th><th>Probe</th><th>Licence</th></tr>
+            </thead>
+            <tbody>
+                {{range .Fleet}}
+                <tr>
+                    <td>{{.Account}}</td>
+                    <td><code>{{.Drive}}</code>{{if .Pinned}} <span class="badge badge-success">pinned</span>{{end}}</td>
+                    <td>{{.UsedFmt}}</td>
+                    <td>{{.BinFmt}}</td>
+                    <td>{{.TotalFmt}}</td>
+                    <td>{{if gt .Throttles1h 0}}<span class="badge badge-warning">{{.Throttles1h}}</span>{{else}}0{{end}}</td>
+                    <td>{{if eq .Probe "up"}}<span class="badge badge-success">up</span>{{else if eq .Probe "failing"}}<span class="badge badge-danger" title="{{.LastError}}">failing</span>{{else}}{{.Probe}}{{end}}</td>
+                    <td>{{.Licence}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+    <div class="card-detail">The OneDrive fleet as the driver sees it (WP-FLEET-10): the drive each account writes to, the quota its last probe read (Graph <code>drive.quota</code> — the recycle bin counts against the total), the 429/503s Microsoft answered in the last hour (each holds the account for its Retry-After — <code>internal/drivers/onedrive_README.md</code> § Throttle Handling), the probe's outcome. The licence column is WP-FLEET-6's. <code>docs/FLEET.md</code></div>
+</div>
+{{end}}
+
 {{if .Routing}}
 <div class="card">
     <div class="card-title">Routing Truth</div>

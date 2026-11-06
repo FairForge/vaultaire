@@ -192,7 +192,7 @@ func (s *Server) initMetrics() {
 		// The Vault parity copy (WP-VAULT-1): shards written, erased, and
 		// reads a backend failure sent to the parity.
 		reg.MustRegister(vaultParityObjects, vaultParityBytes, vaultParityFallbacks, vaultParityOrphans,
-			vaultParityUnprotectedBytes, vaultParityUnprotectedObjects)
+			vaultParityUnprotectedBytes, vaultParityUnprotectedObjects, vaultParityProtectsInFlight)
 		// Its scrub (WP-VAULT-2): shards read, rows re-protected, rebuilds
 		// from the parity alone, restores asked of tape; the standing
 		// gauges are read from the table.
