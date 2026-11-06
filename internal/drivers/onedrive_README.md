@@ -79,19 +79,20 @@ env vars in `.env.bench` (gitignored).
 
 ### Upload Strategy
 
-| File size | Method | Notes |
-|-----------|--------|-------|
-| < 4 MB | Simple PUT | Single request, path-based addressing |
-| 4 MB - 250 MB | Simple PUT | Works on personal OneDrive (NOT Business/SharePoint) |
-| >= 4 MB (Business) | Upload session | Chunked, resumable |
-| >= 250 MB | Upload session | Required for all account types |
+**What the driver does (WP-FLEET-4, 2026-11-06; `onedrive_upload.go`):**
 
-**Chunked upload rules:**
-- Chunk size MUST be a multiple of 320 KiB (327,680 bytes)
-- Recommended: 5-10 MB per chunk (max 60 MB per PUT)
-- No `Authorization` header on chunk PUTs — the upload URL is pre-authenticated
-- On 404: session expired, restart entire upload
-- On 416: query upload status with GET to find missing bytes
+| Body | Method | Why |
+|------|--------|-----|
+| ≤ 4 MiB, any | Simple PUT (read into memory) | one request |
+| ≤ 200 MiB and **re-readable** (`io.ReaderAt`: the `materialize` spool, a `bytes.Reader`) | Simple PUT, the burst attempts, each attempt reading its own section | one request instead of a session; Microsoft allows 250 MB (the 2026-11-05 checks: the simple PUT works on Business) |
+| anything **streamed** > 4 MiB (the parity shards' pipes, a client body) | Upload session | a streamed simple PUT is ONE request that cannot be re-sent: a 429 burst would lose the shard (WP-FLEET-3). The session rides it fragment by fragment |
+| > 200 MiB | Upload session | |
+
+**Sessions** (D-F4-3): fragments of **180 × 320 KiB = 58,982,400 B** (`odChunkSize`; Microsoft asks for < 60 MiB in multiples of 320 KiB — the old 60 MiB sat on the bound), the largest being the fastest (~25 MB/s per session against ~13 at 20 MiB); **double-buffered** — the next fragment is read from the source while one is in flight (two pooled buffers per upload; a pipelined session from a client body wrote 24.6 MB/s against 7.6 read-then-send). No `Authorization` header on fragment PUTs (the URL is pre-authenticated). A fragment that exhausts its attempts resumes from `nextExpectedRanges`; a session gone (404) restarts a seekable body once (Throttle Handling below).
+
+**Every write is verified** (D-F4-4): the body is hashed with `quickXorHash` as it streams (`quickxor.go`) and compared with the item Graph answers — the simple PUT's, or the final fragment's (a final 202 = the item is read back by path). A different hash (or a different size with a hash) deletes the item for good (`permanentDelete`) and fails the Put with `engine.ErrObjectChanged`, counted in `vaultaire_permafrost_hash_mismatch_total{account}`. An answer naming no hash is accepted (Business always sends one).
+
+**Reads** (D-F4-1): a Get of ≥ 10 MiB reads ranges of 8 MiB below 64 MiB, **32 MiB** to 1 GiB, **64 MiB** from 1 GiB — a 256 MB object is ≤ 8 requests of the per-user budget instead of 32. A Get holds at most 256 MiB of ranges (8 × 32, 4 × 64), and every fleet Get past its first range shares one 1 GiB budget, so under load a Get reads fewer ranges at once, never more memory.
 
 ### Throttling Limits (Microsoft Learn, "Avoid getting throttled or blocked in SharePoint Online", read 2026-11-05)
 

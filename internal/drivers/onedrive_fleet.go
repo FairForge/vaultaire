@@ -20,6 +20,7 @@
 package drivers
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -438,7 +439,7 @@ func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, di
 	if err != nil {
 		return fmt.Errorf("marker encode: %w", err)
 	}
-	return t.simpleUpload(ctx, driveID, rootID, fleetMarkerPath, b)
+	return t.simpleUploadAt(ctx, driveID, rootID, fleetMarkerPath, bytes.NewReader(b), 0, int64(len(b)), false)
 }
 
 // The account's drive quota as Graph reports it (WP-FLEET-2, D-F1-6), read by
