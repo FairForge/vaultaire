@@ -141,9 +141,11 @@ func TestOneDriveGet_ARangeThrottledThreeTimesIsRiddenOut(t *testing.T) {
 	assert.Equal(t, patternSum(burstObject), sum)
 	assert.Equal(t, 4, cdn.attemptsAt(odRangePart), "three refusals, then the range")
 	waits := wl.all()
-	require.Len(t, waits, 3)
-	for _, w := range waits {
-		assert.GreaterOrEqual(t, w, time.Second, "Retry-After is a floor")
+	// Three retries of the range — and, since WP-FLEET-3 D-F3-6, the
+	// object's other ranges waiting out the account's hold too.
+	require.GreaterOrEqual(t, len(waits), 3)
+	for _, w := range waits[:3] {
+		assert.GreaterOrEqual(t, w, 900*time.Millisecond, "Retry-After is a floor")
 	}
 }
 
@@ -175,7 +177,7 @@ func TestOneDriveGet_ARangeThrottledForeverFailsAfterItsAttempts(t *testing.T) {
 			assert.Contains(t, err.Error(), "429")
 			assert.Equal(t, int64(2*odRangePart), n, "the ranges before it, nothing after")
 			assert.Equal(t, tc.want, cdn.attemptsAt(2*odRangePart))
-			assert.Len(t, wl.all(), tc.want-1)
+			assert.GreaterOrEqual(t, len(wl.all()), tc.want-1, "a wait before every retry (and the other ranges' holds)")
 		})
 	}
 }
@@ -198,9 +200,14 @@ func TestOneDriveGet_ARetryAfterOfAMinuteIsWaitedForAndCapped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, patternSum(burstObject), sum)
 	waits := wl.all()
-	require.Len(t, waits, 2)
-	assert.GreaterOrEqual(t, waits[0], 60*time.Second, "a burst lasts about a minute: waited for")
-	assert.Equal(t, odBurstMaxWait, waits[1], "never more than the burst cap")
+	require.GreaterOrEqual(t, len(waits), 2)
+	longest := time.Duration(0)
+	for _, w := range waits {
+		assert.LessOrEqual(t, w, odBurstMaxWait, "never more than the burst cap")
+		longest = max(longest, w)
+	}
+	assert.GreaterOrEqual(t, waits[0], 59*time.Second, "a burst lasts about a minute: waited for")
+	assert.Equal(t, odBurstMaxWait, longest, "Retry-After: 600 is waited for to the cap")
 }
 
 func TestOneDriveGet_ARangeIsNeverRetriedPastTheCallersDeadline(t *testing.T) {
@@ -289,6 +296,8 @@ func TestGraphDo_MetadataCallsKeepTheirTwoAttempts(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Equal(t, 2, rt.calls(), "a 429 on a small call is cheap to repeat later (D-F3-2)")
-	require.Len(t, wl.all(), 1)
-	assert.Equal(t, odMaxRetryWait, wl.all()[0], "Graph's cap stays 30 s")
+	waits := wl.all()
+	require.Len(t, waits, 2)
+	assert.Equal(t, odMaxRetryWait, waits[0], "Graph's own retry wait stays capped at 30 s")
+	assert.InDelta(t, 30, waits[1].Seconds(), 1, "the account's hold (D-F3-6) makes the call honour the rest of the Retry-After")
 }

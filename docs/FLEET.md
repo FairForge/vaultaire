@@ -63,6 +63,6 @@ Consent to this use is the owner's premise and decision; the operator's part is 
 ## Open at the time of writing
 
 - WP-FLEET-1 built and on prod; slot 3 migrated; **owed:** slot 3 `-retire` after 24 h green, slot 1's migration, the owner's one-time bin purge of the fleet drives.
-- WP-FLEET-3 (ride the bursts; a refused range must fail the body — the bench saw clean 0-byte bodies under throttling) is the next prompt: `docs/reviews/WP-FLEET-3-PROMPT.md`.
+- WP-FLEET-3 (`docs/reviews/WP-FLEET-3-PROMPT.md`) is built: PR A #1175, where a refused range fails the body and ranges and fragments get 6 attempts (8 under a job) with Retry-After honoured to 90 s; and PR B, which paces at the published rates per account and per TENANT, holds the whole account on a 429, hedges a slow range, resumes a fragment from its session, sends `ISV|Stored|permafrost/<sha>`, and adds the `PermafrostThrottling` rule (`internal/drivers/onedrive_README.md` § Throttle Handling). Owed: PR C, the soak repeated paced and unpaced.
 - The driver sees 15 slots and fans out to every account (WP-FLEET-11) — before any expansion past 15 drives.
 - Unsealed Vault objects' shards are a readable copy under the app's credential: F-14 or a sealed-only leg rule before customer plaintext goes on the fleet.
