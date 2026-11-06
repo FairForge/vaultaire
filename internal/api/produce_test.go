@@ -180,6 +180,23 @@ func TestLegalBackupSentencesAreTheFacts(t *testing.T) {
 	assert.Equal(t, 2, seenTech, "the DPA's and the GDPR page's backup measure")
 }
 
+// TestProduceEdgeLogsAreTheWorkerConfig (WP-LOG-2, D-LOG-1): the page's
+// edge_logs row says the Worker on s3.stored.cloud writes no log of a
+// request at Cloudflare in normal operation — true only while the committed
+// wrangler.toml has invocation logs off and the Worker silent by default.
+func TestProduceEdgeLogsAreTheWorkerConfig(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "edge", "s3-ingest", "wrangler.toml"))
+	require.NoError(t, err)
+	toml := string(raw)
+	assert.Regexp(t, `(?m)^\[observability\.logs\]\s*(#.*\n|\s)*invocation_logs = false\s*$`, toml, "[observability.logs] invocation_logs = false")
+	assert.Regexp(t, `(?m)^EDGE_LOG = "report"\s*$`, toml, `[vars] EDGE_LOG = "report"`)
+	e := produce.All().EdgeLogs
+	assert.Equal(t, "Cloudflare", e.Vendor)
+	assert.Equal(t, 7, e.Days, "Workers Logs keeps an event 7 days")
+	assert.Contains(t, e.What, "writes no log of a request at Cloudflare")
+	assert.Contains(t, e.What, "up to 7 days")
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

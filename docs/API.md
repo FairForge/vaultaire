@@ -463,10 +463,24 @@ on the dashboard's **Developers** page and at
   body, the id a support ticket quotes
 - the body bytes in and out
 - what served the request: `origin`, or the edge host
+- `duration_ms`: how long the request took, in milliseconds — measured by
+  the origin, or reported by the edge host that moved the bytes. Absent on a
+  row written before 2026-11-05 and on an `EdgeNoCommit` row
 
 It never holds a body, a header, an IP address, a user agent, an SSE-C key
 or any secret. Unlike the S3 access log (per bucket, opt-in, 30 days), it
 covers every bucket and is always on.
+
+**`EdgeNoCommit`** (status `0`): the transfer was admitted at the edge and
+its result never reached us. The client may have disconnected, or the edge
+host failed. No answer is known, so the row has no status. A download is
+metered for its admitted size (the bytes out). The row is written when the
+admission expires, about 20 minutes after the request.
+
+**The bucket access log** (`PUT /<bucket>?logging`): each delivered line
+ends with the request's duration in milliseconds, or `-` when it was not
+measured. Every earlier field is unchanged:
+`<tenant> <bucket> [<time>] <ip> <operation> <key> <status> <error code> <bytes sent> <bytes received> <request id> "<user agent>" <ms>`.
 
 | Query parameter | |
 |---|---|

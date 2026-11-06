@@ -30,6 +30,11 @@ func TestValidate_RefusesWhatTheCopyRulesRefuse(t *testing.T) {
 		"pitr without days":    func(f *File) { f.Backups.PITR.Days = 0 },
 		"pitr without vendor":  func(f *File) { f.Backups.PITR.Vendor = "" },
 		"pitr unqualified":     func(f *File) { f.Backups.PITR.What = "We cannot read the archive." },
+		// WP-LOG-2: the edge's logs.
+		"edge logs without vendor": func(f *File) { f.EdgeLogs.Vendor = "" },
+		"edge logs without days":   func(f *File) { f.EdgeLogs.Days = 0 },
+		"edge logs without what":   func(f *File) { f.EdgeLogs.What = "" },
+		"edge logs unqualified":    func(f *File) { f.EdgeLogs.What = "Cloudflare cannot read your requests." },
 	}
 	for name, mutate := range cases {
 		f, err := Parse(landing.ProduceJSON())

@@ -1,5 +1,13 @@
 # Status — the live pointer
 
+Updated: 2026-11-06 — **WP-LOG-2 (Stage 1a side prompt, outside the Prompt 60 chain): a data-plane host keeps no log; the control plane's rows are the record — DONE** (`docs/reviews/WP-LOG-2.md`; prompt `docs/reviews/WP-LOG-2-PROMPT.md`; migration **129**, 128 stays Prompt 60's; next **130** after 128):
+- **#1164** `stored-s3-edge` invocation logs OFF (`[observability.logs] invocation_logs = false`), deployed `1bc47613` with identical bytes — the settings API answers `invocation_logs: false`.
+- **#1165** the customer's logs are whole: `duration_ms` on `request_log` and `s3_access_log` (migration 129; the delivered access-log line's LAST field), `EdgeNoCommit` rows for admits the reaper expires, `vaultaire_data_plane_commits_total` / `_pass_through_total`, `POST /api/v1/edge/report` (+ the node's reporter). Live `55bbc883`.
+- **#1170** the `edge_worker_metrics` job (Cloudflare's `workersInvocationsAdaptive`), the canary's 4 MiB edge leg (`SYNTHETIC_CHECK_EDGE_EVERY=30m`), eight warning rules with promtool tests.
+- **#1166 + #1171** the Worker **0.8.0**: silent by default (`EDGE_LOG = "report"`), failures reported to the origin, a throw no longer Cloudflare's 1101 page; rows `edge-ingest` `92c68c75…`, `edge-codec` `a27ff837…`.
+- **PR 5** `/legal/what-we-can-produce` names Cloudflare's 7-day diagnostic trace (`produce.json` `edge_logs`, held to `wrangler.toml`); `docs/CLOUDFLARE.md` § Worker logging; plan 40.10's sentence.
+- Open questions: `redact_query_string` has no wrangler key; D-LOG-8's family label. Residual RL-5: `wrangler dev` refuses the entry module since 0.7.0 (production accepts it).
+
 Updated: 2026-11-06 — **WP-FLEET-1 + WP-FLEET-2 (`docs/reviews/WP-FLEET-1-PROMPT.md`): the fleet writes where it means to and deletes for real** — #1167 the drive named `OneDrive` (prod pinned per slot first, `TENANT_N_DRIVE_ID`), #1169 `cmd/tools/permafrost-migrate-drive` + quickXorHash (live Graph vectors), #1168 `permanentDelete` + per-account quota gauges + `PermafrostAccountNearFull` (installed). Slot 3 moved to its OneDrive library and read back whole (3,314 objects, 0 fallback hits); a bench round's deletes left the bins unchanged. Owed: slot 3 `-retire` ≥ 2026-11-07 00:10 UTC, then slot 1; the bin purge (~112 GiB) is the owner's call. No migration. `bench-results/PERMAFROST-FLEET-2026-11-05.md` § What changed.
 
 Updated: 2026-11-05 — **RP98, the review of Prompt 59 (WP-XFER-1, transfer in): HOLDS at P2, five P2s (none live for a customer: no transfer job exists yet), all fixed** (`docs/reviews/WP-STRIPE-11-REVIEW.md`; PR #1162):

@@ -342,6 +342,15 @@ pass-through reaches it, and the Worker sees the request as the edge would.
 Go clients must set the proxy explicitly (`http.ProxyURL`) — Go never
 proxies a loopback destination from the environment.
 
+**`wrangler dev` refuses this entry module** (since 0.7.0; found by WP-LOG-2,
+RL-5): workerd takes every named export of the main module for an entrypoint,
+and `FORM_PREFIX_MAX` (a number) is not one — `Incorrect type for map entry
+'FORM_PREFIX_MAX'`. Production accepts the script. For a lab, run a throwaway
+copy of `src/` with an `entry.js` that is only
+`import worker from "./index.js"; export default worker;` and `main =
+"src/entry.js"` in a copy of `wrangler.toml` (routes removed); `index.js`
+stays byte-identical.
+
 The 100 MB request limit is the zone plan's (Free), answered by Cloudflare
 before this Worker runs: keep parts at 64 MiB (`docs/API.md`'s rclone
 snippet). Nothing here works around it.

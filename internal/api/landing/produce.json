@@ -654,6 +654,11 @@
       "what": "Like the backups, the archive holds every row the database holds, including the rows of an account erased within that time."
     }
   },
+  "edge_logs": {
+    "vendor": "Cloudflare",
+    "days": 7,
+    "what": "Cloudflare runs the program that moves large uploads and downloads on s3.stored.cloud. In normal operation that program writes no log of a request at Cloudflare. If we switch on its diagnostic log during an incident, Cloudflare keeps for up to 7 days the address of each request made meanwhile, as sent (it names the bucket and the object, and for a presigned link its query), and the program's own line about it; never the content."
+  },
   "private_ssec": {
     "table": "object_head_cache",
     "holds": [

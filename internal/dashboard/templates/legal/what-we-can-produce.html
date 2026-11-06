@@ -61,6 +61,7 @@
         </tbody>
     </table></div>
     <p>Database backups are kept {{.Backups.OnBoxDays}} days on our server and {{.Backups.OffBoxDays}} days off it. The database is also archived as it changes, at most {{.Backups.PITR.EverySeconds}} seconds behind, to {{.Backups.PITR.Vendor}}, encrypted with {{.Backups.PITR.Cipher}} on our server before it leaves it, so it can be restored to any moment of the last {{.Backups.PITR.Days}} days. {{.Backups.PITR.What}} A record deleted from the database can therefore remain in a backup for up to {{.Backups.UpToDays}} days.</p>
+    <p>{{.EdgeLogs.What}}</p>
     {{if .AdminReads}}<p>{{.AdminReads}}</p>{{end}}
     {{if .Builds}}<p>{{.Builds}}</p>{{end}}
 

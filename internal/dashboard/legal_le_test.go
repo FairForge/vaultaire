@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -93,4 +94,8 @@ func TestLegalLE_ProducePageStatesTheBackupFacts(t *testing.T) {
 	} {
 		assert.Contains(t, body, want)
 	}
+	// WP-LOG-2: the edge's logs — Cloudflare, the program, its 7 days.
+	e := produce.All().EdgeLogs
+	assert.Contains(t, body, html.EscapeString(e.What))
+	assert.Contains(t, e.What, e.Vendor)
 }
