@@ -162,6 +162,7 @@ func (l *LegalLE) data() map[string]any {
 		"ExportsDays": f.ExportsDays,
 		"Kept":        f.Kept,
 		"Backups":     f.Backups,
+		"EdgeLogs":    f.EdgeLogs,
 		"SSEC":        f.PrivateSSEC,
 		"AdminReads":  gated(f.AdminReads),
 		"Builds":      gated(f.Builds),

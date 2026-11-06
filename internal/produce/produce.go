@@ -77,6 +77,17 @@ func (b Backups) UpToDays() int {
 	return max(b.OnBoxDays, b.OffBoxDays, b.PITR.Days)
 }
 
+// EdgeLogs is what a vendor of the data plane may keep of a request
+// (WP-LOG-2): the Worker on s3.stored.cloud writes no log at Cloudflare in
+// normal operation; its diagnostic log, if switched on during an incident,
+// is kept Days days. Held to edge/s3-ingest/wrangler.toml by
+// internal/api/produce_test.go (TestProduceEdgeLogsAreTheWorkerConfig).
+type EdgeLogs struct {
+	Vendor string `json:"vendor"`
+	Days   int    `json:"days"`
+	What   string `json:"what"`
+}
+
 // Column is one column of a table and what it holds.
 type Column struct {
 	Column string `json:"column"`
@@ -104,6 +115,7 @@ type File struct {
 	ExportsDays int            `json:"exports_days"`
 	Kept        []KeptRow      `json:"kept"`
 	Backups     Backups        `json:"backups"`
+	EdgeLogs    EdgeLogs       `json:"edge_logs"`
 	PrivateSSEC PrivateSSEC    `json:"private_ssec"`
 	AdminReads  Gated          `json:"admin_reads"`
 	Builds      Gated          `json:"builds"`
@@ -152,6 +164,10 @@ func Validate(f File) error {
 		return fmt.Errorf("produce: backups.pitr incomplete")
 	}
 	texts = append(texts, f.Backups.PITR.What)
+	if f.EdgeLogs.Vendor == "" || f.EdgeLogs.Days <= 0 || f.EdgeLogs.What == "" {
+		return fmt.Errorf("produce: edge_logs incomplete")
+	}
+	texts = append(texts, f.EdgeLogs.What)
 	if f.PrivateSSEC.Table == "" || len(f.PrivateSSEC.Holds) == 0 {
 		return fmt.Errorf("produce: private_ssec incomplete")
 	}
