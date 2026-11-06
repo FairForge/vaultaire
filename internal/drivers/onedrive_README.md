@@ -142,6 +142,36 @@ code (`ResourceNotFound`: the drive or the user gone) is the account's
 failure. A conflict creating the root folder is decided by status/code, never
 the text.
 
+**Ranges and fragments ride the bursts (WP-FLEET-3 PR A, 2026-11-06).** Above
+the published per-user rates Microsoft does not cap: it answers **429 bursts of
+about a minute, about every five minutes** (the two-hour soak: 574 range 429s,
+the next round always clean). A CDN range had ONE attempt (the window's retry
+runs only with hedging, which the fleet never set) and a fragment two, so a
+burst lost the object. Now a range (`fetchRange`) and a fragment (`putChunk`)
+get **`odBurstAttempts` = 6 attempts on a request path, 8 under a job**: a
+transport error, a body cut short, a 429/503 or another 5xx is asked again —
+the same range of the same URL, the same bytes of the same session, nothing
+doubled. The wait is the larger of a backoff (2, 4, 8, 16, 32 s … jittered up
+by half) and the answer's `Retry-After` (seconds or a date), capped at
+**`odBurstMaxWait` = 90 s**; every wait is on ctx and none is begun past the
+caller's deadline. A 200 to a range (Range ignored), a wrong Content-Range,
+another 4xx and a caller gone are not retried. A read under a burst may take
+minutes — the trade (an error is worse; the caller's context bounds it). The
+per-attempt bounds are unchanged (25 s first byte, 2 min fragment answer).
+Graph metadata calls (`graphDo`) keep 2/3 attempts and the 30 s cap.
+
+**A range that does not come fails the body (D-F3-1).** The soak also saw
+**135 `size mismatch: got 0`**: a GET whose ranges were refused returned a
+reader that gave 0 bytes and then a CLEAN end. The cause was in `parfetch`: a
+part's error that wrapped `io.EOF` (`io.ReadFull` of an empty body, or Go's
+transport answering `EOF` for a dropped connection) passed every
+`errors.Is(err, io.EOF)` check, so `Reader.WriteTo` — what `io.Copy` uses —
+returned `(0, nil)`. Now a part's failure is `parfetch.ErrPartCut` (the chain
+to `io.EOF` cut, the words kept), the only `io.EOF` a stream hands out is its
+own end (compared by identity), and the driver reports an empty range body as
+`io.ErrUnexpectedEOF`. Every `parfetch` user (the chunked GET, the parallel
+ranged GET, the parity rebuild) gets the same guarantee.
+
 **User-Agent decoration** (prioritized by Microsoft):
 ```
 ISV|FairForge|Vaultaire/1.0

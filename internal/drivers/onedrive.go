@@ -69,6 +69,18 @@ const (
 	// inside a request).
 	odMaxRetryWait = 30 * time.Second
 
+	// odBurstMaxWait caps one wait between attempts at a CDN range or an
+	// upload fragment (WP-FLEET-3 D-F3-2): Microsoft answers over-rate
+	// traffic with 429 bursts of about a minute (the 2026-11-06 soak), so a
+	// Retry-After of up to 90 s is waited for there. Graph's metadata calls
+	// keep odMaxRetryWait: a 429 on a small call is cheap to repeat later.
+	odBurstMaxWait = 90 * time.Second
+
+	// odBurstBase is the first wait of a range or fragment retry with no
+	// Retry-After; it doubles per attempt (2, 4, 8, 16, 32 s — a minute's
+	// burst in the request path's five waits), jittered up by half.
+	odBurstBase = 2 * time.Second
+
 	// Response-header bounds by request class (RP9-1, WP-R7-4; the bound
 	// invariant in CLAUDE.md): a Graph call is metadata — an S3-class meta
 	// call's 15 s; a CDN range's first byte a GET's 25 s; an upload fragment
@@ -552,31 +564,75 @@ func (t *odTenant) downloadRanges(ctx context.Context, dlURL string, fileSize in
 	return parfetch.NewReader(stream, nil), nil
 }
 
-// fetchRange is one ranged CDN read of size bytes at start.
+// fetchRange is one ranged CDN read of size bytes at start, with the burst
+// attempts (odBurstAttempts, WP-FLEET-3 D-F3-2): a transport error, a body
+// cut short, a 429/503 (Retry-After honoured to odBurstMaxWait) or another
+// 5xx is asked again — the same range of the same URL. A 200 (the CDN
+// ignored Range), a Content-Range other than the one asked, any other 4xx,
+// and a caller already gone are not: no attempt would differ.
 func (t *odTenant) fetchRange(ctx context.Context, dlURL string, start, size, total int64) ([]byte, error) {
+	end := start + size - 1
+	attempts := odBurstAttempts(ctx)
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		buf, retryAfter, retry, err := t.fetchRangeOnce(ctx, dlURL, start, end, size, total)
+		if err == nil {
+			return buf, nil
+		}
+		if !retry {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == attempts-1 {
+			break
+		}
+		if err := t.burstRetry(ctx, attempt+1, retryAfter, lastErr); err != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("onedrive range %d-%d: %d attempts: %w", start, end, attempts, lastErr)
+}
+
+// fetchRangeOnce is one attempt at a range: its bytes, or the error, whether
+// another attempt may differ, and the answer's Retry-After.
+func (t *odTenant) fetchRangeOnce(ctx context.Context, dlURL string, start, end, size, total int64) (buf []byte, retryAfter time.Duration, retry bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("onedrive range request: %w", err)
+		return nil, 0, false, fmt.Errorf("onedrive range request: %w", err)
 	}
-	end := start + size - 1
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	resp, err := t.cdnHTTP.Do(req)
+	t.totalReqs.Add(1)
 	if err != nil {
-		return nil, fmt.Errorf("onedrive range %d-%d: %w", start, end, err)
+		return nil, 0, ctx.Err() == nil, fmt.Errorf("onedrive range %d-%d: %w", start, end, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusPartialContent {
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable:
+		ra := odRetryAfter(resp.Header)
+		t.noteThrottle(max(ra, odBurstBase))
+		odPooledDrain(resp.Body)
+		return nil, ra, true, fmt.Errorf("onedrive range %d-%d: HTTP %d (throttled)", start, end, resp.StatusCode)
+	case resp.StatusCode >= 500:
+		odPooledDrain(resp.Body)
+		return nil, 0, true, fmt.Errorf("onedrive range %d-%d: HTTP %d", start, end, resp.StatusCode)
+	case resp.StatusCode != http.StatusPartialContent:
 		// Never drained: a 200 is the whole object.
-		return nil, fmt.Errorf("onedrive range %d-%d: HTTP %d, not 206", start, end, resp.StatusCode)
+		return nil, 0, false, fmt.Errorf("onedrive range %d-%d: HTTP %d, not 206", start, end, resp.StatusCode)
 	}
 	if want, got := fmt.Sprintf("bytes %d-%d/%d", start, end, total), resp.Header.Get("Content-Range"); got != want {
-		return nil, fmt.Errorf("onedrive range %d-%d: Content-Range %q, asked %q", start, end, got, want)
+		return nil, 0, false, fmt.Errorf("onedrive range %d-%d: Content-Range %q, asked %q", start, end, got, want)
 	}
-	buf := make([]byte, size)
+	buf = make([]byte, size)
 	if _, err := io.ReadFull(resp.Body, buf); err != nil {
-		return nil, fmt.Errorf("onedrive range %d-%d: %w", start, end, err)
+		// An empty body is io.EOF, a short one io.ErrUnexpectedEOF: both a
+		// range that did not come, never the end of the object.
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, 0, ctx.Err() == nil, fmt.Errorf("onedrive range %d-%d: body: %w", start, end, err)
 	}
-	return buf, nil
+	return buf, 0, false, nil
 }
 
 // Delete removes an artifact from OneDrive. It sweeps the WHOLE fleet, not
@@ -1045,6 +1101,72 @@ func odAttempts(ctx context.Context) int {
 	return requestRetryMaxAttempts
 }
 
+// odBurstAttempts is the attempts a CDN range or an upload fragment gets
+// (WP-FLEET-3 D-F3-2): 6 on a request path, 8 under common.WithJob — enough
+// to wait out one of Microsoft's one-minute 429 bursts (odBurstBackoff,
+// Retry-After to odBurstMaxWait). A range or a fragment is idempotent: the
+// same bytes of the same URL, nothing doubled. The caller's context bounds
+// the whole: a wait past its deadline is never begun.
+func odBurstAttempts(ctx context.Context) int {
+	if common.IsJob(ctx) {
+		return 8
+	}
+	return 6
+}
+
+// odBurstBackoff is the wait before attempt n (n ≥ 1) with no Retry-After:
+// odBurstBase × 2^(n-1), jittered up to half again (so 48 ranges refused in
+// the same second do not come back in the same second), capped at
+// odBurstMaxWait.
+func odBurstBackoff(n int) time.Duration {
+	d := odBurstBase << uint(min(max(n-1, 0), 10))
+	d += time.Duration(mrand.Int64N(int64(d)/2 + 1)) // #nosec G404 -- jitter for backoff, not security
+	return min(d, odBurstMaxWait)
+}
+
+// odRetryAfter is a response's Retry-After as a duration: delta-seconds or
+// an HTTP date; 0 when absent or unreadable.
+func odRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		if d := time.Until(at); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// noteThrottle counts a 429/503 of the account and marks it throttled for
+// the wait about to be made.
+func (t *odTenant) noteThrottle(wait time.Duration) {
+	t.throttleCount.Add(1)
+	t.throttledUntil.Store(time.Now().Add(wait).Unix())
+}
+
+// burstRetry waits before attempt n of a range or a fragment: the larger of
+// the backoff and the answer's Retry-After, capped at odBurstMaxWait, on
+// ctx. False (with the error to return) when there is no attempt to make —
+// the caller is gone, or the wait would outlast its deadline.
+func (t *odTenant) burstRetry(ctx context.Context, n int, retryAfter time.Duration, lastErr error) error {
+	w, ok := retryWaitCapped(ctx, max(odBurstBackoff(n), retryAfter), odBurstMaxWait)
+	if !ok {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("%w (%w)", lastErr, ctxErr)
+		}
+		return lastErr
+	}
+	if err := t.sleep(ctx, w); err != nil {
+		return fmt.Errorf("%w (waiting to retry: %w)", lastErr, err)
+	}
+	return nil
+}
+
 // odWait waits d, or until ctx is done (every wait between attempts did a
 // time.Sleep that no caller could end).
 func odWait(ctx context.Context, d time.Duration) error {
@@ -1063,11 +1185,17 @@ func odWait(ctx context.Context, d time.Duration) error {
 // would outlast the caller's deadline (a Retry-After past it is given up on
 // at once, never slept through).
 func retryWait(ctx context.Context, d time.Duration) (time.Duration, bool) {
+	return retryWaitCapped(ctx, d, odMaxRetryWait)
+}
+
+// retryWaitCapped is retryWait with its own cap (odBurstMaxWait for a range
+// or a fragment).
+func retryWaitCapped(ctx context.Context, d, limit time.Duration) (time.Duration, bool) {
 	if ctx.Err() != nil {
 		return 0, false
 	}
-	if d > odMaxRetryWait {
-		d = odMaxRetryWait
+	if d > limit {
+		d = limit
 	}
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) <= d {
 		return 0, false
@@ -1410,28 +1538,24 @@ func (t *odTenant) simpleUpload(ctx context.Context, driveID, parentID, path str
 	return nil
 }
 
-// putChunk sends one upload fragment with the bounded retries (odAttempts;
-// 1 s, then 2 s between, on ctx): a transport error, a 429 or a 5xx is sent
+// putChunk sends one upload fragment with the burst attempts
+// (odBurstAttempts, WP-FLEET-3 D-F3-2; every wait on ctx, Retry-After
+// honoured to odBurstMaxWait): a transport error, a 429 or a 5xx is sent
 // again — the same byte range of the same session, so nothing is doubled; a
 // caller already gone is never retried. The body is fenced after each
 // attempt: the transport may still read a request body after Do returns,
 // and chunk is the caller's pooled buffer.
 func (t *odTenant) putChunk(ctx context.Context, uploadURL string, chunk []byte, start, endInc, total int) error {
-	attempts := odAttempts(ctx)
+	attempts := odBurstAttempts(ctx)
 	var lastErr error
+	var retryAfter time.Duration
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
-			w, ok := retryWait(ctx, time.Duration(1<<uint(attempt-1))*time.Second)
-			if !ok {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return fmt.Errorf("onedrive chunk: %w (%w)", lastErr, ctxErr)
-				}
-				break
-			}
-			if err := t.sleep(ctx, w); err != nil {
-				return fmt.Errorf("onedrive chunk: %w (waiting to retry: %w)", lastErr, err)
+			if err := t.burstRetry(ctx, attempt, retryAfter, lastErr); err != nil {
+				return fmt.Errorf("onedrive chunk: %w", err)
 			}
 		}
+		retryAfter = 0
 		body := &odFragment{b: chunk}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, body)
 		if err != nil {
@@ -1455,13 +1579,19 @@ func (t *odTenant) putChunk(ctx context.Context, uploadURL string, chunk []byte,
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
 		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter = odRetryAfter(resp.Header)
+			t.noteThrottle(max(retryAfter, odBurstBase))
+			lastErr = fmt.Errorf("onedrive chunk HTTP %d (throttled)", resp.StatusCode)
+			continue
+		}
+		if resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("onedrive chunk HTTP %d", resp.StatusCode)
 			continue
 		}
 		return fmt.Errorf("onedrive chunk HTTP %d", resp.StatusCode)
 	}
-	return fmt.Errorf("onedrive chunk exhausted retries: %w", lastErr)
+	return fmt.Errorf("onedrive chunk: %d attempts: %w", attempts, lastErr)
 }
 
 // errFragmentFenced is a read of a fragment body after its attempt ended.
