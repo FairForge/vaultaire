@@ -88,6 +88,9 @@ func (s *Server) registerJobs() {
 	if s.catalogueFilter != nil {
 		s.jobs.Register(s.catalogueFilter.spec())
 	}
+	if s.edgeWorkerMetrics != nil {
+		s.jobs.Register(s.edgeWorkerMetrics.spec()) // WP-LOG-2: every 5 minutes
+	}
 	if s.db != nil && s.engine != nil {
 		s.jobs.Register(newSandboxPurgeJob(s).spec()) // WP-DX-1: test data kept 7 days
 	}

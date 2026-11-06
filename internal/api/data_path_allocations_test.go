@@ -70,6 +70,7 @@ var allocationSites = map[string]string{
 	// Small: a constant or a key-sized buffer that the walker cannot size.
 	"api/blob_address.go:newBlobAddress":          "17 bytes: a blob address's random bits",
 	"api/synthetic_check.go:cycle":                "a few KiB: the canary's body",
+	"api/synthetic_check.go:edgeLeg":              "not a request path: the canary's edge-leg body (WP-LOG-2), one at a time, SYNTHETIC_CHECK_EDGE_BYTES ≤ 64 MiB (4 MiB by default) every SYNTHETIC_CHECK_EDGE_EVERY ≥ 5 min; the GET hashes as it streams (no second copy)",
 	"crypto/chunk_encryption.go:deriveChunkNonce": "12 bytes: a nonce",
 	"crypto/encryption.go:Encrypt":                "legacy whole-buffer AES-GCM (the 0x01/0x02 compatibility path; no request-path writer since WP-R8-5)",
 	"crypto/encryption.go:GenerateRandomKey":      "32 bytes: a key",

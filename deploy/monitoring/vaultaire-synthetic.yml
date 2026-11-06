@@ -5,6 +5,11 @@
 #   vaultaire_synthetic_check_latency_seconds{op}            last request latency per op
 #   vaultaire_synthetic_check_failures_total{op}             cycles that failed, by the op that failed
 #   vaultaire_synthetic_check_last_success_timestamp_seconds unix time of the last good cycle (0 = never)
+#   vaultaire_synthetic_check_edge_enabled / _edge_success / _edge_last_success_timestamp_seconds
+#                                                            the edge leg (WP-LOG-2): every
+#                                                            SYNTHETIC_CHECK_EDGE_EVERY a 4 MiB
+#                                                            PUT → GET (sha256) → DELETE; ops
+#                                                            edge_put|edge_get|edge_delete
 #
 # The synthetic check (internal/api/synthetic_check.go, Review R13-13) signs
 # real S3 requests with its own key pair through SYNTHETIC_CHECK_URL — the
@@ -47,3 +52,12 @@ groups:
         annotations:
           summary: "Synthetic PUT slower than 5 s for 15 minutes"
           description: "A 4 KiB PUT through the public endpoint takes {{ $value }}s. Check the primary backend probe latency and HAProxy."
+
+      - alert: SyntheticEdgeLegFailing
+        expr: vaultaire_synthetic_check_edge_enabled == 1 and vaultaire_synthetic_check_edge_success == 0
+        for: 65m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The canary's edge leg has failed for an hour"
+          description: "The 4 MiB PUT → GET → DELETE through the public endpoint (the size the edge takes) has failed for 65 minutes while the small cycle may be green. journalctl -u 'vaultaire@*' | grep 'edge leg FAILED' names the op; vaultaire_synthetic_check_failures_total{op=~\"edge_.*\"}."

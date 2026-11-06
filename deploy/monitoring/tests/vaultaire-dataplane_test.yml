@@ -31,3 +31,175 @@ tests:
       - eval_time: 3m
         alertname: DataPlaneHostDown
         exp_alerts: []
+
+  # WP-LOG-2 — 12 expired an hour against 300 admitted (4 %, >= 5) fires after 15 m;
+  # 12 against 3000 (0.4 %) does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_edge_admit_reaper_total{outcome="expired"}'
+        values: '0+0.2x120'
+      - series: 'vaultaire_data_plane_admits_total{host="edge",op="put",outcome="admitted"}'
+        values: '0+5x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DataPlaneAdmitsExpiring
+        exp_alerts:
+          - exp_labels:
+
+              severity: warning
+            exp_annotations:
+              summary: "Edge admits are expiring without a commit"
+              description: "More than 2 % of the last hour's admitted edge transfers (and at least 5) were never committed: the reaper expired them. Each is an EdgeNoCommit row in the customer's request log; a GET was metered for its admitted size. A host is failing after the admit (reports: grep 'edge host report'), or its commit cannot reach the origin. GET /api/v1/admin/jobs (edge_admit_reaper); journalctl -u 'vaultaire@*' | grep 'edge get admit expired'."
+      - eval_time: 10m
+        alertname: DataPlaneAdmitsExpiring
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_edge_admit_reaper_total{outcome="expired"}'
+        values: '0+0.2x120'
+      - series: 'vaultaire_data_plane_admits_total{host="edge",op="put",outcome="admitted"}'
+        values: '0+50x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: DataPlaneAdmitsExpiring
+        exp_alerts: []
+
+  # The edge fails 1 commit in 11 (9 %) for an hour; a node fails 1 in 101 (1 %).
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_data_plane_commits_total{host="edge",op="put",outcome="ok"}'
+        values: '0+10x80'
+      - series: 'vaultaire_data_plane_commits_total{host="edge",op="put",outcome="backend_error"}'
+        values: '0+1x80'
+      - series: 'vaultaire_data_plane_commits_total{host="node-1.lab.test",op="put",outcome="ok"}'
+        values: '0+100x80'
+      - series: 'vaultaire_data_plane_commits_total{host="node-1.lab.test",op="get",outcome="error"}'
+        values: '0+1x80'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: DataPlaneCommitsFailing
+        exp_alerts:
+          - exp_labels:
+              host: edge
+              severity: warning
+            exp_annotations:
+              summary: "A data-plane host's commits are failing"
+              description: "More than 5 % of the host's commits of the last 30 minutes (and at least 5) report a failure (backend_error, edge_error, checksum_mismatch, error). Each failed write was answered to its client as the origin would; a read fell back to the origin. journalctl -u 'vaultaire@*' | grep '\"edge commit\"' (the state and backend_status of each); the backend's breaker and probe."
+      - eval_time: 10m
+        alertname: DataPlaneCommitsFailing
+        exp_alerts: []
+
+  # A host reports 1 commit_failed a minute (15 in 15 m) for 40 m; another reports 5 in all.
+  # An exception fires at once.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_data_plane_host_reports_total{host="edge",kind="commit_failed"}'
+        values: '0+1x40'
+      - series: 'vaultaire_data_plane_host_reports_total{host="edge",kind="admit_failed"}'
+        values: '0+1x5 5x35'
+      - series: 'vaultaire_data_plane_host_reports_total{host="edge",kind="exception"}'
+        values: '0x20 1x20'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: DataPlaneHostReporting
+        exp_alerts:
+          - exp_labels:
+              host: edge
+              kind: commit_failed
+              severity: warning
+            exp_annotations:
+              summary: "A data-plane host is reporting failures"
+              description: "The host sent more than 10 failure reports of one kind in 15 minutes (POST /api/v1/edge/report). journalctl -u 'vaultaire@*' | grep 'edge host report' names each one's kind, request id, admit id, op, status and detail. The host keeps no log of its own."
+      - eval_time: 15m
+        alertname: DataPlaneHostReporting
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: DataPlaneHostException
+        exp_alerts:
+          - exp_labels:
+              host: edge
+              severity: warning
+            exp_annotations:
+              summary: "A data-plane host threw"
+              description: "The host's top-level handler caught an exception and answered the client a pass-through or a 503. journalctl -u 'vaultaire@*' | grep 'edge host report' | grep exception (the message and the first stack line)."
+      - eval_time: 15m
+        alertname: DataPlaneHostException
+        exp_alerts: []
+
+  # Cloudflare's metrics: exceptions for 15 m fire, success and client disconnects never;
+  # a CPU p99 of 250 s for 20 m fires, 100 s does not.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_edge_worker_requests{script="stored-s3-edge",status="scriptThrewException"}'
+        values: '3x20'
+      - series: 'vaultaire_edge_worker_requests{script="stored-s3-edge",status="success"}'
+        values: '30x20'
+      - series: 'vaultaire_edge_worker_requests{script="stored-s3-edge",status="clientDisconnected"}'
+        values: '2x20'
+      - series: 'vaultaire_edge_worker_cpu_p99_seconds{script="stored-s3-edge",status="success"}'
+        values: '250x20'
+      - series: 'vaultaire_edge_worker_cpu_p99_seconds{script="stored-status",status="success"}'
+        values: '300x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: EdgeWorkerErrors
+        exp_alerts:
+          - exp_labels:
+              script: stored-s3-edge
+              status: scriptThrewException
+              severity: warning
+            exp_annotations:
+              summary: "A Worker's invocations are failing at Cloudflare"
+              description: "Cloudflare's own metrics (the edge_worker_metrics job) count invocations of the last 15 minutes that ended neither in success nor in a client disconnect (scriptThrewException, exceededCpu, exceededMemory, …): the client got Cloudflare's error page. The Worker logs nothing by default: re-deploy with --var EDGE_LOG:all to see its lines (docs/CLOUDFLARE.md § Worker logging)."
+      - eval_time: 5m
+        alertname: EdgeWorkerErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: EdgeWorkerCPUNearLimit
+        exp_alerts:
+          - exp_labels:
+              script: stored-s3-edge
+              status: success
+              severity: warning
+            exp_annotations:
+              summary: "The edge Worker's CPU p99 is near its limit"
+              description: "The p99 CPU time of stored-s3-edge invocations of the last 15 minutes is above 240 s, 80 % of wrangler.toml's cpu_ms = 300000: a codec write of a large body is close to being cut (exceededCpu)."
+
+  # The canary's edge leg runs and the edge is admitted nothing: fires after 30 m.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '1x60'
+      - series: 'vaultaire_data_plane_admits_total{host="edge",op="put",outcome="admitted"}'
+        values: '5x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DataPlaneEdgePathUnused
+        exp_alerts:
+          - exp_labels:
+
+              severity: warning
+            exp_annotations:
+              summary: "No transfer has taken the edge path in 2 hours"
+              description: "The canary's edge leg runs (SYNTHETIC_CHECK_EDGE_EVERY) and yet the origin admitted nothing for the Worker in 2 hours: the Worker passes everything through (its admit fails or its route is gone), or the canary's tenant lost edge_ingest. curl -s localhost:$(cat /opt/vaultaire/ACTIVE_PORT)/metrics | grep 'vaultaire_data_plane_pass_through_total{host=\"edge\"'."
+  # Admitted every few minutes, or the leg off: silent.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '1x60'
+      - series: 'vaultaire_data_plane_admits_total{host="edge",op="put",outcome="admitted"}'
+        values: '0+0.1x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DataPlaneEdgePathUnused
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_synthetic_check_edge_enabled'
+        values: '0x60'
+      - series: 'vaultaire_data_plane_admits_total{host="edge",op="put",outcome="admitted"}'
+        values: '5x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: DataPlaneEdgePathUnused
+        exp_alerts: []

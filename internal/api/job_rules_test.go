@@ -56,6 +56,9 @@ func TestJobRuleFile_MatchesTheRegisteredJobsAndTheExportedSeries(t *testing.T) 
 	eng.SetPrimary("idrive")
 	// A master key: key_reencrypt joins the table (WP-R8-1).
 	t.Setenv("ENCRYPTION_MASTER_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	// Both Cloudflare settings: edge_worker_metrics joins the table (WP-LOG-2).
+	t.Setenv("CLOUDFLARE_ANALYTICS_TOKEN", "test-analytics-token")
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "0123456789abcdef0123456789abcdef")
 	s := NewServer(&config.Config{Server: config.ServerConfig{Port: 8000}}, zap.NewNop(), eng, nil, jf.db)
 	s.accountDeletion = NewAccountDeletionRunner(jf.db, zap.NewNop(), eng, s.gci, nil, s.accountSvc)
 	require.NotNil(t, s.accountDeletion)
