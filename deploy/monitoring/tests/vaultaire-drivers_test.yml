@@ -1,5 +1,6 @@
-# promtool unit tests of vaultaire-drivers.yml: PermafrostFleetMismatch, PermafrostAccountNearFull and
-# PermafrostThrottling (WP-R7-4, Stage 1a Prompt 16 Part A; WP-FLEET-2; WP-FLEET-3). Also run by deploy/monitoring/promtool-test.sh.
+# promtool unit tests of vaultaire-drivers.yml: PermafrostFleetMismatch, PermafrostAccountNearFull,
+# PermafrostThrottling, PermafrostHashMismatch and PermafrostFallbackWalking (WP-R7-4, Stage 1a Prompt 16
+# Part A; WP-FLEET-2; WP-FLEET-3; WP-FLEET-10). Also run by deploy/monitoring/promtool-test.sh.
 # Run on the box (promtool is there):
 #   scp deploy/monitoring/vaultaire-drivers.yml deploy/monitoring/tests/vaultaire-drivers_test.yml vaultaire-slc:/tmp/
 #   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-drivers_test.yml'
@@ -88,3 +89,47 @@ tests:
             exp_annotations:
               summary: "Permafrost account tenant-1 is being throttled (15 a minute)"
               description: "Microsoft has answered permafrost account tenant-1 with 429/503 more than 10 times a minute for 10 minutes (vaultaire_permafrost_throttles_total by op: graph, range, fragment, session). The driver waits each Retry-After out and holds the account meanwhile, so reads and writes there are slow, not wrong. Check vaultaire_permafrost_paced_seconds_total{dir=\"hold\"}, whether a PERMAFROST_ACCOUNT_* / PERMAFROST_TENANT_GBH knob was raised above the published rates (docs/FLEET.md), and whether another job shares the tenant. internal/drivers/onedrive_README.md § Throttle Handling."
+
+  # WP-FLEET-10: one hash mismatch fires at once and clears an hour later.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_permafrost_hash_mismatch_total{instance="slc",job="vaultaire",account="tenant-2"}'
+        values: '0x10 1x80'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: PermafrostHashMismatch
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: PermafrostHashMismatch
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: slc
+              job: vaultaire
+              account: tenant-2
+            exp_annotations:
+              summary: "Permafrost account tenant-2: a write did not match what was sent"
+              description: "In the last hour a write to permafrost account tenant-2 came back from Graph with another quickXorHash or size than the driver sent (vaultaire_permafrost_hash_mismatch_total). The item was deleted for good and the Put failed (engine.ErrObjectChanged): the parity job retries it. Once is a transfer fault; more than once on one account is the drive or its path — check the journal's 'quickXorHash' errors and the account's other writes. internal/drivers/onedrive_README.md § Upload Strategy."
+      - eval_time: 85m
+        alertname: PermafrostHashMismatch
+        exp_alerts: []
+
+  # WP-FLEET-10: walks for 20 minutes fire after 15; none never.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_permafrost_fallback_walks_total{instance="slc",job="vaultaire",op="get"}'
+        values: '0+3x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: PermafrostFallbackWalking
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: PermafrostFallbackWalking
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: slc
+              job: vaultaire
+            exp_annotations:
+              summary: "Permafrost reads are walking the fleet"
+              description: "For 15 minutes permafrost Get/Exists/Delete calls have missed on their home account and walked up to 8 others (vaultaire_permafrost_fallback_walks_total): the fleet fingerprint is mismatch or unknown (vaultaire_permafrost_fleet_mismatch, the boot's and the probe's 'permafrost fleet fingerprint' lines). Restore the TENANT_N / fleet-file order, or rebalance and set PERMAFROST_FLEET_ACCEPT. internal/drivers/onedrive_README.md § The fleet file."

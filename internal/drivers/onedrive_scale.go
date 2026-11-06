@@ -155,13 +155,13 @@ func readSecretRef(ref *odSecretRef) ([]byte, error) {
 		if dir == "" || strings.ContainsAny(ref.Credential, `/\`) {
 			return nil, fmt.Errorf("credential %q: no $CREDENTIALS_DIRECTORY, or not a bare name", ref.Credential)
 		}
-		b, err := os.ReadFile(filepath.Join(dir, ref.Credential)) // #nosec G304 -- a systemd credential name, validated above
+		b, err := os.ReadFile(filepath.Join(dir, ref.Credential)) // #nosec G304 G703 -- a systemd credential name (no separator, validated above) under $CREDENTIALS_DIRECTORY
 		if err != nil {
 			return nil, fmt.Errorf("credential %q: %w", ref.Credential, err)
 		}
 		return b, nil
 	case ref.File != "":
-		b, err := os.ReadFile(filepath.Clean(ref.File)) // #nosec G304 -- an operator-named secret file
+		b, err := os.ReadFile(filepath.Clean(ref.File)) // #nosec G304 G703 -- an operator-named secret file from the fleet file
 		if err != nil {
 			return nil, fmt.Errorf("file %s: %w", ref.File, err)
 		}
@@ -275,7 +275,7 @@ func odFleetSpecs(getenv func(string) string, logger *zap.Logger) ([]odAccountSp
 	if len(env) > 0 || getenv("TENANT_1_ID") != "" {
 		return nil, fmt.Errorf("%w: PERMAFROST_FLEET_FILE and TENANT_N_* are both set — the file replaces the slots; remove one", errODFleetConfig)
 	}
-	b, err := os.ReadFile(filepath.Clean(file)) // #nosec G304 -- the operator's fleet file
+	b, err := os.ReadFile(filepath.Clean(file)) // #nosec G304 G703 -- the operator's fleet file (PERMAFROST_FLEET_FILE)
 	if err != nil {
 		return nil, fmt.Errorf("%w: PERMAFROST_FLEET_FILE: %w", errODFleetConfig, err)
 	}

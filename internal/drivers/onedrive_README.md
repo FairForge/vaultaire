@@ -229,6 +229,14 @@ Metrics: `vaultaire_permafrost_throttles_total{account,op=graph|range|fragment|s
 rule `PermafrostThrottling` (> 10 a minute on one account for 10 min, warn).
 One Info line at boot names the pacing in force.
 
+**What the operator sees (WP-FLEET-10).** The System page's **Permafrost Fleet** card lists every account: the drive it writes to (the id's tail, and *pinned*), the quota its last probe read (used, the recycle bin, total), the 429/503s of the last hour (a per-minute ring the account's hold feeds), the probe's outcome, and the licence (WP-FLEET-6; "—" until then). Rules (`deploy/monitoring/vaultaire-drivers.yml`, promtool tests beside them):
+
+- `PermafrostThrottling`: more than 10 throttles a minute on one account for 10 min;
+- `PermafrostHashMismatch`: any quickXorHash mismatch in the last hour;
+- `PermafrostFallbackWalking`: reads walking the fleet for 15 min, so the fingerprint is not settled.
+
+Beside them, `PermafrostAccountNearFull` and `PermafrostFleetMismatch`. On the parity side, `vaultaire_vault_parity_protects_in_flight` shows the protects running now.
+
 **User-Agent decoration** (Microsoft's documented format for prioritised ISV
 traffic, on every Graph, CDN and fragment request since WP-FLEET-3 D-F3-7;
 `main` stamps the build with `drivers.SetPermafrostBuild(api.BuildSHA)`):

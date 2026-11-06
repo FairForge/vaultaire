@@ -140,3 +140,31 @@ groups:
         annotations:
           summary: "Permafrost account {{ $labels.account }} is being throttled ({{ $value | humanize }} a minute)"
           description: "Microsoft has answered permafrost account {{ $labels.account }} with 429/503 more than 10 times a minute for 10 minutes (vaultaire_permafrost_throttles_total by op: graph, range, fragment, session). The driver waits each Retry-After out and holds the account meanwhile, so reads and writes there are slow, not wrong. Check vaultaire_permafrost_paced_seconds_total{dir=\"hold\"}, whether a PERMAFROST_ACCOUNT_* / PERMAFROST_TENANT_GBH knob was raised above the published rates (docs/FLEET.md), and whether another job shares the tenant. internal/drivers/onedrive_README.md § Throttle Handling."
+
+      # WP-FLEET-10 (WP-FLEET-4 D-F4-4): a permafrost write whose item, as
+      # Graph answered it, did not match what was sent (quickXorHash or size).
+      # The driver deleted the item for good and failed the Put, so nothing
+      # wrong is stored — but bytes were changed in flight or at rest, once.
+      - alert: PermafrostHashMismatch
+        expr: |
+          sum by (instance, job, account) (increase(vaultaire_permafrost_hash_mismatch_total[1h])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Permafrost account {{ $labels.account }}: a write did not match what was sent"
+          description: "In the last hour a write to permafrost account {{ $labels.account }} came back from Graph with another quickXorHash or size than the driver sent (vaultaire_permafrost_hash_mismatch_total). The item was deleted for good and the Put failed (engine.ErrObjectChanged): the parity job retries it. Once is a transfer fault; more than once on one account is the drive or its path — check the journal's 'quickXorHash' errors and the account's other writes. internal/drivers/onedrive_README.md § Upload Strategy."
+
+      # WP-FLEET-10 (WP-FLEET-11 D-F11-3): reads are walking the fleet. Once
+      # the fingerprint is settled a miss costs one request; walks happen only
+      # while it is mismatch or unknown — so a sustained rate means the fleet's
+      # order is not settled and every miss costs up to 8 accounts' requests.
+      - alert: PermafrostFallbackWalking
+        expr: |
+          sum by (instance, job) (rate(vaultaire_permafrost_fallback_walks_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Permafrost reads are walking the fleet"
+          description: "For 15 minutes permafrost Get/Exists/Delete calls have missed on their home account and walked up to 8 others (vaultaire_permafrost_fallback_walks_total): the fleet fingerprint is mismatch or unknown (vaultaire_permafrost_fleet_mismatch, the boot's and the probe's 'permafrost fleet fingerprint' lines). Restore the TENANT_N / fleet-file order, or rebalance and set PERMAFROST_FLEET_ACCEPT. internal/drivers/onedrive_README.md § The fleet file."

@@ -14,12 +14,18 @@ import (
 	"time"
 
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"go.uber.org/zap"
 )
 
+// FleetSource is the permafrost driver's per-account snapshot
+// (drivers.OneDriveDriver.FleetAccounts), for the fleet card.
+type FleetSource func() []drivers.FleetAccount
+
 // HandleAdminSystem renders the admin system health page with runtime
-// and database connection pool stats.
-func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) http.HandlerFunc {
+// and database connection pool stats; with a fleet source, the permafrost
+// fleet card (WP-FLEET-10).
+func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger, fleet ...FleetSource) http.HandlerFunc {
 	startTime := time.Now()
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,12 +65,52 @@ func HandleAdminSystem(tmpl *template.Template, db *sql.DB, logger *zap.Logger) 
 			data["DBStatus"] = "not connected"
 		}
 
+		if len(fleet) > 0 && fleet[0] != nil {
+			data["Fleet"] = fleetRows(fleet[0]())
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.ExecuteTemplate(w, "admin", data); err != nil {
 			logger.Error("render admin system", zap.Error(err))
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	}
+}
+
+// FleetRow is one permafrost account on the fleet card (WP-FLEET-10): its
+// drive (the id's tail — enough to tell a pin from another library), the
+// quota the last probe read (used excludes the bin; the bin counts against
+// the total), throttles in the last hour, the probe's outcome, the licence
+// (WP-FLEET-6; "—" until it is watched).
+type FleetRow struct {
+	Account, Drive, UsedFmt, BinFmt, TotalFmt, Probe, LastError, Licence string
+	Throttles1h                                                          int64
+	Pinned                                                               bool
+}
+
+func fleetRows(accts []drivers.FleetAccount) []FleetRow {
+	out := make([]FleetRow, 0, len(accts))
+	for _, a := range accts {
+		r := FleetRow{Account: a.Account, Drive: "—", UsedFmt: "—", BinFmt: "—", TotalFmt: "—",
+			Probe: "not yet", LastError: a.LastError, Licence: "—", Throttles1h: a.Throttles1h, Pinned: a.Pinned}
+		if id := a.DriveID; id != "" {
+			r.Drive = "…" + id[max(0, len(id)-4):]
+		}
+		if a.QuotaKnown {
+			r.UsedFmt, r.BinFmt, r.TotalFmt = formatBytes(a.QuotaUsed), formatBytes(a.QuotaDeleted), formatBytes(a.QuotaTotal)
+		}
+		switch {
+		case a.Probed && a.Up:
+			r.Probe = "up"
+		case a.Probed:
+			r.Probe = "failing"
+		}
+		if a.Licence != "" {
+			r.Licence = a.Licence
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // DataPlaneHostRow is one data-plane host on the System page (WP-EDGE-3):

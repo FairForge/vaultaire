@@ -127,6 +127,12 @@ var (
 		Name: "vaultaire_vault_parity_unprotected_objects",
 		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), flag_off (the tenant's vault_parity flag is off — never protected while it is), unknown_length (an SSE-C multipart object — the 0x05 container, whose stored length is in its own header and not a function of its size: skipped until the job reads that header, RP19-1), unsealed_leg (an unsealed object no leg may take: the only leg is the permafrost fleet, which takes ciphertext shards only unless PERMAFROST_ALLOW_UNSEALED — WP-FLEET D-F-SEAL-1), other (pending, partial, chunked).",
 	}, []string{"reason"})
+	// WP-FLEET-10: the protects a run has in flight now
+	// (VAULT_PARITY_PROTECT_CONCURRENCY at most, D-F-PROT-1).
+	vaultParityProtectsInFlight = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "vaultaire_vault_parity_protects_in_flight",
+		Help: "Vault parity protects running now (each reads one object back from its backend and writes its four shards); at most VAULT_PARITY_PROTECT_CONCURRENCY.",
+	})
 	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_orphans_total",
 		Help: "Parity shard folders no row names, as the job's reconcile pass meets them: found (a new sighting — once per folder), erased (its files deleted after two sightings at least VAULT_PARITY_ORPHAN_GRACE apart — once per folder), failed (a delete that did not go through).",
@@ -738,6 +744,8 @@ func (p *VaultParity) protectPending(ctx context.Context, res *VaultParityResult
 		go func(c parityCandidate) {
 			defer wg.Done()
 			defer func() { <-slots }()
+			vaultParityProtectsInFlight.Inc()
+			defer vaultParityProtectsInFlight.Dec()
 			state, written, err := p.protect(ctx, c)
 			mu.Lock()
 			defer mu.Unlock()

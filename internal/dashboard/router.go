@@ -19,6 +19,7 @@ import (
 	dashauth "github.com/FairForge/vaultaire/internal/dashboard/auth"
 	"github.com/FairForge/vaultaire/internal/dashboard/handlers"
 	"github.com/FairForge/vaultaire/internal/dashboard/middleware"
+	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/email"
 	"github.com/FairForge/vaultaire/internal/engine"
 	"github.com/FairForge/vaultaire/internal/flags"
@@ -684,7 +685,7 @@ func RegisterRoutes(r chi.Router, deps Deps) {
 		ar.Post("/tenants/{id}/billing/payment", handlers.HandleAdminManualPayment(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/billing/entitlement", handlers.HandleAdminAdjustEntitlement(deps.DB, deps.Logger))
 		ar.Post("/tenants/{id}/billing/refund", handlers.HandleAdminRefund(deps.DB, deps.Logger))
-		adminGet(ar, deps, "/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger))
+		adminGet(ar, deps, "/system", handlers.HandleAdminSystem(systemTmpl, deps.DB, deps.Logger, fleetSource(deps.Engine)))
 		adminGet(ar, deps, "/audit", handlers.HandleAdminAudit(auditTmpl, deps.DB, deps.Logger))
 		adminGet(ar, deps, "/audit/export", handlers.HandleAdminAuditExport(deps.DB, deps.Logger))
 		adminGet(ar, deps, "/waitlist", handlers.HandleAdminWaitlist(waitlistTmpl, deps.DB, deps.Logger))
@@ -1515,4 +1516,21 @@ func noSystemBucket(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// fleetSource is the permafrost driver's snapshot for the System page's
+// fleet card (WP-FLEET-10); nil without the driver.
+func fleetSource(eng *engine.CoreEngine) handlers.FleetSource {
+	if eng == nil {
+		return nil
+	}
+	d, ok := eng.GetDriver("permafrost")
+	if !ok {
+		return nil
+	}
+	f, ok := d.(interface{ FleetAccounts() []drivers.FleetAccount })
+	if !ok {
+		return nil
+	}
+	return f.FleetAccounts
 }
