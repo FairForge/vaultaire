@@ -149,9 +149,15 @@ func TestGraphDo_ARetryAfterIsCappedWithNoDeadline(t *testing.T) {
 
 	require.NoError(t, err)
 	_ = resp.Body.Close()
-	require.Len(t, wl.all(), 1)
-	assert.LessOrEqual(t, wl.all()[0], odMaxRetryWait, "Retry-After: 120 waits at most odMaxRetryWait")
-	assert.GreaterOrEqual(t, wl.all()[0], odMaxRetryWait/2)
+	waits := wl.all()
+	require.Len(t, waits, 2)
+	assert.Equal(t, odMaxRetryWait, waits[0], "Retry-After: 120 — the call's own wait is at most odMaxRetryWait")
+	// WP-FLEET-3 D-F3-6: the 429 holds the whole ACCOUNT for its
+	// Retry-After, capped at odBurstMaxWait (90 s), and the next attempt
+	// waits out what the call's own wait did not cover — on ctx, never past
+	// its deadline (the test above), so never the uninterruptible 120 s
+	// sleep R7-08 removed.
+	assert.InDelta(t, (odBurstMaxWait - odMaxRetryWait).Seconds(), waits[1].Seconds(), 1)
 }
 
 func TestGraphDo_AWaitEndsWhenTheCallerGoes(t *testing.T) {

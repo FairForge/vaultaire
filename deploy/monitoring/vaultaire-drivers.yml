@@ -122,3 +122,21 @@ groups:
         annotations:
           summary: "Permafrost account {{ $labels.account }} is {{ $value | humanizePercentage }} full"
           description: "The OneDrive drive of permafrost account {{ $labels.account }} has been more than 80 % full for an hour (Graph drive.quota: total − remaining, the recycle bin included — vaultaire_permafrost_quota_bytes{kind=\"deleted\"} is the bin). The driver's deletes are permanentDelete since WP-FLEET-2, so a large bin is from before it or from another app: the operator purge (fleet-admin/fleet-recyclebin.py, SharePoint RecycleBin/DeleteAll) is the owner's decision. Otherwise the drive is full of live shards: add accounts (WP-FLEET-7) or move a parity leg (VAULT_PARITY_LEGS). internal/drivers/onedrive_README.md § OneDrive Gotchas."
+
+      # WP-FLEET-3 (D-F3-8): a permafrost account keeps answering 429/503.
+      # The driver rides a burst (6 attempts, Retry-After to 90 s, the
+      # account held for it) and paces at Microsoft's published rates
+      # (PERMAFROST_ACCOUNT_*, PERMAFROST_TENANT_GBH), so a sustained rate of
+      # throttles means the pacing is above what the tenant allows today —
+      # a knob raised past the published rate, another app on the tenant, or
+      # a new Microsoft line. Warning: more than 10 a minute on one account
+      # for 10 minutes (a one-minute burst is ~10–60 and ends).
+      - alert: PermafrostThrottling
+        expr: |
+          sum by (instance, job, account) (rate(vaultaire_permafrost_throttles_total[5m])) * 60 > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Permafrost account {{ $labels.account }} is being throttled ({{ $value | humanize }} a minute)"
+          description: "Microsoft has answered permafrost account {{ $labels.account }} with 429/503 more than 10 times a minute for 10 minutes (vaultaire_permafrost_throttles_total by op: graph, range, fragment, session). The driver waits each Retry-After out and holds the account meanwhile, so reads and writes there are slow, not wrong. Check vaultaire_permafrost_paced_seconds_total{dir=\"hold\"}, whether a PERMAFROST_ACCOUNT_* / PERMAFROST_TENANT_GBH knob was raised above the published rates (docs/FLEET.md), and whether another job shares the tenant. internal/drivers/onedrive_README.md § Throttle Handling."

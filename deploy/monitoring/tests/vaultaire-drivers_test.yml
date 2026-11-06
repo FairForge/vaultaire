@@ -1,5 +1,5 @@
-# promtool unit tests of vaultaire-drivers.yml: PermafrostFleetMismatch and PermafrostAccountNearFull
-# (WP-R7-4, Stage 1a Prompt 16 Part A; WP-FLEET-2). Also run by deploy/monitoring/promtool-test.sh.
+# promtool unit tests of vaultaire-drivers.yml: PermafrostFleetMismatch, PermafrostAccountNearFull and
+# PermafrostThrottling (WP-R7-4, Stage 1a Prompt 16 Part A; WP-FLEET-2; WP-FLEET-3). Also run by deploy/monitoring/promtool-test.sh.
 # Run on the box (promtool is there):
 #   scp deploy/monitoring/vaultaire-drivers.yml deploy/monitoring/tests/vaultaire-drivers_test.yml vaultaire-slc:/tmp/
 #   ssh vaultaire-slc 'cd /tmp && promtool test rules vaultaire-drivers_test.yml'
@@ -61,3 +61,30 @@ tests:
             exp_annotations:
               summary: "Permafrost account tenant-1 is 85% full"
               description: "The OneDrive drive of permafrost account tenant-1 has been more than 80 % full for an hour (Graph drive.quota: total − remaining, the recycle bin included — vaultaire_permafrost_quota_bytes{kind=\"deleted\"} is the bin). The driver's deletes are permanentDelete since WP-FLEET-2, so a large bin is from before it or from another app: the operator purge (fleet-admin/fleet-recyclebin.py, SharePoint RecycleBin/DeleteAll) is the owner's decision. Otherwise the drive is full of live shards: add accounts (WP-FLEET-7) or move a parity leg (VAULT_PARITY_LEGS). internal/drivers/onedrive_README.md § OneDrive Gotchas."
+
+  # WP-FLEET-3: 15 throttles a minute on one account for 20 minutes fires
+  # after 10; a one-minute burst (60 in a minute, then none) and 5 a minute
+  # never do.
+  - interval: 1m
+    input_series:
+      - series: 'vaultaire_permafrost_throttles_total{instance="slc",job="vaultaire",account="tenant-1",op="range"}'
+        values: '0+15x30'
+      - series: 'vaultaire_permafrost_throttles_total{instance="slc",job="vaultaire",account="tenant-2",op="range"}'
+        values: '0x5 60x25'
+      - series: 'vaultaire_permafrost_throttles_total{instance="slc",job="vaultaire",account="tenant-3",op="fragment"}'
+        values: '0+5x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: PermafrostThrottling
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: PermafrostThrottling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: slc
+              job: vaultaire
+              account: tenant-1
+            exp_annotations:
+              summary: "Permafrost account tenant-1 is being throttled (15 a minute)"
+              description: "Microsoft has answered permafrost account tenant-1 with 429/503 more than 10 times a minute for 10 minutes (vaultaire_permafrost_throttles_total by op: graph, range, fragment, session). The driver waits each Retry-After out and holds the account meanwhile, so reads and writes there are slow, not wrong. Check vaultaire_permafrost_paced_seconds_total{dir=\"hold\"}, whether a PERMAFROST_ACCOUNT_* / PERMAFROST_TENANT_GBH knob was raised above the published rates (docs/FLEET.md), and whether another job shares the tenant. internal/drivers/onedrive_README.md § Throttle Handling."

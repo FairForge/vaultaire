@@ -172,9 +172,67 @@ own end (compared by identity), and the driver reports an empty range body as
 `io.ErrUnexpectedEOF`. Every `parfetch` user (the chunked GET, the parallel
 ranged GET, the parity rebuild) gets the same guarantee.
 
-**User-Agent decoration** (prioritized by Microsoft):
+**Pacing — the good-tenant posture (WP-FLEET-3 PR B, `onedrive_pace.go`).**
+The driver paces at Microsoft's PUBLISHED rates, even though the soaks drew
+several times more, and treats a 429 as the budget's signal:
+
+| Knob | Default | Bucket |
+|---|---|---|
+| `PERMAFROST_ACCOUNT_RPS` | 8 (burst 100) | requests per account (3,000 / 5 min) |
+| `PERMAFROST_ACCOUNT_IN_GBH` | 50 | bytes written per account per hour |
+| `PERMAFROST_ACCOUNT_OUT_GBH` | 100 | bytes read per account per hour |
+| `PERMAFROST_TENANT_GBH` | 400 | bytes per TENANT (app registration) per hour, each way, shared by every slot in it |
+| `PERMAFROST_RANGE_HEDGE_AFTER` | 2s | a CDN range not done after max(this, 3 × the Get's median range time) is asked again |
+
+GB = 10⁹ (Microsoft's). `0`/`off` turns a bucket (or the hedge) off; a
+rejected value is a Warn and the default. A bytes bucket holds a minute of
+its rate (≥ 64 MiB): a lone read after a quiet spell is not slowed, a
+sustained one runs at the rate (100 GB/h ≈ 28 MB/s per drive; 400 GB/h ≈
+111 MB/s per tenant). **The tenant bucket is the one that bites first in a
+dense tenant** (two drives of one tenant flat out lost reads in 12 of 21
+rounds, 2026-11-06). Callers WAIT — never a refusal; the caller's context
+bounds it. A request token before every Graph call, range attempt, fragment
+attempt and session query; a range's bytes once, before its first attempt; a
+fragment's bytes as it is READ from the source (back-pressure, the
+`sia_write.go` pattern: the fragment's answer bound times Microsoft only, a
+retry re-sends the buffer without taking its bytes again). The pacer is the
+one `drivers/pacer.go` the sia budgets use.
+
+**A 429 holds the whole account (D-F3-6):** any 429/503 marks the account
+held for its `Retry-After` (5 s if none; at most 90 s) and drains its
+buckets; every request of every caller on that account waits for the hold's
+end (`throttledUntil`, which nothing read before). A retry's own wait covers
+the hold; a hold past the caller's deadline fails the request as throttled at
+once (`errODThrottled`), nothing sent. `RateLimit-Remaining` below 20 % of
+`RateLimit-Limit`, when Microsoft sends them, holds likewise until
+`RateLimit-Reset` (never seen in any run).
+
+**A slow range is hedged (D-F3-4)** on another connection to the same
+download URL; the first verified copy wins, the loser is cancelled; never a
+fragment. The hedge waits out the hold and takes a request token like any
+request. **A fragment that exhausted its attempts resumes its session
+(D-F3-3):** the session is asked for `nextExpectedRanges` and the rest of the
+fragment is sent once from the buffer; a fragment the session already holds
+(its answer was lost) is skipped — the session's view wins; a session that is
+gone (404) restarts the upload in a new session only for a rewindable body
+(the materialize spool, a `bytes.Reader`); a streamed one fails as before.
+**Token renewal (D-F3-10):** one renewer at a time, 5 min before the token
+ends; the others keep the valid token; a failed renewal pauses renewals 15 s
+(a valid token is still served, an expired one fails at once — no renewal per
+request).
+
+Metrics: `vaultaire_permafrost_throttles_total{account,op=graph|range|fragment|session}`,
+`vaultaire_permafrost_paced_seconds_total{account,dir=requests|in|out|hold}`,
+`vaultaire_permafrost_range_hedges_total{outcome=won|lost|failed}`,
+`vaultaire_permafrost_fragment_resumes_total{outcome=resumed|skipped|restarted|failed}`;
+rule `PermafrostThrottling` (> 10 a minute on one account for 10 min, warn).
+One Info line at boot names the pacing in force.
+
+**User-Agent decoration** (Microsoft's documented format for prioritised ISV
+traffic, on every Graph, CDN and fragment request since WP-FLEET-3 D-F3-7;
+`main` stamps the build with `drivers.SetPermafrostBuild(api.BuildSHA)`):
 ```
-ISV|FairForge|Vaultaire/1.0
+ISV|Stored|permafrost/<BuildSHA>
 ```
 
 ### Delta Queries (Efficient Listing)
