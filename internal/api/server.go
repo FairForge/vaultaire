@@ -658,6 +658,7 @@ func NewServer(cfg *config.Config, logger *zap.Logger, eng *engine.CoreEngine, q
 	if s.vaultParity != nil {
 		s.vaultParity.AllowCleartextLegs = s.allowUnsealedCleartext
 		s.vaultParity.AllowSiaLeg = s.allowUnsealedSia
+		s.vaultParity.AllowUnsealedPermafrost = allowUnsealedPermafrostFromEnv(os.Getenv, logger)
 	}
 	if s.vaultParity != nil {
 		s.vaultParity.SSE = s.sseService

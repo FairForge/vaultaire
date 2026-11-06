@@ -124,7 +124,7 @@ var (
 	})
 	vaultParityUnprotectedObjects = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "vaultaire_vault_parity_unprotected_objects",
-		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), flag_off (the tenant's vault_parity flag is off — never protected while it is), unknown_length (an SSE-C multipart object — the 0x05 container, whose stored length is in its own header and not a function of its size: skipped until the job reads that header, RP19-1), other (pending, partial, chunked).",
+		Help: "Vault-floor objects with no complete parity copy of their current version, as the job's last run counted them, by reason: too_large (a protect estimated longer than a whole run — never started, never takes a slot), flag_off (the tenant's vault_parity flag is off — never protected while it is), unknown_length (an SSE-C multipart object — the 0x05 container, whose stored length is in its own header and not a function of its size: skipped until the job reads that header, RP19-1), unsealed_leg (an unsealed object no leg may take: the only leg is the permafrost fleet, which takes ciphertext shards only unless PERMAFROST_ALLOW_UNSEALED — WP-FLEET D-F-SEAL-1), other (pending, partial, chunked).",
 	}, []string{"reason"})
 	vaultParityOrphans = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "vaultaire_vault_parity_orphans_total",
@@ -142,7 +142,7 @@ func init() {
 	for _, o := range []string{"found", "erased", "failed"} {
 		vaultParityOrphans.WithLabelValues(o)
 	}
-	for _, r := range []string{"too_large", "flag_off", "unknown_length", "other"} {
+	for _, r := range []string{"too_large", "flag_off", "unknown_length", "unsealed_leg", "other"} {
 		vaultParityUnprotectedObjects.WithLabelValues(r)
 	}
 }
@@ -227,11 +227,15 @@ type VaultParityResult struct {
 	// own header (RP19-1: storedBlobLength is 0 for it, and every protect
 	// failed "longer than its recorded 0 bytes", 20 attempts each).
 	// Protected once the job reads that header.
-	UnknownLengthSkipped int      `json:"unknown_length_skipped,omitempty"`
-	FlagOff              int      `json:"flag_off"`
-	BytesWritten         int64    `json:"bytes_written"`
-	Leg                  string   `json:"leg"`
-	Errors               []string `json:"errors,omitempty"`
+	UnknownLengthSkipped int `json:"unknown_length_skipped,omitempty"`
+	// UnsealedLegSkipped: unsealed objects no leg may take (the only leg is
+	// permafrost and PERMAFROST_ALLOW_UNSEALED is off, D-F-SEAL-1). Counted,
+	// noted, no slot.
+	UnsealedLegSkipped int      `json:"unsealed_leg_skipped,omitempty"`
+	FlagOff            int      `json:"flag_off"`
+	BytesWritten       int64    `json:"bytes_written"`
+	Leg                string   `json:"leg"`
+	Errors             []string `json:"errors,omitempty"`
 	// Notes: standing conditions, not failures of this run — the objects
 	// too large for a run (the first 20). They used to be Errors, so the
 	// admin page said "N failed" on every run (Prompt 2b.3 D2.3).
@@ -305,6 +309,14 @@ type VaultParity struct {
 	// skipped like a cleartext leg: the shards of an unsealed object would
 	// reach s3d and the Sia hosts readable.
 	AllowSiaLeg bool
+	// AllowUnsealedPermafrost lets the permafrost fleet take an UNSEALED
+	// object's shards (PERMAFROST_ALLOW_UNSEALED; WP-FLEET D-F-SEAL-1). Off,
+	// the fleet takes ciphertext shards only (an SSE-S3 or SSE-C object's):
+	// its transport is TLS, but four shards rebuild the object, and every
+	// drive of a tenant opens to that tenant's one data-app credential. An
+	// unsealed object then goes to the next leg that may take it, or stays
+	// unprotected (reason unsealed_leg).
+	AllowUnsealedPermafrost bool
 
 	// The reconcile pass: a shard folder no row names is erased once it has
 	// been a candidate on two passes OrphanGrace apart; at most
@@ -379,6 +391,14 @@ func (p *VaultParity) Leg() (string, engine.Driver, bool) { return p.LegFor("") 
 // permafrost: legRegion names none) is outside every residency; none
 // inside = no parity copy for that tenant, never one outside.
 func (p *VaultParity) LegFor(residency string) (string, engine.Driver, bool) {
+	return p.legForObject(residency, true)
+}
+
+// legForObject is LegFor for one object: sealed = its stored bytes are
+// ciphertext (SSE-S3 or SSE-C). An unsealed object never goes to the
+// permafrost fleet unless AllowUnsealedPermafrost (D-F-SEAL-1) — the next
+// leg that may take it is chosen instead.
+func (p *VaultParity) legForObject(residency string, sealed bool) (string, engine.Driver, bool) {
 	legs := p.Legs
 	if len(legs) == 0 {
 		legs = vaultParityLegs
@@ -396,10 +416,20 @@ func (p *VaultParity) LegFor(residency string) (string, engine.Driver, bool) {
 			if name == "sia" && !p.AllowSiaLeg {
 				continue
 			}
+			if name == "permafrost" && !sealed && !p.AllowUnsealedPermafrost {
+				continue
+			}
 			return name, d, true
 		}
 	}
 	return "", nil, false
+}
+
+// unsealedHasLeg: some leg may take an unsealed object's shards (any
+// residency; protect checks the tenant's own).
+func (p *VaultParity) unsealedHasLeg() bool {
+	_, _, ok := p.legForObject("", false)
+	return ok
 }
 
 func (p *VaultParity) enabled(tenantID string) bool {
@@ -635,6 +665,7 @@ type parityCandidate struct {
 	chunked                     bool
 	storageKey                  string // the row's blob address ("" = the key, WP-R2-1)
 	backend                     string // the row's backend_name: the one backend the object is read from (WP-R6-1)
+	sealed                      bool   // its stored bytes are ciphertext: an encryption_algorithm is recorded (D-F-SEAL-1)
 	// rowAt is the row's updated_at as this protect wrote it: its finish
 	// records the outcome only on a row nothing touched since (Prompt 2b.2
 	// C4 — a delete marks the row and erases shards meanwhile).
@@ -752,19 +783,22 @@ func (p *VaultParity) countUnprotected(ctx context.Context, res *VaultParityResu
 		SELECT o.tenant_id, COUNT(*), COALESCE(SUM(o.size_bytes), 0)::BIGINT,
 		       COUNT(*) FILTER (WHERE $2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT AND NOT o.is_chunked
 		                          AND COALESCE(o.encryption_algorithm, '') <> $3),
-		       COUNT(*) FILTER (WHERE NOT o.is_chunked AND COALESCE(o.encryption_algorithm, '') = $3)`+unprotectedFrom+`
+		       COUNT(*) FILTER (WHERE NOT o.is_chunked AND COALESCE(o.encryption_algorithm, '') = $3),
+		       COUNT(*) FILTER (WHERE NOT o.is_chunked AND COALESCE(o.encryption_algorithm, '') = ''
+		                          AND NOT ($2::BIGINT >= 0 AND o.size_bytes > $2::BIGINT))`+unprotectedFrom+`
 		GROUP BY o.tenant_id`, p.scopeTenant, maxSize, crypto.SSECAlgorithmMultipart)
 	if err != nil {
 		return fmt.Errorf("vault parity: count unprotected: %w", err)
 	}
-	var other, large, flagOff, unknownLen int
+	var other, large, flagOff, unknownLen, unsealedLeg int
+	blocked := !p.unsealedHasLeg()
 	var allBytes int64
 	var largeTenants []string
 	for rows.Next() {
 		var tenantID string
-		var n, l, u int
+		var n, l, u, plain int
 		var b int64
-		if err := rows.Scan(&tenantID, &n, &b, &l, &u); err != nil {
+		if err := rows.Scan(&tenantID, &n, &b, &l, &u, &plain); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("vault parity: count unprotected: %w", err)
 		}
@@ -773,9 +807,13 @@ func (p *VaultParity) countUnprotected(ctx context.Context, res *VaultParityResu
 		case !p.enabled(tenantID):
 			flagOff += n
 		default:
+			if !blocked {
+				plain = 0
+			}
 			large += l
 			unknownLen += u
-			other += n - l - u
+			unsealedLeg += plain
+			other += n - l - u - plain
 			if l > 0 {
 				largeTenants = append(largeTenants, tenantID)
 			}
@@ -789,6 +827,7 @@ func (p *VaultParity) countUnprotected(ctx context.Context, res *VaultParityResu
 	vaultParityUnprotectedObjects.WithLabelValues("too_large").Set(float64(large))
 	vaultParityUnprotectedObjects.WithLabelValues("flag_off").Set(float64(flagOff))
 	vaultParityUnprotectedObjects.WithLabelValues("unknown_length").Set(float64(unknownLen))
+	vaultParityUnprotectedObjects.WithLabelValues("unsealed_leg").Set(float64(unsealedLeg))
 	vaultParityUnprotectedObjects.WithLabelValues("other").Set(float64(other))
 	res.TooLarge = large
 	if large == 0 {
@@ -853,6 +892,7 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 				_ = rows.Close()
 				return nil, fmt.Errorf("vault parity: scan candidate: %w", err)
 			}
+			c.sealed = enc != ""
 			// The shards cover the STORED bytes — a sealed object's
 			// ciphertext, read as stored and rebuilt as stored, then opened
 			// by the GET (WP-R8-5: sized by the plaintext, every sealed
@@ -886,6 +926,15 @@ func (p *VaultParity) protectCandidates(ctx context.Context, res *VaultParityRes
 				if res.UnknownLengthSkipped <= 20 {
 					res.Notes = append(res.Notes, fmt.Sprintf("protect %s/%s not started: an SSE-C multipart object (%s) — its stored length is not known without reading its header",
 						c.bucket, c.key, crypto.SSECAlgorithmMultipart))
+				}
+			case !c.sealed && !p.unsealedHasLeg():
+				// D-F-SEAL-1: the only leg is the fleet, which takes
+				// ciphertext only. Counted (reason unsealed_leg), noted,
+				// no slot, no row — nothing is written for it.
+				res.UnsealedLegSkipped++
+				if res.UnsealedLegSkipped <= 20 {
+					res.Notes = append(res.Notes, fmt.Sprintf("protect %s/%s not started: an unsealed object, and no parity leg but permafrost (ciphertext shards only; PERMAFROST_ALLOW_UNSEALED)",
+						c.bucket, c.key))
 				}
 			default:
 				cands = append(cands, c)
@@ -955,7 +1004,7 @@ func (p *VaultParity) protect(ctx context.Context, c parityCandidate) (state str
 	if err := p.db.QueryRowContext(ctx, `SELECT residency FROM tenants WHERE id = $1`, c.tenantID).Scan(&residency); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "skipped", 0, fmt.Errorf("vault parity: read the residency: %w", err)
 	}
-	legName, leg, ok := p.LegFor(residency.String)
+	legName, leg, ok := p.legForObject(residency.String, c.sealed)
 	if !ok && residency.String != "" {
 		// The tenant's bytes stay inside its residency: no leg there, no
 		// parity copy (a note each run), never a copy outside.
