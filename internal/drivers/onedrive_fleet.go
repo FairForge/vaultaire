@@ -92,8 +92,24 @@ type fleetMarker struct {
 	// PlacedUnder is the digest of the fleet order the account's data is laid
 	// out for (RB3-1; additive): "" = Digest (a marker written before).
 	PlacedUnder string `json:"placed_under,omitempty"`
+	// PlacementVersion is the placement the account's data is laid out
+	// under (WP-FLEET-5; additive): 0 = 1 = hash % slots over Fleet; 2 =
+	// rendezvous over Tenants then drives. PlacementTarget is set by the
+	// rebalance tool while it runs (writes go there, reads look there first);
+	// Tenants is the fleet's grouping as written, so the old placement can
+	// be computed exactly.
+	PlacementVersion int                 `json:"placement_version,omitempty"`
+	PlacementTarget  int                 `json:"placement_target,omitempty"`
+	Tenants          []fleetMarkerTenant `json:"tenants,omitempty"`
 
 	foundOn string // the drive the marker was read on, when not the account's (never encoded)
+}
+
+// fleetMarkerTenant is one directory in the marker: its key (a hash, never
+// the id) and the fleet positions of its drives.
+type fleetMarkerTenant struct {
+	Key    string `json:"key"`
+	Drives []int  `json:"drives"`
 }
 
 // FleetMarkerPath is the marker's path under vaultaire/ (the migration tool
