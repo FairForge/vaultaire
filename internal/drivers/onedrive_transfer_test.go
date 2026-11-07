@@ -261,3 +261,35 @@ func TestOneDriveGet_A256MBReadIsAtMostEightRanges(t *testing.T) {
 	assert.Equal(t, int64(32<<20), odRangePartFor(size))
 	assert.Equal(t, int64(64<<20), odRangePartFor(1<<30))
 }
+
+// The 2026-11-07 proof on the test drives: a 200 MiB simple PUT wrote 10 MB/s
+// per object — it went over the Graph client, HTTP/2, whose flow control is
+// why CDN reads and upload fragments are HTTP/1.1 (README § v3). A simple PUT
+// of more than 4 MiB goes over the upload transport, with its Graph token.
+func TestOneDrivePut_ALargeSimplePUTGoesOverTheHTTP1UploadTransport(t *testing.T) {
+	ctx := common.WithTenantID(context.Background(), "x")
+	g := &graphSink{}
+	d := graphSinkFleet(g)
+	var graphPuts, uploadPuts atomic.Int32
+	var auth atomic.Value
+	d.tenants[0].graphHTTP = &http.Client{Transport: odRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPut {
+			graphPuts.Add(1)
+		}
+		return g.RoundTrip(req)
+	})}
+	d.tenants[0].uploadHTTP = &http.Client{Transport: odRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPut && strings.HasSuffix(req.URL.Path, ":/content") {
+			uploadPuts.Add(1)
+			auth.Store(req.Header.Get("Authorization"))
+		}
+		return g.RoundTrip(req)
+	})}
+
+	require.NoError(t, d.Put(ctx, "bkt", "big.bin", bytes.NewReader(patternBytes(8<<20)), engine.WithContentLength(8<<20)))
+	require.NoError(t, d.Put(ctx, "bkt", "small.bin", bytes.NewReader([]byte("tiny")), engine.WithContentLength(4)))
+
+	assert.Equal(t, int32(1), uploadPuts.Load(), "the 8 MiB simple PUT: HTTP/1.1")
+	assert.Equal(t, int32(1), graphPuts.Load(), "a small one stays on the Graph client")
+	assert.Equal(t, "Bearer stub-token", auth.Load(), "with its Graph token")
+}

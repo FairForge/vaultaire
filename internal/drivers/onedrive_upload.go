@@ -151,7 +151,15 @@ func (t *odTenant) simpleUploadAt(ctx context.Context, driveID, parentID, path s
 	req.ContentLength = size
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.GetBody = func() (io.ReadCloser, error) { return body(), nil }
-	resp, err := t.graphDoWith(ctx, req, odBurstAttempts(ctx), odBurstMaxWait)
+	// A body past simpleUploadMax goes over the upload transport: HTTP/1.1,
+	// the fragments' — Go's HTTP/2 flow control held a 200 MiB simple PUT to
+	// ~10 MB/s per object (2026-11-07), and its answer bound (2 min after the
+	// body) fits a large body where Graph's 15 s did not.
+	client := t.graphHTTP
+	if size > simpleUploadMax && t.uploadHTTP != nil {
+		client = t.uploadHTTP
+	}
+	resp, err := t.graphDoWith(ctx, client, req, odBurstAttempts(ctx), odBurstMaxWait)
 	if err != nil {
 		return fmt.Errorf("onedrive simple upload: %w", err)
 	}
