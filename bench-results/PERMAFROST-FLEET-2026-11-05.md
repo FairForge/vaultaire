@@ -106,6 +106,74 @@ DELETE 14.8/s, one 429 in 1,000.
 - slot 2 needs no move: its `-switch` only records `drive_id`;
 - the one-time purge of the three bins (~112 GiB) is the owner's decision (D-F1-6).
 
+## What changed (the WP-FLEET next chain, 2026-11-06/07; #1175–#1183)
+
+The chain is `docs/reviews/WP-FLEET-NEXT-PROMPT.md`. All of it was measured on SLC: the test drives (`stored-fleet-test2@<tenant>`, slots 5 and 6 of `run-fleet.sh`) and the parity lab. No prod fleet account was benched.
+
+### WP-FLEET-3: ride the bursts (#1175 PR A, #1177 PR B)
+
+**The soak, repeated.** Two drives in two tenants, 48 × 256 MB PUT then GET per round at concurrency 24. The driver was built from #1177, plus `onedrive-bench`'s new closing `permafrost metrics:` line, which sums the driver's own counters for the run.
+
+| Run | Rounds | PUT (both drives) | GET (both drives) | Failed objects | `size mismatch: got 0` | 429s absorbed |
+|---|---|---|---|---|---|---|
+| **Paced**, the defaults (8 req/s, 50 / 100 GB/h per drive, 400 GB/h per tenant), 2 h | 13 | 30.1–30.3 MB/s | 71.2–71.3 MB/s | **0** | **0** | **0** |
+| Bytes unpaced, the request bucket still at 8/s, 18 min | 8 | 408–453 MB/s | 130–134 MB/s | 0 | 0 | 0 |
+| **Fully unpaced** (`PERMAFROST_ACCOUNT_RPS=0` too), 2 h | 93 | 105–480, mean 401 MB/s | 89–686, mean 473 MB/s | **0** | **0** | **187**: 174 range, 10 fragment, 3 graph; 1 fragment resumed |
+
+- **Acceptance is met:** 0 failed objects with the bursts counted, and never a clean empty body. The 2026-11-06 soak at the same load lost ≥ 20 of 48 objects in 19 of 111 rounds and had 135 `got 0`.
+- **The unpaced run had to be repeated.** The prompt's unpaced settings (the three GB/h knobs at 0) leave the request bucket at 8/s. Two drives × 8 requests/s × 8 MiB ranges is 134 MB/s, exactly what those reads measured, and no 429 ever came: the request pacing alone keeps the account under Microsoft's line. The fully unpaced run brings the 2026-11-06 load back, and the ride-through with it.
+- **Microsoft's `RateLimit-*` headers appeared** (never seen before). In the fully unpaced run the accounts were held for `Retry-After`s and `RateLimit-Reset`s: 162,599 caller-seconds over 2 h, about 30 s per round per caller, with round 4's 510 s of holds and no throttle counted.
+- Paced rates sit a little above the published ones (about 54 / 128 GB/h per drive). Each round is a new process, so each starts with a full one-minute burst bucket; a long-running server takes that burst once.
+- Range hedges: 70–93 lost and 0–6 won per paced round (about 5 % extra range requests). Unpaced: about 105–155 lost and 40–63 won, so hedges win about 30 % of the time under load, the straggler cure.
+- After the runs the test drives held 0 bytes and 0 items in their recycle bins (`fleet-recyclebin.py --test-only`). About 4.5 TB was written and deleted, and `permanentDelete` (#1168) left nothing.
+
+### WP-FLEET-4: transfer tuning (#1179, fix #1183)
+
+Unpaced, test drives, PR B's binary against main's:
+
+| Shape | #1177 | #1179 | #1179 + #1183 |
+|---|---|---|---|
+| GET 48 × 256 MB, c24 | 135 MB/s | **460 MB/s** | — |
+| GET 8 × 256 MB, c2 | 116 MB/s | 159 MB/s | — |
+| PUT 48 × 256 MB, c24 | 440 MB/s | 363 MB/s | — |
+| PUT 8 × 256 MB, c2 (a session) | 45.3 / 42.7 / 43.7 MB/s | 33.8 MB/s | 41.1 / 39.2 MB/s |
+| PUT 8 × 200 MB, c2 | 41.9 / 39.1 / 39.2 MB/s (a session) | **20.4 MB/s** (one simple PUT over HTTP/2) | 40.7 / 30.3 MB/s (one simple PUT over HTTP/1.1) |
+
+- **Reads:** 32 MiB ranges carry four times the bytes per request under the same request bucket, so a 256 MB read is 8 requests instead of 32.
+- **The proof found a regression, fixed in #1183.** The 200 MiB simple PUT went over the Graph client, which is HTTP/2, and Go's HTTP/2 flow control held it to about 10 MB/s per object. It now uses the HTTP/1.1 upload transport and is level with the session path. Its gain is requests, one instead of four, not speed.
+- **Not met: "per-object write ≥ 24 MB/s".** No binary got there. One upload stream from SLC to OneDrive writes about 20 MB/s, in a session or in one PUT; aggregate write speed comes from concurrency across objects.
+
+### Part 3: the sealed-only leg rule (#1176)
+
+Measured on prod after deploy: `vaultaire_vault_parity_unprotected_objects{reason="unsealed_leg"}` is 0. Prod's leg is Lyve, and no row names permafrost.
+
+### Part 4: parallel protects (#1178)
+
+Parity lab, built from main, with the leg = the three test drives. 12 × 256 MiB GLACIER objects, sealed under the lab's master key (`ML-KEM-768+AES-256-GCM`), each set protected in one run.
+
+| `VAULT_PARITY_PROTECT_CONCURRENCY` | First row → last row | Job run |
+|---|---|---|
+| 1 | **192 s** | — |
+| 4 | **75 s** (39 % of sequential) | 75 s, 12 protected, 0 partial or failed |
+
+**Not met: "≤ 1/3 of the sequential time".** The speed-up is 2.6×. With four in flight the bound looks like the four parallel Geyser read-backs, not the fleet. The lab tenant is free tier, so its quota was raised in the lab database only, and the sets were deleted through S3 after, their shards with them.
+
+### WP-FLEET-11 and WP-FLEET-10 (#1180, #1182)
+
+- **WP-FLEET-11:** a fake fleet of 300 drives boots in about 3 s (50 ms per Graph call; one after the other it took 45 s). A miss on a settled fleet costs 1 request, where it cost 300. A probe samples ≤ 16 accounts.
+- **On prod:** the boot reads `match`, and every `vaultaire_permafrost_fallback_walks_total` series is 0.
+- **WP-FLEET-10:** rules `PermafrostHashMismatch` and `PermafrostFallbackWalking` are installed on the box beside `PermafrostThrottling` (all six `Permafrost*` rules `inactive`). Each fires on its forced condition in its promtool test; a live Prometheus saw none, because the bench drives the driver without a server.
+
+### The owed slot moves
+
+- **Slot 3 retired (2026-11-07 01:00 UTC), after a refusal.**
+  - The tool refused first: the old library held 1 file, 68 MB of the parity lab's shards, and empty `t-ecbench/ec-*` folders, all written *after* the switch by binaries older than #1167, which took `drives[0]`.
+  - `fleet-admin/fleet-fill.py` diffed both trees and Graph-copied the 6 missing items into the OneDrive library. Then `-retire` verified 1,275 files by count, bytes and quickXorHash, and permanently deleted the old tree.
+- **Slot 1 moved (2026-11-07 01:24 UTC).**
+  - `-copy`: 1,296 files, 191 folders, 7,405,467,690 bytes, every quickXorHash equal, 0 throttled, 13 min. Then `-switch`, `TENANT_1_DRIVE_ID` set to the OneDrive library (backup `.env.bak-fleet-slot1-switch-20261107T012450Z`), and `vaultaire-switch restart`.
+  - Read back through the driver with prod's pins: 3,314 objects `ok`, **0 fallback hits**. 7 keys first answered 429 on metadata at concurrency 16 from a pre-pacing `blob-verify` build, and read whole at concurrency 1.
+  - **Owed:** `-retire` no earlier than 2026-11-08 01:25 UTC. Rebuild the parity lab's `erasure-bench` (it still takes `drives[0]`) before any run touches slots 1–3, or the old library gets writes again; the lab's `vaultaire` is now main's build.
+
 ## Evening additions (2026-11-05 22:00 → 2026-11-06 07:00 UTC) — the gate rehearsals
 
 **Worker ↔ fleet, no origin bytes (a throwaway Worker on the bench account, deleted after; bodies synthesised in the Worker).**
