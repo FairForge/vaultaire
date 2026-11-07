@@ -25,11 +25,11 @@ import (
 // the fleet's union because no drive could be named for a folder.
 //
 //   - D-F5-1 placement from the key alone: the key's GROUP (its parent
-//     folder) and its SHARD index j (a leaf `p<j>`, else 0). Each shard ranks
-//     the fleet's tenants by rendezvous on (tenant key, group, j) and takes
-//     the first whose shard count is under ⌈max(spread, j+1)/n⌉; the drive
-//     inside the tenant is rendezvous on (drive identity, group) — every file
-//     of one group that lands on a tenant lands on ONE drive of it.
+//     folder) and its SHARD index j (a leaf `p<j>`, else 0). The tenants
+//     stand in columns (tenant k in column k mod spread); shard j takes a
+//     tenant of column j mod spread by rendezvous on (tenant key, group); the
+//     drive inside the tenant is rendezvous on (drive identity, group) —
+//     every file of one group that lands on a tenant lands on ONE drive of it.
 //   - D-F5-2 the marker records placement_version (absent = 1 = hash % slots
 //     over the recorded order; 2 = this) and the tenant grouping, so a reader
 //     can compute the OLD placement exactly.
@@ -178,13 +178,43 @@ func TestPlacement_AnAppendedTenantMovesAboutOneShardInN(t *testing.T) {
 	before := newPlacementV2(synthFleet(4, 2), 4)
 	after := newPlacementV2(synthFleet(5, 2), 4)
 	moved := movedFraction(t, before, after, "")
-	// One tenant in five takes about a fifth of the shards; the exclusion
-	// (two shards may not share a tenant) cascades a little. Never the
-	// three quarters of hash % slots, never the half of a shifted ranking.
-	assert.InDelta(t, 0.20, moved, 0.06, "moved %.3f", moved)
+	// The fifth tenant joins one of the four columns, and half of that
+	// column's shards (one shard in four) move to it: an eighth. Never the
+	// three quarters of hash % slots; never the half that a ranking shared
+	// across shards, or an exclusion of earlier shards' tenants, moved here
+	// in the red run (with as many tenants as shards every change cascades).
+	assert.InDelta(t, 0.125, moved, 0.03, "moved %.3f", moved)
+
+	// At eight tenants a ninth moves about a sixteenth: one column of two
+	// becomes three, a third of its shards (one shard in four) move.
+	moved = movedFraction(t, newPlacementV2(synthFleet(8, 2), 4), newPlacementV2(synthFleet(9, 2), 4), "")
+	assert.InDelta(t, 1.0/12, moved, 0.03, "moved %.3f", moved)
 
 	// Nothing changes when nothing changes.
 	assert.Zero(t, movedFraction(t, before, newPlacementV2(synthFleet(4, 2), 4), ""))
+
+	// Balance: a tenant count that is a multiple of the spread gives every
+	// tenant the same share (within 15 %); five tenants at spread four give
+	// the two tenants of the doubled column half the others' (documented).
+	share := func(p *odPlacement) map[string]float64 {
+		per := map[string]float64{}
+		for g := 0; g < 4000; g++ {
+			for j := 0; j < 4; j++ {
+				per[tenantOf(p, parityKey(g, j))]++
+			}
+		}
+		for k := range per {
+			per[k] /= 16000
+		}
+		return per
+	}
+	for tk, s := range share(newPlacementV2(synthFleet(8, 2), 4)) {
+		assert.InDelta(t, 0.125, s, 0.125*0.15, "tenant %s share %.3f", tk, s)
+	}
+	fives := share(newPlacementV2(synthFleet(5, 2), 4))
+	assert.InDelta(t, 0.125, fives["tenant-0"], 0.02)
+	assert.InDelta(t, 0.125, fives["tenant-4"], 0.02)
+	assert.InDelta(t, 0.25, fives["tenant-1"], 0.02)
 }
 
 func TestPlacement_AnAppendedDriveMovesOnlyInsideItsTenant(t *testing.T) {
@@ -245,6 +275,32 @@ func TestPlacement_TheSpreadSetIsOneDrivePerShard(t *testing.T) {
 
 // ── the driver: markers, versions, the computed fallback ────────────────────
 
+// twoHomes is an artifact in bucket whose home and previous-placement home
+// are two different accounts of d (the second look exists), with their
+// indexes; fails the test when none of 200 candidates is.
+func twoHomes(t *testing.T, d *OneDriveDriver, bucket string) (artifact string, home, second int) {
+	t.Helper()
+	ctx := common.WithTenantID(context.Background(), "x")
+	for i := 0; i < 400; i++ {
+		a := fmt.Sprintf("g%d/etag/p0", i) // its own group: a folder's files share one home
+		ts := d.tenantsFor(d.ObjectKey(ctx, bucket, a))
+		if len(ts) != 2 {
+			continue
+		}
+		at := func(x *odTenant) int {
+			for k, tn := range d.tenants {
+				if tn == x {
+					return k
+				}
+			}
+			return -1
+		}
+		return a, at(ts[0]), at(ts[1])
+	}
+	t.Fatal("no artifact with two homes")
+	return "", 0, 0
+}
+
 // tenantedFleet builds a fleet whose accounts share directories: every store
 // of one group has the same tenant id.
 func tenantedFleet(logger *zap.Logger, groups ...[]*markerStore) *OneDriveDriver {
@@ -302,13 +358,14 @@ func TestFleetPlacement_AMarkerWithoutTheVersionIsVersionOneAndStaysAuthoritativ
 
 	// A miss costs one request, at the version-1 home.
 	ctx := common.WithTenantID(context.Background(), "x")
-	before := totalGets(acc...)
+	home := fresh.tenants[fresh.homeTenantIndex(tenantKey("x", "bkt", "nothing"))]
+	homeStore := storeOf(fresh, acc, home.identity())
+	before, homeBefore := totalGets(acc...), homeStore.getCount()
 	ok, err := fresh.Exists(ctx, "bkt", "nothing")
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, 1, totalGets(acc...)-before)
-	home := fresh.tenants[fresh.homeTenantIndex(tenantKey("x", "bkt", "nothing"))]
-	assert.Equal(t, 1, storeOf(fresh, acc, home.identity()).getCount()-0, "asked at hash %% slots")
+	assert.Equal(t, 1, homeStore.getCount()-homeBefore, "asked at hash %% slots")
 }
 
 func TestFleetPlacement_AFirstBootRecordsVersionTwoAndTheTenants(t *testing.T) {
@@ -375,12 +432,26 @@ func TestFleetPlacement_AnUnplacedMissAsksTheOldHomeAndNoMore(t *testing.T) {
 	require.NotNil(t, grown.previousPlacement(), "the markers say where the data was laid out")
 	assert.Equal(t, 39, len(grown.previousPlacement().order))
 
-	// A miss: the new home, then the old home — two requests at 40 drives.
+	// A miss whose homes differ: the new home, then the old home — two
+	// requests at 40 drives. A miss whose homes coincide: one.
+	moved, _, _ := twoHomes(t, grown, "parity")
 	before := totalGets(all...)
-	ok, err := grown.Exists(ctx, "parity", "nothing/here/p0")
+	ok, err := grown.Exists(common.WithTenantID(context.Background(), "x"), "parity", moved)
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Equal(t, 2, totalGets(all...)-before, "never a walk")
+	for i := 0; i < 200; i++ {
+		a := fmt.Sprintf("same-%d/etag/p0", i)
+		if len(grown.tenantsFor(grown.ObjectKey(ctx, "parity", a))) != 1 {
+			continue
+		}
+		before = totalGets(all...)
+		ok, err = grown.Exists(ctx, "parity", a)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Equal(t, 1, totalGets(all...)-before, "the two placements agree: one look")
+		break
+	}
 
 	// A hit placed under the old order is found at the old home.
 	before = totalGets(all...)

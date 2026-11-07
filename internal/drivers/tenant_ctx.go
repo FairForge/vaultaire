@@ -39,7 +39,7 @@ var callsWithoutTenant = prometheus.NewCounterVec(prometheus.CounterOpts{
 func Collectors() []prometheus.Collector {
 	return []prometheus.Collector{callsWithoutTenant, geyserGetRanges, geyserGetBytesPerSecond, driverPutRetries, geyserPutMaterialized, geyserPutMultipart, geyserPutBytesPerSecond,
 		webdavRequests, webdavStalls, webdavRetries, webdavBridgeUp, webdavFallbackReads, webdavDeleteElsewhere, webdavFolderFilesMax, webdavFolderFull,
-		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans, driverHedges, driverHedgesWon, driverDNSRefreshes, lyveBucketLockEnabled, permafrostFleetMismatch, permafrostDriveMismatch, permafrostQuotaBytes, permafrostQuotaState,
+		webdavStripePieces, webdavStripeBytes, webdavStripeOrphans, driverHedges, driverHedgesWon, driverDNSRefreshes, lyveBucketLockEnabled, permafrostFleetMismatch, permafrostPlacementVersion, permafrostDriveMismatch, permafrostQuotaBytes, permafrostQuotaState,
 		permafrostThrottles, permafrostPaced, permafrostRangeHedges, permafrostFragmentResumes, permafrostHashMismatch, permafrostFallbackWalks,
 		swiftRequests, swiftRetries, swiftAuths, siaReadResumes, siaReadBudgetRate, siaReadBudgetWait,
 		siaWriteBudgetRate, siaWriteBudgetWait,

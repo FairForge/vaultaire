@@ -3,6 +3,7 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,7 +54,7 @@ func (m *markerStore) RoundTrip(req *http.Request) (*http.Response, error) {
 		if _, ok := m.files[p]; !ok {
 			return odResp(req, 404, `{"error":{"code":"itemNotFound"}}`, nil), nil
 		}
-		return odResp(req, 200, `{"@microsoft.graph.downloadUrl":"https://cdn.example.test/`+m.name+`/`+p+`","size":1}`, nil), nil
+		return odResp(req, 200, fmt.Sprintf(`{"@microsoft.graph.downloadUrl":"https://cdn.example.test/%s/%s","size":%d}`, m.name, p, len(m.files[p])), nil), nil
 	case req.Method == http.MethodGet && strings.HasPrefix(u, "https://cdn.example.test/"+m.name+"/"):
 		p := strings.TrimPrefix(u, "https://cdn.example.test/"+m.name+"/")
 		return odResp(req, 200, m.files[p], nil), nil

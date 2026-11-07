@@ -575,37 +575,62 @@ failing account named; an account whose outcome changed is logged
 them all), RateLimit-header throttle tracking with bounded decorrelated-jitter
 backoff (above), token refresh mutex, the fleet fingerprint (below).
 
-### Fleet placement (deterministic, 2026-07-30)
+### Fleet placement (WP-FLEET-5, 2026-11-07; `onedrive_placement.go`)
 
-An object's home account is a pure function of its storage path:
+An object's home — a (tenant, drive) — is a pure function of its storage path
+(`t-<tenant>/<container>/<artifact>`), under the placement **version** the
+fleet's markers record:
 
-```
-home = FNV-1a(path) % fleetSize     // path = t-<tenant>/<container>/<artifact>
-```
+- **Version 1** (2026-07-30 → WP-FLEET-5): `home = FNV-1a(path) % fleetSize`
+  over the slot order. Prod's three accounts are version 1 until the
+  rebalance tool moves them; a marker without `placement_version` is one.
+- **Version 2** (the current one; what a first boot records): the key's
+  **group** is its parent folder and its **shard index** *j* is the integer
+  of a leaf `p<j>` (the parity layout `<tenant>__parity/<digest>/<etag>/p<j>`),
+  else 0. The tenants stand in **columns** — tenant *k* (its position in the
+  fleet's order of first appearance, append-only) is in column *k* mod
+  `PERMAFROST_PLACEMENT_SPREAD` (default 4) — and shard *j* takes a tenant of
+  column *j* mod spread by rendezvous (HRW, FNV-1a 64) on (tenant key, group);
+  the drive inside the tenant is rendezvous on (drive identity, group). So the
+  four parity shards of one object sit on four tenants whenever four exist
+  (⌈4/n⌉ per tenant at fewer: an empty column falls back to every tenant under
+  that cap); every file of one group that lands on a tenant lands on ONE drive
+  of it; a tenant appended to the fleet joins one column and moves about one
+  shard in (its size + 1) of that column's — an eighth of all shards on a 4 → 5
+  step, measured — and a drive appended to a tenant moves about one file in
+  *d* of THAT tenant's and nothing elsewhere. The price is balance: a column
+  with fewer tenants gives each of its tenants a larger share (5 tenants at
+  spread 4: three hold a quarter, two an eighth), so keep the tenant count a
+  multiple of the spread (`docs/FLEET.md` § Sizing a tenant). A ranking shared
+  across shards, or an exclusion of the tenants earlier shards took, moved half
+  of every shard on a 4 → 5 step (the red test): with as many tenants as
+  shards the assignment is forced and every change cascades.
 
-- **Put** always writes to the home account — even a throttled one (`graphDo`
-  backs off and retries). Writing elsewhere would strand the object where
-  reads don't look first.
-- **Get / Exists / Delete** try the home account first, then probe the rest
-  of the fleet: data written in the round-robin era (pre-2026-07-30) may live
-  on any account. **Delete sweeps ALL accounts** — round-robin overwrites
-  could leave copies of one path on several accounts, and deleting only the
-  first copy found lets the next Get resurrect a stale duplicate.
-- **List** unions every account (placement scatters each container across
-  the whole fleet), walks every folder (a key with `/` is a folder tree) and
-  follows `@odata.nextLink` pagination.
-- **Fallback hits are logged** (`onedrive fallback hit`, Info level, with
-  op/path/tenant). They mark pre-placement data being served off its home
-  account. When they stop appearing in prod, the fleet-wide probe on misses
-  (and Delete's full sweep) can be retired — reads become single-account.
+- **Put** writes to the home under the current placement — a rebalance's
+  target while one runs — even a throttled one (`graphDo` backs off). Writing
+  elsewhere would strand the object where reads don't look first.
+- **Get / Exists / Delete** ask the home; while the fleet is **not placed**
+  (an accepted order change not yet rebalanced, a rebalance running, no
+  verdict yet) they ask one more account: the home under the placement the
+  markers say the data is laid out for — **computed, never a walk** (D-F5-3;
+  it was a walk of up to eight accounts, which could not reach a remapped
+  object past them). Two accounts at most, at any fleet size; the second look
+  is counted in `vaultaire_permafrost_fallback_walks_total{op}` and a hit
+  there logged (`onedrive fallback hit`). Delete takes both copies.
+- **ListDir** of a **group folder** (two folders under the container — the
+  parity layout's `<digest>/<etag>/`, whose members are files) asks the group's
+  spread set: shards 0..spread−1's drives, one listing each; a shallower
+  folder, whose members are folders that may sit anywhere, and **List** are
+  the union of every account. **RemoveEmptyDir** of a group folder deletes it
+  on the spread set.
 
-**⚠️ Never reorder or remove `TENANT_N_*` entries.** Placement is
-`hash % fleetSize` over config order — reordering remaps every object's home
-and demotes all reads to fallback probes. Appending new accounts also
-changes the modulus and remaps most objects: correctness survives (the probe
-finds them) but every remapped read pays the fleet-walk penalty. A rebalance
-or consistent-hashing scheme is a prerequisite for growing the fleet to 15 —
-planned, not built.
+**⚠️ Never reorder or remove `TENANT_N_*` entries.** The fleet's order is
+what the fingerprint below checks and what version 1 places over; version 2
+places over the tenants' order of first appearance in it. Appending is the
+growth path: a new drive (a new, higher index) in an existing tenant moves
+about 1/d of that tenant's files; a new tenant about 1/(spread · (column size
++ 1)) of the shards. `PERMAFROST_FLEET_ACCEPT` blesses the new order, and
+`cmd/tools/permafrost-rebalance` (WP-FLEET-5 PR B) moves what changed home.
 
 ### The fleet file and the driver at scale (WP-FLEET-11, 2026-11-06; `onedrive_scale.go`)
 
@@ -628,7 +653,7 @@ Past 15 drives the env slots cannot hold the fleet. **`PERMAFROST_FLEET_FILE`** 
 
 **One credential, one token and one transport set per tenant** (D-F11-2). This holds for slots of one directory and app too: the tenant's first account renews the token, and the others ask it.
 
-**Placement-authoritative reads** (D-F11-3; RB3-1, the review of the chain, 2026-11-07). Once the fingerprint is settled (`match`, `recorded`, `repaired`, `accepted`) **and every marker records its data laid out for that order** (`placed_under` = the current digest), `Get`, `Exists` and `Delete` ask the home account only, so a miss is a miss and costs one request (at 300 drives it was 300). While the fingerprint is `mismatch` or `unknown`, or any marker is placed under another order (an accepted change not yet rebalanced — the order is settled, the data is not), the walk stays, capped at 8 accounts (the home and the 7 after it), each walk counted in `vaultaire_permafrost_fallback_walks_total{op}` (rule `PermafrostFallbackWalking`). The fingerprint proves the ORDER is the recorded one; it says nothing about where the objects sit — `PERMAFROST_FLEET_ACCEPT` rewrites every marker, so without `placed_under` the very next check (the hourly re-check, the next deploy) was `match` and every remapped object a miss.
+**Placement-authoritative reads** (D-F11-3; RB3-1, the review of the chain, 2026-11-07; WP-FLEET-5 D-F5-3). Once the fingerprint is settled (`match`, `recorded`, `repaired`, `accepted`) **and every marker records its data laid out for that order and placement** (`placed_under` = the current digest, one `placement_version`, no `placement_target`), `Get`, `Exists` and `Delete` ask the home account only, so a miss is a miss and costs one request (at 300 drives it was 300). While the fingerprint is `mismatch` or `unknown`, any marker is placed under another order (an accepted change not yet rebalanced — the order is settled, the data is not), or a rebalance target is set, the second look is the home under the placement the markers record — computed from the marker's `fleet`, `tenants` and `placement_version` — never a walk (it was one, capped at 8 accounts, which could not reach a remapped object past them); each second look is counted in `vaultaire_permafrost_fallback_walks_total{op}` (rule `PermafrostFallbackWalking`), and `vaultaire_permafrost_placement_version` is 0 meanwhile (1 or 2 once placed). The fingerprint proves the ORDER is the recorded one; it says nothing about where the objects sit — `PERMAFROST_FLEET_ACCEPT` rewrites every marker, so without `placed_under` the very next check (the hourly re-check, the next deploy) was `match` and every remapped object a miss.
 
 **The probe samples** (D-F11-5). A HealthCheck probes:
 
@@ -642,7 +667,7 @@ It reports every account whose **last** probe failed, or whose tenant's token fa
 
 **Not done, and why:**
 
-- `List` / `ListDir` from "the drives placement names" (D-F11-4). Placement hashes the full path, so one folder's files (a parity folder's `p0..p3`) sit on different drives, and no drive can be named for a prefix until WP-FLEET-5's placement over (tenant, drive). They stay the fleet's union.
+- `ListDir` from "the drives placement names" (D-F11-4) is WP-FLEET-5's D-F5-4 (§ Fleet placement): a group folder on its spread set, shallower folders and `List` the union.
 - The fingerprint by `$batch`. A `$batch` answers a `/content` read with a redirect, so it saves only the metadata calls. The concurrent read bounds the boot instead; `$batch` is WP-FLEET-9's.
 
 ### Fleet fingerprint (WP-R7-4, R7-09)
@@ -655,7 +680,11 @@ since RB3-1 `placed_under`: the digest of the order the account's DATA is laid
 out for (a first boot writes the current digest; an accept carries each old
 marker's value forward, a brand-new account gets the current digest; a marker
 written before the field reads as placed under its own digest — prod's
-markers).
+markers); since WP-FLEET-5 `placement_version` (absent = 1), `tenants` (the
+fleet's grouping by directory as written — key = a hash of the directory id,
+`drives` = fleet positions — so the old placement can be computed exactly) and
+`placement_target` (set by the rebalance tool while it runs: writes go to the
+target placement, reads look there first and at the recorded one second).
 `cmd/vaultaire` reads every marker at boot (`CheckFleetFingerprint`, 20 s):
 
 | Found | Outcome |
@@ -666,9 +695,10 @@ markers).
 | a marker records another order or size | `mismatch`: **one Error line** `permafrost fleet fingerprint mismatch` with `diffs` (`size 3 → 2`, `index 1: was <hash>, now <hash>`, `account tenant-3 (<hash>) is index 1, recorded index 2`) and `fingerprint` (the current digest); `vaultaire_permafrost_fleet_mismatch` 1, rule `PermafrostFleetMismatch` (warning); nothing rewritten |
 | a marker cannot be read | `unknown`: a Warn, no verdict, nothing written, the gauge stays 0 — **re-checked at the next probe** (below) |
 
-Boot is never blocked: reads find a remapped object by the fleet walk — on a
-`mismatch`, and after an accept until a rebalance rewrites `placed_under`
-(the `placed` field of the verdict's log line; `authoritative()`).
+Boot is never blocked: reads find a remapped object by the second look at
+its previous placement — on a `mismatch`, and after an accept until a
+rebalance rewrites `placed_under` (the `placed` field of the verdict's log
+line; `authoritative()`).
 
 The check does not end with the boot (RP18-1, Prompt 17 Part 0): the
 driver's probe (every 30 s) re-runs it at its next run after an `unknown`
@@ -687,21 +717,24 @@ account added):
    `.env`, `sudo vaultaire-switch restart`. The boot rewrites every marker
    with the new order (`state=accepted`, a Warn line) and the gauge goes to
    0 — but each marker keeps `placed_under` = the OLD order (an account
-   appended holds nothing and gets the new one), so reads keep walking the
-   fleet (capped at 8 accounts; `PermafrostFallbackWalking` warns while
-   they do) and the `onedrive fallback hit` Info lines name what is off its
-   home. A value left set does nothing once the markers match, and never
-   accepts a different order (it must equal that order's digest). Remove it
-   at the next edit.
-3. Rebalance: move every object whose home changed to its new home account
-   (`hash(path) % new size` — `homeTenantIndex`), deleting the old copy,
-   then rewrite every marker's `placed_under` to the new digest. **No tool
-   does this yet** (WP-FLEET-5's placement over (tenant, drive) is the
-   growth path; until it or a rebalance tool exists, an accepted fleet walks
-   for ever — the honest state, and the one an erasure needs: an off-home
-   object the home-only `Delete` cannot see leaves its container non-empty,
-   `RemoveContainerTree` refuses, and the tenant's erasure is deferred
-   hourly until the object is found).
+   appended holds nothing and gets the new one), so reads keep looking at
+   the previous placement's home second (`PermafrostFallbackWalking` warns
+   while they do; `vaultaire_permafrost_placement_version` is 0) and the
+   `onedrive fallback hit` Info lines name what is off its home. A value
+   left set does nothing once the markers match, and never accepts a
+   different order (it must equal that order's digest). Remove it at the
+   next edit.
+3. Rebalance: `cmd/tools/permafrost-rebalance -dry-run`, then `-run` (every
+   file whose home changed copied to its new home, verified by quickXorHash,
+   the source `permanentDelete`d; resumable; paced through the driver's own
+   buckets), then `-commit`, which rewrites every marker's `placed_under`
+   to the new digest and `placement_version` to the current one — the
+   moment reads are authoritative again (**PR B of WP-FLEET-5; until it
+   lands an accepted fleet keeps its second look for ever** — the honest
+   state, and the one an erasure needs: an off-home object the home-only
+   `Delete` cannot see leaves its container non-empty, `RemoveContainerTree`
+   refuses, and the tenant's erasure is deferred hourly until the object is
+   found).
 
 Restoring the old `TENANT_N` order instead is a plain restart: the markers
 match again.

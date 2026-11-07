@@ -62,16 +62,20 @@ func TestFleetAtScale_AMissOnASettledFleetCostsOneRequest(t *testing.T) {
 	assert.Equal(t, int64(1), rt.n.Load())
 }
 
-func TestFleetAtScale_AnUnsettledFleetWalksAtMostEightAccounts(t *testing.T) {
+func TestFleetAtScale_AnUnsettledFleetAsksAtMostTwoAccounts(t *testing.T) {
+	// WP-FLEET-5 D-F5-3: the second look is the previous placement's home,
+	// computed — it was a walk of eight accounts, which could not reach a
+	// remapped object past them.
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, rt := bigFleet(300)
-	d.fleetState = FleetMismatch
+	d.fleetState = FleetUnknown
 
 	ok, err := d.Exists(ctx, "bkt", "nothing-here")
 
 	require.NoError(t, err)
 	assert.False(t, ok)
-	assert.Equal(t, int64(8), rt.n.Load())
+	assert.LessOrEqual(t, rt.n.Load(), int64(2))
+	assert.GreaterOrEqual(t, rt.n.Load(), int64(1))
 }
 
 func TestFleetAtScale_AProbesWorkPerIntervalIsBounded(t *testing.T) {

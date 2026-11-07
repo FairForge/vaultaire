@@ -64,6 +64,7 @@ func (s *odRouteStub) sawMethod(method string) bool {
 func stubTenant(name string, rt http.RoundTripper) *odTenant {
 	return &odTenant{
 		name:      name,
+		userUPN:   name + "@stub.test", // identities must differ (placement, the fingerprint)
 		driveID:   "DRIVE-" + name,
 		cachedTok: "stub-token",
 		tokExpiry: time.Now().Add(time.Hour),
@@ -88,16 +89,16 @@ func itemURL(tenant *odTenant, path string) string {
 	return graphBase + "/drives/" + tenant.driveID + "/items/root:/" + odRootFolder + "/" + odEscapePath(path)
 }
 
-// The old round-robin Put could leave copies of the SAME path on several
-// accounts (every overwrite landed wherever the rotation pointed). Delete
-// must sweep the whole fleet: removing only the first copy found leaves a
-// stale duplicate that the next Get's fleet probe resurrects.
+// While the fleet is not placed, a path may have a copy at its home under
+// either placement (an accepted order change, a rebalance running). Delete
+// must take both: removing only the first copy found leaves a stale
+// duplicate that the next Get's second look resurrects. (Before WP-FLEET-5
+// the second look was a walk of the fleet, for the round-robin era's copies.)
 func TestOneDriveDelete_SweepsAllFleetCopies(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(3, zap.NewNop())
-	path := d.ObjectKey(ctx, "bkt", "obj")
-	home := d.homeTenantIndex(path)
-	dup := (home + 1) % 3
+	obj, home, dup := twoHomes(t, d, "bkt")
+	path := d.ObjectKey(ctx, "bkt", obj)
 
 	for idx, id := range map[int]string{home: "ID-HOME", dup: "ID-DUP"} {
 		tn := d.tenants[idx]
@@ -105,7 +106,7 @@ func TestOneDriveDelete_SweepsAllFleetCopies(t *testing.T) {
 		stubs[idx].routes["POST "+permaURL(tn, id)] = odRoute{204, ""}
 	}
 
-	require.NoError(t, d.Delete(ctx, "bkt", "obj"))
+	require.NoError(t, d.Delete(ctx, "bkt", obj))
 	assert.Contains(t, stubs[home].calls, "POST "+permaURL(d.tenants[home], "ID-HOME"), "home copy must be deleted")
 	assert.Contains(t, stubs[dup].calls, "POST "+permaURL(d.tenants[dup], "ID-DUP"),
 		"duplicate on account %q survived — next Get resurrects the object", d.tenants[dup].name)
@@ -125,9 +126,8 @@ func TestOneDriveDelete_MissingEverywhereErrors(t *testing.T) {
 func TestOneDriveExists_SurvivesDownAccount(t *testing.T) {
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(2, zap.NewNop())
-	path := d.ObjectKey(ctx, "bkt", "obj")
-	home := d.homeTenantIndex(path)
-	other := (home + 1) % 2
+	obj, home, other := twoHomes(t, d, "bkt")
+	path := d.ObjectKey(ctx, "bkt", obj)
 
 	// Home account is down: no cached driveID and its drive lookup fails.
 	d.tenants[home].driveID = ""
@@ -135,7 +135,7 @@ func TestOneDriveExists_SurvivesDownAccount(t *testing.T) {
 
 	stubs[other].routes["GET "+itemURL(d.tenants[other], path)] = odRoute{200, `{"id":"ID-1"}`}
 
-	found, err := d.Exists(ctx, "bkt", "obj")
+	found, err := d.Exists(ctx, "bkt", obj)
 	require.NoError(t, err, "a down account must not abort the fleet probe")
 	assert.True(t, found)
 }
@@ -161,15 +161,15 @@ func TestOneDriveGet_LogsFallbackHit(t *testing.T) {
 	core, logs := observer.New(zap.InfoLevel)
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, stubs := stubFleet(2, zap.New(core))
-	path := d.ObjectKey(ctx, "bkt", "obj")
-	other := (d.homeTenantIndex(path) + 1) % 2
+	obj, _, other := twoHomes(t, d, "bkt")
+	path := d.ObjectKey(ctx, "bkt", obj)
 
 	dlURL := "https://cdn.example.test/obj"
 	stubs[other].routes["GET "+itemURL(d.tenants[other], path)] =
 		odRoute{200, `{"@microsoft.graph.downloadUrl":"` + dlURL + `","size":5}`}
 	stubs[other].routes["GET "+dlURL] = odRoute{200, "hello"}
 
-	rc, err := d.Get(ctx, "bkt", "obj")
+	rc, err := d.Get(ctx, "bkt", obj)
 	require.NoError(t, err)
 	body, err := io.ReadAll(rc)
 	require.NoError(t, err)
@@ -201,7 +201,17 @@ func TestOneDriveSweepShape_ListsEveryKeyAndDeletesEachOnEveryAccount(t *testing
 	stubs[0].routes["GET "+childrenURL(a, "c/photos")] = odRoute{200, `{"value":[{"name":"a.jpg","file":{}}]}`}
 	stubs[1].routes["GET "+childrenURL(b, "c")] = odRoute{200, `{"value":[{"name":"photos","folder":{}}]}`}
 	stubs[1].routes["GET "+childrenURL(b, "c/photos")] = odRoute{200, `{"value":[{"name":"a.jpg","file":{}},{"name":"b.jpg","file":{}}]}`}
-	for i, tn := range []*odTenant{a, b} {
+	// The file sits on the accounts a Delete asks (WP-FLEET-5 D-F5-3: the home
+	// under each placement, two at most), whichever of the three they are.
+	holders := map[int]*odTenant{}
+	for _, tn := range d.tenantsFor("t-x/c/photos/a.jpg") {
+		for i := range d.tenants {
+			if d.tenants[i] == tn {
+				holders[i] = tn
+			}
+		}
+	}
+	for i, tn := range holders {
 		id := "FILE-" + tn.name
 		stubs[i].routes["GET "+itemURL(tn, "t-x/c/photos/a.jpg")] = odRoute{200, `{"id":"` + id + `"}`}
 		stubs[i].routes["POST "+permaURL(tn, id)] = odRoute{204, ""}
@@ -215,7 +225,7 @@ func TestOneDriveSweepShape_ListsEveryKeyAndDeletesEachOnEveryAccount(t *testing
 	// Assert
 	assert.ElementsMatch(t, []string{"k.txt", "photos/a.jpg", "photos/b.jpg"}, names, "every key, relative to the container, the union of the fleet")
 	require.NoError(t, delErr)
-	for i, tn := range []*odTenant{a, b} {
+	for i, tn := range holders {
 		assert.Contains(t, stubs[i].calls, "POST "+permaURL(tn, "FILE-"+tn.name),
 			"the file is deleted on account %s", tn.name)
 	}
