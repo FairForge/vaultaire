@@ -1,5 +1,13 @@
 # Status — the live pointer
 
+Updated: 2026-11-07 — **The WP-FLEET next chain (`docs/reviews/WP-FLEET-NEXT-PROMPT.md`): the fleet rides Microsoft's bursts and is ready to scale.**
+- #1175 + #1177: WP-FLEET-3. Reads and writes ride 429 bursts, a refused range fails the body, and the driver paces at the published rates per account and per tenant. Fully unpaced soak: 93 rounds, 187 429s absorbed, 0 failed objects.
+- #1179 + #1183: WP-FLEET-4, transfers. Reads are ×3.4. The per-object write target was not met.
+- #1176: the sealed-only leg rule. #1178: parallel protects, 2.6×.
+- #1180: WP-FLEET-11, the fleet file and home-only reads. #1182: WP-FLEET-10, the fleet card and two rules.
+- Slot 3 retired; slot 1 moved. Owed: slot 1 `-retire` no earlier than 2026-11-08 01:25 UTC. The owner's: the bin purge, the seven test users.
+- No migration. `bench-results/PERMAFROST-FLEET-2026-11-05.md` § What changed (the WP-FLEET next chain).
+
 Updated: 2026-11-06 — **WP-LOG-2 (Stage 1a side prompt, outside the Prompt 60 chain): a data-plane host keeps no log; the control plane's rows are the record — DONE** (`docs/reviews/WP-LOG-2.md`; prompt `docs/reviews/WP-LOG-2-PROMPT.md`; migration **129**, 128 stays Prompt 60's; next **130** after 128):
 - **#1164** `stored-s3-edge` invocation logs OFF (`[observability.logs] invocation_logs = false`), deployed `1bc47613` with identical bytes — the settings API answers `invocation_logs: false`.
 - **#1165** the customer's logs are whole: `duration_ms` on `request_log` and `s3_access_log` (migration 129; the delivered access-log line's LAST field), `EdgeNoCommit` rows for admits the reaper expires, `vaultaire_data_plane_commits_total` / `_pass_through_total`, `POST /api/v1/edge/report` (+ the node's reporter). Live `55bbc883`.

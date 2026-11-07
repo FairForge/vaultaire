@@ -18,6 +18,10 @@
 //   - "fallback hit" log lines during GET mean data was found off its home
 //     account — for freshly written data that count must be ZERO, so any
 //     hit here is a placement regression.
+//   - The closing "permafrost metrics:" line sums the driver's own counters
+//     for this run (WP-FLEET-3): 429s absorbed by op, seconds paced or held,
+//     range hedges, fragment resumes, hash mismatches. A run that loses no
+//     object while throttles > 0 is the ride-through working.
 package main
 
 import (
@@ -37,6 +41,7 @@ import (
 	"github.com/FairForge/vaultaire/internal/common"
 	"github.com/FairForge/vaultaire/internal/drivers"
 	"github.com/FairForge/vaultaire/internal/engine"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -151,6 +156,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "WARNING: LIST returned fewer objects than were written\n")
 	}
 
+	defer printDriverMetrics()
 	if *keep {
 		fmt.Println("\n-keep set: objects left in place")
 		return
@@ -168,4 +174,55 @@ func main() {
 	} else {
 		fmt.Println("post-delete LIST clean: 0 objects remain")
 	}
+}
+
+// printDriverMetrics prints the permafrost driver's counters for this run,
+// summed per name and label set (the soak's evidence, WP-FLEET-3 PR C).
+func printDriverMetrics() {
+	reg := prometheus.NewRegistry()
+	for _, c := range drivers.Collectors() {
+		_ = reg.Register(c)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		fmt.Printf("permafrost metrics: %v\n", err)
+		return
+	}
+	out := ""
+	for _, mf := range mfs {
+		name := mf.GetName()
+		switch name {
+		case "vaultaire_permafrost_throttles_total", "vaultaire_permafrost_paced_seconds_total",
+			"vaultaire_permafrost_range_hedges_total", "vaultaire_permafrost_fragment_resumes_total",
+			"vaultaire_permafrost_hash_mismatch_total":
+		default:
+			continue
+		}
+		short := name[len("vaultaire_permafrost_"):]
+		sums := map[string]float64{}
+		for _, m := range mf.GetMetric() {
+			key := ""
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "account" {
+					continue
+				}
+				key += l.GetValue()
+			}
+			sums[key] += m.GetCounter().GetValue()
+		}
+		for k, v := range sums {
+			if v == 0 {
+				continue
+			}
+			if k == "" {
+				out += fmt.Sprintf(" %s=%.6g", short, v)
+			} else {
+				out += fmt.Sprintf(" %s{%s}=%.6g", short, k, v)
+			}
+		}
+	}
+	if out == "" {
+		out = " (all 0)"
+	}
+	fmt.Printf("permafrost metrics:%s\n", out)
 }
