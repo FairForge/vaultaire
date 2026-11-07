@@ -13,10 +13,20 @@
 // — a database restore cannot lose it, a fleet moved to another box keeps it.
 // A mismatch is one Error line naming the diff, and
 // vaultaire_permafrost_fleet_mismatch 1 (rule PermafrostFleetMismatch). Boot is
-// never blocked. Accepting a new order after a rebalance:
-// PERMAFROST_FLEET_ACCEPT=<the fingerprint the Error line names> rewrites the
-// markers at the next boot; a value left set does nothing once they match
-// (onedrive_README.md § Fleet fingerprint).
+// never blocked. Accepting a new order: PERMAFROST_FLEET_ACCEPT=<the
+// fingerprint the Error line names> rewrites the markers at the next boot; a
+// value left set does nothing once they match (onedrive_README.md § Fleet
+// fingerprint).
+//
+// The order and the DATA are two facts (RB3-1, the review of WP-FLEET-11): a
+// marker also records `placed_under`, the digest of the order the account's
+// objects are laid out for. A first boot writes the current digest; an accept
+// carries each old marker's value forward (a brand-new account gets the
+// current digest — it holds nothing); a marker written before the field reads
+// as placed under its own digest. Get / Exists / Delete ask the home account
+// only (WP-FLEET-11 D-F11-3) while EVERY marker is placed under the current
+// order; after an accept they walk until a rebalance rewrites the field —
+// the hourly re-check and the next deploy find `match` and change nothing.
 package drivers
 
 import (
@@ -79,6 +89,9 @@ type fleetMarker struct {
 	WrittenAt time.Time `json:"written_at"`
 	DriveID   string    `json:"drive_id,omitempty"`
 	MovedTo   string    `json:"moved_to,omitempty"`
+	// PlacedUnder is the digest of the fleet order the account's data is laid
+	// out for (RB3-1; additive): "" = Digest (a marker written before).
+	PlacedUnder string `json:"placed_under,omitempty"`
 
 	foundOn string // the drive the marker was read on, when not the account's (never encoded)
 }
@@ -105,6 +118,15 @@ func RewriteFleetMarker(b []byte, driveID, movedTo string) ([]byte, error) {
 	return json.Marshal(m)
 }
 
+// placedUnder is the order the marker's data is laid out for: PlacedUnder,
+// else the marker's own Digest (written before the field existed).
+func (m *fleetMarker) placedUnder() string {
+	if m.PlacedUnder != "" {
+		return m.PlacedUnder
+	}
+	return m.Digest
+}
+
 // FleetState is the outcome of a fingerprint check.
 type FleetState string
 
@@ -122,6 +144,10 @@ type FleetFingerprint struct {
 	State  FleetState
 	Digest string   // the current fleet's fingerprint
 	Diffs  []string // what differs, for a mismatch
+	// Placed: every marker records its data laid out for THIS order
+	// (placed_under = Digest) — reads may be authoritative. False after an
+	// accept until a rebalance, and on a mismatch or no verdict.
+	Placed bool
 }
 
 // identity is the account's short hash in the fingerprint (its directory and
@@ -200,6 +226,7 @@ func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept strin
 	out, err := d.checkFleetFingerprint(ctx, accept)
 	d.fleetMu.Lock()
 	d.fleetState, d.fleetAccept, d.fleetCheckedAt = out.State, accept, time.Now()
+	d.fleetUnplaced = !out.Placed
 	d.fleetMu.Unlock()
 	return out, err
 }
@@ -264,6 +291,38 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 	slices.Sort(out.Diffs)
 	out.Diffs = slices.Compact(out.Diffs)
 
+	// placed: what each (re)written marker records as placed_under, and
+	// whether every marker's data is laid out for THIS order (RB3-1). A
+	// marker present keeps its own value: an accept carries the old order
+	// forward — the data did not move. One absent takes the fleet's: the
+	// value the present markers agree on, else the first one that is not the
+	// current digest (the conservative one: it keeps the walk), else the
+	// current digest (a first boot, or an account appended to a placed fleet
+	// — it holds nothing).
+	placedFor := out.Digest
+	out.Placed = true
+	for _, m := range markers {
+		if m == nil {
+			continue
+		}
+		if p := m.placedUnder(); p != out.Digest {
+			out.Placed = false
+			if placedFor == out.Digest {
+				placedFor = p
+			}
+		}
+	}
+	placedUnderFor := func(i int) string {
+		switch {
+		case markers[i] != nil:
+			return markers[i].placedUnder() // carried forward (an accept): the data stays where it is
+		case out.State == FleetRepaired:
+			return placedFor // the fleet's
+		default:
+			return out.Digest // a first boot, or an account appended at an accept: it holds nothing
+		}
+	}
+
 	var write []int // the accounts whose marker is (re)written
 	switch {
 	case present == 0:
@@ -282,6 +341,7 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 		out.State = FleetAccepted
 		write = allIndexes(len(markers))
 	default:
+		out.Placed = false
 		out.State = FleetMismatch
 		permafrostFleetMismatch.Set(1)
 		if d.fleetVerdictChanged(out.State) {
@@ -308,7 +368,7 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 			defer wwg.Done()
 			wsem <- struct{}{}
 			defer func() { <-wsem }()
-			if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest); err != nil {
+			if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest, placedUnderFor(i)); err != nil {
 				fmu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", d.tenants[i].name, err))
 				fmu.Unlock()
@@ -318,13 +378,13 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 	wwg.Wait()
 	slices.Sort(failed)
 	fields := []zap.Field{zap.String("state", string(out.State)), zap.String("fingerprint", out.Digest),
-		zap.Int("accounts", len(ids)), zap.Int("written", len(write)-len(failed))}
+		zap.Int("accounts", len(ids)), zap.Int("written", len(write)-len(failed)), zap.Bool("placed", out.Placed)}
 	switch {
 	case len(failed) > 0:
 		d.logger.Warn("permafrost fleet fingerprint: markers not written", append(fields, zap.Strings("failed", failed))...)
 		return out, fmt.Errorf("permafrost fleet fingerprint: write: %s", strings.Join(failed, "; "))
 	case out.State == FleetAccepted:
-		d.logger.Warn("permafrost fleet fingerprint: a new fleet order accepted (PERMAFROST_FLEET_ACCEPT) — markers rewritten", fields...)
+		d.logger.Warn("permafrost fleet fingerprint: a new fleet order accepted (PERMAFROST_FLEET_ACCEPT) — markers rewritten; the data stays laid out for the previous order (placed_under), so reads walk the fleet until a rebalance rewrites it", fields...)
 	case d.fleetVerdictChanged(out.State):
 		d.logger.Info("permafrost fleet fingerprint", fields...)
 	}
@@ -451,8 +511,9 @@ func (t *odTenant) readFleetMarkerOn(ctx context.Context, driveID string) (*flee
 	return &m, nil
 }
 
-// writeFleetMarker writes the account's marker for index i of fleet ids.
-func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, digest string) error {
+// writeFleetMarker writes the account's marker for index i of fleet ids,
+// its data placed under placedUnder (RB3-1).
+func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, digest, placedUnder string) error {
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return err
@@ -461,7 +522,7 @@ func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, di
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC(), DriveID: driveID})
+	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC(), DriveID: driveID, PlacedUnder: placedUnder})
 	if err != nil {
 		return fmt.Errorf("marker encode: %w", err)
 	}

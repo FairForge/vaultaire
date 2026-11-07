@@ -149,6 +149,11 @@ type OneDriveDriver struct {
 	fleetAccept    string
 	fleetCheckedAt time.Time
 	fleetChecking  bool
+	// fleetUnplaced: the last check found a marker whose data is laid out
+	// for ANOTHER order (`placed_under` ≠ the current digest — an accepted
+	// change not yet rebalanced, RB3-1). Reads walk while it is set,
+	// whatever the verdict (onedrive_fleet.go, authoritative()).
+	fleetUnplaced bool
 }
 
 type odTenant struct {
@@ -515,35 +520,15 @@ func (d *OneDriveDriver) Get(ctx context.Context, container, artifact string) (i
 		return nil, lastErr
 	}
 
-	streams := odAdaptiveStreams(fileSize)
-	if streams > 1 {
-		return t.downloadRanges(ctx, dlURL, fileSize, streams)
+	if fileSize == 0 {
+		// Nothing to fetch; downloadRanges has no part to ask for.
+		return io.NopCloser(bytes.NewReader(nil)), nil
 	}
-
-	if err := t.paceOut(ctx, fileSize); err != nil {
-		return nil, fmt.Errorf("onedrive download %s: %w", path, err)
-	}
-	if err := t.paceRequest(ctx); err != nil {
-		return nil, fmt.Errorf("onedrive download %s: %w", path, err)
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("onedrive create download request: %w", err)
-	}
-	req.Header.Set("User-Agent", odUserAgent())
-	resp, err := t.cdnHTTP.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("onedrive download %s: %w", path, err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-			t.hold("range", odRetryAfter(resp.Header))
-		}
-		odPooledDrain(resp.Body)
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("onedrive download %s: HTTP %d", path, resp.StatusCode)
-	}
-	return resp.Body, nil
+	// Every read is the ranged reader's (RB3-2): a small object is its one
+	// part, fetched whole (no Range header) with the burst attempts, the
+	// hedge and the budget a range gets. Until then a Get under 10 MiB was
+	// one plain GET: a 429 failed it and a cut body streamed through.
+	return t.downloadRanges(ctx, dlURL, fileSize, odAdaptiveStreams(fileSize))
 }
 
 // odAdaptiveStreams picks optimal parallel stream count based on file size.
@@ -651,13 +636,21 @@ func (t *odTenant) fetchRange(ctx context.Context, dlURL string, start, size, to
 }
 
 // fetchRangeOnce is one attempt at a range: its bytes, or the error, whether
-// another attempt may differ, and the answer's Retry-After.
+// another attempt may differ, and the answer's Retry-After. A range that IS
+// the whole object (a small Get's one part, RB3-2) is asked for with no
+// Range header and must answer 200 with exactly the object's bytes (the
+// soak's `got 0` — a 200 with no bytes — is a body that did not come, asked
+// again; one byte more is another object, never served) — the CDN's answer
+// to a full-span Range is not relied on.
 func (t *odTenant) fetchRangeOnce(ctx context.Context, dlURL string, start, end, size, total int64) (buf []byte, retryAfter time.Duration, retry bool, err error) {
+	whole := start == 0 && size == total
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf("onedrive range request: %w", err)
 	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	if !whole {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	}
 	req.Header.Set("User-Agent", odUserAgent())
 	resp, err := t.cdnHTTP.Do(req)
 	t.totalReqs.Add(1)
@@ -674,12 +667,16 @@ func (t *odTenant) fetchRangeOnce(ctx context.Context, dlURL string, start, end,
 	case resp.StatusCode >= 500:
 		odPooledDrain(resp.Body)
 		return nil, 0, true, fmt.Errorf("onedrive range %d-%d: HTTP %d", start, end, resp.StatusCode)
-	case resp.StatusCode != http.StatusPartialContent:
+	case whole && resp.StatusCode != http.StatusOK:
+		return nil, 0, false, fmt.Errorf("onedrive download of %d bytes: HTTP %d, not 200", size, resp.StatusCode)
+	case !whole && resp.StatusCode != http.StatusPartialContent:
 		// Never drained: a 200 is the whole object.
 		return nil, 0, false, fmt.Errorf("onedrive range %d-%d: HTTP %d, not 206", start, end, resp.StatusCode)
 	}
-	if want, got := fmt.Sprintf("bytes %d-%d/%d", start, end, total), resp.Header.Get("Content-Range"); got != want {
-		return nil, 0, false, fmt.Errorf("onedrive range %d-%d: Content-Range %q, asked %q", start, end, got, want)
+	if !whole {
+		if want, got := fmt.Sprintf("bytes %d-%d/%d", start, end, total), resp.Header.Get("Content-Range"); got != want {
+			return nil, 0, false, fmt.Errorf("onedrive range %d-%d: Content-Range %q, asked %q", start, end, got, want)
+		}
 	}
 	buf = make([]byte, size)
 	if _, err := io.ReadFull(resp.Body, buf); err != nil {
@@ -690,14 +687,29 @@ func (t *odTenant) fetchRangeOnce(ctx context.Context, dlURL string, start, end,
 		}
 		return nil, 0, ctx.Err() == nil, fmt.Errorf("onedrive range %d-%d: body: %w", start, end, err)
 	}
+	if whole {
+		// A Content-Range pins a range's length; a whole body is pinned by
+		// its end: one more byte is another object's, never served and
+		// never asked again.
+		switch n, err := resp.Body.Read(make([]byte, 1)); {
+		case n > 0:
+			return nil, 0, false, fmt.Errorf("onedrive download of %d bytes: the body is longer", size)
+		case err != nil && !errors.Is(err, io.EOF):
+			return nil, 0, ctx.Err() == nil, fmt.Errorf("onedrive download of %d bytes: the body's end: %w", size, err)
+		}
+	}
 	return buf, 0, false, nil
 }
 
-// Delete removes an artifact from OneDrive. It sweeps the WHOLE fleet, not
-// just the first copy found: the old round-robin Put could leave copies of
-// the same path on several accounts (every overwrite landed wherever the
-// rotation pointed), and deleting only one of them leaves a stale duplicate
-// that the next Get's fleet probe resurrects.
+// Delete removes an artifact from OneDrive — from the accounts tenantsFor
+// names: the home account alone while the fleet is settled and its data
+// placed under the current order (WP-FLEET-11 D-F11-3, RB3-1), else the
+// home and up to seven more, every copy found. The walk exists because the
+// old round-robin Put could leave copies of the same path on several
+// accounts (every overwrite landed wherever the rotation pointed), and an
+// accepted order change leaves objects on their old homes until a
+// rebalance: deleting only one copy leaves a stale duplicate that the next
+// walking Get resurrects.
 func (d *OneDriveDriver) Delete(ctx context.Context, container, artifact string) error {
 	path, pErr := d.buildPath(ctx, "Delete", container, artifact)
 	if pErr != nil {
