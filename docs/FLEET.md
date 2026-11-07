@@ -48,9 +48,61 @@ The SharePoint bulk pre-provisioning request (`CreatePersonalSiteEnqueueBulk`, w
 
 Before any of it, per tenant: `OneDriveStorageQuota` = 5242880 (MB) via the tenant admin REST (`PATCH /_api/SPO.Tenant`, Int64 as a string), sharing internal-only, TAP policy on.
 
+## Terms and consent
+
+The OneDrive service description excludes "system back-ups and departmental and organizational level data" and "the assignment of a per user license to a bot, department, or other non-human entity"; the Product Terms exclude "commercial hosting services to third parties". **Microsoft's consent for Stored customers' data on the fleet is in place (owner, 2026-11-07).** Sealed parity shards and cold copies may be held on fleet users provisioned for that purpose. No terms question remains; what remains is the posture below and the sizing rule.
+
+## The limits, as published and re-read 2026-11-07
+
+Microsoft Learn, *Avoid getting throttled or blocked in SharePoint Online* (page dated 2025-10-02, updated 2026-08-10):
+
+| Scope | Limit | Scales with licences? |
+|---|---|---|
+| Per app per tenant, ingress | **400 GB/h** | **no** — "no license bound" |
+| Per app per tenant, egress | **400 GB/h** | **no** |
+| Per app per tenant, requests | 1,250 RU/min, 1.2 M RU/day at 0–1,000 licences (2,500/min at 1,001–5,000 …) | yes; 300 users stays in the bottom band |
+| Tenant, all apps | 18,750 RU / 5 min (bottom band) | yes |
+| Per user | 50 GB/h in, 100 GB/h out, 3,000 requests / 5 min | — |
+| RU cost | download-URL fetch 1; create / update / delete / upload 2; `$expand=permissions` 5 | — |
+
+Three sentences from that page decide the design: **"SharePoint Online does not return or support IETF RateLimit headers … honor the Retry-After header"** (the headers the 11-07 soak saw are not a contract; fixed buckets at the published rates are the design, not a conservative choice); **"Don't create separate AppIDs where the applications essentially perform the same operations … applications running against the same tenant share the same resource bucket"** (never a second data app per tenant); **"Well-decorated traffic will be prioritized"** (`ISV|Stored|permafrost/<sha>`, #1177). Persistent overuse is a block: permanent 503 and a Message Center notice.
+
+The OneDrive service description (2026-07-23) lists Business plans at **1 TB per user** and E3/E5 at 1 TB "can be increased to 5 TB"; the 25 TB-by-support ladder is gone from the page ("eligible enterprise and government cloud customers should work with their Microsoft representatives"). Our 5 TiB drives are SharePoint Plan 2 (the Dynamics bundle) plus the tenant default; 5 TB is the ceiling to plan on.
+
+## Sizing a tenant
+
+The pipe is **per tenant and fixed**; the bucket is **per user and additive**. How many 5 TB users sit behind one 400 GB/h pipe is therefore the one sizing decision:
+
+| Users per tenant | Capacity | Re-protect a lost tenant from Geyser | What binds |
+|---|---|---|---|
+| 1 (2026-11) | 5 TiB | ~4 days (the user's 50 GB/h in) | the user |
+| **8** | 40 TiB | ~4 days | the user — 8 × 50 GB/h = the tenant's 400: the tenant cap never trips |
+| **16** | 80 TiB | ~8 days | the tenant |
+| 300 | 1.5 PB | **~156 days** | the tenant — five months with that tenant's shards single-copy |
+
+**Rules:** keep **8 users per tenant** by default and never more than **16**; add a tenant rather than user 17. Keep **≥ 4 tenants** so RS 4+4's shards sit on four tenants (shard *j* on tenant *j*, WP-FLEET-5): a rebuild reads four pipes, and a lost tenant loses one shard of four, not the copy; a 5th tenant is the spare (or a fifth parity shard, RS 4+5). 5 × 8 = 40 drives ≈ 200 TiB ≈ 100 Vault customers at 2 TB each, repairable in four days, behind 2 TB/h each way — more than the business will fill. Fewer tenants is fine while the data is small (3 tenants: shards 0 and 3 share one), more users per tenant never is. Pipe scales with tenants, capacity with users; tenants are expensive to own (a GA, a licence bundle with its own lifecycle date, two app registrations with expiring secrets, a fingerprint slot, a probe), users are cheap to add (~1 min each, § Provisioning).
+
+**Economics:** the free seats are the whole case. A paid 5 TB seat (SharePoint Plan 2, ~$10/user-month list — verify) is ~$2/TB-month, Vault's list price; Geyser is $1.55. The fleet grows only on promotional seats, and every tenant's bundle has a lifecycle date (today 2028-06-05 and 2028-08-02).
+
+## The step plan (2026-11-07)
+
+| Step | What | What it buys / gate |
+|---|---|---|
+| 0 | Close the chain: #1185; slot-1 `-retire` (dry-run first, ≥ 2026-11-08 01:25 UTC); the bins' one-time purge. **F-14 (the master key):** the sealed-only rule means only sealed bytes land on the fleet — without a master key, only SSE-C objects qualify. F-14 is the owner click that unlocks the fleet for every other customer | the fleet correct at 3 × 1; the gate for everything below |
+| 1 | The fleet as Vault's leg: `VAULT_PARITY_LEGS=permafrost,…` (or the stacked RS 4+8 set with Lyve while its promo lasts); `vault_parity_serve` ON for the bench tenant → tenant zero → global; restore p50/p99 measured | Vault's second copy at $0 and restores in seconds; 15 TiB covers the first ~7–15 customers |
+| 2 | **WP-FLEET-5** placement over (tenant, drive): rendezvous ranking, shard *j* → tenant *j*, drive by rendezvous inside the tenant, `ListDir` over the spread set, the rebalance tool (`docs/reviews/WP-FLEET-5-PROMPT.md`) | growth stops remapping everything; a rebuild spans four tenants; a lost tenant loses one shard. **Precondition for any fourth drive** |
+| 3 | WP-FLEET-6 (certificates, licence + lifecycle + secret-expiry gauges) with WP-FLEET-11's fleet file | operable at 40–80 drives; the 2028 dates are a metric |
+| 4 | Provision 8 users per tenant on the three tenants (WP-FLEET-7's recipe) | 24 drives ≈ 120 TiB ≈ 60 Vault customers, repair ≤ 4 days |
+| 5 | Tenants 4 and 5 — only those carrying the promotional bundle (candidates: stored.ge, teamviera.com, vaultaire.cloud, oligrace.co; SKUs unchecked); else 16 users on three tenants | 200 TiB on a true shard-per-tenant layout, or 240 TiB on three |
+| 6 | The cold half of Standard on the fleet (`smart_demotion`, sealed ≥ 64 MiB only) — **not before 2027**: Lyve is free until mid-2028 and the fleet ends the same summer, so the window in which it saves money is about zero; the fleet's capacity is Vault's first | decided with step 7 |
+| 7 | The 2028 leg: build an archive leg (AWS Deep Archive via the S3 driver, or Azure Archive; ~$1/TB-month, 180-day minimum) in 2027-H1; price Vault's term against it; **re-protect the fleet's shards onto it before the bundles lapse** (400 TiB at 2 TB/h ≈ 8 days; an unlicensed drive is read-only at day 60, archived at day 93) | no single-copy window in summer 2028 |
+| 8 | BYO-M365: a business customer's own tenant holds their Vault copy — the same placement, pacing and provisioning engine, no seats, consent or cliff of ours | the scalable form of the fleet; year 2 |
+
+Dates: Dynamics lifecycle 2028-06-05 (fromhis.com) and 2028-08-02 (viera.fun, viera.pics); data-app secrets 2027-10-02 / 2027-10-08 / 2028-04-18; admin certificates 2028-11-04; Lyve's promo mid-2028.
+
 ## Good-tenant posture
 
-Consent to this use is the owner's premise and decision; the operator's part is to behave like a well-made client: one app registration per tenant and never more for the same job; pace at the published per-user and per-tenant rates even though the soaks took several times more; honour `Retry-After` fully and treat a 429 burst as the budget's signal, not a fault; decorate the `User-Agent`; keep ≥ 5 licensed users per tenant (the 5 TB entitlement) and every drive licensed (an unlicensed drive goes read-only at 60 days and archived at 93); no per-file customer keys (path ≤ 400, ~50k items per folder); shards, packs and generated names only.
+The operator's part is to behave like a well-made client: one app registration per tenant and never more for the same job; pace at the published per-user and per-tenant rates even though the soaks took several times more; honour `Retry-After` fully and treat a 429 burst as the budget's signal, not a fault; decorate the `User-Agent`; keep ≥ 5 licensed users per tenant (the 5 TB entitlement) and every drive licensed (an unlicensed drive goes read-only at 60 days and archived at 93); no per-file customer keys (path ≤ 400, ~50k items per folder); shards, packs and generated names only.
 
 ## What a Vault write and read look like on the fleet, end to end
 

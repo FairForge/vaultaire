@@ -25,9 +25,12 @@ copies across Microsoft's infrastructure" at $0 cost.
   designed to serve the needs of individuals"; "storage of data other than an individual's personal work
   files, including system back-ups and departmental and organizational level data, is not supported,
   nor is the assignment of a per user license to a bot, department, or other non-human entity"; the
-  Product Terms forbid "commercial hosting services to third parties". So the fleet holds the licence
-  holders' OWN data (and its parity) as of right; customer data needs Microsoft's written consent (the
-  Sync precedent) — never 299 synthetic users per tenant. Research: `research_notes/ONEDRIVE-FLEET-LIMITS-2026-11-05.md`.
+  Product Terms forbid "commercial hosting services to third parties". **Microsoft's consent for
+  Stored customers' data on the fleet is in place (owner, 2026-11-07)**: sealed parity shards and cold
+  copies may go there, on fleet users provisioned for it. What remains is the good-tenant posture and the
+  sizing rule (`docs/FLEET.md` § Sizing a tenant): the 400 GB/h per-app-per-tenant budget is fixed ("no
+  license bound") while capacity grows per user, so keep 8–16 five-TB users per tenant and add tenants —
+  never a 300-user tenant. Research: `research_notes/ONEDRIVE-FLEET-LIMITS-2026-11-05.md`.
 
 ## Tier Architecture
 
