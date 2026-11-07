@@ -49,7 +49,11 @@ import (
 
 // fleetMarkerPath is the marker under the fleet's root folder (outside every
 // t-<tenant>/ tree).
-const fleetMarkerPath = "_fleet/fingerprint.json"
+// odFleetFolder holds the fleet's own files under vaultaire/ (the marker);
+// a rebalance never walks it.
+const odFleetFolder = "_fleet"
+
+const fleetMarkerPath = odFleetFolder + "/fingerprint.json"
 
 // permafrostDriveMismatch is the per-account drive verdict (WP-FLEET-1,
 // D-F1-2): 1 when the fleet's tree is not on the drive the account uses —
