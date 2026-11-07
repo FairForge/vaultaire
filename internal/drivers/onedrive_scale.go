@@ -83,10 +83,19 @@ func init() {
 	}
 }
 
-// authoritative: the fleet's order is settled, so the home account is the
-// only one that can hold an object.
+// authoritative: the fleet's order is settled AND every marker records its
+// data laid out for that order (placed_under, RB3-1), so the home account is
+// the only one that can hold an object. After PERMAFROST_FLEET_ACCEPT the
+// order is settled but the data is not: the walk stays until a rebalance
+// rewrites the markers — through the hourly re-check and every deploy.
 func (d *OneDriveDriver) authoritative() bool {
-	switch d.FleetState() {
+	d.fleetMu.Lock()
+	state, unplaced := d.fleetState, d.fleetUnplaced
+	d.fleetMu.Unlock()
+	if unplaced {
+		return false
+	}
+	switch state {
 	case FleetMatch, FleetRecorded, FleetRepaired, FleetAccepted:
 		return true
 	}

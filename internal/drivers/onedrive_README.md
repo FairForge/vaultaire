@@ -92,7 +92,7 @@ env vars in `.env.bench` (gitignored).
 
 **Every write is verified** (D-F4-4): the body is hashed with `quickXorHash` as it streams (`quickxor.go`) and compared with the item Graph answers — the simple PUT's, or the final fragment's (a final 202 = the item is read back by path). A different hash (or a different size with a hash) deletes the item for good (`permanentDelete`) and fails the Put with `engine.ErrObjectChanged`, counted in `vaultaire_permafrost_hash_mismatch_total{account}`. An answer naming no hash is accepted (Business always sends one).
 
-**Reads** (D-F4-1): a Get of ≥ 10 MiB reads ranges of 8 MiB below 64 MiB, **32 MiB** to 1 GiB, **64 MiB** from 1 GiB — a 256 MB object is ≤ 8 requests of the per-user budget instead of 32. A Get holds at most 256 MiB of ranges (8 × 32, 4 × 64), and every fleet Get past its first range shares one 1 GiB budget, so under load a Get reads fewer ranges at once, never more memory.
+**Reads** (D-F4-1): a Get of ≥ 10 MiB reads ranges of 8 MiB below 64 MiB, **32 MiB** to 1 GiB, **64 MiB** from 1 GiB — a 256 MB object is ≤ 8 requests of the per-user budget instead of 32. A Get holds at most 256 MiB of ranges (8 × 32, 4 × 64), and every fleet Get past its first range shares one 1 GiB budget, so under load a Get reads fewer ranges at once, never more memory. **A Get under 10 MiB is the same reader with one stream** (RB3-2, 2026-11-07): a part that is the whole object is fetched with a plain GET (no Range header), 200 with exactly the object's bytes — a body that ends early is asked again, one byte more is another object and fails — with the burst attempts, the hedge and the budget a range gets; a 0-byte object is an empty body with no CDN call. Until then a small Get was ONE plain GET: a 429 failed it and a cut body streamed through.
 
 ### Throttling Limits (Microsoft Learn, "Avoid getting throttled or blocked in SharePoint Online", read 2026-11-05)
 
@@ -159,7 +159,9 @@ caller's deadline. A 200 to a range (Range ignored), a wrong Content-Range,
 another 4xx and a caller gone are not retried. A read under a burst may take
 minutes — the trade (an error is worse; the caller's context bounds it). The
 per-attempt bounds are unchanged (25 s first byte, 2 min fragment answer).
-Graph metadata calls (`graphDo`) keep 2/3 attempts and the 30 s cap.
+Graph metadata calls (`graphDo`) keep 2/3 attempts and the 30 s cap. A whole
+Get under 10 MiB rides the same attempts since RB3-2 (it is one part of the
+ranged reader, fetched without a Range header).
 
 **A range that does not come fails the body (D-F3-1).** The soak also saw
 **135 `size mismatch: got 0`**: a GET whose ranges were refused returned a
@@ -626,7 +628,7 @@ Past 15 drives the env slots cannot hold the fleet. **`PERMAFROST_FLEET_FILE`** 
 
 **One credential, one token and one transport set per tenant** (D-F11-2). This holds for slots of one directory and app too: the tenant's first account renews the token, and the others ask it.
 
-**Placement-authoritative reads** (D-F11-3). Once the fingerprint is settled (`match`, `recorded`, `repaired`, `accepted`), `Get`, `Exists` and `Delete` ask the home account only, so a miss is a miss and costs one request (at 300 drives it was 300). While the fingerprint is `mismatch` or `unknown`, the walk stays, capped at 8 accounts (the home and the 7 after it), each walk counted in `vaultaire_permafrost_fallback_walks_total{op}`.
+**Placement-authoritative reads** (D-F11-3; RB3-1, the review of the chain, 2026-11-07). Once the fingerprint is settled (`match`, `recorded`, `repaired`, `accepted`) **and every marker records its data laid out for that order** (`placed_under` = the current digest), `Get`, `Exists` and `Delete` ask the home account only, so a miss is a miss and costs one request (at 300 drives it was 300). While the fingerprint is `mismatch` or `unknown`, or any marker is placed under another order (an accepted change not yet rebalanced — the order is settled, the data is not), the walk stays, capped at 8 accounts (the home and the 7 after it), each walk counted in `vaultaire_permafrost_fallback_walks_total{op}` (rule `PermafrostFallbackWalking`). The fingerprint proves the ORDER is the recorded one; it says nothing about where the objects sit — `PERMAFROST_FLEET_ACCEPT` rewrites every marker, so without `placed_under` the very next check (the hourly re-check, the next deploy) was `match` and every remapped object a miss.
 
 **The probe samples** (D-F11-5). A HealthCheck probes:
 
@@ -648,7 +650,12 @@ It reports every account whose **last** probe failed, or whose tenant's token fa
 The rule above is now checked. Every account carries a marker,
 `vaultaire/_fleet/fingerprint.json` (outside every `t-<tenant>/` tree): its
 index in the fleet and the ordered fleet — one 16-hex hash per account of its
-`TENANT_N_ID` + `TENANT_N_USER`, never a secret — and the fleet's digest.
+`TENANT_N_ID` + `TENANT_N_USER`, never a secret — the fleet's digest, and
+since RB3-1 `placed_under`: the digest of the order the account's DATA is laid
+out for (a first boot writes the current digest; an accept carries each old
+marker's value forward, a brand-new account gets the current digest; a marker
+written before the field reads as placed under its own digest — prod's
+markers).
 `cmd/vaultaire` reads every marker at boot (`CheckFleetFingerprint`, 20 s):
 
 | Found | Outcome |
@@ -659,7 +666,9 @@ index in the fleet and the ordered fleet — one 16-hex hash per account of its
 | a marker records another order or size | `mismatch`: **one Error line** `permafrost fleet fingerprint mismatch` with `diffs` (`size 3 → 2`, `index 1: was <hash>, now <hash>`, `account tenant-3 (<hash>) is index 1, recorded index 2`) and `fingerprint` (the current digest); `vaultaire_permafrost_fleet_mismatch` 1, rule `PermafrostFleetMismatch` (warning); nothing rewritten |
 | a marker cannot be read | `unknown`: a Warn, no verdict, nothing written, the gauge stays 0 — **re-checked at the next probe** (below) |
 
-Boot is never blocked: reads find a remapped object by the fleet walk.
+Boot is never blocked: reads find a remapped object by the fleet walk — on a
+`mismatch`, and after an accept until a rebalance rewrites `placed_under`
+(the `placed` field of the verdict's log line; `authoritative()`).
 
 The check does not end with the boot (RP18-1, Prompt 17 Part 0): the
 driver's probe (every 30 s) re-runs it at its next run after an `unknown`
@@ -674,15 +683,25 @@ the same `permafrost fleet fingerprint` / `… mismatch` line, a probe later.
 account added):
 
 1. Expect the mismatch. Note the Error line's `fingerprint`.
-2. Rebalance: move every object whose home changed to its new home account
-   (`hash(path) % new size` — `homeTenantIndex`), deleting the old copy. No
-   tool does this yet; until one exists, the fleet walk keeps reads working
-   and the `onedrive fallback hit` Info lines name what is off its home.
-3. Accept the new order: `PERMAFROST_FLEET_ACCEPT=<fingerprint>` in the
+2. Accept the new order: `PERMAFROST_FLEET_ACCEPT=<fingerprint>` in the
    `.env`, `sudo vaultaire-switch restart`. The boot rewrites every marker
-   (`state=accepted`, a Warn line) and the gauge goes to 0. A value left set
-   does nothing once the markers match, and never accepts a different order
-   (it must equal that order's digest). Remove it at the next edit.
+   with the new order (`state=accepted`, a Warn line) and the gauge goes to
+   0 — but each marker keeps `placed_under` = the OLD order (an account
+   appended holds nothing and gets the new one), so reads keep walking the
+   fleet (capped at 8 accounts; `PermafrostFallbackWalking` warns while
+   they do) and the `onedrive fallback hit` Info lines name what is off its
+   home. A value left set does nothing once the markers match, and never
+   accepts a different order (it must equal that order's digest). Remove it
+   at the next edit.
+3. Rebalance: move every object whose home changed to its new home account
+   (`hash(path) % new size` — `homeTenantIndex`), deleting the old copy,
+   then rewrite every marker's `placed_under` to the new digest. **No tool
+   does this yet** (WP-FLEET-5's placement over (tenant, drive) is the
+   growth path; until it or a rebalance tool exists, an accepted fleet walks
+   for ever — the honest state, and the one an erasure needs: an off-home
+   object the home-only `Delete` cannot see leaves its container non-empty,
+   `RemoveContainerTree` refuses, and the tenant's erasure is deferred
+   hourly until the object is found).
 
 Restoring the old `TENANT_N` order instead is a plain restart: the markers
 match again.
