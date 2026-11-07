@@ -1362,13 +1362,17 @@ func (t *odTenant) sleep(ctx context.Context, d time.Duration) error {
 // wait on ctx; a caller already gone is never retried. Any other answer >= 400
 // is an *odError at once.
 func (t *odTenant) graphDo(ctx context.Context, req *http.Request) (*http.Response, error) {
-	return t.graphDoWith(ctx, req, odAttempts(ctx), odMaxRetryWait)
+	return t.graphDoWith(ctx, t.graphHTTP, req, odAttempts(ctx), odMaxRetryWait)
 }
 
 // graphDoWith is graphDo with its own attempts and wait cap: a simple PUT of
 // up to 200 MiB is data, not metadata, and rides a burst like a fragment
 // (odBurstAttempts, odBurstMaxWait; WP-FLEET-4 D-F4-2).
-func (t *odTenant) graphDoWith(ctx context.Context, req *http.Request, attempts int, maxWait time.Duration) (*http.Response, error) {
+//
+// client is the transport: the Graph client (HTTP/2) for metadata; the
+// upload client (HTTP/1.1) for a large simple PUT — Go's HTTP/2 flow
+// control held a 200 MiB body to ~10 MB/s (the 2026-11-07 proof).
+func (t *odTenant) graphDoWith(ctx context.Context, client *http.Client, req *http.Request, attempts int, maxWait time.Duration) (*http.Response, error) {
 	base := 500 * time.Millisecond
 	prev := base
 
@@ -1401,7 +1405,7 @@ func (t *odTenant) graphDoWith(ctx context.Context, req *http.Request, attempts 
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("User-Agent", odUserAgent())
 
-		resp, err := t.graphHTTP.Do(req)
+		resp, err := client.Do(req)
 		t.totalReqs.Add(1)
 		var wait time.Duration
 		switch {
