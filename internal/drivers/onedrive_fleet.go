@@ -92,8 +92,24 @@ type fleetMarker struct {
 	// PlacedUnder is the digest of the fleet order the account's data is laid
 	// out for (RB3-1; additive): "" = Digest (a marker written before).
 	PlacedUnder string `json:"placed_under,omitempty"`
+	// PlacementVersion is the placement the account's data is laid out
+	// under (WP-FLEET-5; additive): 0 = 1 = hash % slots over Fleet; 2 =
+	// rendezvous over Tenants then drives. PlacementTarget is set by the
+	// rebalance tool while it runs (writes go there, reads look there first);
+	// Tenants is the fleet's grouping as written, so the old placement can
+	// be computed exactly.
+	PlacementVersion int                 `json:"placement_version,omitempty"`
+	PlacementTarget  int                 `json:"placement_target,omitempty"`
+	Tenants          []fleetMarkerTenant `json:"tenants,omitempty"`
 
 	foundOn string // the drive the marker was read on, when not the account's (never encoded)
+}
+
+// fleetMarkerTenant is one directory in the marker: its key (a hash, never
+// the id) and the fleet positions of its drives.
+type fleetMarkerTenant struct {
+	Key    string `json:"key"`
+	Drives []int  `json:"drives"`
 }
 
 // FleetMarkerPath is the marker's path under vaultaire/ (the migration tool
@@ -145,9 +161,17 @@ type FleetFingerprint struct {
 	Digest string   // the current fleet's fingerprint
 	Diffs  []string // what differs, for a mismatch
 	// Placed: every marker records its data laid out for THIS order
-	// (placed_under = Digest) — reads may be authoritative. False after an
-	// accept until a rebalance, and on a mismatch or no verdict.
+	// (placed_under = Digest) under ONE placement version with no rebalance
+	// target — reads may be authoritative. False after an accept until a
+	// rebalance, while a rebalance runs, and on a mismatch or no verdict.
 	Placed bool
+	// PlacementVersion is the placement writes go to (and reads look at
+	// first): the markers' version, their target while a rebalance runs, or
+	// odPlacementCurrent for a first boot.
+	PlacementVersion int
+
+	placement *odPlacement // PlacementVersion over the current fleet
+	previous  *odPlacement // the markers' layout while not Placed, else nil
 }
 
 // identity is the account's short hash in the fingerprint (its directory and
@@ -227,6 +251,14 @@ func (d *OneDriveDriver) CheckFleetFingerprint(ctx context.Context, accept strin
 	d.fleetMu.Lock()
 	d.fleetState, d.fleetAccept, d.fleetCheckedAt = out.State, accept, time.Now()
 	d.fleetUnplaced = !out.Placed
+	if out.placement != nil { // a verdict (an unknown one keeps the last placement)
+		d.fleetPlacement, d.fleetPrevious = out.placement, out.previous
+		if out.Placed {
+			permafrostPlacementVersion.Set(float64(out.PlacementVersion))
+		} else {
+			permafrostPlacementVersion.Set(0)
+		}
+	}
 	d.fleetMu.Unlock()
 	return out, err
 }
@@ -323,6 +355,44 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 		}
 	}
 
+	// The placement (WP-FLEET-5 D-F5-2/3): the markers' version is the one
+	// the data is laid out under; a target set by the rebalance tool is where
+	// writes go meanwhile; both must agree across the markers. Writes go to
+	// the target, else the laid version, else (a first boot) the current one.
+	// While not placed, the previous placement is computed from a marker of
+	// the old layout — what reads look at second.
+	pv := placementOfMarkers(markers, out.Digest)
+	if pv.present && (pv.target != 0 || !pv.agree) {
+		out.Placed = false
+	}
+	switch {
+	case !pv.present:
+		out.PlacementVersion = odPlacementCurrent
+	case pv.target != 0:
+		out.PlacementVersion = pv.target
+	default:
+		out.PlacementVersion = pv.laid
+	}
+	out.placement = d.placementOver(out.PlacementVersion)
+	if !out.Placed && pv.ref != nil {
+		out.previous = d.placementFromMarker(pv.ref)
+	}
+	// The placement fields a (re)written marker carries: a present marker's
+	// own (an accept carries the layout forward — the data did not move); a
+	// repaired one takes the fleet's; a first boot's, or an account appended
+	// at an accept, the version writes go to and the fleet's grouping (it
+	// holds nothing).
+	placementFor := func(i int) (version, target int, tenants []fleetMarkerTenant) {
+		switch {
+		case markers[i] != nil:
+			return markers[i].PlacementVersion, markers[i].PlacementTarget, markers[i].Tenants
+		case out.State == FleetRepaired && pv.ref != nil:
+			return pv.laid, pv.target, pv.ref.Tenants
+		default:
+			return out.PlacementVersion, 0, d.markerTenants()
+		}
+	}
+
 	var write []int // the accounts whose marker is (re)written
 	switch {
 	case present == 0:
@@ -368,7 +438,8 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 			defer wwg.Done()
 			wsem <- struct{}{}
 			defer func() { <-wsem }()
-			if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest, placedUnderFor(i)); err != nil {
+			version, target, tenants := placementFor(i)
+			if err := d.tenants[i].writeFleetMarker(ctx, i, ids, out.Digest, placedUnderFor(i), version, target, tenants); err != nil {
 				fmu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", d.tenants[i].name, err))
 				fmu.Unlock()
@@ -378,7 +449,8 @@ func (d *OneDriveDriver) checkFleetFingerprint(ctx context.Context, accept strin
 	wwg.Wait()
 	slices.Sort(failed)
 	fields := []zap.Field{zap.String("state", string(out.State)), zap.String("fingerprint", out.Digest),
-		zap.Int("accounts", len(ids)), zap.Int("written", len(write)-len(failed)), zap.Bool("placed", out.Placed)}
+		zap.Int("accounts", len(ids)), zap.Int("written", len(write)-len(failed)), zap.Bool("placed", out.Placed),
+		zap.Int("placement_version", out.PlacementVersion), zap.Stringer("placement", pv)}
 	switch {
 	case len(failed) > 0:
 		d.logger.Warn("permafrost fleet fingerprint: markers not written", append(fields, zap.Strings("failed", failed))...)
@@ -512,8 +584,9 @@ func (t *odTenant) readFleetMarkerOn(ctx context.Context, driveID string) (*flee
 }
 
 // writeFleetMarker writes the account's marker for index i of fleet ids,
-// its data placed under placedUnder (RB3-1).
-func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, digest, placedUnder string) error {
+// its data placed under placedUnder (RB3-1) and laid out by placement
+// version (a rebalance target and the tenant grouping beside it, WP-FLEET-5).
+func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, digest, placedUnder string, version, target int, tenants []fleetMarkerTenant) error {
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return err
@@ -522,7 +595,8 @@ func (t *odTenant) writeFleetMarker(ctx context.Context, i int, ids []string, di
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC(), DriveID: driveID, PlacedUnder: placedUnder})
+	b, err := json.Marshal(fleetMarker{Version: 1, Index: i, Fleet: ids, Digest: digest, WrittenAt: time.Now().UTC(), DriveID: driveID, PlacedUnder: placedUnder,
+		PlacementVersion: version, PlacementTarget: target, Tenants: tenants})
 	if err != nil {
 		return fmt.Errorf("marker encode: %w", err)
 	}

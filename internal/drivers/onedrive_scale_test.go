@@ -226,9 +226,10 @@ func TestFleetAtScale_EveryAccountIsProbedWithinTheSpread(t *testing.T) {
 func TestFleetAtScale_TheFallbackWalksAreCounted(t *testing.T) {
 	d, _ := bigFleet(20)
 	d.fleetState = FleetUnknown
+	artifact, _, _ := twoHomes(t, d, "bkt")
 	before := testutil.ToFloat64(permafrostFallbackWalks.WithLabelValues("exists"))
 
-	_, _ = d.Exists(common.WithTenantID(context.Background(), "x"), "bkt", "missing")
+	_, _ = d.Exists(common.WithTenantID(context.Background(), "x"), "bkt", artifact)
 
 	assert.Equal(t, before+1, testutil.ToFloat64(permafrostFallbackWalks.WithLabelValues("exists")))
 }

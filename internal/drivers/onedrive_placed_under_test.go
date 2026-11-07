@@ -170,7 +170,9 @@ func TestFleetFingerprint_ARepairedMarkerTakesTheFleetsPlacement(t *testing.T) {
 
 func TestFleetAtScale_AnAcceptedFleetStillWalksAMiss(t *testing.T) {
 	// The behaviour behind the flag: a miss on a fleet whose data is placed
-	// under another order walks (capped at 8), whatever the verdict says.
+	// under another order looks at the previous placement too, whatever the
+	// verdict says — since WP-FLEET-5 that second look is computed (the home
+	// under the other placement), never a walk of eight.
 	ctx := common.WithTenantID(context.Background(), "x")
 	d, rt := bigFleet(300)
 	d.fleetState = FleetAccepted
@@ -180,5 +182,6 @@ func TestFleetAtScale_AnAcceptedFleetStillWalksAMiss(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, ok)
-	assert.Equal(t, int64(odFallbackWalkMax), rt.n.Load(), "the home and the seven after it")
+	assert.LessOrEqual(t, rt.n.Load(), int64(2), "the home and the previous home, no walk")
+	assert.GreaterOrEqual(t, rt.n.Load(), int64(1))
 }

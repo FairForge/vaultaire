@@ -154,6 +154,17 @@ type OneDriveDriver struct {
 	// change not yet rebalanced, RB3-1). Reads walk while it is set,
 	// whatever the verdict (onedrive_fleet.go, authoritative()).
 	fleetUnplaced bool
+	// fleetPlacement is the placement writes go to and reads look at first
+	// (the markers' version, or their target, over the current fleet; nil
+	// before any check = version 1). fleetPrevious is the placement the
+	// markers say the data is laid out under while that differs (WP-FLEET-5
+	// D-F5-3); nil when placed. placementSpread is PERMAFROST_PLACEMENT_SPREAD.
+	fleetPlacement  *odPlacement
+	fleetPrevious   *odPlacement
+	placementSpread int
+
+	identityMu    sync.Mutex
+	identityIndex map[string]*odTenant // identity → account (tenantByIdentity)
 }
 
 type odTenant struct {
@@ -252,10 +263,11 @@ func NewOneDriveFleetDriver(logger *zap.Logger) (*OneDriveDriver, error) {
 	}
 
 	d := &OneDriveDriver{
-		tenants: tenants,
-		logger:  logger,
+		tenants:         tenants,
+		logger:          logger,
+		placementSpread: placementSpreadDefaultEnv(logger),
 	}
-	logger.Info("OneDrive fleet initialized", zap.Int("tenants", len(tenants)),
+	logger.Info("OneDrive fleet initialized", zap.Int("tenants", len(tenants)), zap.Int("placement_spread", d.placementSpread),
 		zap.Float64("account_rps", paceCfg.AccountRPS), zap.Float64("account_in_gbh", paceCfg.AccountInGBh),
 		zap.Float64("account_out_gbh", paceCfg.AccountOutGBh), zap.Float64("tenant_gbh", paceCfg.TenantGBh),
 		zap.Duration("range_hedge_after", hedgeAfter))
@@ -329,38 +341,42 @@ func (d *OneDriveDriver) Name() string { return "permafrost" }
 
 func (d *OneDriveDriver) TenantCount() int { return len(d.tenants) }
 
-// homeTenantIndex is the deterministic fleet placement for a path: FNV-1a of
-// the full storage path mod fleet size. Every operation on the same path
-// lands on the same account, restart-stable and config-order-stable as long
-// as the TENANT_N ordering doesn't change.
+// homeTenantIndex is placement version 1 (what the fleet did before
+// WP-FLEET-5): FNV-1a of the full storage path mod fleet size, over the
+// TENANT_N order. Kept as the definition version-1 markers are read by
+// (onedrive_placement.go newPlacementV1 agrees with it, pinned by a test).
 func (d *OneDriveDriver) homeTenantIndex(path string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(path))
 	return int(h.Sum32() % uint32(len(d.tenants)))
 }
 
-// tenantsFor returns the fleet ordered for a data operation on path (an object
-// lives on exactly ONE account — a rotating read was the 2026-07-30
-// read-after-write failure): the
-// deterministic home tenant first, then the rest as fallbacks. The fallback
-// probe exists for data written before deterministic placement (the old
-// round-robin Put scattered objects across accounts) — reads walk the fleet
-// on 404 instead of failing — and since WP-FLEET-11 only while the fleet's
-// order is not settled, at most odFallbackWalkMax accounts (the home and
-// the ones after it).
+// tenantsFor returns the accounts a data operation on path asks, in order (an
+// object lives on exactly ONE account — a rotating read was the 2026-07-30
+// read-after-write failure): the home under the current placement, and —
+// only while the fleet is not placed (an accepted order change not yet
+// rebalanced, a rebalance running, no verdict yet) — the home under the
+// placement the markers say the data is laid out for (WP-FLEET-5 D-F5-3: the
+// previous placement, computed; it was a walk of up to eight accounts, which
+// could not reach a remapped object past them). Two accounts at most, at any
+// fleet size.
 func (d *OneDriveDriver) tenantsFor(path string) []*odTenant {
-	home := d.homeTenantIndex(path)
+	home := d.homeTenant(path)
 	if d.authoritative() {
-		// WP-FLEET-11 D-F11-3: the order is settled — the home account is
-		// the only one that can hold it; a miss is a miss.
-		return []*odTenant{d.tenants[home]}
+		// WP-FLEET-11 D-F11-3: the order is settled and the data placed
+		// under it — the home account is the only one that can hold it; a
+		// miss is a miss.
+		return []*odTenant{home}
 	}
-	n := min(len(d.tenants), odFallbackWalkMax)
-	ordered := make([]*odTenant, 0, n)
-	for i := 0; i < n; i++ {
-		ordered = append(ordered, d.tenants[(home+i)%len(d.tenants)])
+	prev := d.previousPlacement()
+	if prev == nil {
+		return []*odTenant{home}
 	}
-	return ordered
+	old := d.tenantByIdentity(prev.home(path).identity)
+	if old == nil || old == home {
+		return []*odTenant{home}
+	}
+	return []*odTenant{home, old}
 }
 
 // odError is a Graph answer >= 400 (other than throttling and the retried
@@ -435,11 +451,12 @@ func (d *OneDriveDriver) Put(ctx context.Context, container, artifact string, da
 	if pErr != nil {
 		return pErr
 	}
-	// Deterministic placement: the path's home tenant, always — never the
-	// rotation. A throttled home tenant still receives the write (graphDo
-	// retries with backoff); writing elsewhere would strand the object where
-	// deterministic reads don't look first.
-	t := d.tenants[d.homeTenantIndex(path)]
+	// Deterministic placement: the path's home account under the current
+	// placement (a rebalance's target while one runs), always — never the
+	// rotation. A throttled home still receives the write (graphDo retries
+	// with backoff); writing elsewhere would strand the object where reads
+	// don't look first.
+	t := d.homeTenant(path)
 	driveID, err := t.getDriveID(ctx)
 	if err != nil {
 		return fmt.Errorf("onedrive get drive: %w", err)
@@ -900,20 +917,29 @@ func (t *odTenant) deleteItem(ctx context.Context, driveID, itemID string) error
 }
 
 // ListDir lists the direct members of the folder dir under container ("" =
-// the container) on every account of the fleet: sub-folder names and file
-// names, the union (a folder on any account is a folder). One Graph listing
-// per account. The vault parity reconcile walks `<digest>/<etag>/` with it —
-// List alone sees only the container's direct children.
+// the container): sub-folder names and file names. A GROUP folder (odGroupDepth
+// folders under the container — the parity layout's `<digest>/<etag>/`, whose
+// members are files) is listed on the accounts placement names for it — the
+// group's spread set, one listing each (WP-FLEET-5 D-F5-4); a shallower folder,
+// whose members are folders that may sit anywhere, is the union of every
+// account (a folder on any account is a folder). The vault parity reconcile
+// walks `<digest>/<etag>/` with it — List alone sees only the container's
+// direct children.
 func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (dirs, files []string, err error) {
 	tenantID, tErr := requireTenant(ctx, d.Name(), "ListDir", "", d.logger)
 	if tErr != nil {
 		return nil, nil, tErr
 	}
+	sub := strings.Trim(dir, "/")
 	folderPath := fmt.Sprintf("%s/t-%s/%s", odRootFolder, tenantID, container)
-	if sub := strings.Trim(dir, "/"); sub != "" {
+	accounts := d.tenants
+	if sub != "" {
 		folderPath += "/" + sub
+		if odGroupFolder(container, sub) {
+			accounts = d.spreadTenants(strings.TrimPrefix(folderPath, odRootFolder+"/"))
+		}
 	}
-	children, err := d.children(ctx, folderPath)
+	children, err := d.children(ctx, folderPath, accounts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -928,8 +954,9 @@ func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (di
 }
 
 // RemoveEmptyDir removes the folder at dir under container when no account
-// of the fleet holds anything in it (one listing per account, the union),
-// then deletes it on every account that has it (Delete sweeps the fleet).
+// that can hold anything in it does (ListDir: the group's spread set for a
+// group folder, else every account), then deletes it on each of those
+// accounts (a folder exists on every account that ever held a file in it).
 // ErrDirNotEmpty when an account holds something; a folder missing
 // everywhere is fine; the container itself is refused. A folder's
 // permanentDelete is recursive: the caller makes the window between the
@@ -948,8 +975,36 @@ func (d *OneDriveDriver) RemoveEmptyDir(ctx context.Context, container, dir stri
 	if len(files)+len(dirs) > 0 {
 		return fmt.Errorf("onedrive remove dir %s: %w", sub, ErrDirNotEmpty)
 	}
-	if err := d.Delete(ctx, container, sub); err != nil && !odIsNotFound(err) {
-		return fmt.Errorf("onedrive remove dir %s: %w", sub, err)
+	if !odGroupFolder(container, sub) {
+		if err := d.Delete(ctx, container, sub); err != nil && !odIsNotFound(err) {
+			return fmt.Errorf("onedrive remove dir %s: %w", sub, err)
+		}
+		return nil
+	}
+	path, pErr := d.buildPath(ctx, "RemoveEmptyDir", container, sub)
+	if pErr != nil {
+		return pErr
+	}
+	var hardErr error
+	for _, t := range d.spreadTenants(path) {
+		driveID, err := t.getDriveID(ctx)
+		if err != nil {
+			hardErr = fmt.Errorf("onedrive get drive: %w", err)
+			continue
+		}
+		itemID, err := t.getItemID(ctx, driveID, path)
+		if err != nil {
+			if !odIsNotFound(err) {
+				hardErr = fmt.Errorf("onedrive resolve %s: %w", path, err)
+			}
+			continue
+		}
+		if err := t.deleteItem(ctx, driveID, itemID); err != nil && !odIsNotFound(err) {
+			hardErr = fmt.Errorf("onedrive delete %s: %w", path, err)
+		}
+	}
+	if hardErr != nil {
+		return fmt.Errorf("onedrive remove dir %s: %w", sub, hardErr)
 	}
 	return nil
 }
@@ -959,12 +1014,12 @@ type odChild struct {
 	folder bool
 }
 
-// children is the union of the folder's direct children on every account
-// (a name once; a folder on any account is a folder).
-func (d *OneDriveDriver) children(ctx context.Context, folderPath string) ([]odChild, error) {
+// children is the union of the folder's direct children on the given
+// accounts (a name once; a folder on any account is a folder).
+func (d *OneDriveDriver) children(ctx context.Context, folderPath string, accounts []*odTenant) ([]odChild, error) {
 	seen := make(map[string]int)
 	var out []odChild
-	for _, t := range d.tenants {
+	for _, t := range accounts {
 		driveID, err := t.getDriveID(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("onedrive get drive: %w", err)

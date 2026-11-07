@@ -19,11 +19,12 @@ package drivers
 //     TENANT, shared by its drives (env slots of one directory and app share
 //     them too). The tenant's first account owns the token; the others ask it.
 //   - D-F11-3 placement-authoritative reads: once the fleet fingerprint is
-//     settled (match, recorded, repaired, accepted), Get / Exists / Delete
-//     ask the home account only — a miss is a miss (the WP-R6-1 rule). While
-//     it is mismatch or unknown the fallback walk stays, capped at
-//     odFallbackWalkMax accounts, and each walk past the home is counted
-//     (vaultaire_permafrost_fallback_walks_total{op}).
+//     settled (match, recorded, repaired, accepted) AND the data is placed
+//     under it (RB3-1), Get / Exists / Delete ask the home account only — a
+//     miss is a miss (the WP-R6-1 rule). While it is not, the second look is
+//     the PREVIOUS placement, computed from the markers (WP-FLEET-5 D-F5-3;
+//     it was a walk capped at eight accounts), counted in
+//     vaultaire_permafrost_fallback_walks_total{op}.
 //   - D-F11-5 probe sampling: a HealthCheck probes at most
 //     max(min(n, odProbeConcurrency), ceil(n/240)) accounts in rotation —
 //     every account within the hour at 15 s intervals, a small fleet still
@@ -33,12 +34,11 @@ package drivers
 //   - Boot: the drives are initialised and the fingerprint markers read
 //     odBootConcurrency at a time (they were one after the other).
 //
+//   - D-F11-4 (ListDir from the drives placement names) is WP-FLEET-5's
+//     D-F5-4 (onedrive_placement.go): a group folder is listed on its spread
+//     set; shallower folders and List stay the union.
+//
 // Not done here, and why (recorded in the PR):
-//   - D-F11-4 (List / ListDir from the drives placement names): placement is
-//     a hash of the FULL path, so a folder's files — a parity folder's
-//     p0..p3 — sit on different drives; no drive can be named for a prefix
-//     without WP-FLEET-5's placement over (tenant, drive). List and ListDir
-//     stay the union, as before.
 //   - The fingerprint read by $batch: a $batch answers a /content GET with a
 //     redirect, so it saves the metadata calls only; the concurrent read
 //     bounds the boot instead (WP-FLEET-9 owns $batch).
@@ -62,9 +62,6 @@ import (
 )
 
 const (
-	// odFallbackWalkMax caps the accounts a fallback walk asks (the home
-	// included) while the fleet's order is not settled.
-	odFallbackWalkMax = 8
 	// odBootConcurrency is the accounts initialised, and markers read, at once.
 	odBootConcurrency = 16
 	// odProbeSpread is the probe intervals within which every account is
