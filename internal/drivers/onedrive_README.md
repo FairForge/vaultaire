@@ -584,10 +584,15 @@ fleet's markers record:
 - **Version 1** (2026-07-30 → WP-FLEET-5): `home = FNV-1a(path) % fleetSize`
   over the slot order. Prod's three accounts are version 1 until the
   rebalance tool moves them; a marker without `placement_version` is one.
-- **Version 2** (the current one; what a first boot records): the key's
-  **group** is its parent folder and its **shard index** *j* is the integer
-  of a leaf `p<j>` (the parity layout `<tenant>__parity/<digest>/<etag>/p<j>`),
-  else 0. The tenants stand in **columns** — tenant *k* (its position in the
+- **Version 2** (the current one; what a first boot records). A file that is
+  **not a shard** places by its full path — rendezvous over every tenant,
+  then every drive of it — so a folder of plain files (a cold copy, a
+  backup, the bench's leftovers) spreads as version 1 did; prod's dry run of
+  2026-11-07, with the folder as the unit for every file, would have put all
+  3,875 files of three accounts on one drive of one tenant. A **shard** — a
+  leaf `p<j>`, the parity layout `<tenant>__parity/<digest>/<etag>/p<j>` —
+  places by its **group** (its parent folder) and its index *j*: the tenants
+  stand in **columns** — tenant *k* (its position in the
   fleet's order of first appearance, append-only) is in column *k* mod
   `PERMAFROST_PLACEMENT_SPREAD` (default 4) — and shard *j* takes a tenant of
   column *j* mod spread by rendezvous (HRW, FNV-1a 64) on (tenant key, group);
@@ -617,12 +622,12 @@ fleet's markers record:
   object past them). Two accounts at most, at any fleet size; the second look
   is counted in `vaultaire_permafrost_fallback_walks_total{op}` and a hit
   there logged (`onedrive fallback hit`). Delete takes both copies.
-- **ListDir** of a **group folder** (two folders under the container — the
-  parity layout's `<digest>/<etag>/`, whose members are files) asks the group's
-  spread set: shards 0..spread−1's drives, one listing each; a shallower
-  folder, whose members are folders that may sit anywhere, and **List** are
-  the union of every account. **RemoveEmptyDir** of a group folder deletes it
-  on the spread set.
+- **ListDir** of a **group folder** (two folders under a `__parity`
+  container — the layout's `<digest>/<etag>/`, whose members are shards) asks
+  the group's spread set: shards 0..spread−1's drives, one listing each; any
+  other folder (members that are folders, or plain files placed by their
+  path) and **List** are the union of every account. **RemoveEmptyDir** of a
+  group folder deletes it on the spread set.
 
 **⚠️ Never reorder or remove `TENANT_N_*` entries.** The fleet's order is
 what the fingerprint below checks and what version 1 places over; version 2

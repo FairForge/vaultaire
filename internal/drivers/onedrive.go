@@ -935,7 +935,7 @@ func (d *OneDriveDriver) ListDir(ctx context.Context, container, dir string) (di
 	accounts := d.tenants
 	if sub != "" {
 		folderPath += "/" + sub
-		if odGroupFolder(sub) {
+		if odGroupFolder(container, sub) {
 			accounts = d.spreadTenants(strings.TrimPrefix(folderPath, odRootFolder+"/"))
 		}
 	}
@@ -975,7 +975,7 @@ func (d *OneDriveDriver) RemoveEmptyDir(ctx context.Context, container, dir stri
 	if len(files)+len(dirs) > 0 {
 		return fmt.Errorf("onedrive remove dir %s: %w", sub, ErrDirNotEmpty)
 	}
-	if !odGroupFolder(sub) {
+	if !odGroupFolder(container, sub) {
 		if err := d.Delete(ctx, container, sub); err != nil && !odIsNotFound(err) {
 			return fmt.Errorf("onedrive remove dir %s: %w", sub, err)
 		}

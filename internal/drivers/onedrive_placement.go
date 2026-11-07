@@ -29,9 +29,9 @@ package drivers
 //     grouping as written, and placement_target while a rebalance runs.
 //   - D-F5-3 the fallback is the previous placement, COMPUTED from the
 //     markers — two requests at any fleet size, never a walk.
-//   - D-F5-4 ListDir of a group folder (odGroupDepth segments under the
-//     container) asks the group's spread set; shallower folders and List stay
-//     the union.
+//   - D-F5-4 ListDir of a group folder (odGroupDepth segments under a PARITY
+//     container, whose every file is a shard) asks the group's spread set;
+//     every other folder and List stay the union.
 //
 // The fleet's version is what its markers say: prod's three accounts, whose
 // markers predate the field, stay version 1 and authoritative with nothing
@@ -110,21 +110,28 @@ func newPlacementV2(tenants []odPlacedTenant, spread int) *odPlacement {
 // odKeyGroup is the key's group (its parent folder) and shard index (a leaf
 // `p<j>`, digits only, else 0).
 func odKeyGroup(key string) (string, int) {
+	g, j, _ := odKeyShard(key)
+	return g, j
+}
+
+// odKeyShard is odKeyGroup with whether the leaf IS a shard (`p<j>`): a shard
+// places by its group, any other file by its full path.
+func odKeyShard(key string) (group string, j int, shard bool) {
 	group, leaf := path.Split(key)
 	group = strings.TrimSuffix(group, "/")
 	if len(leaf) < 2 || leaf[0] != 'p' {
-		return group, 0
+		return group, 0, false
 	}
 	for _, r := range leaf[1:] {
 		if r < '0' || r > '9' {
-			return group, 0
+			return group, 0, false
 		}
 	}
 	j, err := strconv.Atoi(leaf[1:])
 	if err != nil || j < 0 {
-		return group, 0
+		return group, 0, false
 	}
-	return group, j
+	return group, j, true
 }
 
 // odRendezvous is the rendezvous weight of parts (FNV-1a 64 over the parts
@@ -151,13 +158,42 @@ func (p *odPlacement) home(key string) odPlaced {
 		_, _ = h.Write([]byte(key))
 		return p.order[int(h.Sum32()%uint32(len(p.order)))]
 	default:
-		group, j := odKeyGroup(key)
+		group, j, shard := odKeyShard(key)
+		if !shard {
+			// Not a shard: the file itself is the unit — rendezvous over
+			// every tenant, then every drive of it, on the FULL path, so a
+			// folder of plain files spreads like version 1 did (prod's dry
+			// run 2026-11-07: by folder, every bench file of three accounts
+			// went to one drive of one tenant).
+			t := p.tenantByPath(key)
+			if t == nil {
+				return odPlaced{}
+			}
+			return t.driveFor(key)
+		}
 		t := p.tenantFor(group, j)
 		if t == nil {
 			return odPlaced{}
 		}
 		return t.driveFor(group)
 	}
+}
+
+// tenantByPath is the tenant a plain file lands on: rendezvous over every
+// tenant on the path.
+func (p *odPlacement) tenantByPath(key string) *odPlacedTenant {
+	pick := -1
+	var pickW uint64
+	for k := range p.tenants {
+		w := odRendezvous(p.tenants[k].key, key)
+		if pick < 0 || w > pickW || (w == pickW && p.tenants[k].key < p.tenants[pick].key) {
+			pick, pickW = k, w
+		}
+	}
+	if pick < 0 {
+		return nil
+	}
+	return &p.tenants[pick]
 }
 
 // tenantFor is the tenant shard j of group lands on.
@@ -472,11 +508,19 @@ func (d *OneDriveDriver) spreadTenants(group string) []*odTenant {
 	return out
 }
 
-// odGroupFolder reports whether a folder under the container (dir, "/"
-// separated, no leading slash) is a group folder: files live in it.
-func odGroupFolder(dir string) bool {
+// odParityContainerSuffix names the containers whose every file is a shard:
+// the Vault parity layout's `<tenant>__parity` (internal/api/vault_parity.go)
+// — the one layout a folder's drives can be named for.
+const odParityContainerSuffix = "__parity"
+
+// odGroupFolder reports whether a folder (dir, "/" separated, no leading
+// slash) of the container is a group folder — a parity container's
+// `<digest>/<etag>`, whose files are shards and sit on the group's spread
+// set. Any other folder may hold plain files, placed by their full path, so
+// it is listed on every account.
+func odGroupFolder(container, dir string) bool {
 	dir = strings.Trim(dir, "/")
-	return dir != "" && strings.Count(dir, "/")+1 >= odGroupDepth
+	return strings.HasSuffix(container, odParityContainerSuffix) && dir != "" && strings.Count(dir, "/")+1 >= odGroupDepth
 }
 
 // odPlacementSpreadFromEnv reads PERMAFROST_PLACEMENT_SPREAD (default 4; a

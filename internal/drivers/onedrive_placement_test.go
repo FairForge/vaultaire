@@ -136,11 +136,27 @@ func TestPlacement_FourShardsOfOneObjectSitOnFourTenants(t *testing.T) {
 	}
 }
 
-func TestPlacement_AGroupsFilesOnOneTenantShareOneDrive(t *testing.T) {
+func TestPlacement_PlainFilesOfOneFolderSpreadOverTenantsAndDrives(t *testing.T) {
+	// A file that is not a shard places by its full path: a bucket of plain
+	// files (a cold copy, a backup, prod's bench leftovers) spreads like
+	// version 1 did — prod's dry run of 2026-11-07 placed every file of three
+	// accounts on one drive of one tenant by folder.
+	p := newPlacementV2(synthFleet(4, 2), 4)
+	per := map[string]int{}
+	for i := 0; i < 4000; i++ {
+		per[p.home(fmt.Sprintf("t-cust/backups/pg/dump-%d.sql.gz", i)).identity]++
+	}
+	require.Len(t, per, 8, "every drive holds some")
+	for id, n := range per {
+		assert.InDelta(t, 500, n, 500*0.2, "drive %s holds %d", id, n)
+	}
+}
+
+func TestPlacement_AGroupsShardsOnOneTenantShareOneDrive(t *testing.T) {
 	p := newPlacementV2(synthFleet(3, 4), 4)
 	for g := 0; g < 500; g++ {
 		driveOf := map[string]string{} // tenant → drive
-		leaves := []string{"p0", "p1", "p2", "p3", "p4", "p5", "manifest", "x.bin"}
+		leaves := []string{"p0", "p1", "p2", "p3", "p4", "p5"}
 		for _, leaf := range leaves {
 			k := fmt.Sprintf("t-cust__parity/%08x/etag/%s", g*7919, leaf)
 			home := p.home(k)
@@ -580,7 +596,7 @@ func TestFleetPlacement_ListDirOfAGroupFolderAsksTheSpreadSet(t *testing.T) {
 	require.True(t, d.authoritative())
 	ctx := common.WithTenantID(context.Background(), "cust")
 	for j := 0; j < 4; j++ {
-		require.NoError(t, d.Put(ctx, "parity", fmt.Sprintf("ab/etag/p%d", j), strings.NewReader("s")))
+		require.NoError(t, d.Put(ctx, "cust__parity", fmt.Sprintf("ab/etag/p%d", j), strings.NewReader("s")))
 	}
 	reset := func() {
 		for _, s := range stores {
@@ -600,7 +616,7 @@ func TestFleetPlacement_ListDirOfAGroupFolderAsksTheSpreadSet(t *testing.T) {
 
 	// The group folder: four listings, every shard seen.
 	reset()
-	dirs, files, err := d.ListDir(ctx, "parity", "ab/etag")
+	dirs, files, err := d.ListDir(ctx, "cust__parity", "ab/etag")
 	require.NoError(t, err)
 	assert.Empty(t, dirs)
 	assert.ElementsMatch(t, []string{"p0", "p1", "p2", "p3"}, files)
@@ -608,7 +624,7 @@ func TestFleetPlacement_ListDirOfAGroupFolderAsksTheSpreadSet(t *testing.T) {
 
 	// Above it, the union still (sub-folders may be anywhere).
 	reset()
-	dirs, _, err = d.ListDir(ctx, "parity", "ab")
+	dirs, _, err = d.ListDir(ctx, "cust__parity", "ab")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"etag"}, dirs)
 	assert.Equal(t, 12, count())
@@ -616,7 +632,16 @@ func TestFleetPlacement_ListDirOfAGroupFolderAsksTheSpreadSet(t *testing.T) {
 	// RemoveEmptyDir of the group folder: refused while a shard is there,
 	// and it asked the spread set.
 	reset()
-	err = d.RemoveEmptyDir(ctx, "parity", "ab/etag")
+	err = d.RemoveEmptyDir(ctx, "cust__parity", "ab/etag")
 	require.ErrorIs(t, err, ErrDirNotEmpty)
 	assert.Equal(t, 4, count())
+
+	// A folder of the same depth in any other container holds plain files
+	// placed by their path: the union.
+	require.NoError(t, d.Put(ctx, "backups", "pg/2026/dump.gz", strings.NewReader("s")))
+	reset()
+	_, files, err = d.ListDir(ctx, "backups", "pg/2026")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"dump.gz"}, files)
+	assert.Equal(t, 12, count())
 }
