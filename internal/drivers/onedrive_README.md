@@ -638,7 +638,9 @@ places over the tenants' order of first appearance in it. Appending is the
 growth path: a new drive (a new, higher index) in an existing tenant moves
 about 1/d of that tenant's files; a new tenant about 1/(spread · (column size
 + 1)) of the shards. `PERMAFROST_FLEET_ACCEPT` blesses the new order, and
-`cmd/tools/permafrost-rebalance` (WP-FLEET-5 PR B) moves what changed home.
+`cmd/tools/permafrost-rebalance` (`onedrive_rebalance.go`: plan → target →
+moves → commit, every byte through the driver's pacing and hash checks)
+moves what changed home — prod's version-1 accounts to version 2 the same way.
 
 ### The fleet file and the driver at scale (WP-FLEET-11, 2026-11-06; `onedrive_scale.go`)
 
@@ -737,12 +739,14 @@ account added):
    the source `permanentDelete`d; resumable; paced through the driver's own
    buckets), then `-commit`, which rewrites every marker's `placed_under`
    to the new digest and `placement_version` to the current one — the
-   moment reads are authoritative again (**PR B of WP-FLEET-5; until it
-   lands an accepted fleet keeps its second look for ever** — the honest
-   state, and the one an erasure needs: an off-home object the home-only
-   `Delete` cannot see leaves its container non-empty, `RemoveContainerTree`
-   refuses, and the tenant's erasure is deferred hourly until the object is
-   found).
+   moment reads are authoritative again. Run `-run` once more after the
+   live slots have re-checked (an hour, or `vaultaire-switch restart`): the
+   writes they placed under the old placement meanwhile move too; `-commit`
+   refuses (exit 2) while anything remains. Without the commit an accepted
+   fleet keeps its second look for ever — the honest state, and the one an
+   erasure needs: an off-home object the home-only `Delete` cannot see
+   leaves its container non-empty, `RemoveContainerTree` refuses, and the
+   tenant's erasure is deferred hourly until the object is found.
 
 Restoring the old `TENANT_N` order instead is a plain restart: the markers
 match again.

@@ -1012,6 +1012,10 @@ func (d *OneDriveDriver) RemoveEmptyDir(ctx context.Context, container, dir stri
 type odChild struct {
 	name   string
 	folder bool
+	// size and hash (quickXorHash, "" when Graph reports none) of a file;
+	// the rebalance walks with them (WP-FLEET-5 PR B).
+	size int64
+	hash string
 }
 
 // children is the union of the folder's direct children on the given
@@ -1064,6 +1068,12 @@ func (t *odTenant) listChildren(ctx context.Context, driveID, folderPath string,
 			Value []struct {
 				Name   string           `json:"name"`
 				Folder *json.RawMessage `json:"folder"`
+				Size   int64            `json:"size"`
+				File   *struct {
+					Hashes struct {
+						QuickXorHash string `json:"quickXorHash"`
+					} `json:"hashes"`
+				} `json:"file"`
 			} `json:"value"`
 			NextLink string `json:"@odata.nextLink"`
 		}
@@ -1073,7 +1083,11 @@ func (t *odTenant) listChildren(ctx context.Context, driveID, folderPath string,
 			return fmt.Errorf("onedrive list decode: %w", decodeErr)
 		}
 		for _, item := range result.Value {
-			fn(odChild{name: item.Name, folder: item.Folder != nil})
+			c := odChild{name: item.Name, folder: item.Folder != nil, size: item.Size}
+			if item.File != nil {
+				c.hash = item.File.Hashes.QuickXorHash
+			}
+			fn(c)
 		}
 		u = result.NextLink
 	}
